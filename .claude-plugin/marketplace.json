@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "1.0.0",
+  "name": "workspace-guard",
+  "owner": "karlkfi",
+  "description": "Path-aware guard rails for Claude Code Bash commands.",
+  "plugins": [
+    {
+      "name": "workspace-guard",
+      "version": "1.0.0",
+      "description": "Prompt before grep/sed/jq/awk/cat/head/tail touch files outside the workspace.",
+      "author": { "name": "Karl" },
+      "source": {
+        "type": "git",
+        "url": "https://github.com/karlkfi/workspace-guard.git",
+        "ref": "main"
+      }
+    }
+  ]
+}

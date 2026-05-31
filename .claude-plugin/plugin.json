@@ -1,0 +1,13 @@
+{
+  "name": "workspace-guard",
+  "version": "1.0.0",
+  "description": "PreToolUse hook that prompts before guarded Bash commands (grep, sed, jq, awk, cat, head, tail) read or write files outside the workspace; in-workspace files and pipes are allowed automatically.",
+  "author": {
+    "name": "Karl",
+    "url": "https://github.com/karlkfi"
+  },
+  "homepage": "https://github.com/karlkfi/workspace-guard",
+  "repository": "https://github.com/karlkfi/workspace-guard",
+  "license": "MIT",
+  "keywords": ["hooks", "pretooluse", "security", "permissions", "workspace", "bash"]
+}
