@@ -58,7 +58,17 @@ When in doubt, ask before shipping. The hook's job is to add friction at the sec
 
 ## Testing
 
-There is no test suite yet — adding one is tracked as `Q1` in `docs/STATUS.md`. When changing `SPEC` or the tokenization in `scripts/bash-workspace-guard.py`, hand-exercise the decision table in `README.md` against the change before committing, and add the case that motivated the change to the test fixtures once they exist.
+Tests live in `tests/test_workspace_guard.py` (stdlib `unittest`, no third-party deps). Run with:
+
+```
+python3 -m unittest discover tests
+```
+
+Two layers:
+- **Unit tests** import `files_in_command` from the script and exercise per-`SPEC`-row parsing, `prog_suppressed_by`, `--opt=val`, end-of-options `--`, and aliases.
+- **End-to-end tests** invoke the script as a subprocess, feed it the hook's stdin JSON, and assert the emitted `permissionDecision` for workspace-vs-outside paths, redirect targets, pipe chains, and defer cases (unguarded command, empty input, unbalanced quotes).
+
+When changing `SPEC` or tokenization, add the case that motivated the change as a fixture, and hand-exercise the decision table in `README.md` against the change before committing.
 
 ## Commits
 
