@@ -11,7 +11,7 @@
       "author": { "name": "Karl" },
       "source": {
         "type": "git",
-        "url": "https://github.com/karlkfi/workspace-guard.git",
+        "url": "https://github.com/karlkfi/claude-workspace-guard.git",
         "ref": "main"
       }
     }

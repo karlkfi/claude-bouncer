@@ -6,8 +6,8 @@
     "name": "Karl",
     "url": "https://github.com/karlkfi"
   },
-  "homepage": "https://github.com/karlkfi/workspace-guard",
-  "repository": "https://github.com/karlkfi/workspace-guard",
+  "homepage": "https://github.com/karlkfi/claude-workspace-guard",
+  "repository": "https://github.com/karlkfi/claude-workspace-guard",
   "license": "MIT",
   "keywords": ["hooks", "pretooluse", "security", "permissions", "workspace", "bash"]
 }

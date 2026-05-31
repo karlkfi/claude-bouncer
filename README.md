@@ -51,7 +51,7 @@ program syntax.
 ## Install
 
 ```
-/plugin marketplace add karlkfi/workspace-guard
+/plugin marketplace add karlkfi/claude-workspace-guard
 /plugin install workspace-guard@workspace-guard
 ```
 
