@@ -1,0 +1,81 @@
+# Design
+
+The "why" behind workspace-guard. The [`README.md`](../README.md) covers *what* the plugin does; this doc covers *why this approach* and *why not the alternatives*. Read this before proposing a structural change to the parser, the `SPEC` table, or the decision semantics.
+
+## Problem
+
+Claude Code's built-in permission system matches commands as string patterns. `Bash(grep:*)` allows **every** invocation of `grep`. Users who pre-approve common file readers (`grep`, `cat`, `sed`, `head`, …) — the standard remedy for prompt fatigue — end up implicitly pre-approving `grep secret /etc/passwd` and `cat ~/.aws/credentials` along with the legitimate workspace reads.
+
+The naive alternatives don't work:
+
+- Leaving the rules empty and answering every prompt destroys agent throughput.
+- Denying every outside-workspace read blocks legitimate cases (`cat /etc/os-release` for environment inspection, `man` pipelines, viewing system configs the user explicitly asked about).
+
+The right granularity is **per file argument**, not per command. That's what this plugin adds.
+
+## Approach
+
+A `PreToolUse` hook on `Bash` that:
+
+1. Tokenizes the command with `shlex` (a real POSIX lexer, not a regex).
+2. Walks the tokens of each simple command against a static per-command spec (`SPEC` in [`../scripts/bash-workspace-guard.py`](../scripts/bash-workspace-guard.py)) that knows which positionals and flag-values are file arguments.
+3. Resolves each file against `CLAUDE_PROJECT_DIR` with `realpath`.
+4. Emits a decision:
+   - All paths inside workspace → `allow`
+   - Any path outside → `ask` (Claude Code prompts the user)
+   - Command not in `SPEC`, or parsing fails → defer (no output, normal permissions apply)
+
+Because `PreToolUse` hooks run before Claude Code's permission check, a user with `Bash(grep:*)` pre-approved still gets prompted when grep targets `/etc/passwd`.
+
+## Why these specific design choices
+
+### Why a hook, not deeper integration
+
+Hooks are the only sanctioned extension point that sees structured tool input before the tool runs. A change to the permission-rule grammar in Claude Code itself would be the cleanest answer, but it requires an upstream change; this hook ships today and is per-user opt-in.
+
+### Why a static `SPEC` table, not flag inference
+
+The command being parsed is adversarial input. If the parser tries to *guess* whether an unknown flag takes a value, every guess is a potential bypass. The static `SPEC` table is the contract: a command is guarded **only** if we've explicitly written down which tokens are files. Adding coverage is a one-row change. Misclassification is impossible by construction for any command not in the table.
+
+### Why `ask`, not `deny`
+
+The hook is a guardrail, not a wall. False positives — legitimate reads of `/etc/os-release`, system configs, the user's `~/.zshrc` — are routine, and a `deny` default would erode trust until the user disabled the hook entirely. `ask` puts the human in the loop, which is the right cost for the rare outside-workspace read. Hard-blocking is available as a one-line local edit, documented in the README.
+
+### Why defer on uncertainty
+
+Unparseable commands, commands not in `SPEC`, empty input — all return no decision. Control hands back to Claude Code's normal permission rules, i.e. the same behavior as if the hook weren't installed. This is the only fail mode that doesn't surprise the user:
+
+- Failing closed (deny on parse error) would block legitimate work and train users to disable the hook.
+- Failing open with a silent `allow` would mask security regressions.
+- Defer is net-neutral: the user is no worse off than without the hook.
+
+This is the asymmetry behind the "secure by default" principle the plugin holds itself to: adding friction is cheap, removing it requires sign-off.
+
+### Why only these seven commands
+
+`grep`, `sed`, `awk`, `jq`, `cat`, `head`, `tail` are the high-frequency file readers users typically pre-approve. Pre-approval is what creates the gap this hook fills. Commands nobody pre-approves (`bash -c`, `eval`, `xargs`) still go through normal prompts and don't benefit from a hook layer on top.
+
+The bar for adding a row to `SPEC`: **users pre-approve this command in permission settings, and it can read arbitrary files**. `cut`, `wc`, `xxd`, `od`, `strings` are reasonable candidates; `ls` is not (doesn't read file contents); `bash` is not (different threat model — see [`security-notes.md`](security-notes.md)).
+
+## Alternatives considered and rejected
+
+- **Sandboxing (seccomp, App Sandbox, bind mounts, chroot).** Too heavyweight; platform-specific; breaks legitimate cross-workspace reads. A user who wants this level of isolation should run the whole agent in a container, not bolt on a partial sandbox.
+- **Wrapping the agent's shell.** Invasive; introduces a forked environment that drifts from the real one; easily bypassed by invoking the binary at its real absolute path.
+- **Per-invocation permission rules upstream in Claude Code.** Probably the right long-term answer. This hook is the bridge while that doesn't exist.
+- **Denying outside-workspace reads outright.** Too noisy; erodes trust; the agent and user will route around it (file a workaround as a Queue item, set a wider PROJECT_DIR, uninstall the hook).
+- **A dynamic learning parser.** Inferring flag semantics from observed commands would let coverage grow without code changes, but the misclassification surface — and the bypass surface — grows with it. The static table is boring on purpose.
+
+## Non-goals
+
+- **Defending against an attacker with arbitrary shell execution.** The agent can write a script and `bash` it; the hook does not try to model every wrapper command. The "wrapper commands" section of [`security-notes.md`](security-notes.md) covers this.
+- **Sandboxing the workspace from itself.** Workspace-local reads are explicitly allowed, including reads of sensitive files (`.env`, `.git/config`) inside the project. Protecting those is the user's choice via other means.
+- **Replacing Claude Code's permission system.** The hook augments it for one specific gap. If the gap closes upstream, this plugin retires.
+- **Modeling every shell construct.** Variable expansion, command substitution, `cd` semantics, etc. are out of scope for the lexer but covered as Queue items where the gap has security impact (`STATUS.md` Q5–Q8). Constructs without security impact stay unmodeled.
+
+## Open questions
+
+These are intentionally unresolved; if you have a strong opinion, propose a Queue item:
+
+- **Should the spec be data, not code?** The `SPEC` dict could move to a JSON/TOML file shipped with the plugin, making contributions less Python-centric. Today it's code because it's tiny and stdlib-only matters more than ergonomics.
+- **Should denials be configurable per command?** Some users may want `ask` for `cat` but `deny` for `jq --rawfile`. Today it's a global one-line edit.
+- **Should the hook log decisions?** A local audit log would help debug false positives and false negatives, but it's also a new surface (write target, PII).

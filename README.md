@@ -68,6 +68,13 @@ output.
 - In non-interactive / headless runs there is no one to answer an `ask` prompt,
   so it effectively blocks.
 
+## Design
+
+For the rationale behind the approach (why a hook, why `ask`, why a static
+spec table, what alternatives were rejected), see [`docs/design.md`](docs/design.md).
+Out-of-scope security observations from audits live in
+[`docs/security-notes.md`](docs/security-notes.md).
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
