@@ -2,6 +2,8 @@
 
 **Path-aware bash permissions for Claude Code.**
 
+[![License: MIT](https://img.shields.io/github/license/karlkfi/claude-workspace-guard.svg)](LICENSE) [![Claude Code plugin](https://img.shields.io/badge/Claude_Code-plugin-7e57c2)](#install)
+
 You ask Claude to "find that auth error." It runs `grep -r token /var/log`. Or
 `cat ~/.aws/credentials` while "checking the environment." Or pipes a file from
 outside your repo into `jq`. The default `Bash(grep:*)` permission rules can't
