@@ -55,7 +55,8 @@ program syntax.
 /plugin install workspace-guard@workspace-guard
 ```
 
-Restart Claude Code so the hook is registered. Requires `python3` on your PATH.
+- Requires `python3` on your PATH.
+- Restart Claude Code so the hook is registered.
 
 To verify, ask Claude to run `grep root /etc/passwd` — you should see a
 permission prompt citing the outside-workspace path. Then ask it to `grep` a
@@ -76,6 +77,13 @@ file in your repo; it should run without prompting.
    `realpath`, collapsing `../` and following symlinks. Anything that resolves
    outside the root yields `ask`; otherwise `allow`.
 
+## Configuration
+
+The set of guarded commands lives in the `SPEC` and `ALIASES` tables at the top
+of `scripts/bash-workspace-guard.py`. Add a row to guard another command. To
+switch from prompting to hard-blocking, change `"ask"` to `"deny"` in the
+script's final output.
+
 ## Limitations
 
 - Command substitution (`grep x $(cat list)`) and variable-expanded paths
@@ -85,19 +93,19 @@ file in your repo; it should run without prompting.
 - In non-interactive / headless runs there is no one to answer an `ask` prompt,
   so it effectively blocks.
 
-## Configuration
-
-The set of guarded commands lives in the `SPEC` and `ALIASES` tables at the top
-of `scripts/bash-workspace-guard.py`. Add a row to guard another command. To
-switch from prompting to hard-blocking, change `"ask"` to `"deny"` in the
-script's final output.
-
 ## Design
 
 For the rationale behind the approach (why a hook, why `ask`, why a static
 spec table, what alternatives were rejected), see [`docs/design.md`](docs/design.md).
 Out-of-scope security observations from audits live in
 [`docs/security-notes.md`](docs/security-notes.md).
+
+## Contributing
+
+Bugs, ideas, and questions go in
+[GitHub Issues](https://github.com/karlkfi/claude-workspace-guard/issues).
+For the development backlog and how to add new guarded commands, see
+[`docs/STATUS.md`](docs/STATUS.md).
 
 ## License
 
