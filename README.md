@@ -1,6 +1,6 @@
 # workspace-guard
 
-**Keep Claude Code's bash commands inside your project.**
+**Path-aware bash permissions for Claude Code.**
 
 You ask Claude to "find that auth error." It runs `grep -r token /var/log`. Or
 `cat ~/.aws/credentials` while "checking the environment." Or pipes a file from

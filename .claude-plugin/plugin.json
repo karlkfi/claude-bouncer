@@ -1,7 +1,7 @@
 {
   "name": "workspace-guard",
   "version": "1.0.0",
-  "description": "PreToolUse hook that prompts before guarded Bash commands (grep, sed, jq, awk, cat, head, tail) read or write files outside the workspace; in-workspace files and pipes are allowed automatically.",
+  "description": "Path-aware bash permissions for Claude Code.",
   "author": {
     "name": "Karl",
     "url": "https://github.com/karlkfi"
