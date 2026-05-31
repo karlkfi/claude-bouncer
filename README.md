@@ -1,32 +1,52 @@
 # workspace-guard
 
-A Claude Code plugin that adds a **PreToolUse hook** for `Bash`. When a guarded
-command (`grep`, `sed`, `jq`, `awk`, `cat`, `head`, `tail`) is about to read or
-write a file **outside the current workspace**, Claude Code prompts you to
-confirm. Commands that only touch files inside the workspace — or that operate on
-pipes/stdin — run without interruption.
+**Keep Claude Code's bash commands inside your project.**
 
-Unlike plain permission rules (`Bash(grep:*)`), which match the literal command
-string and can't tell `grep foo.txt` from `grep /etc/passwd`, this hook tokenizes
-the command with a real POSIX shell lexer, resolves each file argument against the
-project root, and decides accordingly.
+You ask Claude to "find that auth error." It runs `grep -r token /var/log`. Or
+`cat ~/.aws/credentials` while "checking the environment." Or pipes a file from
+outside your repo into `jq`. The default `Bash(grep:*)` permission rules can't
+tell these apart from the dozens of in-repo greps Claude runs every session —
+they either trust every invocation or prompt on every one.
+
+workspace-guard is a `PreToolUse` hook for `Bash` that parses the command, finds
+its file arguments, and asks for confirmation only when a path resolves outside
+your project root (`$CLAUDE_PROJECT_DIR`). In-repo reads and pure pipelines run
+silently.
+
+![Claude Code's permission prompt when grep targets a file outside the project root](docs/img/ask-prompt.png)
 
 ## What it does
+
+The hook produces one of three outcomes:
+
+- **allow** — the command runs without a prompt.
+- **ask** — Claude Code shows its standard permission prompt for the command
+  (as above). You approve or reject.
+- **defer** — the hook stays silent; your normal permission settings apply.
+
+Guarded commands: `grep` (and `egrep`, `fgrep`, `rg`), `sed`, `awk` (and
+`gawk`, `mawk`), `jq`, `cat`, `head`, `tail`. These are the file-reading
+commands Claude reaches for most often; tools like `ls`, `find`, and `xargs`
+aren't covered yet (see [`docs/STATUS.md`](docs/STATUS.md)).
 
 | Command                              | Decision |
 | ------------------------------------ | -------- |
 | `grep foo ./src.txt`                 | allow    |
 | `cat data.txt \| grep foo`           | allow    |
-| `jq '.a/.b' data.json`               | allow (the `.a/.b` program is not mistaken for a path) |
+| `jq '.a/.b' data.json`               | allow    |
 | `sed 's/a/b/g' notes.md`             | allow    |
 | `grep secret /etc/passwd`            | **ask**  |
 | `jq '.x' /etc/hosts`                 | **ask**  |
 | `sed -f /tmp/evil.sed notes.md`      | **ask**  |
-| `grep foo data.txt > /tmp/out.txt`   | **ask** (redirect target outside workspace) |
+| `grep foo data.txt > /tmp/out.txt`   | **ask**  |
 | `cat ../../etc/passwd`               | **ask**  |
-| `ls /etc`                            | defer (not a guarded command) |
+| `ls /etc`                            | defer    |
 
-"Defer" means the hook stays silent and your normal permission settings apply.
+Note the `jq` row: `.a/.b` is a jq program, not a filesystem path. The hook
+knows the difference because it parses each command against a per-command spec
+of which positions are programs, which are files, and which flags take values.
+A naive string match would either miss real file arguments or false-positive on
+program syntax.
 
 ## Install
 
@@ -36,6 +56,10 @@ project root, and decides accordingly.
 ```
 
 Restart Claude Code so the hook is registered. Requires `python3` on your PATH.
+
+To verify, ask Claude to run `grep root /etc/passwd` — you should see a
+permission prompt citing the outside-workspace path. Then ask it to `grep` a
+file in your repo; it should run without prompting.
 
 ## How it works
 
@@ -48,16 +72,9 @@ Restart Claude Code so the hook is registered. Requires `python3` on your PATH.
    take values (`grep -e PAT`), which flag-values are themselves files
    (`grep -f`, `jq --slurpfile`), and how many leading positionals are the
    program/pattern to skip.
-4. **Resolve** every file argument against `$CLAUDE_PROJECT_DIR` (the workspace
-   root) with `realpath`, collapsing `../` and following symlinks. Anything that
-   resolves outside the root yields `ask`; otherwise `allow`.
-
-## Configuration
-
-The set of guarded commands lives in the `SPEC` and `ALIASES` tables at the top of
-`scripts/bash-workspace-guard.py`. Add a row to guard another command. To switch
-from prompting to hard-blocking, change `"ask"` to `"deny"` in the script's final
-output.
+4. **Resolve** every file argument against `$CLAUDE_PROJECT_DIR` with
+   `realpath`, collapsing `../` and following symlinks. Anything that resolves
+   outside the root yields `ask`; otherwise `allow`.
 
 ## Limitations
 
@@ -67,6 +84,13 @@ output.
   paths are normalized lexically (fine for read-style commands).
 - In non-interactive / headless runs there is no one to answer an `ask` prompt,
   so it effectively blocks.
+
+## Configuration
+
+The set of guarded commands lives in the `SPEC` and `ALIASES` tables at the top
+of `scripts/bash-workspace-guard.py`. Add a row to guard another command. To
+switch from prompting to hard-blocking, change `"ask"` to `"deny"` in the
+script's final output.
 
 ## Design
 
