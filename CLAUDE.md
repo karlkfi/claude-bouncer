@@ -1,0 +1,88 @@
+# workspace-guard
+
+A Claude Code plugin that adds a `PreToolUse` hook for `Bash`. When a guarded command (`grep`, `sed`, `jq`, `awk`, `cat`, `head`, `tail`) is about to read or write a file outside `$CLAUDE_PROJECT_DIR`, the hook returns `ask` so the user can confirm; in-workspace files and pure pipelines are allowed silently. See `README.md` for the user-facing overview and the decision table.
+
+The load-bearing piece is `scripts/bash-workspace-guard.py` — a stdlib-only Python script that tokenizes the command with `shlex`, classifies tokens against a per-command `SPEC` table, resolves file arguments with `realpath`, and emits a `PreToolUse` decision.
+
+## Model selection
+
+Use the `model-advisor` skill to assess the right model and thinking level at session start and whenever the task type shifts significantly (e.g. moving from a small `SPEC` row addition to redesigning the tokenizer).
+
+## Development philosophy
+
+Build the right thing AND build it well. Before writing any code, state the goal in one sentence and the approach in two or three. If the goal is unclear, ask one focused question rather than guessing.
+
+Make the smallest change that achieves the goal. If you notice problems outside the current task's scope, flag them rather than fixing them:
+- New near-term work → add a row to the Queue in `docs/STATUS.md` in priority order.
+- Larger / speculative work → add a Queue row marked `💤 deferred` with a one-line rationale.
+
+Before introducing a new pattern or abstraction, check whether the existing `SPEC`/`ALIASES` model already solves the problem with a new row.
+
+## Workflow
+
+1. **Before making changes** — read `README.md` and skim `scripts/bash-workspace-guard.py` so the proposed change matches the existing parsing model. If picking the next task, run `gh pr list` first and skip any Queue item from `docs/STATUS.md` already covered by an open PR.
+   - **Verify 🚫 blockers are still real.** A previous session may have silently completed the dependency without flipping the Queue row. Grep for the deliverables before treating the item as truly blocked.
+   - **Investigation findings marked ✅ must be end-to-end verified, not just source-read.** If a `§Findings` block claims "command X with flag Y produces Z" because of source inspection, actually run the command and confirm. Shell parsing is full of surprises that only show up when you exec the thing.
+2. **For complex tasks** — write an explicit plan to `docs/plan/<slug>.md` and follow it. Keep it updated so completed scope is verifiable at the end. Revise the plan if new information changes the approach.
+3. **After making changes** — review the diff. Update docs proactively:
+   - **Changed parsing behavior or `SPEC` table** → update the decision table in `README.md` and the "How it works" / "Limitations" sections.
+   - **New configuration or hook surface** → `README.md` and `.claude-plugin/plugin.json` keywords/description.
+   - Update `docs/STATUS.md`: remove the completed Queue row.
+4. **Commit when done** — small, focused, Conventional Commits. **Always commit `docs/STATUS.md` changes in their own isolated commit**, separate from code and plan-doc changes (see `docs/development/maintaining-backlog.md`).
+
+## Code standards
+
+### Python (`scripts/bash-workspace-guard.py`)
+
+- Stdlib only — no third-party deps. The hook runs on whatever `python3` the user has on their PATH.
+- The `SPEC` table is the contract. Adding a guarded command means adding a row with explicit `consume` / `file_flags` / `prog` / `prog_suppressed_by` entries — do not "infer" flag behavior at runtime.
+- On any parsing uncertainty (unbalanced quotes, unknown shell construct, empty input), the hook **defers silently** (returns nothing) so normal permissions apply. Never fail closed without an explicit reason.
+- Default decision for outside-workspace paths is `ask`, not `deny`. Hard-blocking is opt-in via a local edit, documented in `README.md`.
+
+### Bash (if any helper scripts are added)
+
+There are no Bash scripts in the repo today. If one is added: start with `set -euo pipefail`, use `local` inside functions, use `[[ ]]` / `(( ))` (never `[ ]`), and quote all variable expansions.
+
+## Security principles
+
+**Secure by default, not opt-in.** This plugin exists to add a guardrail; its defaults must never trade away a security property for convenience. If a proposed change weakens any property — even partially, even with mitigations — the more secure behavior stays the default. The looser behavior may be offered as an explicit opt-in (env var, config, local edit) but must be documented as a trade-off.
+
+Examples of regressions that must not silently become defaults:
+- Flipping the outside-workspace decision from `ask` to `allow`.
+- Removing a guarded command from the `SPEC` table because it was "noisy".
+- Treating an unparseable command as `allow` rather than deferring.
+- Aliasing a new tool to an existing `SPEC` row when their flag sets diverge (see Q3 on `rg`).
+- Skipping `realpath` resolution for a class of paths so that `../` traversal is no longer caught.
+
+When in doubt, ask before shipping. The hook's job is to add friction at the security boundary; removing friction is the change that needs sign-off, not adding it.
+
+## Testing
+
+There is no test suite yet — adding one is tracked as `Q1` in `docs/STATUS.md`. When changing `SPEC` or the tokenization in `scripts/bash-workspace-guard.py`, hand-exercise the decision table in `README.md` against the change before committing, and add the case that motivated the change to the test fixtures once they exist.
+
+## Commits
+
+- Commit after each task is complete and validated.
+- Use small, focused commits.
+- Follow the Conventional Commits standard.
+- Amending an unpushed commit is fine — fix up the message or staged changes before pushing without asking. Once a commit is pushed, prefer a follow-up commit; only amend + force-push (always `--force-with-lease`, never on `main`/`master`) when the user asks for it.
+- After pushing, check whether a PR exists (`gh pr view`). If one does, update its description with `gh pr edit` to reflect any new commits.
+- Always commit `docs/STATUS.md` changes in their own isolated commit, separate from code and plan-doc changes. STATUS.md is high-contention across parallel sessions; isolating it makes rebase conflicts trivial to resolve.
+- If a change doesn't belong in the current PR, open a separate PR for it. Working multiple PRs in parallel is fine and preferable to bundling unrelated concerns.
+- Queue items have `Q`-prefixed IDs (e.g. `Q1`). Use the bare ID in commit messages and PR bodies — the `Q` stops GitHub from auto-linking the number to PR/issue 1.
+
+## Documentation conventions
+
+Human-facing docs (`README.md`, anything under `docs/` outside `docs/development/maintaining-backlog.md`) must never link to `CLAUDE.md` or `AGENTS.md`. This file is the entrypoint for Claude/agents only; humans start at `README.md`. The dependency direction is one-way: `CLAUDE.md` may link out to `docs/` and `README.md`, but nothing under those may link back to it.
+
+## Agent reference docs
+
+When working on specific tasks, read the relevant doc before starting:
+
+| Task | Reference |
+|---|---|
+| Picking the next task, tracking progress, adding new items | `docs/STATUS.md` — also run `gh pr list` and skip any Queue item already covered by an open PR |
+| Editing `docs/STATUS.md` (any change to the Queue or header) | `docs/development/maintaining-backlog.md` |
+| Changing parsing behavior or the `SPEC` table | `scripts/bash-workspace-guard.py` + `README.md` decision table |
+| Plugin packaging / marketplace listing | `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` |
+| Hook registration | `hooks/hooks.json` |
