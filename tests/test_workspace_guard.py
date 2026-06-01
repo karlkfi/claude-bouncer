@@ -455,6 +455,44 @@ class HookEndToEndTests(unittest.TestCase):
     def test_redirect_append_outside_ask(self):
         self._decision("cat in.txt >> /tmp/out.txt", "ask")
 
+    # --- shell expansions (Q5) ----------------------------------------------
+
+    def test_tilde_path_outside_ask(self):
+        # `~/...` is expanded by bash to $HOME at runtime; shlex leaves it
+        # literal. Lexical resolution would put it inside cwd — must ask.
+        out = self._decision("cat ~/.ssh/id_rsa", "ask")
+        self.assertIn(
+            "~/.ssh/id_rsa",
+            out["hookSpecificOutput"]["permissionDecisionReason"],
+        )
+
+    def test_dollar_var_path_outside_ask(self):
+        out = self._decision("cat $HOME/.aws/credentials", "ask")
+        self.assertIn(
+            "$HOME/.aws/credentials",
+            out["hookSpecificOutput"]["permissionDecisionReason"],
+        )
+
+    def test_quoted_dollar_var_outside_ask(self):
+        # Double quotes preserve `$` expansion in bash; shlex strips the
+        # quotes but the literal `$HOME` remains in the token. Still ask.
+        self._decision('cat "$HOME/secret"', "ask")
+
+    def test_curly_dollar_var_outside_ask(self):
+        self._decision("cat ${HOME}/secret", "ask")
+
+    def test_redirect_to_tilde_outside_ask(self):
+        self._decision("cat in.txt > ~/evil", "ask")
+
+    def test_redirect_to_dollar_var_outside_ask(self):
+        self._decision("cat in.txt > $LOG/evil", "ask")
+
+    def test_tilde_in_middle_of_token_allowed(self):
+        # `~` only triggers when it's the leading character — bash only
+        # tilde-expands at word start. A literal `foo~bak` inside workspace
+        # should still allow.
+        self._decision("cat foo~bak", "allow")
+
     # --- heredoc / here-string (Q4) -----------------------------------------
 
     def test_here_string_path_like_content_allow(self):
