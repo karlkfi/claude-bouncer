@@ -47,6 +47,7 @@ aren't covered yet (see [`docs/STATUS.md`](docs/STATUS.md)).
 | `cat ../../etc/passwd`               | **ask**  |
 | `cat ~/.aws/credentials`             | **ask**  |
 | `cat $HOME/.ssh/id_rsa`              | **ask**  |
+| `cd /etc && cat passwd`              | **ask**  |
 | `ls /etc`                            | defer    |
 
 Note the `jq` row: `.a/.b` is a jq program, not a filesystem path. The hook
@@ -81,7 +82,12 @@ file in your repo; it should run without prompting.
    take values (`grep -e PAT`), which flag-values are themselves files
    (`grep -f`, `jq --slurpfile`), and how many leading positionals are the
    program/pattern to skip.
-4. **Resolve** every file argument against `$CLAUDE_PROJECT_DIR` with
+4. **Track** cwd shifts across the chain. A `cd`/`pushd` in an earlier group
+   re-roots relative file paths in later guarded groups (so
+   `cd /etc && cat passwd` flags `passwd` as `/etc/passwd`). When the new cwd
+   can't be resolved at hook time — bare `cd`, `cd -`, `cd $HOME`, `popd` —
+   later relative paths short-circuit to `ask`.
+5. **Resolve** every file argument against `$CLAUDE_PROJECT_DIR` with
    `realpath`, collapsing `../` and following symlinks. Anything that resolves
    outside the root yields `ask`; otherwise `allow`. Tokens that bash would
    expand at runtime — leading `~` or any `$` — short-circuit to `ask`, since
@@ -105,6 +111,10 @@ script's final output.
   will get an `ask` prompt rather than slip through.
 - `realpath` only follows symlinks for files that already exist; nonexistent
   paths are normalized lexically (fine for read-style commands).
+- Redirect targets (`> file`) are always resolved against the original cwd,
+  not any `cd`-shifted cwd. A relative redirect after a `cd /etc` would still
+  be checked against the original workspace cwd. Absolute redirect targets
+  still get caught.
 - In non-interactive / headless runs there is no one to answer an `ask` prompt,
   so it effectively blocks.
 

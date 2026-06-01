@@ -92,6 +92,31 @@ def split_eq(tok):
     return tok, None
 
 
+def classify_cd(tokens):
+    """Classify a command group as a cwd-shifting builtin.
+
+    Returns:
+      ('arg', path)      — cd/pushd with a resolvable positional path
+      ('unknown', None)  — cd/pushd/popd whose effect we can't track precisely
+                           (no arg, `cd -`, `pushd +N`, popd, `~`/`$` arg, etc.)
+      (None, None)       — not a cd-family command
+    """
+    if not tokens:
+        return (None, None)
+    name = os.path.basename(tokens[0])
+    if name not in ('cd', 'pushd', 'popd'):
+        return (None, None)
+    if name == 'popd':
+        return ('unknown', None)                  # stack not tracked
+    for t in tokens[1:]:
+        if t.startswith('-'):
+            continue                              # option flag, keep looking
+        if t.startswith('+') or t.startswith('~') or '$' in t:
+            return ('unknown', None)
+        return ('arg', t)
+    return ('unknown', None)                      # bare `cd` -> $HOME
+
+
 def files_in_command(tokens):
     """Return list of file-arg tokens for a simple command, or None if unguarded."""
     name = ALIASES.get(os.path.basename(tokens[0]), os.path.basename(tokens[0]))
@@ -163,32 +188,60 @@ def main():
         cur.append(t); i += 1
     if cur: groups.append(cur)
 
-    candidates, guarded = list(redir_files), False
+    def check_file(f, group_cwd, group_cwd_unknown):
+        """Return the original token if it resolves outside the workspace,
+        else None. Relative paths resolve against `group_cwd`; if the cwd has
+        been shifted unpredictably by an earlier `cd`/`pushd`/`popd`, any
+        relative path is treated as outside (secure-by-default)."""
+        if not f or f == '-' or f.startswith('-'):
+            return None
+        if is_allowed_device(f):
+            return None
+        # Bash expands `~` and `$VAR` at runtime; shlex leaves them literal.
+        if f.startswith('~') or '$' in f:
+            return f
+        if os.path.isabs(f):
+            rp = os.path.realpath(f)
+        elif group_cwd_unknown:
+            return f
+        else:
+            rp = os.path.realpath(os.path.join(group_cwd, f))
+        if rp != proj and not rp.startswith(proj + os.sep):
+            return f
+        return None
+
+    # Per-group cwd tracking. A `cd`/`pushd` in an earlier group of the same
+    # chain shifts the runtime cwd for later guarded groups; `popd` or an
+    # unresolvable `cd` arg (`cd -`, `$HOME`, etc.) loses tracking.
+    outside, guarded = [], False
+    group_cwd, group_cwd_unknown = cwd, False
     for g in groups:
         if not g: continue
+        kind, arg = classify_cd(g)
+        if kind is not None:
+            if kind == 'arg':
+                new_cwd = arg if os.path.isabs(arg) else os.path.join(group_cwd, arg)
+                group_cwd = os.path.realpath(new_cwd)
+                group_cwd_unknown = False
+            else:
+                group_cwd_unknown = True
+            continue
         fs = files_in_command(g)
         if fs is None: continue
         guarded = True
-        candidates += fs
+        for f in fs:
+            o = check_file(f, group_cwd, group_cwd_unknown)
+            if o is not None:
+                outside.append(o)
     if not guarded:
         return                                    # no guarded command -> defer
 
-    outside = []
-    for f in candidates:
-        if not f or f == '-' or f.startswith('-'):
-            continue
-        if is_allowed_device(f):
-            continue
-        # Bash expands `~` and `$VAR` at runtime; shlex leaves them literal,
-        # so `~/x` and `$HOME/x` would resolve lexically inside cwd and slip
-        # through. Treat as outside — secure-by-default at the boundary.
-        if f.startswith('~') or '$' in f:
-            outside.append(f)
-            continue
-        path = f if os.path.isabs(f) else os.path.join(cwd, f)
-        rp = os.path.realpath(path)
-        if rp != proj and not rp.startswith(proj + os.sep):
-            outside.append(f)
+    # Redirects are collected at the top level (not associated with a group),
+    # so resolve them against the original cwd — they don't track cd-shifts.
+    for f in redir_files:
+        o = check_file(f, cwd, False)
+        if o is not None:
+            outside.append(o)
 
     if outside:
         decision, reason = "ask", "Outside-workspace path(s): " + ", ".join(sorted(set(outside)))
