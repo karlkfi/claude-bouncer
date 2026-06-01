@@ -73,6 +73,7 @@ and file-writing commands Claude reaches for most often; tools like `ls`,
 | `cd /etc && cat passwd`              | **ask**  |
 | `LC_ALL=C cat /etc/passwd`           | **ask**  |
 | `ln -s /etc/passwd link && cat link` | **ask**  |
+| `ln /etc/passwd link && cat link`    | **ask**  |
 | `ls /etc`                            | defer    |
 
 Note the `jq` row: `.a/.b` is a jq program, not a filesystem path. The hook
@@ -117,11 +118,11 @@ file in your repo; it should run without prompting.
    `cd /etc && cat passwd` flags `passwd` as `/etc/passwd`). When the new cwd
    can't be resolved at hook time — bare `cd`, `cd -`, `cd $HOME`, `popd` —
    later relative paths short-circuit to `ask`.
-6. **Stage** symlinks created by an earlier `ln -s OUTSIDE LINK` in the chain.
-   `LINK`'s resolved path is recorded so a later `cat LINK` is flagged — bash
-   hasn't materialised the symlink yet at hook time, so a naive `realpath`
-   would otherwise place `LINK` lexically inside the workspace and let it
-   through.
+6. **Stage** symlinks *and* hard links created by an earlier `ln OUTSIDE LINK`
+   in the chain (with or without `-s`). `LINK`'s resolved path is recorded so
+   a later `cat LINK` is flagged — bash hasn't materialised the link yet at
+   hook time, so a naive `realpath` would otherwise place `LINK` lexically
+   inside the workspace and let it through.
 7. **Resolve** every file argument against `$CLAUDE_PROJECT_DIR` with
    `realpath`, collapsing `../` and following symlinks. Anything that resolves
    outside the root yields `ask`; otherwise `allow`. Tokens that bash would
@@ -150,11 +151,8 @@ script's final output.
   not any `cd`-shifted cwd. A relative redirect after a `cd /etc` would still
   be checked against the original workspace cwd. Absolute redirect targets
   still get caught.
-- Hard-link TOCTOU (`ln SRC LINK` without `-s`) is not staged. Only `ln -s`
-  is tracked. Hard links can't cross filesystems, so the exposure is narrower,
-  but the same bypass shape exists on a single-volume host.
-- Multi-source `ln -s a b destdir/` (3+ positionals) is not staged. The hook
-  recognises the one- and two-positional forms only.
+- Multi-source `ln a b destdir/` (3+ positionals, symbolic or hard) is not
+  staged. The hook recognises the one- and two-positional forms only.
 - In non-interactive / headless runs there is no one to answer an `ask` prompt,
   so it effectively blocks.
 
