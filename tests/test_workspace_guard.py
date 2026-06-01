@@ -1220,6 +1220,49 @@ class HookEndToEndTests(unittest.TestCase):
         self.assertIsNone(guard.classify_ln(["cat", "-s", "/tmp/x"]))
         self.assertIsNone(guard.classify_ln([]))
 
+    # --- classify_dd helper (Q11 PR3) ---------------------------------------
+
+    def test_classify_dd_helper_if_and_of(self):
+        self.assertEqual(
+            guard.classify_dd(["dd", "if=./in", "of=/tmp/out", "bs=1M"]),
+            ["./in", "/tmp/out"],
+        )
+
+    def test_classify_dd_helper_if_only(self):
+        self.assertEqual(
+            guard.classify_dd(["dd", "if=/dev/urandom", "count=1"]),
+            ["/dev/urandom"],
+        )
+
+    def test_classify_dd_helper_of_only(self):
+        self.assertEqual(
+            guard.classify_dd(["dd", "of=/tmp/out", "bs=1M"]),
+            ["/tmp/out"],
+        )
+
+    def test_classify_dd_helper_no_operands(self):
+        # `dd` alone is still guarded (return [] not None) — main() should
+        # mark guarded=True and proceed with an empty file list.
+        self.assertEqual(guard.classify_dd(["dd"]), [])
+
+    def test_classify_dd_helper_no_file_operands(self):
+        # Only value-bearing operands, no if=/of= — guarded with no files.
+        self.assertEqual(
+            guard.classify_dd(["dd", "bs=1M", "count=10", "conv=fdatasync"]),
+            [],
+        )
+
+    def test_classify_dd_helper_lookalike_operands_not_matched(self):
+        # `iflag=` / `oflag=` are not `if=` / `of=`; the prefix check is strict.
+        self.assertEqual(
+            guard.classify_dd(["dd", "iflag=fullblock", "oflag=direct"]),
+            [],
+        )
+
+    def test_classify_dd_helper_not_dd(self):
+        self.assertIsNone(guard.classify_dd(["cat", "if=foo"]))
+        self.assertIsNone(guard.classify_dd([]))
+
     # --- inline env-var prefix (Q6) -----------------------------------------
 
     def test_env_prefix_outside_ask(self):
@@ -1565,6 +1608,55 @@ class HookEndToEndTests(unittest.TestCase):
         # `rm -- /etc/passwd` — end-of-options doesn't change the workspace
         # check; absolute outside path still asks.
         self._decision("rm -- /tmp/q11-fake-target", "ask")
+
+    # --- Q11 PR3: dd end-to-end ---------------------------------------------
+
+    def test_dd_inside_workspace_allow(self):
+        # `dd if=./in of=./out` — both operands inside workspace.
+        self._decision("dd if=./in of=./out bs=1M", "allow")
+
+    def test_dd_outside_of_ask(self):
+        out = self._decision(
+            "dd if=/dev/urandom of=/tmp/q11-fake-target bs=1M count=1", "ask",
+        )
+        self.assertIn(
+            "/tmp/q11-fake-target",
+            out["hookSpecificOutput"]["permissionDecisionReason"],
+        )
+
+    def test_dd_outside_if_ask(self):
+        out = self._decision("dd if=/etc/passwd of=./out", "ask")
+        self.assertIn(
+            "/etc/passwd",
+            out["hookSpecificOutput"]["permissionDecisionReason"],
+        )
+
+    def test_dd_dev_allowlisted_of_inside_allow(self):
+        # `/dev/null` is allowlisted; ./out inside workspace.
+        self._decision("dd if=./in of=/dev/null", "allow")
+
+    def test_dd_no_operands_allow(self):
+        # Bare `dd` is guarded but has no file operands — must allow, not defer.
+        self._decision("dd", "allow")
+
+    def test_dd_only_value_operands_allow(self):
+        self._decision("dd bs=1M count=10", "allow")
+
+    def test_dd_iflag_lookalike_not_treated_as_file_allow(self):
+        # `iflag=fullblock` must not be parsed as `if=lag=fullblock`.
+        self._decision("dd if=./in of=./out iflag=fullblock", "allow")
+
+    def test_dd_after_cd_relative_outside_ask(self):
+        # `cd /etc && dd if=passwd of=./out` — Q7 cd-tracking re-roots `passwd`
+        # to /etc, which is outside the workspace.
+        self._decision("cd /etc && dd if=passwd of=./out", "ask")
+
+    def test_dd_tilde_outside_ask(self):
+        out = self._decision("dd if=./in of=~/leaked", "ask")
+        self.assertIn(
+            "~/leaked",
+            out["hookSpecificOutput"]["permissionDecisionReason"],
+        )
 
     # --- defer paths --------------------------------------------------------
 

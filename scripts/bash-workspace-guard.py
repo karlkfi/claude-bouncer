@@ -263,6 +263,27 @@ def classify_ln(tokens):
     return None
 
 
+def classify_dd(tokens):
+    """For a `dd` command, return the list of file operands (`if=`/`of=` values).
+
+    Returns None when the command isn't `dd`. Returns `[]` when `dd` is invoked
+    with no `if=`/`of=` operands (still guarded, just no files to check).
+
+    `dd` doesn't take POSIX-style flags — every argument is `KEY=VALUE`. Only
+    `if=PATH` (read source) and `of=PATH` (write destination) name files; other
+    operands (`bs=`, `count=`, `conv=`, `iflag=`, `oflag=`, `seek=`, `skip=`,
+    `status=`) are values, not paths. The prefix check is strict: `iflag=` does
+    not start with `if=`, and `oflag=` does not start with `of=`.
+    """
+    if not tokens or os.path.basename(tokens[0]) != 'dd':
+        return None
+    files = []
+    for t in tokens[1:]:
+        if t.startswith('if=') or t.startswith('of='):
+            files.append(t.split('=', 1)[1])
+    return files
+
+
 def classify_cd(tokens):
     """Classify a command group as a cwd-shifting builtin.
 
@@ -442,6 +463,14 @@ def main():
         ln = classify_ln(g)
         if ln is not None:
             stage_ln(ln[0], ln[1], group_cwd, group_cwd_unknown)
+            continue
+        dd = classify_dd(g)
+        if dd is not None:
+            guarded = True
+            for f in dd:
+                o = check_file(f, group_cwd, group_cwd_unknown)
+                if o is not None:
+                    outside.append(o)
             continue
         fs = files_in_command(g)
         if fs is None: continue
