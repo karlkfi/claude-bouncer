@@ -179,6 +179,12 @@ def main():
             continue
         if is_allowed_device(f):
             continue
+        # Bash expands `~` and `$VAR` at runtime; shlex leaves them literal,
+        # so `~/x` and `$HOME/x` would resolve lexically inside cwd and slip
+        # through. Treat as outside — secure-by-default at the boundary.
+        if f.startswith('~') or '$' in f:
+            outside.append(f)
+            continue
         path = f if os.path.isabs(f) else os.path.join(cwd, f)
         rp = os.path.realpath(path)
         if rp != proj and not rp.startswith(proj + os.sep):

@@ -45,6 +45,8 @@ aren't covered yet (see [`docs/STATUS.md`](docs/STATUS.md)).
 | `sed -f /tmp/evil.sed notes.md`      | **ask**  |
 | `grep foo data.txt > /tmp/out.txt`   | **ask**  |
 | `cat ../../etc/passwd`               | **ask**  |
+| `cat ~/.aws/credentials`             | **ask**  |
+| `cat $HOME/.ssh/id_rsa`              | **ask**  |
 | `ls /etc`                            | defer    |
 
 Note the `jq` row: `.a/.b` is a jq program, not a filesystem path. The hook
@@ -81,10 +83,12 @@ file in your repo; it should run without prompting.
    program/pattern to skip.
 4. **Resolve** every file argument against `$CLAUDE_PROJECT_DIR` with
    `realpath`, collapsing `../` and following symlinks. Anything that resolves
-   outside the root yields `ask`; otherwise `allow`. Well-known device paths
-   (`/dev/null`, `/dev/stdin`, `/dev/stdout`, `/dev/stderr`, `/dev/zero`,
-   `/dev/tty`, `/dev/random`, `/dev/urandom`, `/dev/fd/N`) are allowlisted and
-   skip the workspace check.
+   outside the root yields `ask`; otherwise `allow`. Tokens that bash would
+   expand at runtime — leading `~` or any `$` — short-circuit to `ask`, since
+   `realpath` would otherwise lexically place them inside `cwd`. Well-known
+   device paths (`/dev/null`, `/dev/stdin`, `/dev/stdout`, `/dev/stderr`,
+   `/dev/zero`, `/dev/tty`, `/dev/random`, `/dev/urandom`, `/dev/fd/N`) are
+   allowlisted and skip the workspace check.
 
 ## Configuration
 
@@ -95,8 +99,10 @@ script's final output.
 
 ## Limitations
 
-- Command substitution (`grep x $(cat list)`) and variable-expanded paths
-  (`grep x $VAR`) are not visible before execution.
+- Tokens that bash would expand at runtime — leading `~` or any unquoted `$`
+  (variables and command substitutions) — are treated as outside-workspace.
+  This is the secure-by-default choice: a literal filename containing `$`
+  will get an `ask` prompt rather than slip through.
 - `realpath` only follows symlinks for files that already exist; nonexistent
   paths are normalized lexically (fine for read-style commands).
 - In non-interactive / headless runs there is no one to answer an `ask` prompt,
