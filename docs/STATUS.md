@@ -24,7 +24,6 @@ Specific actionable items in priority order. Pick from the top; skip 🚫 items 
 
 | ID | Item | Labels | St | Sz | Notes |
 |---|---|---|---|---|---|
-| <a id="Q3"></a>Q3 | Reconcile `rg` alias to `grep` | `parsing` `bug` | 🔲 | S | `ripgrep` has a different flag set (`-g`, `-t`, `--type`, `--type-add`, etc.). Treating it as `grep` means unknown flags are zero-arg, so `rg -g '*.py' PAT path` mis-parses `'*.py'` as a positional. Either add a dedicated `rg` SPEC or drop the alias. |
 | <a id="Q4"></a>Q4 | Heredoc / here-string false positives | `parsing` | 🔲 | S | `<<` / `<<<` capture the next shlex token as a "file" candidate. Lexical resolution usually lands inside the workspace, but `<<<"/etc/foo"` would falsely flag. Skip the token after `<<`/`<<<` from path checks. |
 | <a id="Q5"></a>Q5 | Tilde and `$VAR` path expansions silently allowed | `security` `parsing` | 🔲 | S | Verified: `cat ~/.ssh/id_rsa` and `cat $HOME/.aws/credentials` resolve lexically inside `cwd` and return `allow`; bash expands at runtime to outside-workspace files. Treat any path token beginning with `~` or containing an unquoted `$` as outside-workspace. |
 | <a id="Q6"></a>Q6 | Inline env-var assignments bypass guard | `security` `parsing` | 🔲 | S | Verified: `LC_ALL=C cat /etc/passwd` tokenizes with the assignment as `tokens[0]`, so `SPEC.get(name)` returns `None` and the hook defers entirely. Skip leading `NAME=VALUE` tokens (POSIX command-prefix assignments) before the `SPEC` lookup. |
