@@ -37,7 +37,9 @@ class SpecShapeTests(unittest.TestCase):
              # Q9: cat-shape commands with file-naming flags.
              "sort", "wc", "diff", "file", "hexdump",
              # Q10: yq (kislyuk + mikefarah variants).
-             "yq"},
+             "yq",
+             # Q11 PR1: write/mutation commands (cp, mv, tee).
+             "cp", "mv", "tee"},
         )
 
     def test_documented_aliases_present(self):
@@ -445,6 +447,112 @@ class FilesInCommandTests(unittest.TestCase):
                 ["hexdump", "-e", '"%x"', "data.bin"]
             ),
             ["data.bin"],
+        )
+
+    # --- cp / mv / tee (Q11 PR1) --------------------------------------------
+
+    def test_cp_two_positionals(self):
+        # `cp SRC DEST` — both positionals are files (sources and dest both
+        # participate in the workspace check).
+        self.assertEqual(
+            guard.files_in_command(["cp", "a.txt", "b.txt"]),
+            ["a.txt", "b.txt"],
+        )
+
+    def test_cp_multiple_sources_and_dest(self):
+        self.assertEqual(
+            guard.files_in_command(["cp", "a.txt", "b.txt", "destdir"]),
+            ["a.txt", "b.txt", "destdir"],
+        )
+
+    def test_cp_recursive_zero_arg_flag(self):
+        # `-r` is zero-arg and falls through; positionals are unchanged.
+        self.assertEqual(
+            guard.files_in_command(["cp", "-r", "src", "dst"]),
+            ["src", "dst"],
+        )
+
+    def test_cp_combined_short_flags_zero_arg(self):
+        # `-rf` parses as one unknown flag with no value — both positionals
+        # remain. (Combined short flags don't need to be decomposed because
+        # none of them take separated values in cp's flag set.)
+        self.assertEqual(
+            guard.files_in_command(["cp", "-rf", "src", "dst"]),
+            ["src", "dst"],
+        )
+
+    def test_cp_target_directory_short_flag_is_file(self):
+        # `cp -t DIR SRC...` — DIR is the destination directory; declare it
+        # as file_flag so it participates in the workspace check.
+        self.assertEqual(
+            guard.files_in_command(["cp", "-t", "/tmp", "a.txt", "b.txt"]),
+            ["/tmp", "a.txt", "b.txt"],
+        )
+
+    def test_cp_target_directory_long_inline_is_file(self):
+        self.assertEqual(
+            guard.files_in_command(
+                ["cp", "--target-directory=/tmp", "a.txt"]
+            ),
+            ["/tmp", "a.txt"],
+        )
+
+    def test_cp_target_directory_long_separated_is_file(self):
+        self.assertEqual(
+            guard.files_in_command(
+                ["cp", "--target-directory", "/tmp", "a.txt"]
+            ),
+            ["/tmp", "a.txt"],
+        )
+
+    def test_cp_end_of_options_double_dash(self):
+        # `cp -- -src -dst` — after `--`, dash-prefixed tokens are positional.
+        self.assertEqual(
+            guard.files_in_command(["cp", "--", "-src", "-dst"]),
+            ["-src", "-dst"],
+        )
+
+    def test_mv_two_positionals(self):
+        self.assertEqual(
+            guard.files_in_command(["mv", "a.txt", "b.txt"]),
+            ["a.txt", "b.txt"],
+        )
+
+    def test_mv_target_directory_short_flag_is_file(self):
+        self.assertEqual(
+            guard.files_in_command(["mv", "-t", "/tmp", "a.txt"]),
+            ["/tmp", "a.txt"],
+        )
+
+    def test_mv_force_flag_zero_arg(self):
+        self.assertEqual(
+            guard.files_in_command(["mv", "-f", "src", "dst"]),
+            ["src", "dst"],
+        )
+
+    def test_tee_positional_output_file(self):
+        # `tee FILE` — FILE is the output target.
+        self.assertEqual(
+            guard.files_in_command(["tee", "log.txt"]),
+            ["log.txt"],
+        )
+
+    def test_tee_multiple_output_files(self):
+        self.assertEqual(
+            guard.files_in_command(["tee", "a.log", "b.log"]),
+            ["a.log", "b.log"],
+        )
+
+    def test_tee_append_flag_zero_arg(self):
+        self.assertEqual(
+            guard.files_in_command(["tee", "-a", "log.txt"]),
+            ["log.txt"],
+        )
+
+    def test_tee_long_append_flag_zero_arg(self):
+        self.assertEqual(
+            guard.files_in_command(["tee", "--append", "log.txt"]),
+            ["log.txt"],
         )
 
     # --- Q9 aliases (cat-shape readers) -------------------------------------
@@ -1273,6 +1381,87 @@ class HookEndToEndTests(unittest.TestCase):
 
     def test_cmp_outside_ask(self):
         self._decision("cmp in.txt /etc/hosts", "ask")
+
+    # --- Q11 PR1: cp / mv / tee end-to-end ----------------------------------
+
+    def test_cp_inside_workspace_allow(self):
+        # `cp SRC DEST` where both are inside the workspace — must allow.
+        with open(os.path.join(self.workspace, "src.txt"), "w") as f:
+            f.write("hi\n")
+        self._decision("cp src.txt dst.txt", "allow")
+
+    def test_cp_outside_source_ask(self):
+        # `cp /etc/passwd ./local` — outside source must ask.
+        out = self._decision("cp /etc/passwd ./local", "ask")
+        self.assertIn(
+            "/etc/passwd",
+            out["hookSpecificOutput"]["permissionDecisionReason"],
+        )
+
+    def test_cp_outside_dest_ask(self):
+        # `cp ./in.txt /tmp/exfil` — outside dest must ask (the net-new
+        # coverage Q11 adds).
+        out = self._decision("cp ./in.txt /tmp/exfil", "ask")
+        self.assertIn(
+            "/tmp/exfil",
+            out["hookSpecificOutput"]["permissionDecisionReason"],
+        )
+
+    def test_cp_target_directory_outside_ask(self):
+        # `cp -t /tmp a.txt` — DIR must be checked.
+        out = self._decision("cp -t /tmp in.txt", "ask")
+        self.assertIn(
+            "/tmp",
+            out["hookSpecificOutput"]["permissionDecisionReason"],
+        )
+
+    def test_cp_target_directory_inline_outside_ask(self):
+        self._decision("cp --target-directory=/tmp in.txt", "ask")
+
+    def test_cp_recursive_outside_ask(self):
+        self._decision("cp -r ./dir /tmp/exfil", "ask")
+
+    def test_cp_after_cd_relative_outside_ask(self):
+        # `cd /etc && cp passwd /tmp/x` — both positionals resolve outside
+        # the workspace via Q7's cd-tracking.
+        self._decision("cd /etc && cp passwd /tmp/x", "ask")
+
+    def test_mv_inside_workspace_allow(self):
+        with open(os.path.join(self.workspace, "src.txt"), "w") as f:
+            f.write("hi\n")
+        self._decision("mv src.txt dst.txt", "allow")
+
+    def test_mv_outside_dest_tilde_ask(self):
+        # `mv .env ~/leaked` — `~` is runtime-expanded; secure-by-default ask.
+        out = self._decision("mv in.txt ~/leaked", "ask")
+        self.assertIn(
+            "~/leaked",
+            out["hookSpecificOutput"]["permissionDecisionReason"],
+        )
+
+    def test_mv_outside_source_ask(self):
+        self._decision("mv /tmp/payload ./app.py", "ask")
+
+    def test_tee_inside_workspace_allow(self):
+        self._decision("tee log.txt", "allow")
+
+    def test_tee_outside_ask(self):
+        out = self._decision("tee /etc/hosts", "ask")
+        self.assertIn(
+            "/etc/hosts",
+            out["hookSpecificOutput"]["permissionDecisionReason"],
+        )
+
+    def test_tee_append_outside_ask(self):
+        self._decision("tee -a /var/log/syslog", "ask")
+
+    def test_pipe_into_tee_inside_allow(self):
+        # `echo foo | tee log.txt` — pipe source is unguarded (echo is not in
+        # SPEC), tee target is inside workspace. Decision is allow.
+        self._decision("echo foo | tee log.txt", "allow")
+
+    def test_pipe_into_tee_outside_ask(self):
+        self._decision("echo foo | tee /etc/hosts", "ask")
 
     # --- defer paths --------------------------------------------------------
 

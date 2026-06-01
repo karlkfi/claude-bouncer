@@ -154,6 +154,28 @@ SPEC = {
     'hexdump':{'consume':{'-e':1,'-n':1,'-s':1},
                'file_flags':{'-f':(1,[0])},
                'prog':0},
+    # Q11: write/mutation commands. All positionals are file paths (sources
+    # and destinations alike) — the workspace check doesn't care which is
+    # which, so `prog:0` over the whole positional list is sufficient.
+    #
+    # `-t DIR`/`--target-directory` names the destination directory: file_flag
+    # so DIR participates in the workspace check. `-T`/`--no-target-directory`
+    # is a no-arg flag that affects bash's interpretation, not ours.
+    # Other cp/mv flags (`-r`, `-R`, `-a`, `-p`, `-i`, `-f`, `-n`, `-v`,
+    # `-d`, `-l`, `-s`, `-b`, `-u`, etc.) are zero-arg and fall through
+    # harmlessly. Value-taking flags like `--suffix`/`-S` or `--reflink WHEN`
+    # are deliberately not declared: their values (`.bak`, `always`) leak as
+    # positional file tokens, which then resolve cwd-relative and are
+    # harmless allows — the secure-by-default direction.
+    'cp':   {'consume':{},
+             'file_flags':{'-t':(1,[0]),'--target-directory':(1,[0])},
+             'prog':0},
+    'mv':   {'consume':{},
+             'file_flags':{'-t':(1,[0]),'--target-directory':(1,[0])},
+             'prog':0},
+    # `tee`: all positionals are output files. Zero-arg flags (`-a`,
+    # `--append`, `-i`, `--ignore-interrupts`, `-p`) fall through.
+    'tee':  {'consume':{}, 'file_flags':{}, 'prog':0},
 }
 # Pure cat-shape readers — aliased to `cat`. cat's spec (no consume flags,
 # no file flags, prog:0) matches every tool here: positional files only,
