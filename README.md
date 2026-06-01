@@ -30,8 +30,9 @@ Guarded commands: `grep` (and `egrep`, `fgrep`), `rg`, `sed`, `awk` (and
 `gawk`, `mawk`), `jq`, `yq`, `cat`, `head`, `tail`, `sort`, `wc`, `diff`,
 `file`, `hexdump`, plus the cat-shape readers `less`, `more`, `tac`, `rev`,
 `nl`, `uniq`, `xxd`, `od`, `strings`, `cmp`, and `zcat`/`gzcat`/`bzcat`/`xzcat`.
-These are the file-reading commands Claude reaches for most often; tools
-like `ls`, `find`, and `xargs` aren't covered yet (see
+On the write side: `cp`, `mv`, `tee`. These are the file-reading and
+file-writing commands Claude reaches for most often; tools like `ls`, `find`,
+`rm`, `dd`, and `xargs` aren't covered yet (see
 [`docs/STATUS.md`](docs/STATUS.md)).
 
 | Command                              | Decision |
@@ -45,6 +46,9 @@ like `ls`, `find`, and `xargs` aren't covered yet (see
 | `wc -l data.txt`                     | allow    |
 | `sort -o sorted.txt data.txt`        | allow    |
 | `diff a.txt b.txt`                   | allow    |
+| `cp a.txt b.txt`                     | allow    |
+| `mv a.txt b.txt`                     | allow    |
+| `echo foo \| tee log.txt`            | allow    |
 | `cat data.txt > /dev/null`           | allow    |
 | `cat <<<"/etc/foo"` (here-string)    | allow    |
 | `grep secret /etc/passwd`            | **ask**  |
@@ -55,6 +59,9 @@ like `ls`, `find`, and `xargs` aren't covered yet (see
 | `sort -o /tmp/out.txt data.txt`      | **ask**  |
 | `wc --files0-from=/etc/list`         | **ask**  |
 | `diff --from-file=/etc/hosts in.txt` | **ask**  |
+| `cp ./secret.txt /tmp/exfil`         | **ask**  |
+| `mv .env ~/leaked`                   | **ask**  |
+| `tee /etc/hosts`                     | **ask**  |
 | `less /var/log/syslog`               | **ask**  |
 | `cat ../../etc/passwd`               | **ask**  |
 | `cat ~/.aws/credentials`             | **ask**  |
