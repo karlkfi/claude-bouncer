@@ -455,6 +455,20 @@ class HookEndToEndTests(unittest.TestCase):
     def test_redirect_append_outside_ask(self):
         self._decision("cat in.txt >> /tmp/out.txt", "ask")
 
+    # --- heredoc / here-string (Q4) -----------------------------------------
+
+    def test_here_string_path_like_content_allow(self):
+        # `<<<` content is stdin data, not a file path — must not be flagged
+        # even when it looks like an outside-workspace path.
+        self._decision('cat <<<"/etc/foo"', "allow")
+
+    def test_heredoc_path_like_delimiter_allow(self):
+        # `<<TAG` delimiter is a sentinel string, not a file path. Even when
+        # the delimiter resembles an outside path, the hook must not flag it.
+        # (The heredoc body still tokenizes as positional args — that's a
+        # separate limitation of stdlib shlex, not in scope for Q4.)
+        self._decision("cat <</etc/passwd\nbody\n", "allow")
+
     # --- device allowlist ---------------------------------------------------
 
     def test_cat_dev_null_allow(self):

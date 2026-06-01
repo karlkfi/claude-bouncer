@@ -39,6 +39,7 @@ aren't covered yet (see [`docs/STATUS.md`](docs/STATUS.md)).
 | `jq '.a/.b' data.json`               | allow    |
 | `sed 's/a/b/g' notes.md`             | allow    |
 | `cat data.txt > /dev/null`           | allow    |
+| `cat <<<"/etc/foo"` (here-string)    | allow    |
 | `grep secret /etc/passwd`            | **ask**  |
 | `jq '.x' /etc/hosts`                 | **ask**  |
 | `sed -f /tmp/evil.sed notes.md`      | **ask**  |
@@ -72,7 +73,8 @@ file in your repo; it should run without prompting.
    grouping) so quotes are respected and shell operators (`|`, `&&`, `>`, `;`)
    become their own tokens.
 2. **Split** into simple commands on those operators and pull redirect targets
-   (`> file`) aside as files to check.
+   (`> file`) aside as files to check. The token after `<<` (heredoc
+   delimiter) or `<<<` (here-string content) is skipped — it isn't a path.
 3. **Classify** each token using a per-command spec table that knows which flags
    take values (`grep -e PAT`), which flag-values are themselves files
    (`grep -f`, `jq --slurpfile`), and how many leading positionals are the

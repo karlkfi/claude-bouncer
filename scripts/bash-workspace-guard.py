@@ -154,6 +154,10 @@ def main():
             i += 1; continue
         if t in REDIR:
             if i + 1 < len(tokens):
+                # `<<TAG` heredoc delimiter and `<<<STR` here-string content
+                # are not file paths — skip without adding to redir_files.
+                if t in ('<<', '<<<'):
+                    i += 2; continue
                 redir_files.append(tokens[i+1]); i += 2; continue
             i += 1; continue
         cur.append(t); i += 1
