@@ -10,6 +10,25 @@ import sys, os, json, shlex
 SEPARATORS = {'|', '||', '&&', '&', ';', '\n', '(', ')'}
 REDIR = {'>', '>>', '<', '<<', '<<<', '>|', '&>', '&>>'}
 
+# Well-known device / FD paths that are safe to read or write regardless of
+# workspace boundary. Matched against the raw token before realpath, because
+# `/dev/stdin` resolves to `/dev/fd/0` on darwin and `/proc/self/fd/0` on Linux.
+ALLOWED_DEVICES = frozenset({
+    '/dev/null', '/dev/zero',
+    '/dev/stdin', '/dev/stdout', '/dev/stderr',
+    '/dev/tty', '/dev/random', '/dev/urandom',
+})
+
+
+def is_allowed_device(path):
+    """True for well-known device paths and `/dev/fd/N` FD references."""
+    if path in ALLOWED_DEVICES:
+        return True
+    if path.startswith('/dev/fd/'):
+        rest = path[len('/dev/fd/'):]
+        return rest.isdigit()
+    return False
+
 # Per-command parsing spec:
 #   consume:    flag -> N following tokens to skip (flag *values*, never files)
 #   file_flags: flag -> (N_consumed, [indices among consumed that ARE files])
@@ -127,6 +146,8 @@ def main():
     outside = []
     for f in candidates:
         if not f or f == '-' or f.startswith('-'):
+            continue
+        if is_allowed_device(f):
             continue
         path = f if os.path.isabs(f) else os.path.join(cwd, f)
         rp = os.path.realpath(path)

@@ -37,6 +37,7 @@ aren't covered yet (see [`docs/STATUS.md`](docs/STATUS.md)).
 | `cat data.txt \| grep foo`           | allow    |
 | `jq '.a/.b' data.json`               | allow    |
 | `sed 's/a/b/g' notes.md`             | allow    |
+| `cat data.txt > /dev/null`           | allow    |
 | `grep secret /etc/passwd`            | **ask**  |
 | `jq '.x' /etc/hosts`                 | **ask**  |
 | `sed -f /tmp/evil.sed notes.md`      | **ask**  |
@@ -77,7 +78,10 @@ file in your repo; it should run without prompting.
    program/pattern to skip.
 4. **Resolve** every file argument against `$CLAUDE_PROJECT_DIR` with
    `realpath`, collapsing `../` and following symlinks. Anything that resolves
-   outside the root yields `ask`; otherwise `allow`.
+   outside the root yields `ask`; otherwise `allow`. Well-known device paths
+   (`/dev/null`, `/dev/stdin`, `/dev/stdout`, `/dev/stderr`, `/dev/zero`,
+   `/dev/tty`, `/dev/random`, `/dev/urandom`, `/dev/fd/N`) are allowlisted and
+   skip the workspace check.
 
 ## Configuration
 
