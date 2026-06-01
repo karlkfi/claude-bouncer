@@ -20,15 +20,16 @@ Before introducing a new pattern or abstraction, check whether the existing `SPE
 
 ## Workflow
 
-1. **Before making changes** — read `README.md` and skim `scripts/bash-workspace-guard.py` so the proposed change matches the existing parsing model. If picking the next task, run `gh pr list` first and skip any Queue item from `docs/STATUS.md` already covered by an open PR.
+1. **At session start, check whether the worktree is stale.** New worktrees are branched from `main` at creation time, but `main` may have advanced since then — particularly if a previous session merged a PR. Run `git fetch origin main` and compare with `git log --oneline HEAD..origin/main`; if `origin/main` has new commits, rebase with `git rebase origin/main` before doing any other work. This avoids editing files against an outdated baseline and surfacing phantom conflicts at PR time.
+2. **Before making changes** — read `README.md` and skim `scripts/bash-workspace-guard.py` so the proposed change matches the existing parsing model. If picking the next task, run `gh pr list` first and skip any Queue item from `docs/STATUS.md` already covered by an open PR.
    - **Verify 🚫 blockers are still real.** A previous session may have silently completed the dependency without flipping the Queue row. Grep for the deliverables before treating the item as truly blocked.
    - **Investigation findings marked ✅ must be end-to-end verified, not just source-read.** If a `§Findings` block claims "command X with flag Y produces Z" because of source inspection, actually run the command and confirm. Shell parsing is full of surprises that only show up when you exec the thing.
-2. **For complex tasks** — write an explicit plan to `docs/plan/<slug>.md` and follow it. Keep it updated so completed scope is verifiable at the end. Revise the plan if new information changes the approach.
-3. **After making changes** — review the diff. Update docs proactively:
+3. **For complex tasks** — write an explicit plan to `docs/plan/<slug>.md` and follow it. Keep it updated so completed scope is verifiable at the end. Revise the plan if new information changes the approach.
+4. **After making changes** — review the diff. Update docs proactively:
    - **Changed parsing behavior or `SPEC` table** → update the decision table in `README.md` and the "How it works" / "Limitations" sections.
    - **New configuration or hook surface** → `README.md` and `.claude-plugin/plugin.json` keywords/description.
    - Update `docs/STATUS.md`: remove the completed Queue row.
-4. **Commit when done** — small, focused, Conventional Commits. **Always commit `docs/STATUS.md` changes in their own isolated commit**, separate from code and plan-doc changes (see `docs/development/maintaining-backlog.md`).
+5. **Commit when done** — small, focused, Conventional Commits. **Always commit `docs/STATUS.md` changes in their own isolated commit**, separate from code and plan-doc changes (see `docs/development/maintaining-backlog.md`).
 
 ## Code standards
 
