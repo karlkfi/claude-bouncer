@@ -4,7 +4,14 @@ outside the workspace; allow when it only touches workspace files or pipes.
 
 Reads the hook JSON on stdin, emits a PreToolUse decision on stdout.
 """
-import sys, os, json, shlex
+import sys, os, json, re, shlex
+
+# POSIX command-prefix assignment: NAME starts with letter/underscore,
+# followed by letters/digits/underscores, then `=`. Anything after the `=`
+# (including empty) is the value. Bash treats one or more of these tokens
+# at the start of a simple command as inline env exports for that command;
+# they do not change the command name lookup.
+ASSIGNMENT_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
 
 # Command separators and redirect operators (after shlex punctuation grouping).
 SEPARATORS = {'|', '||', '&&', '&', ';', '\n', '(', ')'}
@@ -82,6 +89,21 @@ SPEC = {
     'tail': {'consume':{'-n':1,'-c':1,'--lines':1,'--bytes':1},'file_flags':{},'prog':0},
 }
 ALIASES = {'egrep':'grep','fgrep':'grep','gawk':'awk','mawk':'awk'}
+
+
+def strip_env_prefix(tokens):
+    """Drop leading POSIX `NAME=VALUE` command-prefix assignments.
+
+    `LC_ALL=C cat /etc/passwd` tokenizes with the assignment at index 0;
+    without stripping, the SPEC lookup misses and the hook defers. Bash
+    treats one or more such tokens at the start of a simple command as
+    inline env exports — the real command begins at the first non-assignment
+    token.
+    """
+    i = 0
+    while i < len(tokens) and ASSIGNMENT_RE.match(tokens[i]):
+        i += 1
+    return tokens[i:]
 
 
 def split_eq(tok):
@@ -217,6 +239,8 @@ def main():
     group_cwd, group_cwd_unknown = cwd, False
     for g in groups:
         if not g: continue
+        g = strip_env_prefix(g)
+        if not g: continue                        # group was env-only (no cmd)
         kind, arg = classify_cd(g)
         if kind is not None:
             if kind == 'arg':
