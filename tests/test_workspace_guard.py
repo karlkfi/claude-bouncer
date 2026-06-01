@@ -493,6 +493,103 @@ class HookEndToEndTests(unittest.TestCase):
         # should still allow.
         self._decision("cat foo~bak", "allow")
 
+    # --- cd / pushd / popd shift cwd (Q7) -----------------------------------
+
+    def test_cd_then_relative_outside_ask(self):
+        # `cd /etc && cat passwd` — bash runs cat in /etc, so `passwd` is
+        # /etc/passwd. The pre-Q7 hook resolved against the original cwd and
+        # returned allow.
+        out = self._decision("cd /etc && cat passwd", "ask")
+        self.assertIn(
+            "passwd",
+            out["hookSpecificOutput"]["permissionDecisionReason"],
+        )
+
+    def test_pushd_then_relative_outside_ask(self):
+        self._decision("pushd /etc && cat passwd", "ask")
+
+    def test_cd_with_semicolon_separator_outside_ask(self):
+        self._decision("cd /etc; cat passwd", "ask")
+
+    def test_cd_into_subshell_outside_ask(self):
+        # `(cd /etc; cat passwd)` — subshell restores cwd for the parent but
+        # we still flag the inner `cat passwd` against /etc.
+        self._decision("(cd /etc; cat passwd)", "ask")
+
+    def test_cd_workspace_subdir_relative_allow(self):
+        # `cd subdir && cat in.txt` where both subdir and in.txt are inside
+        # the workspace — re-rooting keeps this an allow.
+        nested = os.path.join(self.workspace, "sub")
+        os.mkdir(nested)
+        with open(os.path.join(nested, "x.txt"), "w") as f:
+            f.write("hi\n")
+        self._decision("cd sub && cat x.txt", "allow")
+
+    def test_cd_absolute_workspace_path_allow(self):
+        # `cd <workspace>/sub && cat x.txt` — absolute cd into workspace
+        # still allows subsequent in-workspace reads.
+        nested = os.path.join(self.workspace, "sub")
+        os.mkdir(nested)
+        with open(os.path.join(nested, "x.txt"), "w") as f:
+            f.write("hi\n")
+        self._decision(f"cd {nested} && cat x.txt", "allow")
+
+    def test_popd_taints_subsequent_relative_outside_ask(self):
+        # popd's effect can't be tracked; any subsequent relative path in a
+        # guarded group is treated as outside.
+        self._decision("popd && cat in.txt", "ask")
+
+    def test_bare_cd_taints_subsequent_relative_outside_ask(self):
+        # `cd` with no arg goes to $HOME — we can't track precisely.
+        self._decision("cd && cat in.txt", "ask")
+
+    def test_cd_dash_taints_subsequent_relative_outside_ask(self):
+        # `cd -` toggles to OLDPWD — same untracked situation.
+        self._decision("cd - && cat in.txt", "ask")
+
+    def test_cd_dollar_var_taints_subsequent_relative_outside_ask(self):
+        # cd target with `$` can't be resolved at hook time.
+        self._decision("cd $HOME && cat in.txt", "ask")
+
+    def test_cd_tilde_taints_subsequent_relative_outside_ask(self):
+        self._decision("cd ~ && cat in.txt", "ask")
+
+    def test_cd_does_not_taint_absolute_paths(self):
+        # `cd /etc && cat /etc/passwd` already had `/etc/passwd` flagged via
+        # the absolute path. Q7 doesn't change that — verify it still asks.
+        self._decision("cd /etc && cat /etc/passwd", "ask")
+
+    def test_cd_only_command_defers(self):
+        # `cd /etc` alone has no guarded command — must defer.
+        self._defer("cd /etc")
+
+    def test_first_group_unaffected_by_later_cd(self):
+        # `cat in.txt; cd /etc; cat passwd` — first cat reads workspace file,
+        # only the second is flagged. Decision is the union, so still ask,
+        # but the outside list must not contain `in.txt`.
+        out = self._decision("cat in.txt; cd /etc; cat passwd", "ask")
+        reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("passwd", reason)
+        self.assertNotIn("in.txt", reason)
+
+    def test_classify_cd_helper_arg(self):
+        self.assertEqual(guard.classify_cd(["cd", "/etc"]), ("arg", "/etc"))
+        self.assertEqual(guard.classify_cd(["pushd", "/tmp"]), ("arg", "/tmp"))
+        self.assertEqual(guard.classify_cd(["cd", "-L", "/etc"]), ("arg", "/etc"))
+
+    def test_classify_cd_helper_unknown(self):
+        self.assertEqual(guard.classify_cd(["cd"]), ("unknown", None))
+        self.assertEqual(guard.classify_cd(["cd", "-"]), ("unknown", None))
+        self.assertEqual(guard.classify_cd(["cd", "~/foo"]), ("unknown", None))
+        self.assertEqual(guard.classify_cd(["cd", "$HOME"]), ("unknown", None))
+        self.assertEqual(guard.classify_cd(["pushd", "+1"]), ("unknown", None))
+        self.assertEqual(guard.classify_cd(["popd"]), ("unknown", None))
+        self.assertEqual(guard.classify_cd(["popd", "+0"]), ("unknown", None))
+
+    def test_classify_cd_helper_not_cd(self):
+        self.assertEqual(guard.classify_cd(["cat", "foo"]), (None, None))
+        self.assertEqual(guard.classify_cd([]), (None, None))
+
     # --- heredoc / here-string (Q4) -----------------------------------------
 
     def test_here_string_path_like_content_allow(self):
