@@ -114,6 +114,48 @@ def split_eq(tok):
     return tok, None
 
 
+def classify_ln(tokens):
+    """For an `ln -s ...` command, return `(target_token, link_token_or_None)`.
+
+    Returns None when the command isn't `ln`, isn't in symbolic mode, or uses
+    the multi-source form (3+ positionals — `ln -s a b destdir/`), which the
+    Q8 staging logic deliberately doesn't track.
+
+    Recognises symbolic mode via `-s`, combined short flags containing `s`
+    (`-sf`, `-fs`, `-fns`), and `--symbolic`. Consumes the value-taking flags
+    (`-t`/`--target-directory`, `-S`/`--suffix`, `--backup`) so they don't
+    surface as positionals.
+    """
+    if not tokens or os.path.basename(tokens[0]) != 'ln':
+        return None
+    consume = {'-t': 1, '--target-directory': 1,
+               '-S': 1, '--suffix': 1, '--backup': 1}
+    symbolic = False
+    positionals = []
+    i, n, end_opts = 1, len(tokens), False
+    while i < n:
+        tok = tokens[i]
+        if not end_opts and tok == '--':
+            end_opts = True; i += 1; continue
+        if not end_opts and tok.startswith('-') and tok != '-':
+            key, inline = split_eq(tok)
+            if key == '--symbolic':
+                symbolic = True
+            elif not key.startswith('--') and 's' in key[1:]:
+                symbolic = True
+            if key in consume:
+                i += 1 + (0 if inline is not None else consume[key]); continue
+            i += 1; continue
+        positionals.append(tok); i += 1
+    if not symbolic:
+        return None
+    if len(positionals) == 1:
+        return (positionals[0], None)
+    if len(positionals) == 2:
+        return (positionals[0], positionals[1])
+    return None
+
+
 def classify_cd(tokens):
     """Classify a command group as a cwd-shifting builtin.
 
@@ -210,27 +252,67 @@ def main():
         cur.append(t); i += 1
     if cur: groups.append(cur)
 
-    def check_file(f, group_cwd, group_cwd_unknown):
-        """Return the original token if it resolves outside the workspace,
-        else None. Relative paths resolve against `group_cwd`; if the cwd has
-        been shifted unpredictably by an earlier `cd`/`pushd`/`popd`, any
-        relative path is treated as outside (secure-by-default)."""
+    def is_outside(rp):
+        return rp != proj and not rp.startswith(proj + os.sep)
+
+    def resolve_token(f, group_cwd, group_cwd_unknown):
+        """Resolve a file token. Returns one of:
+          ('skip', None)         — '-', flag, or allowlisted device
+          ('outside', None)      — runtime-expanded (`~`/`$`) or cwd is
+                                   unknown; secure-by-default outside
+          ('path', abspath)      — caller compares against the workspace and
+                                   the staged-outside set
+        """
         if not f or f == '-' or f.startswith('-'):
-            return None
+            return ('skip', None)
         if is_allowed_device(f):
-            return None
+            return ('skip', None)
         # Bash expands `~` and `$VAR` at runtime; shlex leaves them literal.
         if f.startswith('~') or '$' in f:
-            return f
+            return ('outside', None)
         if os.path.isabs(f):
-            rp = os.path.realpath(f)
-        elif group_cwd_unknown:
+            return ('path', os.path.realpath(f))
+        if group_cwd_unknown:
+            return ('outside', None)
+        return ('path', os.path.realpath(os.path.join(group_cwd, f)))
+
+    # Symlinks staged by an earlier `ln -s OUTSIDE LINK` in the same chain.
+    # Tracks the resolved abspath of each `LINK` whose target is outside the
+    # workspace, so a later `cat link` can be flagged before bash materialises
+    # the symlink and breaks the lexical-realpath check (Q8).
+    staged_outside_paths = set()
+
+    def check_file(f, group_cwd, group_cwd_unknown):
+        """Return the original token if it resolves outside the workspace
+        (directly, or via a symlink staged by an earlier `ln -s` in this
+        chain), else None."""
+        kind, rp = resolve_token(f, group_cwd, group_cwd_unknown)
+        if kind == 'skip':
+            return None
+        if kind == 'outside':
             return f
-        else:
-            rp = os.path.realpath(os.path.join(group_cwd, f))
-        if rp != proj and not rp.startswith(proj + os.sep):
+        if rp in staged_outside_paths or is_outside(rp):
             return f
         return None
+
+    def stage_ln(target, link, group_cwd, group_cwd_unknown):
+        """If `ln -s TARGET LINK` points outside, record LINK's resolved path.
+        LINK may be None (omitted) — then the link name is `basename(TARGET)`
+        in the current group cwd, matching POSIX `ln` semantics."""
+        tkind, trp = resolve_token(target, group_cwd, group_cwd_unknown)
+        if tkind == 'skip':
+            return
+        if tkind == 'path' and not is_outside(trp):
+            return                                # target is inside workspace
+        link_tok = link if link is not None else os.path.basename(target.rstrip('/'))
+        if not link_tok:
+            return
+        lkind, lrp = resolve_token(link_tok, group_cwd, group_cwd_unknown)
+        if lkind != 'path':
+            return                                # link itself unresolvable;
+                                                  # later check_file catches it
+                                                  # via $/~/unknown rule
+        staged_outside_paths.add(lrp)
 
     # Per-group cwd tracking. A `cd`/`pushd` in an earlier group of the same
     # chain shifts the runtime cwd for later guarded groups; `popd` or an
@@ -249,6 +331,10 @@ def main():
                 group_cwd_unknown = False
             else:
                 group_cwd_unknown = True
+            continue
+        ln = classify_ln(g)
+        if ln is not None:
+            stage_ln(ln[0], ln[1], group_cwd, group_cwd_unknown)
             continue
         fs = files_in_command(g)
         if fs is None: continue

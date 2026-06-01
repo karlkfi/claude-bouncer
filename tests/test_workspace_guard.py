@@ -648,6 +648,152 @@ class HookEndToEndTests(unittest.TestCase):
         self.assertEqual(guard.classify_cd(["cat", "foo"]), (None, None))
         self.assertEqual(guard.classify_cd([]), (None, None))
 
+    # --- ln -s symlink staging (Q8) -----------------------------------------
+
+    def test_ln_outside_target_then_cat_link_ask(self):
+        # The Q8 motivating case: `ln -s OUTSIDE link && cat link`. Pre-Q8,
+        # `link` didn't exist at hook time so realpath kept it lexically inside
+        # the workspace and the whole chain was allowed.
+        out = self._decision(
+            "ln -s /tmp/q8-fake-target link && cat link", "ask",
+        )
+        self.assertIn(
+            "link",
+            out["hookSpecificOutput"]["permissionDecisionReason"],
+        )
+
+    def test_ln_inside_target_then_cat_link_allow(self):
+        # Innocent in-workspace symlink — staging must not false-positive.
+        self._decision("ln -s in.txt link && cat link", "allow")
+
+    def test_ln_long_symbolic_flag_staged(self):
+        self._decision(
+            "ln --symbolic /tmp/q8-fake-target link && cat link", "ask",
+        )
+
+    def test_ln_combined_short_flags_staged(self):
+        # `-fs` / `-fns` — symbolic mode hides inside the combined flag.
+        self._decision(
+            "ln -fs /tmp/q8-fake-target link && cat link", "ask",
+        )
+        self._decision(
+            "ln -fns /tmp/q8-fake-target link && cat link", "ask",
+        )
+
+    def test_ln_without_dash_s_not_staged(self):
+        # Hard link is a separate threat (same TOCTOU shape, single-filesystem
+        # only); Q8 stays scoped to `-s`. Verify the staging logic doesn't
+        # silently catch the hard-link form and lull a future reader.
+        self._decision(
+            "ln /tmp/q8-fake-target link && cat link", "allow",
+        )
+
+    def test_ln_omitted_link_uses_basename(self):
+        # `ln -s /tmp/q8-fake-target` creates `q8-fake-target` in cwd.
+        self._decision(
+            "ln -s /tmp/q8-fake-target && cat q8-fake-target", "ask",
+        )
+
+    def test_ln_absolute_outside_link_caught_by_existing_check(self):
+        # Link itself is outside-workspace; the cat already asks via the
+        # absolute-path rule, staging is a no-op. Decision is still ask.
+        self._decision(
+            "ln -s /tmp/q8-fake-target /tmp/q8-link && cat /tmp/q8-link",
+            "ask",
+        )
+
+    def test_ln_after_cd_stages_against_shifted_cwd(self):
+        # `cd /tmp && ln -s OUTSIDE link && cat link` — link lives in /tmp,
+        # so the staged path is /tmp/link. The cat must still ask.
+        self._decision(
+            "cd /tmp && ln -s /tmp/q8-fake-target link && cat link", "ask",
+        )
+
+    def test_ln_inside_target_relative_link_outside_workspace(self):
+        # `ln -s ./in.txt /tmp/out` — target inside, link outside. Staging
+        # skips (target inside), but the resulting symlink lives outside, so
+        # no later guarded read in the workspace would be affected. This
+        # scenario stays allow because there's no later cat inside-workspace.
+        # The `ln` itself isn't guarded yet (that's Q11's scope).
+        self._defer("ln -s ./in.txt /tmp/out")
+
+    def test_ln_subdir_link_path_stages_correctly(self):
+        # `ln -s OUTSIDE ./sub/link && cat ./sub/link` — staged path is
+        # <cwd>/sub/link; the cat must match it.
+        nested = os.path.join(self.workspace, "sub")
+        os.mkdir(nested)
+        self._decision(
+            "ln -s /tmp/q8-fake-target ./sub/link && cat ./sub/link", "ask",
+        )
+
+    def test_ln_dollar_target_stages_link_as_outside(self):
+        # `$HOME` target can't be resolved at hook time; secure-by-default
+        # treats it as outside, so link gets staged.
+        self._decision(
+            "ln -s $HOME/secret link && cat link", "ask",
+        )
+
+    def test_ln_dollar_link_not_staged_but_cat_asks_anyway(self):
+        # `link` with `$` is unresolvable — staging can't pin it down. The
+        # later `cat $X` still asks via the existing $/~ rule.
+        self._decision(
+            "ln -s /tmp/q8-fake-target $LINK && cat $LINK", "ask",
+        )
+
+    def test_ln_only_command_defers(self):
+        # `ln -s OUTSIDE link` alone has no guarded command — must defer
+        # (ln itself isn't guarded; that's Q11).
+        self._defer("ln -s /tmp/q8-fake-target link")
+
+    def test_classify_ln_helper_basic(self):
+        self.assertEqual(
+            guard.classify_ln(["ln", "-s", "/tmp/x", "link"]),
+            ("/tmp/x", "link"),
+        )
+
+    def test_classify_ln_helper_omitted_link(self):
+        self.assertEqual(
+            guard.classify_ln(["ln", "-s", "/tmp/x"]),
+            ("/tmp/x", None),
+        )
+
+    def test_classify_ln_helper_long_flag(self):
+        self.assertEqual(
+            guard.classify_ln(["ln", "--symbolic", "/tmp/x", "link"]),
+            ("/tmp/x", "link"),
+        )
+
+    def test_classify_ln_helper_combined_flags(self):
+        self.assertEqual(
+            guard.classify_ln(["ln", "-fs", "/tmp/x", "link"]),
+            ("/tmp/x", "link"),
+        )
+        self.assertEqual(
+            guard.classify_ln(["ln", "-fns", "/tmp/x", "link"]),
+            ("/tmp/x", "link"),
+        )
+
+    def test_classify_ln_helper_hard_link_returns_none(self):
+        # No `-s` → not symbolic → Q8 staging shouldn't apply.
+        self.assertIsNone(guard.classify_ln(["ln", "/tmp/x", "link"]))
+
+    def test_classify_ln_helper_multi_source_returns_none(self):
+        # 3+ positionals — multi-source-to-directory form is out of scope.
+        self.assertIsNone(
+            guard.classify_ln(["ln", "-s", "a", "b", "destdir"]),
+        )
+
+    def test_classify_ln_helper_target_directory_flag_consumed(self):
+        # `-t DIR` consumes DIR as a value, not a positional.
+        self.assertEqual(
+            guard.classify_ln(["ln", "-s", "-t", "destdir", "/tmp/x"]),
+            ("/tmp/x", None),
+        )
+
+    def test_classify_ln_helper_not_ln(self):
+        self.assertIsNone(guard.classify_ln(["cat", "-s", "/tmp/x"]))
+        self.assertIsNone(guard.classify_ln([]))
+
     # --- inline env-var prefix (Q6) -----------------------------------------
 
     def test_env_prefix_outside_ask(self):
