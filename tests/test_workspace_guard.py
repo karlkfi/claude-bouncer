@@ -262,6 +262,37 @@ class FilesInCommandTests(unittest.TestCase):
         self.assertEqual(guard.split_eq("-fx"), ("-fx", None))
 
 
+class AllowedDeviceTests(unittest.TestCase):
+    """Allowlist of well-known device / FD paths."""
+
+    def test_dev_null_allowed(self):
+        self.assertTrue(guard.is_allowed_device("/dev/null"))
+
+    def test_standard_streams_allowed(self):
+        for p in ("/dev/stdin", "/dev/stdout", "/dev/stderr"):
+            self.assertTrue(guard.is_allowed_device(p), p)
+
+    def test_random_sources_allowed(self):
+        for p in ("/dev/random", "/dev/urandom", "/dev/zero", "/dev/tty"):
+            self.assertTrue(guard.is_allowed_device(p), p)
+
+    def test_dev_fd_numeric_allowed(self):
+        self.assertTrue(guard.is_allowed_device("/dev/fd/0"))
+        self.assertTrue(guard.is_allowed_device("/dev/fd/63"))
+
+    def test_dev_fd_non_numeric_rejected(self):
+        # `/dev/fd/abc` is not a real FD reference — don't allowlist it.
+        self.assertFalse(guard.is_allowed_device("/dev/fd/abc"))
+        self.assertFalse(guard.is_allowed_device("/dev/fd/"))
+
+    def test_other_dev_paths_rejected(self):
+        # Only the explicit allowlist bypasses — `/dev/sda1` etc. still go
+        # through the workspace check.
+        self.assertFalse(guard.is_allowed_device("/dev/sda1"))
+        self.assertFalse(guard.is_allowed_device("/dev/null.bak"))
+        self.assertFalse(guard.is_allowed_device("dev/null"))  # relative
+
+
 def run_hook(cmd, cwd, project_dir=None):
     """Invoke the hook as a subprocess. Returns parsed JSON or None on defer."""
     env = os.environ.copy()
@@ -375,6 +406,27 @@ class HookEndToEndTests(unittest.TestCase):
 
     def test_redirect_append_outside_ask(self):
         self._decision("cat in.txt >> /tmp/out.txt", "ask")
+
+    # --- device allowlist ---------------------------------------------------
+
+    def test_cat_dev_null_allow(self):
+        self._decision("cat /dev/null", "allow")
+
+    def test_redirect_to_dev_null_allow(self):
+        self._decision("cat in.txt > /dev/null", "allow")
+
+    def test_cat_dev_stdin_allow(self):
+        # Verifies raw-token match: /dev/stdin realpath-resolves to /dev/fd/0
+        # on darwin and /proc/self/fd/0 on Linux, but the literal token is
+        # what users write.
+        self._decision("cat /dev/stdin", "allow")
+
+    def test_cat_dev_fd_numeric_allow(self):
+        self._decision("cat /dev/fd/3", "allow")
+
+    def test_cat_dev_sda_outside_ask(self):
+        # Only the explicit allowlist bypasses; other /dev/ paths still ask.
+        self._decision("cat /dev/sda1", "ask")
 
     # --- alias end-to-end ---------------------------------------------------
 
