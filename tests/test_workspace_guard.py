@@ -35,7 +35,9 @@ class SpecShapeTests(unittest.TestCase):
             set(guard.SPEC.keys()),
             {"grep", "rg", "sed", "awk", "jq", "cat", "head", "tail",
              # Q9: cat-shape commands with file-naming flags.
-             "sort", "wc", "diff", "file", "hexdump"},
+             "sort", "wc", "diff", "file", "hexdump",
+             # Q10: yq (kislyuk + mikefarah variants).
+             "yq"},
         )
 
     def test_documented_aliases_present(self):
@@ -220,6 +222,106 @@ class FilesInCommandTests(unittest.TestCase):
                 ["jq", "-f", "script.jq", "main.json"]
             ),
             ["script.jq", "main.json"],
+        )
+
+    # --- yq (Q10: kislyuk + mikefarah variants) -----------------------------
+
+    def test_yq_program_positional(self):
+        self.assertEqual(
+            guard.files_in_command(["yq", ".foo", "input.yaml"]),
+            ["input.yaml"],
+        )
+
+    def test_yq_from_file_short_is_file_and_suppresses_prog(self):
+        # `-f` is kislyuk's jq-pass-through `--from-file`; suppresses prog
+        # so the next positional is a file rather than the program.
+        self.assertEqual(
+            guard.files_in_command(["yq", "-f", "script.jq", "input.json"]),
+            ["script.jq", "input.json"],
+        )
+
+    def test_yq_from_file_long_is_file_and_suppresses_prog(self):
+        self.assertEqual(
+            guard.files_in_command(
+                ["yq", "--from-file", "expr.yq", "input.yaml"]
+            ),
+            ["expr.yq", "input.yaml"],
+        )
+
+    def test_yq_arg_consumes_two_non_file(self):
+        # `--arg NAME VAL` (kislyuk pass-through) must not leak NAME/VAL.
+        self.assertEqual(
+            guard.files_in_command(
+                ["yq", "--arg", "name", "value", ".x", "main.json"]
+            ),
+            ["main.json"],
+        )
+
+    def test_yq_argjson_consumes_two_non_file(self):
+        self.assertEqual(
+            guard.files_in_command(
+                ["yq", "--argjson", "n", "1", ".x", "main.json"]
+            ),
+            ["main.json"],
+        )
+
+    def test_yq_slurpfile_file_at_index_1(self):
+        self.assertEqual(
+            guard.files_in_command(
+                ["yq", "--slurpfile", "d", "aux.json", ".", "main.json"]
+            ),
+            ["aux.json", "main.json"],
+        )
+
+    def test_yq_rawfile_file_at_index_1(self):
+        self.assertEqual(
+            guard.files_in_command(
+                ["yq", "--rawfile", "d", "aux.txt", ".", "main.json"]
+            ),
+            ["aux.txt", "main.json"],
+        )
+
+    def test_yq_split_exp_file_is_file(self):
+        # mikefarah-only flag — file containing the split expression.
+        self.assertEqual(
+            guard.files_in_command(
+                ["yq", "--split-exp-file", "tmpl.txt", ".[]", "input.yaml"]
+            ),
+            ["tmpl.txt", "input.yaml"],
+        )
+
+    def test_yq_expression_long_flag_suppresses_prog(self):
+        # mikefarah `--expression .foo input.yaml` — `--expression` is not
+        # in consume (falls through as zero-arg) but IS in prog_suppressed_by,
+        # so `.foo` is treated as a file (cwd-relative, harmless) and the
+        # actual file is still tracked.
+        self.assertEqual(
+            guard.files_in_command(
+                ["yq", "--expression", ".foo", "input.yaml"]
+            ),
+            [".foo", "input.yaml"],
+        )
+
+    def test_yq_mikefarah_output_format_does_not_consume(self):
+        # `-o json` is not declared as consume — keeps `json` as the prog
+        # positional so the following file is correctly identified. Declaring
+        # `-o:1` would let `yq -o json /etc/passwd` slip through.
+        self.assertEqual(
+            guard.files_in_command(["yq", "-o", "json", "input.yaml"]),
+            ["input.yaml"],
+        )
+
+    def test_yq_mikefarah_indent_does_not_consume(self):
+        self.assertEqual(
+            guard.files_in_command(["yq", "-I", "2", "input.yaml"]),
+            ["input.yaml"],
+        )
+
+    def test_yq_kislyuk_yaml_output_boolean(self):
+        # `-y` (kislyuk yaml-output) is boolean — falls through as zero-arg.
+        self.assertEqual(
+            guard.files_in_command(["yq", "-y", ".foo", "input.json"]),
+            ["input.json"],
         )
 
     # --- sort / wc / diff / file / hexdump (Q9) -----------------------------
@@ -1032,6 +1134,65 @@ class HookEndToEndTests(unittest.TestCase):
 
     def test_rg_type_workspace_allow(self):
         self._decision("rg -t py PAT in.txt", "allow")
+
+    # --- yq end-to-end (Q10) ------------------------------------------------
+
+    def test_yq_workspace_allow(self):
+        self._decision("yq .foo in.txt", "allow")
+
+    def test_yq_outside_ask(self):
+        out = self._decision("yq .x /etc/hosts", "ask")
+        self.assertIn(
+            "/etc/hosts",
+            out["hookSpecificOutput"]["permissionDecisionReason"],
+        )
+
+    def test_yq_from_file_outside_ask(self):
+        # Both kislyuk and mikefarah read the program/expression from FILE.
+        self._decision("yq --from-file /tmp/evil.yq in.txt", "ask")
+
+    def test_yq_short_f_outside_ask(self):
+        # kislyuk's jq-pass-through -f. For mikefarah this is --front-matter
+        # (a string value), but an absolute outside path is unusual there and
+        # asking is the secure default.
+        self._decision("yq -f /tmp/evil.jq in.txt", "ask")
+
+    def test_yq_slurpfile_outside_ask(self):
+        self._decision("yq --slurpfile d /etc/hosts . in.txt", "ask")
+
+    def test_yq_mikefarah_output_format_outside_file_ask(self):
+        # The motivating mikefarah-aware case: expression omitted, flag value
+        # is a format name. If `-o` were declared as consume:1, the value
+        # would be eaten and the outside file silently allowed.
+        out = self._decision("yq -o json /etc/passwd", "ask")
+        self.assertIn(
+            "/etc/passwd",
+            out["hookSpecificOutput"]["permissionDecisionReason"],
+        )
+
+    def test_yq_mikefarah_indent_outside_file_ask(self):
+        self._decision("yq -I 2 /etc/passwd", "ask")
+
+    def test_yq_kislyuk_arg_outside_ask(self):
+        # `--arg NAME VAL` must consume cleanly so the trailing file is the
+        # one that gets flagged — not NAME or VAL.
+        out = self._decision("yq --arg n v .x /etc/hosts", "ask")
+        reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("/etc/hosts", reason)
+        self.assertNotIn(" n,", reason)
+        self.assertNotIn(" v,", reason)
+
+    def test_yq_program_only_workspace_allow(self):
+        # `.a/.b` is a yq expression, not a path — same shape as the jq
+        # decision-table row.
+        self._decision("yq '.a/.b' in.txt", "allow")
+
+    def test_yq_inplace_workspace_allow(self):
+        # mikefarah `-i` (boolean inplace) — falls through as zero-arg.
+        self._decision("yq -i .foo in.txt", "allow")
+
+    def test_yq_pipe_chain_workspace_allow(self):
+        self._decision("cat in.txt | yq .foo", "allow")
 
     # --- Q9: cat-family commands (dedicated rows + aliases) -----------------
 
