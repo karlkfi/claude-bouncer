@@ -33,14 +33,23 @@ class SpecShapeTests(unittest.TestCase):
     def test_spec_covers_documented_commands(self):
         self.assertEqual(
             set(guard.SPEC.keys()),
-            {"grep", "rg", "sed", "awk", "jq", "cat", "head", "tail"},
+            {"grep", "rg", "sed", "awk", "jq", "cat", "head", "tail",
+             # Q9: cat-shape commands with file-naming flags.
+             "sort", "wc", "diff", "file", "hexdump"},
         )
 
     def test_documented_aliases_present(self):
         self.assertEqual(
             guard.ALIASES,
             {"egrep": "grep", "fgrep": "grep",
-             "gawk": "awk", "mawk": "awk"},
+             "gawk": "awk", "mawk": "awk",
+             # Q9: pure cat-shape readers aliased to `cat`.
+             "less": "cat", "more": "cat",
+             "tac": "cat", "rev": "cat", "nl": "cat",
+             "uniq": "cat", "xxd": "cat", "od": "cat",
+             "strings": "cat", "cmp": "cat",
+             "zcat": "cat", "gzcat": "cat",
+             "bzcat": "cat", "xzcat": "cat"},
         )
 
 
@@ -211,6 +220,152 @@ class FilesInCommandTests(unittest.TestCase):
                 ["jq", "-f", "script.jq", "main.json"]
             ),
             ["script.jq", "main.json"],
+        )
+
+    # --- sort / wc / diff / file / hexdump (Q9) -----------------------------
+
+    def test_sort_positional_files(self):
+        self.assertEqual(
+            guard.files_in_command(["sort", "a.txt", "b.txt"]),
+            ["a.txt", "b.txt"],
+        )
+
+    def test_sort_output_short_flag_is_file(self):
+        # `-o FILE` writes to FILE — must be tracked, not consumed.
+        self.assertEqual(
+            guard.files_in_command(["sort", "-o", "out.txt", "in.txt"]),
+            ["out.txt", "in.txt"],
+        )
+
+    def test_sort_output_long_flag_is_file(self):
+        self.assertEqual(
+            guard.files_in_command(["sort", "--output", "out.txt", "in.txt"]),
+            ["out.txt", "in.txt"],
+        )
+
+    def test_sort_output_inline_eq_is_file(self):
+        self.assertEqual(
+            guard.files_in_command(["sort", "--output=out.txt", "in.txt"]),
+            ["out.txt", "in.txt"],
+        )
+
+    def test_sort_files0_from_is_file(self):
+        self.assertEqual(
+            guard.files_in_command(["sort", "--files0-from=list.txt"]),
+            ["list.txt"],
+        )
+
+    def test_sort_field_separator_consumes_value(self):
+        # `-t :` and `-k 1` must not leak as positional files.
+        self.assertEqual(
+            guard.files_in_command(
+                ["sort", "-t", ":", "-k", "1", "in.txt"]
+            ),
+            ["in.txt"],
+        )
+
+    def test_wc_positional_file(self):
+        self.assertEqual(guard.files_in_command(["wc", "in.txt"]), ["in.txt"])
+
+    def test_wc_files0_from_is_file(self):
+        self.assertEqual(
+            guard.files_in_command(["wc", "--files0-from=list.txt"]),
+            ["list.txt"],
+        )
+
+    def test_wc_boolean_flag_not_consumed(self):
+        # `-l` takes no value — file is in.txt, not ""
+        self.assertEqual(
+            guard.files_in_command(["wc", "-l", "in.txt"]),
+            ["in.txt"],
+        )
+
+    def test_diff_two_positional_files(self):
+        self.assertEqual(
+            guard.files_in_command(["diff", "a.txt", "b.txt"]),
+            ["a.txt", "b.txt"],
+        )
+
+    def test_diff_unified_consumes_value(self):
+        self.assertEqual(
+            guard.files_in_command(["diff", "-U", "3", "a.txt", "b.txt"]),
+            ["a.txt", "b.txt"],
+        )
+
+    def test_diff_from_file_is_file(self):
+        self.assertEqual(
+            guard.files_in_command(
+                ["diff", "--from-file=base.txt", "new.txt"]
+            ),
+            ["base.txt", "new.txt"],
+        )
+
+    def test_diff_to_file_is_file(self):
+        self.assertEqual(
+            guard.files_in_command(
+                ["diff", "--to-file", "target.txt", "src.txt"]
+            ),
+            ["target.txt", "src.txt"],
+        )
+
+    def test_file_positional(self):
+        self.assertEqual(
+            guard.files_in_command(["file", "foo.bin"]),
+            ["foo.bin"],
+        )
+
+    def test_file_dash_f_reads_file_list(self):
+        # `file -f LIST` reads filenames to test from LIST — LIST is a file.
+        self.assertEqual(
+            guard.files_in_command(["file", "-f", "list.txt"]),
+            ["list.txt"],
+        )
+
+    def test_hexdump_positional(self):
+        self.assertEqual(
+            guard.files_in_command(["hexdump", "data.bin"]),
+            ["data.bin"],
+        )
+
+    def test_hexdump_dash_f_reads_format_file(self):
+        # `hexdump -f FILE` reads format spec from FILE.
+        self.assertEqual(
+            guard.files_in_command(
+                ["hexdump", "-f", "fmt.txt", "data.bin"]
+            ),
+            ["fmt.txt", "data.bin"],
+        )
+
+    def test_hexdump_dash_e_consumes_value(self):
+        # `-e FORMAT_STRING` consumes the inline format.
+        self.assertEqual(
+            guard.files_in_command(
+                ["hexdump", "-e", '"%x"', "data.bin"]
+            ),
+            ["data.bin"],
+        )
+
+    # --- Q9 aliases (cat-shape readers) -------------------------------------
+
+    def test_q9_aliases_resolve_to_cat(self):
+        # Each alias should parse identically to bare `cat foo.txt`.
+        for cmd in ("less", "more", "tac", "rev", "nl", "uniq",
+                    "xxd", "od", "strings", "cmp",
+                    "zcat", "gzcat", "bzcat", "xzcat"):
+            self.assertEqual(
+                guard.files_in_command([cmd, "foo.txt"]),
+                ["foo.txt"],
+                f"alias {cmd!r} did not resolve to cat-shape",
+            )
+
+    def test_alias_unknown_flag_treats_value_as_positional(self):
+        # Documented false-positive: `tac -s SEP foo.txt` — cat doesn't know
+        # `-s`, so SEP becomes a positional file. In practice SEP resolves
+        # lexically inside cwd (harmless allow); only flagged when it looks
+        # like an absolute outside path.
+        self.assertEqual(
+            guard.files_in_command(["tac", "-s", ",", "foo.txt"]),
+            [",", "foo.txt"],
         )
 
     # --- generic parser behavior --------------------------------------------
@@ -877,6 +1032,86 @@ class HookEndToEndTests(unittest.TestCase):
 
     def test_rg_type_workspace_allow(self):
         self._decision("rg -t py PAT in.txt", "allow")
+
+    # --- Q9: cat-family commands (dedicated rows + aliases) -----------------
+
+    def test_sort_workspace_allow(self):
+        self._decision("sort in.txt", "allow")
+
+    def test_sort_output_outside_ask(self):
+        # `-o /tmp/out.txt` writes outside — must ask, citing /tmp/out.txt.
+        out = self._decision("sort -o /tmp/out.txt in.txt", "ask")
+        self.assertIn(
+            "/tmp/out.txt",
+            out["hookSpecificOutput"]["permissionDecisionReason"],
+        )
+
+    def test_sort_output_inside_allow(self):
+        self._decision("sort -o sorted.txt in.txt", "allow")
+
+    def test_sort_files0_from_outside_ask(self):
+        self._decision("sort --files0-from=/etc/hosts", "ask")
+
+    def test_sort_separator_does_not_leak_as_file(self):
+        # Regression: -t : -k 1 must consume values, not flag them.
+        self._decision("sort -t : -k 1 in.txt", "allow")
+
+    def test_wc_workspace_allow(self):
+        self._decision("wc -l in.txt", "allow")
+
+    def test_wc_outside_ask(self):
+        self._decision("wc -l /etc/passwd", "ask")
+
+    def test_wc_files0_from_outside_ask(self):
+        # Inline `=` form: pre-Q9 cat-alias would have silently dropped it.
+        self._decision("wc --files0-from=/etc/list", "ask")
+
+    def test_diff_workspace_allow(self):
+        with open(os.path.join(self.workspace, "other.txt"), "w") as f:
+            f.write("hi\n")
+        self._decision("diff in.txt other.txt", "allow")
+
+    def test_diff_outside_ask(self):
+        self._decision("diff in.txt /etc/hosts", "ask")
+
+    def test_diff_from_file_outside_ask(self):
+        self._decision("diff --from-file=/etc/hosts in.txt", "ask")
+
+    def test_file_workspace_allow(self):
+        self._decision("file in.txt", "allow")
+
+    def test_file_outside_ask(self):
+        self._decision("file /etc/passwd", "ask")
+
+    def test_file_dash_f_outside_ask(self):
+        self._decision("file -f /tmp/list.txt", "ask")
+
+    def test_hexdump_workspace_allow(self):
+        self._decision("hexdump in.txt", "allow")
+
+    def test_hexdump_outside_ask(self):
+        self._decision("hexdump /etc/passwd", "ask")
+
+    def test_hexdump_format_file_outside_ask(self):
+        self._decision("hexdump -f /tmp/fmt.txt in.txt", "ask")
+
+    # Cat-shape aliases: pick a couple of representative end-to-end checks
+    # rather than re-testing each alias — the alias resolution table is
+    # already covered by SpecShapeTests.
+    def test_less_outside_ask(self):
+        self._decision("less /var/log/syslog", "ask")
+
+    def test_tac_workspace_allow(self):
+        self._decision("tac in.txt", "allow")
+
+    def test_zcat_workspace_allow(self):
+        self._decision("zcat in.txt", "allow")
+
+    def test_zcat_outside_ask(self):
+        self._decision("zcat /tmp/archive.gz", "ask")
+
+    def test_cmp_outside_ask(self):
+        self._decision("cmp in.txt /etc/hosts", "ask")
 
     # --- defer paths --------------------------------------------------------
 

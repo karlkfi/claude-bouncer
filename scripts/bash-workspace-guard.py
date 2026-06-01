@@ -87,8 +87,61 @@ SPEC = {
     'cat':  {'consume':{}, 'file_flags':{}, 'prog':0},
     'head': {'consume':{'-n':1,'-c':1,'--lines':1,'--bytes':1},'file_flags':{},'prog':0},
     'tail': {'consume':{'-n':1,'-c':1,'--lines':1,'--bytes':1},'file_flags':{},'prog':0},
+    # Q9: cat-shape read-side commands that ALSO have file-naming flags.
+    # Aliasing these to `cat` would silently drop the file flag (false
+    # negative), so they get their own rows. Pure cat-clones with no
+    # file-naming flag are listed in ALIASES below.
+    'sort': {'consume':{'-S':1,'--buffer-size':1,
+                        '-T':1,'--temporary-directory':1,
+                        '-t':1,'--field-separator':1,
+                        '-k':1,'--key':1,
+                        '--batch-size':1,'--compress-program':1,
+                        '--parallel':1,'--random-source':1},
+             'file_flags':{'-o':(1,[0]),'--output':(1,[0]),
+                           '--files0-from':(1,[0])},
+             'prog':0},
+    'wc':   {'consume':{}, 'file_flags':{'--files0-from':(1,[0])}, 'prog':0},
+    'diff': {'consume':{'-D':1,'--ifdef':1,
+                        '-F':1,'--show-function-line':1,
+                        '-I':1,'--ignore-matching-lines':1,
+                        '-L':1,'--label':1,
+                        '-S':1,'--starting-file':1,
+                        '-W':1,'--width':1,
+                        '-x':1,'--exclude':1,
+                        '-X':1,'--exclude-from':1,
+                        '-U':1,'--unified':1,
+                        '-C':1,'--context':1,
+                        '--horizon-lines':1,'--tabsize':1,
+                        '--line-format':1,
+                        '--old-line-format':1,'--new-line-format':1,
+                        '--unchanged-line-format':1,
+                        '--group-format':1,
+                        '--old-group-format':1,'--new-group-format':1,
+                        '--unchanged-group-format':1,
+                        '--changed-group-format':1},
+             'file_flags':{'--from-file':(1,[0]),'--to-file':(1,[0])},
+             'prog':0},
+    'file': {'consume':{'-e':1,'--exclude':1,'--exclude-quiet':1,
+                        '-F':1,'--separator':1,
+                        '-m':1,'--magic-file':1,
+                        '-P':1,'--parameter':1},
+             'file_flags':{'-f':(1,[0]),'--files-from':(1,[0])},
+             'prog':0},
+    'hexdump':{'consume':{'-e':1,'-n':1,'-s':1},
+               'file_flags':{'-f':(1,[0])},
+               'prog':0},
 }
-ALIASES = {'egrep':'grep','fgrep':'grep','gawk':'awk','mawk':'awk'}
+# Pure cat-shape readers — aliased to `cat`. cat's spec (no consume flags,
+# no file flags, prog:0) matches every tool here: positional files only,
+# no program/pattern token, no file-naming flags. Value-taking flags like
+# `tac -s SEP` mean SEP is treated as a positional/file; in practice SEP
+# resolves lexically inside cwd, so the false-positive risk is negligible.
+ALIASES = {'egrep':'grep','fgrep':'grep','gawk':'awk','mawk':'awk',
+           'less':'cat','more':'cat',
+           'tac':'cat','rev':'cat','nl':'cat',
+           'uniq':'cat','xxd':'cat','od':'cat',
+           'strings':'cat','cmp':'cat',
+           'zcat':'cat','gzcat':'cat','bzcat':'cat','xzcat':'cat'}
 
 
 def strip_env_prefix(tokens):
