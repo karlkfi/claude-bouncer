@@ -30,9 +30,9 @@ Guarded commands: `grep` (and `egrep`, `fgrep`), `rg`, `sed`, `awk` (and
 `gawk`, `mawk`), `jq`, `yq`, `cat`, `head`, `tail`, `sort`, `wc`, `diff`,
 `file`, `hexdump`, plus the cat-shape readers `less`, `more`, `tac`, `rev`,
 `nl`, `uniq`, `xxd`, `od`, `strings`, `cmp`, and `zcat`/`gzcat`/`bzcat`/`xzcat`.
-On the write side: `cp`, `mv`, `tee`, `rm`. These are the file-reading and
-file-writing commands Claude reaches for most often; tools like `ls`, `find`,
-`dd`, and `xargs` aren't covered yet (see
+On the write side: `cp`, `mv`, `tee`, `rm`, `dd`. These are the file-reading
+and file-writing commands Claude reaches for most often; tools like `ls`,
+`find`, and `xargs` aren't covered yet (see
 [`docs/STATUS.md`](docs/STATUS.md)).
 
 | Command                              | Decision |
@@ -49,6 +49,7 @@ file-writing commands Claude reaches for most often; tools like `ls`, `find`,
 | `cp a.txt b.txt`                     | allow    |
 | `mv a.txt b.txt`                     | allow    |
 | `rm -rf ./build`                     | allow    |
+| `dd if=./in of=./out bs=1M`          | allow    |
 | `echo foo \| tee log.txt`            | allow    |
 | `cat data.txt > /dev/null`           | allow    |
 | `cat <<<"/etc/foo"` (here-string)    | allow    |
@@ -64,6 +65,7 @@ file-writing commands Claude reaches for most often; tools like `ls`, `find`,
 | `mv .env ~/leaked`                   | **ask**  |
 | `rm -rf /tmp/foo`                    | **ask**  |
 | `tee /etc/hosts`                     | **ask**  |
+| `dd if=./in of=/tmp/out`             | **ask**  |
 | `less /var/log/syslog`               | **ask**  |
 | `cat ../../etc/passwd`               | **ask**  |
 | `cat ~/.aws/credentials`             | **ask**  |
@@ -107,7 +109,9 @@ file in your repo; it should run without prompting.
 4. **Classify** each token using a per-command spec table that knows which flags
    take values (`grep -e PAT`), which flag-values are themselves files
    (`grep -f`, `jq --slurpfile`), and how many leading positionals are the
-   program/pattern to skip.
+   program/pattern to skip. `dd` is handled separately because its operands are
+   all `KEY=VALUE` pairs — `if=PATH` and `of=PATH` are the file operands; the
+   rest (`bs=`, `count=`, `conv=`, `iflag=`, `oflag=`, …) are values, not paths.
 5. **Track** cwd shifts across the chain. A `cd`/`pushd` in an earlier group
    re-roots relative file paths in later guarded groups (so
    `cd /etc && cat passwd` flags `passwd` as `/etc/passwd`). When the new cwd
