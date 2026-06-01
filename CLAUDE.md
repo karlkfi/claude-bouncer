@@ -71,6 +71,13 @@ Two layers:
 
 When changing `SPEC` or tokenization, add the case that motivated the change as a fixture, and hand-exercise the decision table in `README.md` against the change before committing.
 
+**Never use real outside-workspace paths — especially sensitive ones — as the target in test fixtures or hand-exercised bypass commands.** Use a synthetic placeholder like `/tmp/q8-fake-target` instead. The hook only checks lexical resolution against `$CLAUDE_PROJECT_DIR`; file existence and contents don't matter for coverage. The placeholder exercises identical code paths with zero risk of:
+- materialising a real symlink to `/etc/passwd`, `~/.ssh/id_rsa`, or `~/.aws/credentials` during a bypass hand-exercise (if the hook erroneously returns `allow`, bash will *run* the command);
+- leaking sensitive content into shell scrollback, test output, or CI logs;
+- normalising the bad habit of reaching for real credential paths when a fake one is just as instructive.
+
+This applies to anything you'd run through the user's `Bash` tool while developing or demoing — not just committed test fixtures. Subprocess-only tests that never invoke bash on the command (the script reads it as a JSON string) are technically safe, but follow the same rule for consistency.
+
 ## Commits
 
 - Commit after each task is complete and validated.
