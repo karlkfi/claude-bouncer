@@ -40,6 +40,32 @@ SPEC = {
                          '--binary-files':1,'--include':1,'--exclude':1},
              'file_flags': {'-f':(1,[0]),'--file':(1,[0])},
              'prog':1, 'prog_suppressed_by':['-e','--regexp','-f','--file']},
+    # ripgrep: flag set diverges from grep enough that aliasing mis-parses
+    # `rg -g '*.py' PAT path` (Q3). Own row with rg's arg-taking flags;
+    # no `--include`/`--exclude` (rg uses `-g`/`--glob`); no `-d`/`-D`.
+    'rg':   {'consume': {'-e':1,'--regexp':1,'-m':1,'--max-count':1,
+                         '-A':1,'--after-context':1,
+                         '-B':1,'--before-context':1,
+                         '-C':1,'--context':1,
+                         '-g':1,'--glob':1,'--iglob':1,
+                         '-t':1,'--type':1,'-T':1,'--type-not':1,
+                         '--type-add':1,'--type-clear':1,
+                         '-M':1,'--max-columns':1,
+                         '--max-filesize':1,'--max-depth':1,
+                         '-r':1,'--replace':1,
+                         '-E':1,'--encoding':1,
+                         '--engine':1,'--pre':1,
+                         '--sort':1,'--sortr':1,
+                         '--context-separator':1,
+                         '--field-context-separator':1,
+                         '--field-match-separator':1,
+                         '--regex-size-limit':1,'--dfa-size-limit':1,
+                         '--path-separator':1,
+                         '--color':1,'--colors':1,
+                         '--hostname-bin':1},
+             'file_flags': {'-f':(1,[0]),'--file':(1,[0]),
+                            '--ignore-file':(1,[0])},
+             'prog':1, 'prog_suppressed_by':['-e','--regexp','-f','--file']},
     'sed':  {'consume': {'-e':1,'--expression':1,'-l':1,'--line-length':1},
              'file_flags': {'-f':(1,[0]),'--file':(1,[0])},
              'prog':1, 'prog_suppressed_by':['-e','--expression','-f','--file']},
@@ -55,7 +81,7 @@ SPEC = {
     'head': {'consume':{'-n':1,'-c':1,'--lines':1,'--bytes':1},'file_flags':{},'prog':0},
     'tail': {'consume':{'-n':1,'-c':1,'--lines':1,'--bytes':1},'file_flags':{},'prog':0},
 }
-ALIASES = {'egrep':'grep','fgrep':'grep','rg':'grep','gawk':'awk','mawk':'awk'}
+ALIASES = {'egrep':'grep','fgrep':'grep','gawk':'awk','mawk':'awk'}
 
 
 def split_eq(tok):
