@@ -39,7 +39,9 @@ class SpecShapeTests(unittest.TestCase):
              # Q10: yq (kislyuk + mikefarah variants).
              "yq",
              # Q11 PR1: write/mutation commands (cp, mv, tee).
-             "cp", "mv", "tee"},
+             "cp", "mv", "tee",
+             # Q11 PR2: rm.
+             "rm"},
         )
 
     def test_documented_aliases_present(self):
@@ -553,6 +555,65 @@ class FilesInCommandTests(unittest.TestCase):
         self.assertEqual(
             guard.files_in_command(["tee", "--append", "log.txt"]),
             ["log.txt"],
+        )
+
+    # --- rm (Q11 PR2) -------------------------------------------------------
+
+    def test_rm_single_positional(self):
+        self.assertEqual(guard.files_in_command(["rm", "foo.txt"]), ["foo.txt"])
+
+    def test_rm_multiple_positionals(self):
+        self.assertEqual(
+            guard.files_in_command(["rm", "a", "b", "c"]),
+            ["a", "b", "c"],
+        )
+
+    def test_rm_recursive_flag_zero_arg(self):
+        # `-r` is zero-arg; positionals follow unchanged.
+        self.assertEqual(
+            guard.files_in_command(["rm", "-r", "./build"]),
+            ["./build"],
+        )
+
+    def test_rm_combined_short_flags_zero_arg(self):
+        # `-rf` parses as one unknown flag — none of rm's short flags take
+        # values, so combined-short doesn't need decomposition.
+        self.assertEqual(
+            guard.files_in_command(["rm", "-rf", "./build"]),
+            ["./build"],
+        )
+
+    def test_rm_long_recursive_flag_zero_arg(self):
+        self.assertEqual(
+            guard.files_in_command(["rm", "--recursive", "./build"]),
+            ["./build"],
+        )
+
+    def test_rm_force_and_interactive_combined(self):
+        self.assertEqual(
+            guard.files_in_command(["rm", "-fI", "./build"]),
+            ["./build"],
+        )
+
+    def test_rm_end_of_options_double_dash(self):
+        # `rm -- -filename` removes a file literally named `-filename`.
+        self.assertEqual(
+            guard.files_in_command(["rm", "--", "-filename"]),
+            ["-filename"],
+        )
+
+    def test_rm_preserve_root_inline_value_discarded(self):
+        # `--preserve-root=all` — unknown long flag with inline value; value
+        # is dropped (not promoted to positional), so only the file remains.
+        self.assertEqual(
+            guard.files_in_command(["rm", "--preserve-root=all", "-r", "./build"]),
+            ["./build"],
+        )
+
+    def test_rm_no_preserve_root_zero_arg(self):
+        self.assertEqual(
+            guard.files_in_command(["rm", "--no-preserve-root", "-rf", "./x"]),
+            ["./x"],
         )
 
     # --- Q9 aliases (cat-shape readers) -------------------------------------
@@ -1462,6 +1523,48 @@ class HookEndToEndTests(unittest.TestCase):
 
     def test_pipe_into_tee_outside_ask(self):
         self._decision("echo foo | tee /etc/hosts", "ask")
+
+    # --- Q11 PR2: rm end-to-end ---------------------------------------------
+
+    def test_rm_inside_workspace_allow(self):
+        # `rm ./build` inside the workspace — allow.
+        self._decision("rm -rf ./build", "allow")
+
+    def test_rm_outside_absolute_ask(self):
+        out = self._decision("rm -rf /tmp/q11-fake-target", "ask")
+        self.assertIn(
+            "/tmp/q11-fake-target",
+            out["hookSpecificOutput"]["permissionDecisionReason"],
+        )
+
+    def test_rm_traversal_outside_ask(self):
+        # `rm -rf ../../foo` from inside the workspace escapes via realpath.
+        nested = os.path.join(self.workspace, "sub")
+        os.mkdir(nested)
+        self._decision("rm -rf ../../../tmp/foo", "ask", cwd=nested)
+
+    def test_rm_tilde_outside_ask(self):
+        out = self._decision("rm ~/secret", "ask")
+        self.assertIn(
+            "~/secret",
+            out["hookSpecificOutput"]["permissionDecisionReason"],
+        )
+
+    def test_rm_after_cd_outside_ask(self):
+        # `cd /etc && rm passwd` — Q7 cd-tracking re-roots `passwd` to /etc.
+        self._decision("cd /etc && rm passwd", "ask")
+
+    def test_rm_mixed_positionals_one_outside_ask(self):
+        # Mixed list — any outside positional triggers ask, citing only it.
+        out = self._decision("rm -rf in.txt /tmp/q11-fake-target", "ask")
+        reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("/tmp/q11-fake-target", reason)
+        self.assertNotIn("in.txt", reason)
+
+    def test_rm_double_dash_then_outside_ask(self):
+        # `rm -- /etc/passwd` — end-of-options doesn't change the workspace
+        # check; absolute outside path still asks.
+        self._decision("rm -- /tmp/q11-fake-target", "ask")
 
     # --- defer paths --------------------------------------------------------
 

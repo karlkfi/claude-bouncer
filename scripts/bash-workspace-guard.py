@@ -176,6 +176,14 @@ SPEC = {
     # `tee`: all positionals are output files. Zero-arg flags (`-a`,
     # `--append`, `-i`, `--ignore-interrupts`, `-p`) fall through.
     'tee':  {'consume':{}, 'file_flags':{}, 'prog':0},
+    # `rm`: all positionals are removal targets. Every documented flag in
+    # GNU/BSD rm (`-r`, `-R`, `--recursive`, `-f`, `--force`, `-i`, `-I`,
+    # `--interactive`, `-v`, `--verbose`, `-d`, `--dir`, `-P`, `-x`,
+    # `--one-file-system`, `--preserve-root`, `--no-preserve-root`) is
+    # zero-arg, so neither `consume` nor `file_flags` is needed. Inline-value
+    # forms like `--preserve-root=all` are split by `split_eq`; the unknown
+    # `--preserve-root` key falls through and the value is discarded.
+    'rm':   {'consume':{}, 'file_flags':{}, 'prog':0},
 }
 # Pure cat-shape readers — aliased to `cat`. cat's spec (no consume flags,
 # no file flags, prog:0) matches every tool here: positional files only,

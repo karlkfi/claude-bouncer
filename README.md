@@ -30,9 +30,9 @@ Guarded commands: `grep` (and `egrep`, `fgrep`), `rg`, `sed`, `awk` (and
 `gawk`, `mawk`), `jq`, `yq`, `cat`, `head`, `tail`, `sort`, `wc`, `diff`,
 `file`, `hexdump`, plus the cat-shape readers `less`, `more`, `tac`, `rev`,
 `nl`, `uniq`, `xxd`, `od`, `strings`, `cmp`, and `zcat`/`gzcat`/`bzcat`/`xzcat`.
-On the write side: `cp`, `mv`, `tee`. These are the file-reading and
+On the write side: `cp`, `mv`, `tee`, `rm`. These are the file-reading and
 file-writing commands Claude reaches for most often; tools like `ls`, `find`,
-`rm`, `dd`, and `xargs` aren't covered yet (see
+`dd`, and `xargs` aren't covered yet (see
 [`docs/STATUS.md`](docs/STATUS.md)).
 
 | Command                              | Decision |
@@ -48,6 +48,7 @@ file-writing commands Claude reaches for most often; tools like `ls`, `find`,
 | `diff a.txt b.txt`                   | allow    |
 | `cp a.txt b.txt`                     | allow    |
 | `mv a.txt b.txt`                     | allow    |
+| `rm -rf ./build`                     | allow    |
 | `echo foo \| tee log.txt`            | allow    |
 | `cat data.txt > /dev/null`           | allow    |
 | `cat <<<"/etc/foo"` (here-string)    | allow    |
@@ -61,6 +62,7 @@ file-writing commands Claude reaches for most often; tools like `ls`, `find`,
 | `diff --from-file=/etc/hosts in.txt` | **ask**  |
 | `cp ./secret.txt /tmp/exfil`         | **ask**  |
 | `mv .env ~/leaked`                   | **ask**  |
+| `rm -rf /tmp/foo`                    | **ask**  |
 | `tee /etc/hosts`                     | **ask**  |
 | `less /var/log/syslog`               | **ask**  |
 | `cat ../../etc/passwd`               | **ask**  |
