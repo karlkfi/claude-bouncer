@@ -310,6 +310,64 @@ class FilesInCommandTests(unittest.TestCase):
         self.assertEqual(guard.split_eq("-fx"), ("-fx", None))
 
 
+class StripEnvPrefixTests(unittest.TestCase):
+    """POSIX command-prefix assignments are dropped before SPEC lookup (Q6)."""
+
+    def test_single_assignment_stripped(self):
+        self.assertEqual(
+            guard.strip_env_prefix(["LC_ALL=C", "cat", "/etc/passwd"]),
+            ["cat", "/etc/passwd"],
+        )
+
+    def test_multiple_assignments_stripped(self):
+        self.assertEqual(
+            guard.strip_env_prefix(["FOO=1", "BAR=2", "cat", "x"]),
+            ["cat", "x"],
+        )
+
+    def test_empty_value_assignment_stripped(self):
+        self.assertEqual(
+            guard.strip_env_prefix(["FOO=", "cat", "x"]),
+            ["cat", "x"],
+        )
+
+    def test_underscore_leading_name_stripped(self):
+        self.assertEqual(
+            guard.strip_env_prefix(["_X=1", "cat", "x"]),
+            ["cat", "x"],
+        )
+
+    def test_assignment_only_returns_empty(self):
+        # `FOO=bar` alone is a pure shell assignment with no command.
+        self.assertEqual(guard.strip_env_prefix(["FOO=bar"]), [])
+
+    def test_stops_at_first_non_assignment(self):
+        # `FOO=1 cat BAR=2 baz` — BAR=2 is an operand to cat, not stripped.
+        self.assertEqual(
+            guard.strip_env_prefix(["FOO=1", "cat", "BAR=2", "baz"]),
+            ["cat", "BAR=2", "baz"],
+        )
+
+    def test_invalid_name_not_stripped(self):
+        # `1FOO=bar` is not a valid POSIX variable name; leave it alone.
+        self.assertEqual(
+            guard.strip_env_prefix(["1FOO=bar", "cat"]),
+            ["1FOO=bar", "cat"],
+        )
+
+    def test_flag_not_stripped(self):
+        self.assertEqual(
+            guard.strip_env_prefix(["--foo=bar", "cat"]),
+            ["--foo=bar", "cat"],
+        )
+
+    def test_no_equals_not_stripped(self):
+        self.assertEqual(
+            guard.strip_env_prefix(["cat", "x"]),
+            ["cat", "x"],
+        )
+
+
 class AllowedDeviceTests(unittest.TestCase):
     """Allowlist of well-known device / FD paths."""
 
@@ -589,6 +647,35 @@ class HookEndToEndTests(unittest.TestCase):
     def test_classify_cd_helper_not_cd(self):
         self.assertEqual(guard.classify_cd(["cat", "foo"]), (None, None))
         self.assertEqual(guard.classify_cd([]), (None, None))
+
+    # --- inline env-var prefix (Q6) -----------------------------------------
+
+    def test_env_prefix_outside_ask(self):
+        # `LC_ALL=C cat /etc/passwd` — pre-Q6 the assignment masked the
+        # command name and the hook deferred entirely.
+        out = self._decision("LC_ALL=C cat /etc/passwd", "ask")
+        self.assertIn(
+            "/etc/passwd",
+            out["hookSpecificOutput"]["permissionDecisionReason"],
+        )
+
+    def test_env_prefix_workspace_allow(self):
+        self._decision("LC_ALL=C cat in.txt", "allow")
+
+    def test_multiple_env_prefix_outside_ask(self):
+        self._decision("FOO=1 BAR=2 cat /etc/passwd", "ask")
+
+    def test_env_prefix_before_grep_outside_ask(self):
+        # Make sure prog-suppression still works after stripping env prefix.
+        self._decision("LC_ALL=C grep -e PAT /etc/passwd", "ask")
+
+    def test_env_prefix_only_defers(self):
+        # `FOO=bar` alone is a pure shell assignment — no command, defer.
+        self._defer("FOO=bar")
+
+    def test_env_prefix_in_second_group_outside_ask(self):
+        # Prefix on a later group in a chain is still stripped.
+        self._decision("cat in.txt && LC_ALL=C cat /etc/passwd", "ask")
 
     # --- heredoc / here-string (Q4) -----------------------------------------
 

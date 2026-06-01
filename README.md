@@ -48,6 +48,7 @@ aren't covered yet (see [`docs/STATUS.md`](docs/STATUS.md)).
 | `cat ~/.aws/credentials`             | **ask**  |
 | `cat $HOME/.ssh/id_rsa`              | **ask**  |
 | `cd /etc && cat passwd`              | **ask**  |
+| `LC_ALL=C cat /etc/passwd`           | **ask**  |
 | `ls /etc`                            | defer    |
 
 Note the `jq` row: `.a/.b` is a jq program, not a filesystem path. The hook
@@ -78,16 +79,19 @@ file in your repo; it should run without prompting.
 2. **Split** into simple commands on those operators and pull redirect targets
    (`> file`) aside as files to check. The token after `<<` (heredoc
    delimiter) or `<<<` (here-string content) is skipped — it isn't a path.
-3. **Classify** each token using a per-command spec table that knows which flags
+3. **Strip** leading POSIX `NAME=VALUE` command-prefix assignments from each
+   simple command (`LC_ALL=C cat …` → `cat …`) so the assignment doesn't mask
+   the command-name lookup.
+4. **Classify** each token using a per-command spec table that knows which flags
    take values (`grep -e PAT`), which flag-values are themselves files
    (`grep -f`, `jq --slurpfile`), and how many leading positionals are the
    program/pattern to skip.
-4. **Track** cwd shifts across the chain. A `cd`/`pushd` in an earlier group
+5. **Track** cwd shifts across the chain. A `cd`/`pushd` in an earlier group
    re-roots relative file paths in later guarded groups (so
    `cd /etc && cat passwd` flags `passwd` as `/etc/passwd`). When the new cwd
    can't be resolved at hook time — bare `cd`, `cd -`, `cd $HOME`, `popd` —
    later relative paths short-circuit to `ask`.
-5. **Resolve** every file argument against `$CLAUDE_PROJECT_DIR` with
+6. **Resolve** every file argument against `$CLAUDE_PROJECT_DIR` with
    `realpath`, collapsing `../` and following symlinks. Anything that resolves
    outside the root yields `ask`; otherwise `allow`. Tokens that bash would
    expand at runtime — leading `~` or any `$` — short-circuit to `ask`, since
