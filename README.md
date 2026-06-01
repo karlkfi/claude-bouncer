@@ -26,7 +26,7 @@ The hook produces one of three outcomes:
   (as above). You approve or reject.
 - **defer** — the hook stays silent; your normal permission settings apply.
 
-Guarded commands: `grep` (and `egrep`, `fgrep`, `rg`), `sed`, `awk` (and
+Guarded commands: `grep` (and `egrep`, `fgrep`), `rg`, `sed`, `awk` (and
 `gawk`, `mawk`), `jq`, `cat`, `head`, `tail`. These are the file-reading
 commands Claude reaches for most often; tools like `ls`, `find`, and `xargs`
 aren't covered yet (see [`docs/STATUS.md`](docs/STATUS.md)).
@@ -34,6 +34,7 @@ aren't covered yet (see [`docs/STATUS.md`](docs/STATUS.md)).
 | Command                              | Decision |
 | ------------------------------------ | -------- |
 | `grep foo ./src.txt`                 | allow    |
+| `rg -g '*.py' foo ./src`             | allow    |
 | `cat data.txt \| grep foo`           | allow    |
 | `jq '.a/.b' data.json`               | allow    |
 | `sed 's/a/b/g' notes.md`             | allow    |

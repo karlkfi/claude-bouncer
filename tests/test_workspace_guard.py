@@ -33,13 +33,13 @@ class SpecShapeTests(unittest.TestCase):
     def test_spec_covers_documented_commands(self):
         self.assertEqual(
             set(guard.SPEC.keys()),
-            {"grep", "sed", "awk", "jq", "cat", "head", "tail"},
+            {"grep", "rg", "sed", "awk", "jq", "cat", "head", "tail"},
         )
 
     def test_documented_aliases_present(self):
         self.assertEqual(
             guard.ALIASES,
-            {"egrep": "grep", "fgrep": "grep", "rg": "grep",
+            {"egrep": "grep", "fgrep": "grep",
              "gawk": "awk", "mawk": "awk"},
         )
 
@@ -234,11 +234,6 @@ class FilesInCommandTests(unittest.TestCase):
             guard.files_in_command(["fgrep", "PAT", "foo.txt"]),
             ["foo.txt"],
         )
-        # rg is currently aliased to grep (see Q3 in docs/STATUS.md).
-        self.assertEqual(
-            guard.files_in_command(["rg", "PAT", "foo.txt"]),
-            ["foo.txt"],
-        )
         self.assertEqual(
             guard.files_in_command(["gawk", "{print}", "foo.txt"]),
             ["foo.txt"],
@@ -246,6 +241,59 @@ class FilesInCommandTests(unittest.TestCase):
         self.assertEqual(
             guard.files_in_command(["mawk", "{print}", "foo.txt"]),
             ["foo.txt"],
+        )
+
+    # --- rg (dedicated SPEC, not aliased to grep — see Q3) ------------------
+
+    def test_rg_pattern_positional(self):
+        self.assertEqual(
+            guard.files_in_command(["rg", "PAT", "foo.txt"]),
+            ["foo.txt"],
+        )
+
+    def test_rg_glob_consumes_value(self):
+        # The Q3 motivating case: -g '*.py' must not leak as a positional.
+        self.assertEqual(
+            guard.files_in_command(["rg", "-g", "*.py", "PAT", "path"]),
+            ["path"],
+        )
+
+    def test_rg_long_glob_inline_eq(self):
+        self.assertEqual(
+            guard.files_in_command(["rg", "--glob=*.py", "PAT", "path"]),
+            ["path"],
+        )
+
+    def test_rg_type_consumes_value(self):
+        self.assertEqual(
+            guard.files_in_command(["rg", "-t", "py", "PAT", "path"]),
+            ["path"],
+        )
+
+    def test_rg_prog_suppressed_by_dash_e(self):
+        self.assertEqual(
+            guard.files_in_command(["rg", "-e", "PAT", "foo.txt"]),
+            ["foo.txt"],
+        )
+
+    def test_rg_file_flag_short(self):
+        self.assertEqual(
+            guard.files_in_command(["rg", "-f", "patterns.txt", "foo.txt"]),
+            ["patterns.txt", "foo.txt"],
+        )
+
+    def test_rg_ignore_file_is_file_flag(self):
+        self.assertEqual(
+            guard.files_in_command(
+                ["rg", "--ignore-file", "ignore.txt", "PAT", "foo.txt"]
+            ),
+            ["ignore.txt", "foo.txt"],
+        )
+
+    def test_rg_max_depth_consumes_value(self):
+        self.assertEqual(
+            guard.files_in_command(["rg", "--max-depth", "3", "PAT", "path"]),
+            ["path"],
         )
 
     def test_basename_strips_path_prefix(self):
@@ -435,6 +483,18 @@ class HookEndToEndTests(unittest.TestCase):
 
     def test_gawk_workspace_allow(self):
         self._decision("gawk '{print}' in.txt", "allow")
+
+    # --- rg end-to-end ------------------------------------------------------
+
+    def test_rg_glob_workspace_allow(self):
+        # Q3 motivating case: `-g '*.py'` must not flag '*.py' as outside.
+        self._decision("rg -g '*.py' PAT in.txt", "allow")
+
+    def test_rg_outside_ask(self):
+        self._decision("rg PAT /etc/hosts", "ask")
+
+    def test_rg_type_workspace_allow(self):
+        self._decision("rg -t py PAT in.txt", "allow")
 
     # --- defer paths --------------------------------------------------------
 
