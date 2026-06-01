@@ -1106,13 +1106,19 @@ class HookEndToEndTests(unittest.TestCase):
             "ln -fns /tmp/q8-fake-target link && cat link", "ask",
         )
 
-    def test_ln_without_dash_s_not_staged(self):
-        # Hard link is a separate threat (same TOCTOU shape, single-filesystem
-        # only); Q8 stays scoped to `-s`. Verify the staging logic doesn't
-        # silently catch the hard-link form and lull a future reader.
+    def test_ln_hard_link_outside_target_then_cat_link_ask(self):
+        # Hard-link bypass shape (Q17): identical to the Q8 symlink case
+        # without `-s`. Bash hasn't created `link` yet at hook time, so the
+        # lexical realpath of `link` lands inside the workspace and would
+        # otherwise sneak through. Staging catches it.
         self._decision(
-            "ln /tmp/q8-fake-target link && cat link", "allow",
+            "ln /tmp/q8-fake-target link && cat link", "ask",
         )
+
+    def test_ln_hard_link_inside_target_then_cat_link_allow(self):
+        # Innocent hard link to a workspace file — both target and link stay
+        # inside, no staging needed.
+        self._decision("ln in.txt link && cat link", "allow")
 
     def test_ln_omitted_link_uses_basename(self):
         # `ln -s /tmp/q8-fake-target` creates `q8-fake-target` in cwd.
@@ -1199,9 +1205,22 @@ class HookEndToEndTests(unittest.TestCase):
             ("/tmp/x", "link"),
         )
 
-    def test_classify_ln_helper_hard_link_returns_none(self):
-        # No `-s` → not symbolic → Q8 staging shouldn't apply.
-        self.assertIsNone(guard.classify_ln(["ln", "/tmp/x", "link"]))
+    def test_classify_ln_helper_hard_link_returns_positionals(self):
+        # Q11 PR4 / Q17: hard-link form is now classified identically to the
+        # symbolic form — the threat model (LINK reads outside file later) is
+        # the same.
+        self.assertEqual(
+            guard.classify_ln(["ln", "/tmp/x", "link"]),
+            ("/tmp/x", "link"),
+        )
+
+    def test_classify_ln_helper_hard_link_single_positional(self):
+        # `ln /tmp/x` (no LINK) — POSIX implicitly creates `x` in cwd, same
+        # as the symbolic case.
+        self.assertEqual(
+            guard.classify_ln(["ln", "/tmp/x"]),
+            ("/tmp/x", None),
+        )
 
     def test_classify_ln_helper_multi_source_returns_none(self):
         # 3+ positionals — multi-source-to-directory form is out of scope.

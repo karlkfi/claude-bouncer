@@ -222,22 +222,27 @@ def split_eq(tok):
 
 
 def classify_ln(tokens):
-    """For an `ln -s ...` command, return `(target_token, link_token_or_None)`.
+    """For an `ln ...` command, return `(target_token, link_token_or_None)`.
 
-    Returns None when the command isn't `ln`, isn't in symbolic mode, or uses
-    the multi-source form (3+ positionals — `ln -s a b destdir/`), which the
-    Q8 staging logic deliberately doesn't track.
+    Returns None when the command isn't `ln` or uses the multi-source form
+    (3+ positionals — `ln a b destdir/`), which the staging logic deliberately
+    doesn't track.
 
-    Recognises symbolic mode via `-s`, combined short flags containing `s`
-    (`-sf`, `-fs`, `-fns`), and `--symbolic`. Consumes the value-taking flags
-    (`-t`/`--target-directory`, `-S`/`--suffix`, `--backup`) so they don't
-    surface as positionals.
+    Both the symbolic-link form (`ln -s`) and the hard-link form (`ln SRC LINK`
+    without `-s`) are recognised — the threat model is identical: a later read
+    through LINK reaches a file that may resolve outside the workspace, and the
+    lexical `realpath` check would otherwise miss it because bash hasn't
+    created LINK yet. Hard links can't cross filesystems, so the exposure is
+    narrower in practice, but the bypass shape is the same on a single volume.
+
+    Consumes the value-taking flags (`-t`/`--target-directory`, `-S`/`--suffix`,
+    `--backup`) so they don't surface as positionals; other flags fall through
+    harmlessly.
     """
     if not tokens or os.path.basename(tokens[0]) != 'ln':
         return None
     consume = {'-t': 1, '--target-directory': 1,
                '-S': 1, '--suffix': 1, '--backup': 1}
-    symbolic = False
     positionals = []
     i, n, end_opts = 1, len(tokens), False
     while i < n:
@@ -246,16 +251,10 @@ def classify_ln(tokens):
             end_opts = True; i += 1; continue
         if not end_opts and tok.startswith('-') and tok != '-':
             key, inline = split_eq(tok)
-            if key == '--symbolic':
-                symbolic = True
-            elif not key.startswith('--') and 's' in key[1:]:
-                symbolic = True
             if key in consume:
                 i += 1 + (0 if inline is not None else consume[key]); continue
             i += 1; continue
         positionals.append(tok); i += 1
-    if not symbolic:
-        return None
     if len(positionals) == 1:
         return (positionals[0], None)
     if len(positionals) == 2:
@@ -404,16 +403,17 @@ def main():
             return ('outside', None)
         return ('path', os.path.realpath(os.path.join(group_cwd, f)))
 
-    # Symlinks staged by an earlier `ln -s OUTSIDE LINK` in the same chain.
-    # Tracks the resolved abspath of each `LINK` whose target is outside the
-    # workspace, so a later `cat link` can be flagged before bash materialises
-    # the symlink and breaks the lexical-realpath check (Q8).
+    # Symlinks and hard links staged by an earlier `ln OUTSIDE LINK` in the
+    # same chain (with or without `-s`). Tracks the resolved abspath of each
+    # `LINK` whose target is outside the workspace, so a later `cat link` can
+    # be flagged before bash materialises the link and breaks the
+    # lexical-realpath check (Q8 + Q17).
     staged_outside_paths = set()
 
     def check_file(f, group_cwd, group_cwd_unknown):
         """Return the original token if it resolves outside the workspace
-        (directly, or via a symlink staged by an earlier `ln -s` in this
-        chain), else None."""
+        (directly, or via a link staged by an earlier `ln` — symbolic or
+        hard — in this chain), else None."""
         kind, rp = resolve_token(f, group_cwd, group_cwd_unknown)
         if kind == 'skip':
             return None
@@ -424,9 +424,10 @@ def main():
         return None
 
     def stage_ln(target, link, group_cwd, group_cwd_unknown):
-        """If `ln -s TARGET LINK` points outside, record LINK's resolved path.
-        LINK may be None (omitted) — then the link name is `basename(TARGET)`
-        in the current group cwd, matching POSIX `ln` semantics."""
+        """If `ln TARGET LINK` (symbolic or hard) points outside, record
+        LINK's resolved path. LINK may be None (omitted) — then the link name
+        is `basename(TARGET)` in the current group cwd, matching POSIX `ln`
+        semantics."""
         tkind, trp = resolve_token(target, group_cwd, group_cwd_unknown)
         if tkind == 'skip':
             return
