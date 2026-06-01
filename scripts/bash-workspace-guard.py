@@ -84,6 +84,30 @@ SPEC = {
              'file_flags': {'-f':(1,[0]),'--from-file':(1,[0]),
                             '--slurpfile':(2,[1]),'--rawfile':(2,[1])},
              'prog':1, 'prog_suppressed_by':['-f','--from-file']},
+    # Q10: yq (both kislyuk Python wrapper and mikefarah Go variants).
+    # Sibling row to jq rather than alias — flag sets diverge.
+    #
+    # Single-value flags (mikefarah `-o yaml`, `-I 2`, `--expression .x`,
+    # kislyuk `-w 80`) are deliberately NOT declared as consume. If they
+    # were, mikefarah's expression-omitted form (`yq -o json /etc/passwd`)
+    # would consume the value, treat the file as the prog positional, and
+    # silently allow. Leaving them unknown means the value becomes prog and
+    # the file is correctly identified — secure-by-default.
+    #
+    # Only 2-arg flags (--arg NAME VAL, --argjson NAME VAL, --slurpfile
+    # VAR FILE, --rawfile VAR FILE) are declared so NAME/VAL don't leak as
+    # positionals/files.
+    #
+    # `-f` is a file_flag (correct for kislyuk's jq-pass-through; for
+    # mikefarah's `-f`/`--front-matter` string value the token resolves
+    # cwd-relative — harmless allow). `--from-file` is identical in both
+    # variants. mikefarah's `--split-exp-file` is also a file flag.
+    'yq':   {'consume': {'--arg':2,'--argjson':2},
+             'file_flags': {'-f':(1,[0]),'--from-file':(1,[0]),
+                            '--slurpfile':(2,[1]),'--rawfile':(2,[1]),
+                            '--split-exp-file':(1,[0])},
+             'prog':1,
+             'prog_suppressed_by':['-f','--from-file','--expression']},
     'cat':  {'consume':{}, 'file_flags':{}, 'prog':0},
     'head': {'consume':{'-n':1,'-c':1,'--lines':1,'--bytes':1},'file_flags':{},'prog':0},
     'tail': {'consume':{'-n':1,'-c':1,'--lines':1,'--bytes':1},'file_flags':{},'prog':0},
