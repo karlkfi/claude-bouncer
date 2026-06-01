@@ -14,7 +14,7 @@ Single source of truth for progress and priorities in workspace-guard. Pick the 
 - **New item identified:** append it to the Queue with the next unused ID. Batch audit-discovery items in one commit.
 - **`Last touched:` is one line, date only.** Do not append session narrative.
 
-Last touched: 2026-05-31
+Last touched: 2026-06-01
 
 ---
 
@@ -24,7 +24,6 @@ Specific actionable items in priority order. Pick from the top; skip 🚫 items 
 
 | ID | Item | Labels | St | Sz | Notes |
 |---|---|---|---|---|---|
-| <a id="Q9"></a>Q9 | Extend `SPEC` with common read-side cat-family commands | `parsing` | 🔲 | S | Add `less`, `more`, `wc`, `sort`, `uniq`, `tac`, `rev`, `nl`, `zcat`/`gzcat`/`bzcat`/`xzcat`, `xxd`, `od`, `hexdump`, `strings`, `file`, `diff`, `cmp` — all use the same positional-file shape as `cat`/`head`/`tail`. `sort` needs `-o FILE` in `file_flags`. Update README decision table. |
 | <a id="Q10"></a>Q10 | Add `yq` as a sibling SPEC to `jq` | `parsing` | 🔲 | S | `yq` (kislyuk and mikefarah variants) mirrors `jq`'s shape: program positional, `-f`/`--from-file` for script files. Add a dedicated row rather than aliasing — flag sets diverge enough that alias risks Q3-style mis-parsing. |
 | <a id="Q11"></a>Q11 | Investigate guarding write/mutation commands (`cp`, `mv`, `rm`, `ln`, `tee`, `dd`) | `parsing` `security` | 🔲 | M | Higher blast radius than current read-side set, but different threat model and `SPEC` shape (`dd` uses `if=`/`of=`, `ln`/`cp`/`mv` have source-vs-dest semantics, `rm -rf` is irreversible). Needs a plan doc under `docs/plan/` covering tokenization, decision policy (`ask` vs `deny`), and README framing before implementation. |
 | <a id="Q13"></a>Q13 | Add CI status badge to README | `docs` | 🔲 | S | Add a workflow-run badge for `.github/workflows/tests.yml` to the README badge row. |
