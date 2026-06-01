@@ -27,9 +27,12 @@ The hook produces one of three outcomes:
 - **defer** — the hook stays silent; your normal permission settings apply.
 
 Guarded commands: `grep` (and `egrep`, `fgrep`), `rg`, `sed`, `awk` (and
-`gawk`, `mawk`), `jq`, `cat`, `head`, `tail`. These are the file-reading
-commands Claude reaches for most often; tools like `ls`, `find`, and `xargs`
-aren't covered yet (see [`docs/STATUS.md`](docs/STATUS.md)).
+`gawk`, `mawk`), `jq`, `cat`, `head`, `tail`, `sort`, `wc`, `diff`, `file`,
+`hexdump`, plus the cat-shape readers `less`, `more`, `tac`, `rev`, `nl`,
+`uniq`, `xxd`, `od`, `strings`, `cmp`, and `zcat`/`gzcat`/`bzcat`/`xzcat`.
+These are the file-reading commands Claude reaches for most often; tools
+like `ls`, `find`, and `xargs` aren't covered yet (see
+[`docs/STATUS.md`](docs/STATUS.md)).
 
 | Command                              | Decision |
 | ------------------------------------ | -------- |
@@ -38,12 +41,19 @@ aren't covered yet (see [`docs/STATUS.md`](docs/STATUS.md)).
 | `cat data.txt \| grep foo`           | allow    |
 | `jq '.a/.b' data.json`               | allow    |
 | `sed 's/a/b/g' notes.md`             | allow    |
+| `wc -l data.txt`                     | allow    |
+| `sort -o sorted.txt data.txt`        | allow    |
+| `diff a.txt b.txt`                   | allow    |
 | `cat data.txt > /dev/null`           | allow    |
 | `cat <<<"/etc/foo"` (here-string)    | allow    |
 | `grep secret /etc/passwd`            | **ask**  |
 | `jq '.x' /etc/hosts`                 | **ask**  |
 | `sed -f /tmp/evil.sed notes.md`      | **ask**  |
 | `grep foo data.txt > /tmp/out.txt`   | **ask**  |
+| `sort -o /tmp/out.txt data.txt`      | **ask**  |
+| `wc --files0-from=/etc/list`         | **ask**  |
+| `diff --from-file=/etc/hosts in.txt` | **ask**  |
+| `less /var/log/syslog`               | **ask**  |
 | `cat ../../etc/passwd`               | **ask**  |
 | `cat ~/.aws/credentials`             | **ask**  |
 | `cat $HOME/.ssh/id_rsa`              | **ask**  |
