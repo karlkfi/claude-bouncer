@@ -10,9 +10,8 @@
       "description": "Prompt before grep/sed/jq/awk/cat/head/tail touch files outside the workspace.",
       "author": { "name": "Karl" },
       "source": {
-        "type": "git",
-        "url": "https://github.com/karlkfi/claude-workspace-guard.git",
-        "ref": "main"
+        "source": "github",
+        "repo": "karlkfi/claude-workspace-guard"
       }
     }
   ]
