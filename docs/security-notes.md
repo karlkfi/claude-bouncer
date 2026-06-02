@@ -45,6 +45,23 @@ If either is wrong — e.g. `CLAUDE_PROJECT_DIR` is set to `/` — every outside
 
 **Why not backlogged:** there's nothing to fix at the hook level. The README's install section already requires the plugin be installed by the user; that's the trust boundary.
 
+## Headless / full-auto `ask` is fail-closed (not fail-open)
+
+A plausible-sounding claim — that a `PreToolUse` hook's `ask` (and `defer`) is remapped to `allow` in non-interactive runs because "there's no one to prompt" — would mean this hook fails *open* in full-auto, silently allowing outside-workspace reads. That claim is **false** at CLI 2.1.159.
+
+Verified end-to-end with a forced-decision hook and sentinel file (Q17):
+
+| Mode | Hook decision | Command runs? |
+|---|---|---|
+| headless `-p` (`default`) | `ask` | **no** — "not approved" |
+| `--dangerously-skip-permissions` (`bypassPermissions`) | `ask` | **no** — "needs your approval" |
+| `bypassPermissions` | `allow` (control) | yes |
+| `bypassPermissions` | `deny` (control) | no |
+
+So `ask` blocks in every unattended mode; the boundary holds regardless of `permission_mode`. The remaining difference is *recoverability*, not security: a blocking `ask` only hands the model an unanswerable approval prompt it stalls on, whereas `deny` feeds the reason back so it routes around the path. That is why the hook emits `deny` (not `ask`) for outside paths when `permission_mode == "bypassPermissions"` — see the **Configuration** and **Limitations** sections of [`../README.md`](../README.md).
+
+**Lesson for future audits:** don't trust a documented runtime behavior for a security property — exercise it. The hook input JSON also can't distinguish interactive `default` from headless `-p` `default` (both report `permission_mode: "default"`), so `bypassPermissions` is the only reliable "no human present" signal available to the hook. The behavior matrix is locked in by `tests/test_workspace_guard.py` (`test_outside_bypass_permissions_deny` and siblings).
+
 ## When to promote a note to the Queue
 
 Move an item from this file to [`STATUS.md`](STATUS.md) when any of the following changes:

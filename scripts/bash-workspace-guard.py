@@ -491,7 +491,18 @@ def main():
             outside.append(o)
 
     if outside:
-        decision, reason = "ask", "Outside-workspace path(s): " + ", ".join(sorted(set(outside)))
+        # In `bypassPermissions` / full-auto runs there is no human to answer an
+        # `ask`. Verified behavior (CLI 2.1.159): `ask` still *blocks* there, but
+        # only feeds the model an unanswerable approval prompt it stalls on.
+        # `deny` blocks identically *and* feeds the reason back, so the model can
+        # route around the outside path instead of stalling. Interactive/headless
+        # `default` mode keeps `ask` so a human still gets the approve/reject
+        # prompt. Both decisions are equally blocking — this is a recoverability
+        # choice, not a weakening of the boundary. `default` is indistinguishable
+        # from interactive at the hook, so `bypassPermissions` is the only clean
+        # "no human" signal we can act on. (Q17)
+        block = "deny" if data.get("permission_mode") == "bypassPermissions" else "ask"
+        decision, reason = block, "Outside-workspace path(s): " + ", ".join(sorted(set(outside)))
     else:
         decision, reason = "allow", "Guarded commands target workspace/pipe only"
     print(json.dumps({"hookSpecificOutput": {

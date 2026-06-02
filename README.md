@@ -95,6 +95,11 @@ of which positions are programs, which are files, and which flags take values.
 A naive string match would either miss real file arguments or false-positive on
 program syntax.
 
+The **ask** rows assume an interactive or `default`-mode session. In full-auto
+`bypassPermissions` mode (`--dangerously-skip-permissions`) those same paths
+return `deny` instead — equally blocking, with recoverable feedback for the
+agent. See [Configuration](#configuration).
+
 ## Install
 
 ```
@@ -148,9 +153,15 @@ file in your repo; it should run without prompting.
 ## Configuration
 
 The set of guarded commands lives in the `SPEC` and `ALIASES` tables at the top
-of `scripts/bash-workspace-guard.py`. Add a row to guard another command. To
-switch from prompting to hard-blocking, change `"ask"` to `"deny"` in the
-script's final output.
+of `scripts/bash-workspace-guard.py`. Add a row to guard another command.
+
+For outside-workspace paths the hook returns `ask` so you get a confirmation
+prompt. In full-auto runs (`--dangerously-skip-permissions`, i.e.
+`bypassPermissions` mode) it returns `deny` instead — equally blocking, but it
+feeds the reason back to the agent so it can route around the path rather than
+stall on a prompt no one can approve. To hard-block in *every* mode, drop the
+`permission_mode` check and return `"deny"` unconditionally in the script's
+final output.
 
 ## Limitations
 
@@ -167,7 +178,11 @@ script's final output.
 - Multi-source `ln a b destdir/` (3+ positionals, symbolic or hard) is not
   staged. The hook recognises the one- and two-positional forms only.
 - In non-interactive / headless runs there is no one to answer an `ask` prompt,
-  so it effectively blocks.
+  so an `ask` still **blocks** the command (verified on CLI 2.1.159 — it does
+  not silently allow). Under `--dangerously-skip-permissions`
+  (`bypassPermissions`) the hook emits `deny` rather than `ask` for
+  outside-workspace paths: equally blocking, but the agent receives the reason
+  and can recover instead of stalling. See [Configuration](#configuration).
 
 ## Design
 

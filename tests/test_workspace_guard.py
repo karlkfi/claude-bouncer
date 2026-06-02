@@ -825,11 +825,14 @@ class AllowedDeviceTests(unittest.TestCase):
         self.assertFalse(guard.is_allowed_device("dev/null"))  # relative
 
 
-def run_hook(cmd, cwd, project_dir=None):
+def run_hook(cmd, cwd, project_dir=None, permission_mode=None):
     """Invoke the hook as a subprocess. Returns parsed JSON or None on defer."""
     env = os.environ.copy()
     env["CLAUDE_PROJECT_DIR"] = project_dir or cwd
-    payload = json.dumps({"tool_input": {"command": cmd}, "cwd": cwd})
+    data = {"tool_input": {"command": cmd}, "cwd": cwd}
+    if permission_mode is not None:
+        data["permission_mode"] = permission_mode
+    payload = json.dumps(data)
     result = subprocess.run(
         [sys.executable, str(SCRIPT)],
         input=payload,
@@ -858,8 +861,10 @@ class HookEndToEndTests(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def _decision(self, cmd, expected, *, cwd=None, project_dir=None):
-        out = run_hook(cmd, cwd or self.workspace, project_dir=project_dir)
+    def _decision(self, cmd, expected, *, cwd=None, project_dir=None,
+                  permission_mode=None):
+        out = run_hook(cmd, cwd or self.workspace, project_dir=project_dir,
+                       permission_mode=permission_mode)
         self.assertIsNotNone(out, f"expected a decision, got defer for: {cmd!r}")
         got = out["hookSpecificOutput"]["permissionDecision"]
         self.assertEqual(
@@ -917,6 +922,42 @@ class HookEndToEndTests(unittest.TestCase):
 
     def test_jq_slurpfile_outside_ask(self):
         self._decision("jq --slurpfile d /etc/hosts . in.txt", "ask")
+
+    # --- permission_mode: ask vs deny for outside paths (Q17) ----------------
+    # Verified end-to-end (CLI 2.1.159): a hook `ask` blocks in both headless
+    # and `bypassPermissions`, so the boundary holds regardless. In
+    # `bypassPermissions` (full-auto, no human) we emit `deny` instead so the
+    # model gets recoverable feedback rather than stalling on an unanswerable
+    # approval prompt. Every other mode — including absent (interactive) and
+    # plain headless `default`, which the hook cannot tell apart — keeps `ask`.
+
+    def test_outside_bypass_permissions_deny(self):
+        out = self._decision(
+            "cat /tmp/q17-fake-target", "deny",
+            permission_mode="bypassPermissions",
+        )
+        self.assertIn(
+            "/tmp/q17-fake-target",
+            out["hookSpecificOutput"]["permissionDecisionReason"],
+        )
+
+    def test_outside_default_mode_ask(self):
+        self._decision("cat /tmp/q17-fake-target", "ask", permission_mode="default")
+
+    def test_outside_no_permission_mode_ask(self):
+        # Field absent (interactive sessions don't always send it) -> ask.
+        self._decision("cat /tmp/q17-fake-target", "ask")
+
+    def test_outside_accept_edits_ask(self):
+        # Only bypassPermissions flips to deny; acceptEdits still has a human.
+        self._decision("cat /tmp/q17-fake-target", "ask", permission_mode="acceptEdits")
+
+    def test_outside_plan_mode_ask(self):
+        self._decision("cat /tmp/q17-fake-target", "ask", permission_mode="plan")
+
+    def test_workspace_bypass_permissions_still_allow(self):
+        # deny only applies to outside paths; in-workspace reads stay allow.
+        self._decision("cat in.txt", "allow", permission_mode="bypassPermissions")
 
     def test_realpath_traversal_outside_ask(self):
         nested = os.path.join(self.workspace, "sub")
