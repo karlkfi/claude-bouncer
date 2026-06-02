@@ -4,6 +4,8 @@
 
 [![release](https://img.shields.io/github/v/release/karlkfi/claude-workspace-guard)](https://github.com/karlkfi/claude-workspace-guard/releases) [![tests](https://img.shields.io/github/actions/workflow/status/karlkfi/claude-workspace-guard/tests.yml?branch=main&label=tests)](https://github.com/karlkfi/claude-workspace-guard/actions/workflows/tests.yml) [![License: MIT](https://img.shields.io/github/license/karlkfi/claude-workspace-guard.svg)](LICENSE) [![Claude Code plugin](https://img.shields.io/badge/Claude_Code-plugin-7e57c2)](#install)
 
+> Stop approving every in-repo grep. Start catching the one that reads `/etc/passwd`.
+
 You ask Claude to "find that auth error." It runs `grep -r token /var/log`. Or
 `cat ~/.aws/credentials` while "checking the environment." Or pipes a file from
 outside your repo into `jq`. The default `Bash(grep:*)` permission rules can't
@@ -16,6 +18,17 @@ your project root (`$CLAUDE_PROJECT_DIR`). In-repo reads and pure pipelines run
 silently.
 
 ![Claude Code's permission prompt when grep targets a file outside the project root](docs/img/ask-prompt.png)
+
+## Contents
+
+- [What it does](#what-it-does)
+- [Install](#install)
+- [How it works](#how-it-works)
+- [Configuration](#configuration)
+- [Limitations](#limitations)
+- [Design](#design)
+- [Contributing](#contributing)
+- [License](#license)
 
 ## What it does
 
