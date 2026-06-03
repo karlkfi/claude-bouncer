@@ -1,5 +1,4 @@
 {
-  "schemaVersion": "1.0.0",
   "name": "workspace-guard",
   "owner": { "name": "karlkfi", "url": "https://github.com/karlkfi" },
   "description": "Path-aware guard rails for Claude Code Bash commands.",
