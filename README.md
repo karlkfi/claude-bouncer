@@ -88,6 +88,7 @@ and file-writing commands Claude reaches for most often; tools like `ls`,
 | `LC_ALL=C cat /etc/passwd`           | **ask**  |
 | `ln -s /etc/passwd link && cat link` | **ask**  |
 | `ln /etc/passwd link && cat link`    | **ask**  |
+| `echo secret > /tmp/out`             | defer    |
 | `ls /etc`                            | defer    |
 
 Note the `jq` row: `.a/.b` is a jq program, not a filesystem path. The hook
@@ -103,16 +104,33 @@ agent. See [Configuration](#configuration).
 
 ## Install
 
+Install on any Claude Code surface that runs plugin `PreToolUse` hooks — the
+CLI, the IDE extensions, or **Claude Code for Claude Desktop**. Both methods add
+the same marketplace and plugin.
+
+**Claude Code (CLI or IDE extension)** — run the slash commands:
+
 ```
 /plugin marketplace add karlkfi/claude-workspace-guard
 /plugin install workspace-guard@workspace-guard
 ```
 
+**Claude Code for Claude Desktop** — use the **Customize** tab:
+
+1. Open the **Customize** tab and go to its plugins / marketplaces section.
+2. Add `karlkfi/claude-workspace-guard` as a marketplace (the repo at
+   `https://github.com/karlkfi/claude-workspace-guard.git`).
+3. Find **workspace-guard** in that marketplace, install it, and make sure it's
+   enabled.
+
+After installing with either method:
+
 - Requires `python3` on your PATH.
 - Restart Claude Code so the hook is registered.
-- **Claude Code only (CLI + IDE extensions).** Not Claude Cowork / Claude
-  Desktop — those don't run plugin `PreToolUse` hooks yet, so the guard never
-  fires there ([anthropics/claude-code#45514](https://github.com/anthropics/claude-code/issues/45514)).
+- **Won't fire where plugin `PreToolUse` hooks don't run.** Claude Cowork and
+  Claude Desktop's *native* assistant don't run them yet, so the guard never
+  fires in those
+  ([anthropics/claude-code#45514](https://github.com/anthropics/claude-code/issues/45514)).
 
 To verify, ask Claude to run `grep root /etc/passwd` — you should see a
 permission prompt citing the outside-workspace path. Then ask it to `grep` a
@@ -175,10 +193,13 @@ final output.
   will get an `ask` prompt rather than slip through.
 - `realpath` only follows symlinks for files that already exist; nonexistent
   paths are normalized lexically (fine for read-style commands).
-- Redirect targets (`> file`) are always resolved against the original cwd,
-  not any `cd`-shifted cwd. A relative redirect after a `cd /etc` would still
-  be checked against the original workspace cwd. Absolute redirect targets
-  still get caught.
+- Redirect targets (`> file`) are only inspected when the command chain also
+  contains a guarded command — the hook keys off guarded commands, so a bare
+  redirect from an unguarded command (`echo secret > /tmp/out`) is not checked
+  and defers to normal permissions. When a guarded command *is* present, the
+  redirect target is resolved against the original cwd, not any `cd`-shifted
+  cwd: a relative redirect after `cd /etc` is still checked against the
+  original workspace cwd, and absolute redirect targets are caught.
 - Multi-source `ln a b destdir/` (3+ positionals, symbolic or hard) is not
   staged. The hook recognises the one- and two-positional forms only.
 - In non-interactive / headless runs there is no one to answer an `ask` prompt,
