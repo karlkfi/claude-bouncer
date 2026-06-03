@@ -27,6 +27,7 @@ silently.
 - [Configuration](#configuration)
 - [Limitations](#limitations)
 - [Design](#design)
+- [Privacy](#privacy)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -190,6 +191,13 @@ For the rationale behind the approach (why a hook, why `ask`, why a static
 spec table, what alternatives were rejected), see [`docs/design.md`](docs/design.md).
 Out-of-scope security observations from audits live in
 [`docs/security-notes.md`](docs/security-notes.md).
+
+## Privacy
+
+The hook runs entirely on your machine and has no network access, telemetry,
+or analytics. It reads the pending Bash command and your project path, decides
+in memory, and never opens file contents or writes anything to disk. See
+[`PRIVACY.md`](PRIVACY.md) for the full policy.
 
 ## Contributing
 
