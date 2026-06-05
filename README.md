@@ -24,6 +24,7 @@ silently.
 - [What it does](#what-it-does)
 - [Install](#install)
 - [How it works](#how-it-works)
+- [Agent guidance: avoiding prompts](#agent-guidance-avoiding-prompts)
 - [Configuration](#configuration)
 - [Limitations](#limitations)
 - [Design](#design)
@@ -171,6 +172,48 @@ file in your repo; it should run without prompting.
    device paths (`/dev/null`, `/dev/stdin`, `/dev/stdout`, `/dev/stderr`,
    `/dev/zero`, `/dev/tty`, `/dev/random`, `/dev/urandom`, `/dev/fd/N`) are
    allowlisted and skip the workspace check.
+
+## Agent guidance: avoiding prompts
+
+When the hook prompts, its reason now tells the agent how to avoid the prompt
+next time — naming the offending path and the fix (use an in-root path, drop a
+`$VAR`/`~`, or read with the Read/Grep tools). But some habits avoid prompts
+entirely, and the hook can't surface them because it *allows* those paths
+silently — there's no prompt on which to attach advice.
+
+Paste the block below into your project's `CLAUDE.md` (or `AGENTS.md`) so the
+agent follows them from the start. They're framed as instructions to the agent:
+
+```markdown
+## Avoiding workspace-guard permission prompts
+
+This repo uses workspace-guard, a hook that prompts before a guarded bash file
+command (`grep`, `sed`, `awk`, `jq`, `cat`, `head`, `tail`, `cp`, `mv`, `rm`,
+`tee`, `dd`, …) reads or writes a path outside the project root. To keep work
+flowing, avoid triggering it:
+
+- **Prefer the Read, Grep, and Glob tools over bash** `cat`/`grep`/`sed`/`head`/
+  `tail`/`awk` for inspecting files. They're purpose-built, don't go through this
+  hook, and are the right tool for reading and searching code.
+- **Keep guarded file arguments inside the project root.** A path that resolves
+  outside the root (including via `../` traversal) prompts every time.
+- **Don't put `$VAR`, `$(...)`, or a leading `~` in a guarded file argument.**
+  The hook can't expand them, so it treats them as outside the root and prompts —
+  even when they'd resolve in-root. Write the literal in-root path instead
+  (e.g. `cat ./config/app.json`, not `cat "$HOME/proj/config/app.json"`).
+- **Don't `cd` outside the project root**, and avoid bare `cd`, `cd -`, and
+  `cd $HOME` — they lose the hook's working-directory tracking, so every later
+  relative path in the same command prompts. Stay in the root, or `cd` into a
+  subdirectory of it with a literal path.
+- **Write temp files inside the project root, not `/tmp`.** Use a path like
+  `./.tmp/out.txt` rather than `/tmp/out.txt`. (Redirects and command output to
+  `/dev/null`, `/dev/stdout`, `/dev/stderr`, and `/dev/fd/N` are exempt and never
+  prompt.)
+```
+
+The plugin also ships a **`reduce-workspace-guard-prompts`** skill: ask Claude
+"why am I getting so many permission prompts?" and it will diagnose the cause
+from recent prompts and walk through these fixes.
 
 ## Configuration
 

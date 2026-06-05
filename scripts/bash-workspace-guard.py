@@ -347,6 +347,50 @@ def files_in_command(tokens):
     return files
 
 
+def build_reason(offenders):
+    """Build the permissionDecisionReason for a blocked command.
+
+    `offenders` is a list of `(token, category)` pairs from `check_file`.
+    The message names the offending token(s) AND tells the agent how to avoid
+    the prompt, tailored per category so each gets the fix that applies:
+
+      * 'outside'   — a path that genuinely resolves outside the project root.
+      * 'expand'    — a `~`/`$VAR`/`$(...)` token bash expands at runtime; the
+                      hook can't see where it lands, so it may in fact be
+                      in-root and fixable by writing a literal path.
+      * 'untracked' — a relative path after a `cd` the hook couldn't follow.
+
+    Categories are emitted in a stable order; tokens within each are sorted and
+    de-duplicated.
+    """
+    buckets = {'outside': [], 'expand': [], 'untracked': []}
+    for tok, cat in offenders:
+        buckets[cat].append(tok)
+
+    hints = []
+    if buckets['outside']:
+        hints.append(
+            "Outside-workspace path(s): "
+            + ", ".join(sorted(set(buckets['outside'])))
+            + ". Fix: use a path inside the project root, or read the file "
+            "with the Read/Grep/Glob tools instead of bash. If you genuinely "
+            "need a file outside the root, approve this prompt.")
+    if buckets['expand']:
+        hints.append(
+            "Runtime-expanded arg(s) bash resolves but the hook can't: "
+            + ", ".join(sorted(set(buckets['expand'])))
+            + ". Fix: if this lands inside the project root, write the literal "
+            "path (drop the $VAR / $(...) / leading ~); otherwise use the "
+            "Read/Grep tools.")
+    if buckets['untracked']:
+        hints.append(
+            "Relative path(s) after an untracked cd: "
+            + ", ".join(sorted(set(buckets['untracked'])))
+            + ". Fix: avoid cd outside the root and bare cd / cd - / cd $HOME; "
+            "pass an in-root path or use the Read/Grep tools.")
+    return " ".join(hints)
+
+
 def main():
     data = json.load(sys.stdin)
     cmd = (data.get('tool_input') or {}).get('command', '') or ''
@@ -385,10 +429,19 @@ def main():
     def resolve_token(f, group_cwd, group_cwd_unknown):
         """Resolve a file token. Returns one of:
           ('skip', None)         — '-', flag, or allowlisted device
-          ('outside', None)      — runtime-expanded (`~`/`$`) or cwd is
-                                   unknown; secure-by-default outside
+          ('expand', None)       — runtime-expanded (`~`/`$`); shlex can't
+                                   resolve it, so secure-by-default outside.
+                                   Distinct from 'untracked' so the decision
+                                   reason can tailor the fix (the path may in
+                                   fact land inside the root).
+          ('untracked', None)    — relative path with an unknown cwd (after a
+                                   `cd` we couldn't follow); secure-by-default
+                                   outside.
           ('path', abspath)      — caller compares against the workspace and
                                    the staged-outside set
+        Both 'expand' and 'untracked' are treated identically to a resolved
+        outside path by the decision logic — they only differ in the advice
+        the reason string surfaces.
         """
         if not f or f == '-' or f.startswith('-'):
             return ('skip', None)
@@ -396,11 +449,11 @@ def main():
             return ('skip', None)
         # Bash expands `~` and `$VAR` at runtime; shlex leaves them literal.
         if f.startswith('~') or '$' in f:
-            return ('outside', None)
+            return ('expand', None)
         if os.path.isabs(f):
             return ('path', os.path.realpath(f))
         if group_cwd_unknown:
-            return ('outside', None)
+            return ('untracked', None)
         return ('path', os.path.realpath(os.path.join(group_cwd, f)))
 
     # Symlinks and hard links staged by an earlier `ln OUTSIDE LINK` in the
@@ -411,16 +464,21 @@ def main():
     staged_outside_paths = set()
 
     def check_file(f, group_cwd, group_cwd_unknown):
-        """Return the original token if it resolves outside the workspace
-        (directly, or via a link staged by an earlier `ln` — symbolic or
-        hard — in this chain), else None."""
+        """Return `(token, category)` if the file resolves outside the
+        workspace (directly, or via a link staged by an earlier `ln` —
+        symbolic or hard — in this chain), else None.
+
+        `category` is one of 'outside' (a resolved path outside the root),
+        'expand' (a runtime-expanded `~`/`$` token), or 'untracked' (a
+        relative path after a `cd` we couldn't follow). All three block
+        identically; the category only steers the advice in the reason."""
         kind, rp = resolve_token(f, group_cwd, group_cwd_unknown)
         if kind == 'skip':
             return None
-        if kind == 'outside':
-            return f
+        if kind in ('expand', 'untracked'):
+            return (f, kind)
         if rp in staged_outside_paths or is_outside(rp):
-            return f
+            return (f, 'outside')
         return None
 
     def stage_ln(target, link, group_cwd, group_cwd_unknown):
@@ -502,7 +560,7 @@ def main():
         # from interactive at the hook, so `bypassPermissions` is the only clean
         # "no human" signal we can act on. (Q17)
         block = "deny" if data.get("permission_mode") == "bypassPermissions" else "ask"
-        decision, reason = block, "Outside-workspace path(s): " + ", ".join(sorted(set(outside)))
+        decision, reason = block, build_reason(outside)
     else:
         decision, reason = "allow", "Guarded commands target workspace/pipe only"
     print(json.dumps({"hookSpecificOutput": {

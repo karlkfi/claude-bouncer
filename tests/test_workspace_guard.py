@@ -1738,5 +1738,81 @@ class HookEndToEndTests(unittest.TestCase):
         self._defer("ls > /tmp/out.txt")
 
 
+class BuildReasonTests(unittest.TestCase):
+    """The decision reason names offenders AND tailors the fix per category."""
+
+    def test_outside_category_names_path_and_fix(self):
+        r = guard.build_reason([("/etc/hosts", "outside")])
+        self.assertIn("/etc/hosts", r)
+        self.assertIn("inside the project root", r)
+        self.assertIn("Read/Grep", r)
+
+    def test_expand_category_distinct_advice(self):
+        # `~`/`$` tokens get the "write a literal path" advice, not the plain
+        # outside-path advice — they may in fact land inside the root.
+        r = guard.build_reason([("$HOME/.aws/credentials", "expand")])
+        self.assertIn("$HOME/.aws/credentials", r)
+        self.assertIn("literal path", r)
+        self.assertNotIn("Outside-workspace path(s)", r)
+
+    def test_untracked_category_mentions_cd(self):
+        r = guard.build_reason([("data.txt", "untracked")])
+        self.assertIn("data.txt", r)
+        self.assertIn("cd", r)
+
+    def test_categories_combine_in_stable_order(self):
+        r = guard.build_reason([
+            ("rel.txt", "untracked"),
+            ("$X/y", "expand"),
+            ("/etc/hosts", "outside"),
+        ])
+        # outside, then expand, then untracked — independent of input order.
+        self.assertLess(r.index("/etc/hosts"), r.index("$X/y"))
+        self.assertLess(r.index("$X/y"), r.index("rel.txt"))
+
+    def test_tokens_deduplicated_and_sorted(self):
+        r = guard.build_reason([
+            ("/b", "outside"), ("/a", "outside"), ("/a", "outside"),
+        ])
+        self.assertEqual(r.count("/a"), 1)
+        self.assertLess(r.index("/a"), r.index("/b"))
+
+
+class ReasonAdviceEndToEndTests(unittest.TestCase):
+    """The emitted reason carries actionable advice end-to-end (subprocess)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = os.path.realpath(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _reason(self, cmd):
+        out = run_hook(cmd, self.workspace)
+        self.assertIsNotNone(out, f"expected a decision for {cmd!r}")
+        return out["hookSpecificOutput"]["permissionDecisionReason"]
+
+    def test_outside_path_reason_has_fix(self):
+        r = self._reason("cat /etc/hosts")
+        self.assertIn("/etc/hosts", r)
+        self.assertIn("Read/Grep", r)
+
+    def test_tilde_token_reason_uses_expand_advice(self):
+        r = self._reason("cat ~/.ssh/id_rsa")
+        self.assertIn("~/.ssh/id_rsa", r)
+        self.assertIn("literal path", r)
+
+    def test_dollar_token_reason_uses_expand_advice(self):
+        r = self._reason("cat $HOME/.aws/credentials")
+        self.assertIn("$HOME/.aws/credentials", r)
+        self.assertIn("literal path", r)
+
+    def test_untracked_cd_reason_mentions_cd(self):
+        r = self._reason("popd && cat data.txt")
+        self.assertIn("data.txt", r)
+        self.assertIn("untracked cd", r)
+
+
 if __name__ == "__main__":
     unittest.main()
