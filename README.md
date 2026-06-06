@@ -6,10 +6,13 @@ keeping a human in the loop for anything that touches a protected branch.
 It installs a single `PreToolUse` hook that:
 
 - **auto-approves `git commit`** when the current branch is *not* protected
-  (e.g. `claude/*` or any feature branch), and
+  (e.g. `claude/*` or any feature branch),
 - **prompts you (`ask`)** before a `git commit` **or** a file edit
   (`Edit`/`Write`/`MultiEdit`) that targets a **protected branch** (`main` or
-  `master`).
+  `master`), and
+- **prompts you (`ask`)** before a `git push` that targets a protected branch —
+  or, under the `strict` policy, any branch other than the worktree's own (see
+  [Push guard](#push-guard)).
 
 Everything else is left untouched — the hook stays silent and the normal Claude
 Code permission flow applies.
@@ -52,13 +55,41 @@ A `git commit` is auto-approved on a feature branch only when **every** command
 in the chain is itself a `git` invocation. A chain that mixes in a non-git
 command (e.g. `git commit -m x && rm -rf foo`) is *not* auto-approved — it falls
 back to the normal permission prompt — so a trailing command can't ride along
-into a silent approval.
+into a silent approval. A chain containing a `git push` is likewise never
+auto-approved; the push is evaluated by the push guard below.
+
+## Push guard
+
+`git push` is evaluated according to the `BRANCH_GUARD_PUSH_POLICY` environment
+variable:
+
+| Policy | Behavior |
+|---|---|
+| `protected` *(default)* | **ask** before a push whose target is `main`/`master` (including `git push origin main`, `git push origin HEAD:main`, deleting `main`, and `--all`/`--mirror`). Any other push defers. |
+| `strict` | **ask** before any push that isn't the worktree's own current branch — also catches pushing a *different* branch (`git push origin other`), foreign refspecs (`git push origin HEAD:other`), wildcards, and `--all`/`--mirror`. |
+| `off` | Pushes are not guarded at all. |
+
+Under every policy a bare `git push` / `git push origin` (which pushes the
+current branch to its same-named upstream) defers to the normal flow.
+
+Set it in `~/.claude/settings.json` (or a project's `.claude/settings.json`):
+
+```json
+{ "env": { "BRANCH_GUARD_PUSH_POLICY": "strict" } }
+```
+
+The push guard is **best-effort**: it parses the Bash command Claude runs and so
+only governs Claude's `Bash` tool, and unusual refspecs may not be classified
+(in which case it defers rather than fails closed). For a hard guarantee that no
+push reaches a protected branch — regardless of how it's invoked or from which
+machine — pair it with a git `pre-push` hook and/or server-side branch
+protection.
 
 ### Known limitation
 
-The hook guards `git commit` (via Bash) and edits made through the
-`Edit`/`Write`/`MultiEdit` tools. It does **not** intercept file mutations done
-through other Bash commands — e.g. `sed -i`, `>` redirects, or `rm` — on a
+The hook guards `git commit` and `git push` (via Bash) and edits made through
+the `Edit`/`Write`/`MultiEdit` tools. It does **not** intercept file mutations
+done through other Bash commands — e.g. `sed -i`, `>` redirects, or `rm` — on a
 protected branch.
 
 ## Requirements
