@@ -1,4 +1,5 @@
 tmp/
+__pycache__/
 .context/
 
 # Claude Code — local runtime artifacts (keep settings.json / commands / agents / skills / hooks tracked)
