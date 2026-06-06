@@ -14,6 +14,12 @@ It installs a single `PreToolUse` hook that:
 Everything else is left untouched — the hook stays silent and the normal Claude
 Code permission flow applies.
 
+The Bash command is tokenized with Python's `shlex` (not a substring match), so
+the hook recognises `git commit` through env-var prefixes
+(`GIT_AUTHOR_NAME=x git commit`), global flags (`git -C path -c k=v commit`),
+and command chains (`git add -A && git commit -m x`), while `git log --grep=commit`
+and similar non-commit invocations are correctly ignored.
+
 ## Why
 
 In a worktree-based workflow you want zero friction committing to throwaway
@@ -31,8 +37,9 @@ repo path) even while your session's cwd is a feature-branch worktree.
 
 | Tool call | Current branch | Decision |
 |---|---|---|
-| `git commit …` (Bash) | non-protected (e.g. `claude/x`) | **allow** (auto) |
-| `git commit …` (Bash) | `main` / `master` | **ask** |
+| `git commit …`, or an all-git chain like `git add -A && git commit …` (Bash) | non-protected (e.g. `claude/x`) | **allow** (auto) |
+| any command containing a `git commit` (Bash) | `main` / `master` | **ask** |
+| `git commit … && <non-git command>` (Bash) | non-protected | no decision (defer) |
 | any other Bash command | any | no decision (defer) |
 | `Edit` / `Write` / `MultiEdit` | file's repo on `main` / `master` | **ask** |
 | `Edit` / `Write` / `MultiEdit` | file's repo on non-protected branch | no decision (defer) |
@@ -40,6 +47,12 @@ repo path) even while your session's cwd is a feature-branch worktree.
 
 "No decision" means the hook emits nothing and Claude Code applies its usual
 permission rules.
+
+A `git commit` is auto-approved on a feature branch only when **every** command
+in the chain is itself a `git` invocation. A chain that mixes in a non-git
+command (e.g. `git commit -m x && rm -rf foo`) is *not* auto-approved — it falls
+back to the normal permission prompt — so a trailing command can't ride along
+into a silent approval.
 
 ### Known limitation
 
@@ -50,7 +63,7 @@ protected branch.
 
 ## Requirements
 
-- `jq` and `git` on `PATH`.
+- `python3` (standard library only) and `git` on `PATH`.
 
 ## Test
 
@@ -59,7 +72,8 @@ protected branch.
 ```
 
 Spins up a throwaway git repo under `tmp/` and asserts the decision for each
-tool/branch combination.
+tool/branch combination. The test harness additionally needs `jq` on `PATH` to
+read the hook's JSON output.
 
 ## Activation
 

@@ -2,7 +2,7 @@
 
 A Claude Code plugin that adds a `PreToolUse` hook for `Bash`, `Edit`, `Write`, and `MultiEdit`. It auto-approves `git commit` on non-protected branches (e.g. `claude/*`, feature branches) and returns `ask` before a `git commit` or a file edit that targets a protected branch (`main`/`master`). Everything else defers silently so the normal permission flow applies. See `README.md` for the user-facing overview and the decision table.
 
-The load-bearing piece is `hooks/branch-guard.sh` — a Bash hook that reads the `PreToolUse` JSON from stdin, classifies the tool (`Bash` git-commit vs `Edit`/`Write`/`MultiEdit`), resolves the relevant branch with `git rev-parse`, and emits a decision against `PROTECTED_BRANCH_REGEX`. For edits it resolves the branch of **the file's own repository** (`git -C <dir-of-file>`), not the session cwd.
+The load-bearing piece is `hooks/branch-guard.py` — a stdlib-only Python hook that reads the `PreToolUse` JSON from stdin, classifies the tool (`Bash` git-commit vs `Edit`/`Write`/`MultiEdit`), resolves the relevant branch with `git rev-parse`, and emits a decision against `PROTECTED_BRANCH_RE`. For Bash it tokenizes the command with `shlex` (matching workspace-guard's parsing model), splits it into simple-command segments, and identifies `git commit` invocations robustly (env prefixes, global flags, chains) rather than by substring match. For edits it resolves the branch of **the file's own repository** (`git -C <dir-of-file>`), not the session cwd.
 
 ## Model selection
 
@@ -14,28 +14,28 @@ Build the right thing AND build it well. Before writing any code, state the goal
 
 Make the smallest change that achieves the goal. If you notice problems outside the current task's scope, flag them rather than fixing them — mention them at the end of the turn or open a separate PR.
 
-Before introducing a new pattern or abstraction, check whether the existing `case "$tool"` dispatch and `PROTECTED_BRANCH_REGEX` already solve the problem with a small edit.
+Before introducing a new pattern or abstraction, check whether the existing tool dispatch in `main()` and `PROTECTED_BRANCH_RE` already solve the problem with a small edit. The tokenizer (`command_segments`, `git_subcommand`) is deliberately shared in spirit with workspace-guard — reuse that model rather than inventing a parallel one.
 
 ## Workflow
 
 1. **At session start, check whether the worktree is stale.** New worktrees are branched from `main` at creation time, but `main` may have advanced since then — particularly if a previous session merged a PR. Run `git fetch origin main` and compare with `git log --oneline HEAD..origin/main`; if `origin/main` has new commits, rebase with `git rebase origin/main` before doing any other work.
-2. **Before making changes** — read `README.md` and the whole of `hooks/branch-guard.sh` so the proposed change matches the existing dispatch model. If picking the next task, run `gh pr list` first and skip anything already covered by an open PR.
-   - **Verify behavioral claims end-to-end, not just by source-reading.** Shell parsing is full of surprises that only show up when you exec the thing. If a change depends on "command X matches the git-commit grep" or "this branch resolves to Y," actually run `./test/run.sh` (or a targeted reproduction) and confirm.
+2. **Before making changes** — read `README.md` and the whole of `hooks/branch-guard.py` so the proposed change matches the existing dispatch and tokenization model. If picking the next task, run `gh pr list` first and skip anything already covered by an open PR.
+   - **Verify behavioral claims end-to-end, not just by source-reading.** Shell tokenization is full of surprises that only show up when you exec the thing. If a change depends on "command X parses as a git commit" or "this branch resolves to Y," actually run `./test/run.sh` (or a targeted reproduction) and confirm.
 3. **After making changes** — review the diff and update docs proactively:
-   - **Changed the decision logic, the git-commit matcher, or `PROTECTED_BRANCH_REGEX`** → update the behavior table and "Known limitation" section in `README.md`.
+   - **Changed the decision logic, the git-commit detection, or `PROTECTED_BRANCH_RE`** → update the behavior table and "Known limitation" section in `README.md`.
    - **New configuration or hook surface** → `README.md`, `hooks/hooks.json`, and `.claude-plugin/plugin.json` keywords/description.
 4. **Commit when done** — small, focused, Conventional Commits.
 
 ## Code standards
 
-### Bash (`hooks/branch-guard.sh`)
+### Python (`hooks/branch-guard.py`)
 
-- Start with `set -euo pipefail`. Use `local` inside functions, `[[ ]]` / `(( ))` (never `[ ]`), and quote all variable expansions.
-- Stay dependency-light: the hook may rely only on `git` and `jq` (documented requirements). Don't add new runtime dependencies without flagging it.
-- The `case "$tool"` dispatch and `PROTECTED_BRANCH_REGEX` are the contract. Adding a guarded tool or protected branch means an explicit edit there — don't infer behavior at runtime.
-- On any uncertainty — not a git repo, detached HEAD, empty/missing input, unresolvable branch — the hook **defers silently** (`exit 0`, emits nothing) so normal permissions apply. Never fail closed without an explicit reason.
+- Stdlib only — no third-party deps. The hook runs on whatever `python3` the user has on their PATH (`hooks/hooks.json` invokes `python3 …`). `git` must be on PATH; the hook no longer shells out to `jq`.
+- The tool dispatch in `main()` and `PROTECTED_BRANCH_RE` are the contract. Adding a guarded tool or protected branch means an explicit edit there — don't infer behavior at runtime.
+- Tokenize Bash commands with `shlex` via `command_segments`/`git_subcommand`; never go back to substring/regex matching on the raw command — that's the exact gap this port closed. `GIT_VALUE_OPTS` lists the git global options that consume a following value token; extend it explicitly rather than guessing at parse time.
+- On any uncertainty — not a git repo, detached HEAD, empty/missing input, unbalanced quotes (`shlex` raises `ValueError`), unresolvable branch — the hook **defers silently** (returns, emits nothing) so normal permissions apply. Never fail closed without an explicit reason.
 - Default decision for a protected branch is `ask`, not `deny`. Hard-blocking is opt-in via a local edit and must be documented in `README.md` if introduced.
-- When emitting JSON, escape the reason string (see the `emit()` helper). Don't hand-build decision JSON elsewhere.
+- Emit decisions only through the `emit()` helper (`json.dumps`) — don't hand-build decision JSON elsewhere.
 
 ## Security principles
 
@@ -43,9 +43,9 @@ Before introducing a new pattern or abstraction, check whether the existing `cas
 
 Examples of regressions that must not silently become defaults:
 - Flipping the protected-branch decision from `ask` to `allow`.
-- Removing `main` or `master` from `PROTECTED_BRANCH_REGEX` because it was "noisy".
+- Removing `main` or `master` from `PROTECTED_BRANCH_RE` because it was "noisy".
 - Treating an unresolvable branch or unparseable input as `allow` rather than deferring.
-- Narrowing the git-commit matcher so a `commit` invocation slips through unguarded.
+- Auto-approving a command chain that mixes a `git commit` with a non-git command (e.g. `git commit && rm -rf foo`). Auto-allow fires only when *every* segment is a git invocation; widening this lets a trailing command ride along into a silent approval — the exact gap the Python port closed.
 - Resolving the edit branch from the session cwd instead of the file's own repo (`git -C <dir-of-file>`), so edits through a checkout sitting on `main` are no longer caught.
 
 When in doubt, ask before shipping. The hook's job is to add friction at the protected-branch boundary; removing friction is the change that needs sign-off, not adding it.
@@ -58,9 +58,9 @@ Tests live in `test/run.sh`. Run with:
 ./test/run.sh
 ```
 
-It spins up a throwaway git repo under `tmp/` and asserts the emitted `permissionDecision` for each tool/branch combination (commit on a feature branch, commit on `main`, edits on protected vs non-protected branches, and defer cases).
+It spins up a throwaway git repo under `tmp/` and asserts the emitted `permissionDecision` for each tool/branch combination (commit on a feature branch, commit on `main`, all-git and mixed chains, env-prefixed/global-flag commits, non-commit `git` invocations, edits on protected vs non-protected branches, and defer cases). The harness parses the hook's JSON with `jq`, so `jq` is a test-only dependency.
 
-When changing the decision logic, the git-commit matcher, or `PROTECTED_BRANCH_REGEX`, add the case that motivated the change as a fixture, and hand-exercise the behavior table in `README.md` against the change before committing.
+When changing the decision logic, the git-commit detection, or `PROTECTED_BRANCH_RE`, add the case that motivated the change as a fixture, and hand-exercise the behavior table in `README.md` against the change before committing.
 
 ## Commits
 
@@ -78,7 +78,7 @@ Human-facing docs (`README.md` and anything user-facing) must never link to `CLA
 
 | Task | Reference |
 |---|---|
-| Changing the decision logic, git-commit matcher, or protected-branch set | `hooks/branch-guard.sh` + `README.md` behavior table |
+| Changing the decision logic, git-commit detection, or protected-branch set | `hooks/branch-guard.py` + `README.md` behavior table |
 | Hook registration / matcher | `hooks/hooks.json` |
 | Plugin packaging / marketplace listing | `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` |
 | Testing the decision matrix | `test/run.sh` |
