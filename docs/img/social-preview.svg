@@ -1,0 +1,112 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" font-family="-apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d1117"/>
+      <stop offset="1" stop-color="#161b22"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#a78bfa" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#a78bfa" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="fence" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#a78bfa" stop-opacity="0"/>
+      <stop offset="0.12" stop-color="#a78bfa" stop-opacity="1"/>
+      <stop offset="0.88" stop-color="#a78bfa" stop-opacity="1"/>
+      <stop offset="1" stop-color="#a78bfa" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="soft" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="6"/>
+    </filter>
+    <linearGradient id="shieldMark" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#a78bfa"/>
+      <stop offset="1" stop-color="#7e57c2"/>
+    </linearGradient>
+  </defs>
+
+  <!-- background -->
+  <rect width="1280" height="640" fill="url(#bg)"/>
+  <ellipse cx="640" cy="380" rx="520" ry="300" fill="url(#glow)" opacity="0.25"/>
+
+  <!-- ===== header ===== -->
+  <!-- shield + folder mark -->
+  <g transform="translate(64,58)">
+    <path d="M36 2 L70 14 V44 C70 66 54 80 36 88 C18 80 2 66 2 44 V14 Z"
+          fill="url(#shieldMark)" stroke="#c4b5fd" stroke-width="1.6"/>
+    <g transform="translate(15,24)" stroke="#f1ecff" stroke-width="1.6" stroke-linejoin="round">
+      <path d="M2 6 H14 L18 11 H40 V34 H2 Z" fill="#f1ecff"/>
+    </g>
+  </g>
+
+  <text x="156" y="98" font-size="58" font-weight="800" letter-spacing="-1">
+    <tspan fill="#e6edf3">workspace</tspan><tspan fill="#a78bfa">-guard</tspan>
+  </text>
+  <text x="158" y="138" font-size="25" font-weight="500" fill="#8b949e" letter-spacing="0.2">
+    Path-aware bash permissions for Claude Code
+  </text>
+
+  <!-- ===== terminal panel ===== -->
+  <g>
+    <rect x="64" y="196" width="1152" height="380" rx="18" fill="#0b0f16" stroke="#222b38" stroke-width="1.5"/>
+    <!-- title bar -->
+    <path d="M64 214 a18 18 0 0 1 18 -18 H1198 a18 18 0 0 1 18 18 V240 H64 Z" fill="#11161f"/>
+    <circle cx="92" cy="218" r="6" fill="#ff5f56"/>
+    <circle cx="114" cy="218" r="6" fill="#ffbd2e"/>
+    <circle cx="136" cy="218" r="6" fill="#27c93f"/>
+    <text x="640" y="223" text-anchor="middle" font-size="16" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" fill="#6e7681">PreToolUse · Bash</text>
+  </g>
+
+  <!-- fence / workspace edge -->
+  <rect x="635" y="250" width="10" height="306" fill="url(#fence)" filter="url(#soft)" opacity="0.7"/>
+  <line x1="640" y1="250" x2="640" y2="556" stroke="#c4b5fd" stroke-width="2" stroke-dasharray="2 9" stroke-linecap="round"/>
+  <g transform="translate(640,272)">
+    <rect x="-86" y="-19" width="172" height="34" rx="17" fill="#1b1530" stroke="#7e57c2" stroke-width="1.5"/>
+    <text x="0" y="4" text-anchor="middle" font-size="15" font-weight="700" fill="#c4b5fd" letter-spacing="0.5">workspace edge</text>
+  </g>
+
+  <!-- zone labels -->
+  <text x="100" y="316" font-size="15" font-weight="700" fill="#3fb950" letter-spacing="2">INSIDE  $CLAUDE_PROJECT_DIR</text>
+  <text x="1180" y="316" text-anchor="end" font-size="15" font-weight="700" fill="#d29922" letter-spacing="2">OUTSIDE</text>
+
+  <!-- ===== INSIDE entries (allow) ===== -->
+  <g font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace">
+    <!-- entry 1 -->
+    <text x="100" y="372" font-size="23" fill="#adbac7"><tspan fill="#7e57c2">$ </tspan>grep -rn TODO ./src</text>
+    <g transform="translate(100,392)">
+      <rect x="0" y="0" width="96" height="32" rx="16" fill="#12261a" stroke="#238636" stroke-width="1.5"/>
+      <path d="M16 16 l5 5 l9 -11" fill="none" stroke="#3fb950" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="40" y="21" font-size="16" font-weight="700" font-family="-apple-system, sans-serif" fill="#3fb950">allow</text>
+    </g>
+    <!-- entry 2 -->
+    <text x="100" y="476" font-size="23" fill="#adbac7"><tspan fill="#7e57c2">$ </tspan>cat package.json | jq '.version'</text>
+    <g transform="translate(100,496)">
+      <rect x="0" y="0" width="96" height="32" rx="16" fill="#12261a" stroke="#238636" stroke-width="1.5"/>
+      <path d="M16 16 l5 5 l9 -11" fill="none" stroke="#3fb950" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="40" y="21" font-size="16" font-weight="700" font-family="-apple-system, sans-serif" fill="#3fb950">allow</text>
+    </g>
+  </g>
+
+  <!-- ===== OUTSIDE entries (ask) ===== -->
+  <g font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace">
+    <!-- entry 1 -->
+    <text x="680" y="372" font-size="23" fill="#adbac7"><tspan fill="#7e57c2">$ </tspan>grep root /etc/passwd</text>
+    <g transform="translate(680,392)">
+      <rect x="0" y="0" width="86" height="32" rx="16" fill="#2a2210" stroke="#9e6a03" stroke-width="1.5"/>
+      <path d="M16 9 l8 14 h-16 Z" fill="none" stroke="#e3b341" stroke-width="2.2" stroke-linejoin="round"/>
+      <line x1="16" y1="15" x2="16" y2="19" stroke="#e3b341" stroke-width="2.2" stroke-linecap="round"/>
+      <circle cx="16" cy="21.6" r="1.1" fill="#e3b341"/>
+      <text x="34" y="21" font-size="16" font-weight="700" font-family="-apple-system, sans-serif" fill="#e3b341">ask</text>
+    </g>
+    <!-- entry 2 -->
+    <text x="680" y="476" font-size="23" fill="#adbac7"><tspan fill="#7e57c2">$ </tspan>cat ~/.aws/credentials</text>
+    <g transform="translate(680,496)">
+      <rect x="0" y="0" width="86" height="32" rx="16" fill="#2a2210" stroke="#9e6a03" stroke-width="1.5"/>
+      <path d="M16 9 l8 14 h-16 Z" fill="none" stroke="#e3b341" stroke-width="2.2" stroke-linejoin="round"/>
+      <line x1="16" y1="15" x2="16" y2="19" stroke="#e3b341" stroke-width="2.2" stroke-linecap="round"/>
+      <circle cx="16" cy="21.6" r="1.1" fill="#e3b341"/>
+      <text x="34" y="21" font-size="16" font-weight="700" font-family="-apple-system, sans-serif" fill="#e3b341">ask</text>
+    </g>
+  </g>
+
+  <!-- footer -->
+  <text x="1216" y="138" text-anchor="end" font-size="18" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" fill="#6e7681">github.com/karlkfi/claude-workspace-guard</text>
+</svg>
