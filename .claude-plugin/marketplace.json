@@ -1,0 +1,11 @@
+{
+  "name": "claude-branch-guard",
+  "owner": { "name": "Karl Isenberg", "email": "karlkfi@gmail.com" },
+  "plugins": [
+    {
+      "name": "branch-guard",
+      "source": "./",
+      "description": "Auto-approve git commits on non-protected branches; prompt before commits or edits targeting main/master."
+    }
+  ]
+}
