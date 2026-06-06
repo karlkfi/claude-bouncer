@@ -10,6 +10,9 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 HOOK="$REPO_ROOT/hooks/branch-guard.py"
 WORK="$REPO_ROOT/tmp/test-repo"
 
+# Keep tests hermetic regardless of the caller's shell.
+unset BRANCH_GUARD_PUSH_POLICY
+
 pass=0
 fail=0
 
@@ -30,10 +33,11 @@ setup_repo() {
   git -C "$WORK" branch claude/x
 }
 
-# decision_for PAYLOAD CWD -> echoes the permissionDecision, or "none".
+# decision_for PAYLOAD CWD [ENV_KV] -> echoes the permissionDecision, or "none".
+# ENV_KV is an optional `NAME=value` passed into the hook's environment.
 decision_for() {
-  local payload="$1" cwd="$2" out
-  out="$( cd "$cwd" && printf '%s' "$payload" | python3 "$HOOK" )"
+  local payload="$1" cwd="$2" env_kv="${3:-}" out
+  out="$( cd "$cwd" && printf '%s' "$payload" | env ${env_kv} python3 "$HOOK" )"
   if [[ -z "$out" ]]; then
     printf 'none'
   else
@@ -109,6 +113,49 @@ check "unknown tool -> none" none \
   "$(decision_for '{"tool_name":"Read","tool_input":{"file_path":"/etc/hosts"}}' "$REPO_ROOT")"
 check "edit missing file_path -> none" none \
   "$(decision_for '{"tool_name":"Edit","tool_input":{}}' "$REPO_ROOT")"
+
+# ---------------------------------------------------------------------------
+# Push guard. Run from the worktree on the feature branch unless noted.
+git -C "$WORK" checkout -q claude/x
+
+# 7. default policy (protected): ask only when the target is a protected branch
+push() { printf '{"tool_name":"Bash","tool_input":{"command":"%s"}}' "$1"; }
+
+check "[protected] push origin main -> ask" ask \
+  "$(decision_for "$(push 'git push origin main')" "$WORK")"
+check "[protected] push origin HEAD:main -> ask" ask \
+  "$(decision_for "$(push 'git push origin HEAD:main')" "$WORK")"
+check "[protected] push delete main (:main) -> ask" ask \
+  "$(decision_for "$(push 'git push origin :main')" "$WORK")"
+check "[protected] push --all -> ask" ask \
+  "$(decision_for "$(push 'git push --all origin')" "$WORK")"
+check "[protected] bare push -> none" none \
+  "$(decision_for "$(push 'git push')" "$WORK")"
+check "[protected] push origin HEAD -> none" none \
+  "$(decision_for "$(push 'git push origin HEAD')" "$WORK")"
+check "[protected] push other feature branch -> none" none \
+  "$(decision_for "$(push 'git push origin feature-y')" "$WORK")"
+check "[protected] commit && push (feature) -> none" none \
+  "$(decision_for "$(push 'git commit -m x && git push')" "$WORK")"
+
+# 8. strict policy: ask for anything that isn't the worktree's own branch
+ENV='BRANCH_GUARD_PUSH_POLICY=strict'
+check "[strict] push origin HEAD -> none" none \
+  "$(decision_for "$(push 'git push origin HEAD')" "$WORK" "$ENV")"
+check "[strict] push origin claude/x -> none" none \
+  "$(decision_for "$(push 'git push origin claude/x')" "$WORK" "$ENV")"
+check "[strict] push origin feature-y -> ask" ask \
+  "$(decision_for "$(push 'git push origin feature-y')" "$WORK" "$ENV")"
+check "[strict] push origin HEAD:other -> ask" ask \
+  "$(decision_for "$(push 'git push origin HEAD:other')" "$WORK" "$ENV")"
+check "[strict] push origin main -> ask" ask \
+  "$(decision_for "$(push 'git push origin main')" "$WORK" "$ENV")"
+check "[strict] bare push -> none" none \
+  "$(decision_for "$(push 'git push')" "$WORK" "$ENV")"
+
+# 9. off policy: pushes are not guarded
+check "[off] push origin main -> none" none \
+  "$(decision_for "$(push 'git push origin main')" "$WORK" 'BRANCH_GUARD_PUSH_POLICY=off')"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [[ "$fail" -eq 0 ]]

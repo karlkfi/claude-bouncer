@@ -34,6 +34,19 @@ GIT_VALUE_OPTS = {
     '--super-prefix', '--config-env', '--exec-path',
 }
 
+# `git push` options that consume a separate following value token.
+PUSH_VALUE_OPTS = {'--repo', '-o', '--push-option', '--receive-pack', '--exec'}
+# `git push` flags that push more than the current branch.
+PUSH_MANY_FLAGS = {'--all', '--mirror', '--branches'}
+
+# Push-guard policy (env var BRANCH_GUARD_PUSH_POLICY):
+#   protected (default) — ask before a push whose target is main/master.
+#   strict              — ask before any push that isn't the worktree's own
+#                         current branch (also blocks other branches, foreign
+#                         refspecs like HEAD:main, and --all/--mirror).
+#   off                 — don't guard pushes at all.
+PUSH_POLICIES = ('off', 'protected', 'strict')
+
 
 def split_newline_separators(tokens):
     """Peel newlines out of operator-run tokens so each becomes its own token.
@@ -85,16 +98,15 @@ def command_segments(cmd):
     return segments
 
 
-def git_subcommand(tokens):
-    """If a segment is a `git` invocation, return its subcommand (e.g.
-    'commit'); otherwise return None. Strips leading env assignments and git
-    global options so `FOO=bar git -C path -c k=v commit` -> 'commit'."""
+def parse_git(tokens):
+    """If a segment is a `git` invocation, return {'sub': <subcommand or None>,
+    'args': [tokens after the subcommand]}; otherwise return None. Strips
+    leading env assignments and git global options so
+    `FOO=bar git -C path -c k=v commit -m x` -> {'sub': 'commit', 'args': ['-m', 'x']}."""
     i = 0
     while i < len(tokens) and ASSIGNMENT_RE.match(tokens[i]):
         i += 1
-    if i >= len(tokens):
-        return None
-    if tokens[i].rsplit('/', 1)[-1] != 'git':
+    if i >= len(tokens) or tokens[i].rsplit('/', 1)[-1] != 'git':
         return None
     i += 1
     while i < len(tokens):
@@ -105,7 +117,94 @@ def git_subcommand(tokens):
         if not t.startswith('-'):
             break
         i += 2 if t in GIT_VALUE_OPTS else 1
-    return tokens[i] if i < len(tokens) else None
+    if i >= len(tokens):
+        return {'sub': None, 'args': []}
+    return {'sub': tokens[i], 'args': tokens[i + 1:]}
+
+
+def ref_to_branch(ref, current):
+    """Map one side of a push refspec to (branch_name_or_None, is_wildcard).
+    `HEAD` -> current branch; `refs/heads/x` -> `x`; an empty side (deletion
+    source) or a non-branch ref (`refs/tags/...`) -> None; a `*` glob sets the
+    wildcard flag. A bare name is assumed to be a branch (best-effort: it could
+    be a tag, but that only ever errs toward asking, never toward allowing)."""
+    if ref == '':
+        return (None, False)
+    if '*' in ref:
+        return (None, True)
+    if ref == 'HEAD':
+        return (current, False)
+    if ref.startswith('refs/heads/'):
+        return (ref[len('refs/heads/'):], False)
+    if ref.startswith('refs/'):
+        return (None, False)
+    return (ref, False)
+
+
+def parse_refspec(spec, current, delete):
+    """Resolve a refspec to (src_branch, dst_branch, is_wildcard). With
+    `--delete`, the token is a destination ref to remove (src is None)."""
+    if delete:
+        dst_b, glob = ref_to_branch(spec, current)
+        return (None, dst_b, glob)
+    if spec.startswith('+'):
+        spec = spec[1:]
+    src_raw, dst_raw = spec.split(':', 1) if ':' in spec else (spec, spec)
+    src_b, src_glob = ref_to_branch(src_raw, current)
+    dst_b, dst_glob = ref_to_branch(dst_raw, current)
+    return (src_b, dst_b, src_glob or dst_glob)
+
+
+def push_decision(args, current, policy):
+    """Given the tokens after `push`, the worktree's current branch, and the
+    policy, return an `ask` reason string if the push should be confirmed, or
+    None to defer. On parsing uncertainty it leans toward deferring so the
+    normal permission flow applies (pair with a pre-push hook / server-side
+    branch protection for a hard guarantee)."""
+    positionals, many, delete, i = [], False, False, 0
+    while i < len(args):
+        t = args[i]
+        if t == '--':
+            positionals += args[i + 1:]
+            break
+        if t.startswith('-'):
+            if t in PUSH_MANY_FLAGS:
+                many = True
+            if t in ('--delete', '-d'):
+                delete = True
+            i += 2 if t in PUSH_VALUE_OPTS else 1
+            continue
+        positionals.append(t)
+        i += 1
+
+    if many:
+        return "Push targets multiple branches (--all/--mirror) — confirm before proceeding."
+
+    # positionals[0] is the repository; the rest are refspecs. With no refspec,
+    # git pushes the current branch to its same-named upstream.
+    refspecs = positionals[1:] if positionals else []
+    pairs = ([parse_refspec(s, current, delete) for s in refspecs]
+             if refspecs else [(current, current, False)])
+
+    for src_b, dst_b, glob in pairs:
+        if glob:
+            return "Push uses a wildcard refspec (multiple branches) — confirm before proceeding."
+        if dst_b and is_protected(dst_b):
+            return f"Push targets protected branch '{dst_b}' — confirm before proceeding."
+        if policy == 'strict':
+            if dst_b is not None and dst_b != current:
+                return (f"Push targets '{dst_b}', not the worktree branch "
+                        f"'{current}' — confirm before proceeding.")
+            if src_b is not None and src_b != current:
+                return (f"Push sends local branch '{src_b}', not the worktree "
+                        f"branch '{current}' — confirm before proceeding.")
+    return None
+
+
+def push_policy():
+    """Read BRANCH_GUARD_PUSH_POLICY; default and fall back to 'protected'."""
+    v = (os.environ.get('BRANCH_GUARD_PUSH_POLICY') or 'protected').strip().lower()
+    return v if v in PUSH_POLICIES else 'protected'
 
 
 def current_branch(cwd):
@@ -154,13 +253,29 @@ def main():
             segments = command_segments(cmd)
         except ValueError:
             return                                 # unbalanced quotes -> defer
-        subcommands = [git_subcommand(seg) for seg in segments]
-        if 'commit' not in subcommands:
-            return                                 # not a git commit -> defer
+        parsed = [parse_git(seg) for seg in segments]
+        has_commit = any(p and p['sub'] == 'commit' for p in parsed)
+        policy = push_policy()
+        push_segs = ([p for p in parsed if p and p['sub'] == 'push']
+                     if policy != 'off' else [])
+        if not has_commit and not push_segs:
+            return                                 # nothing we guard -> defer
 
         branch = current_branch(data.get('cwd') or os.getcwd())
         if branch is None:
             return                                 # not a repo / detached -> defer
+
+        # Push guard takes priority: a chain containing a push is never
+        # auto-approved via the commit path (that would auto-approve the push).
+        if push_segs:
+            for p in push_segs:
+                reason = push_decision(p['args'], branch, policy)
+                if reason:
+                    emit('ask', reason)
+                    return
+            return                                 # push allowed by policy -> defer
+
+        # Commit guard.
         if is_protected(branch):
             emit('ask', f"Targets protected branch '{branch}' — confirm before proceeding.")
             return
@@ -168,7 +283,7 @@ def main():
         # invocation (e.g. `git add -A && git commit -m x`). A chain that mixes
         # in a non-git command (`git commit && rm -rf ~`) is deferred to the
         # normal permission prompt rather than silently auto-approved.
-        if all(sub is not None for sub in subcommands):
+        if all(p is not None for p in parsed):
             emit('allow', f"Commit on non-protected branch '{branch}' — auto-approved.")
         return
 

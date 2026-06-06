@@ -1,7 +1,7 @@
 {
   "name": "branch-guard",
-  "description": "Auto-approve git commits on non-protected branches; prompt before commits or edits targeting main/master.",
+  "description": "Auto-approve git commits on non-protected branches; prompt before commits, edits, or pushes targeting main/master.",
   "version": "0.1.0",
   "author": { "name": "Karl Isenberg", "email": "karlkfi@gmail.com" },
-  "keywords": ["git", "hooks", "permissions", "safety", "worktree"]
+  "keywords": ["git", "hooks", "permissions", "safety", "worktree", "push"]
 }
