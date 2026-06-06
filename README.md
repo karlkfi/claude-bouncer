@@ -23,6 +23,7 @@ silently.
 
 - [What it does](#what-it-does)
 - [Install](#install)
+- [Upgrade](#upgrade)
 - [How it works](#how-it-works)
 - [Agent guidance: avoiding prompts](#agent-guidance-avoiding-prompts)
 - [Configuration](#configuration)
@@ -136,6 +137,38 @@ After installing with either method:
 To verify, ask Claude to run `grep root /etc/passwd` — you should see a
 permission prompt citing the outside-workspace path. Then ask it to `grep` a
 file in your repo; it should run without prompting.
+
+## Upgrade
+
+workspace-guard installs from a GitHub marketplace, which Claude Code tracks at
+the repository's default branch (`main`). It does **not** auto-update by default,
+so a newer release won't reach you until you refresh the marketplace and
+reinstall the plugin.
+
+**Claude Code (CLI or IDE extension)** — run the slash commands:
+
+```
+/plugin marketplace update workspace-guard
+/plugin uninstall workspace-guard@workspace-guard
+/plugin install workspace-guard@workspace-guard
+```
+
+The first command re-fetches the marketplace manifest from the repo; the
+reinstall picks up the new version. Refreshing the catalog alone does **not**
+upgrade an already-installed plugin unless you've turned on auto-update for the
+marketplace — hence the explicit reinstall.
+
+**Claude Code for Claude Desktop** — in the **Customize** tab's plugins /
+marketplaces section, refresh the `workspace-guard` marketplace, then reinstall
+**workspace-guard** from it.
+
+After upgrading either way:
+
+- Run `/reload-plugins` to activate the updated hook without restarting, or
+  restart Claude Code.
+- Confirm the new version is live: the `/plugin` menu lists the installed
+  version — compare it against the
+  [latest release](https://github.com/karlkfi/claude-workspace-guard/releases).
 
 ## How it works
 
