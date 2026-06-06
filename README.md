@@ -7,15 +7,22 @@ It installs a single `PreToolUse` hook that:
 
 - **auto-approves `git commit`** when the current branch is *not* protected
   (e.g. `claude/*` or any feature branch),
+- **auto-approves `git push`** of the worktree's own branch — including force
+  pushes — under the default `strict` policy,
 - **prompts you (`ask`)** before a `git commit` **or** a file edit
   (`Edit`/`Write`/`MultiEdit`) that targets a **protected branch** (`main` or
   `master`), and
-- **prompts you (`ask`)** before a `git push` that targets a protected branch —
-  or, under the `strict` policy, any branch other than the worktree's own (see
-  [Push guard](#push-guard)).
+- **prompts you (`ask`)** before a `git push` to a protected branch — or, under
+  the default `strict` policy, to *any* branch other than the worktree's own
+  (see [Push guard](#push-guard)).
 
 Everything else is left untouched — the hook stays silent and the normal Claude
 Code permission flow applies.
+
+In a **non-interactive permission mode** (`auto`, `dontAsk`, `bypassPermissions`)
+there is no human present to answer a prompt, so any decision that would be an
+`ask` is emitted as a **`deny`** instead — the guard fails safe rather than
+letting the action through unconfirmed.
 
 The Bash command is tokenized with Python's `shlex` (not a substring match), so
 the hook recognises `git commit` through env-var prefixes
@@ -43,20 +50,22 @@ repo path) even while your session's cwd is a feature-branch worktree.
 | `git commit …`, or an all-git chain like `git add -A && git commit …` (Bash) | non-protected (e.g. `claude/x`) | **allow** (auto) |
 | any command containing a `git commit` (Bash) | `main` / `master` | **ask** |
 | `git commit … && <non-git command>` (Bash) | non-protected | no decision (defer) |
+| `git push` of the worktree's own branch, incl. force (Bash) | non-protected, `strict` policy | **allow** (auto) |
+| `git push` elsewhere — see [Push guard](#push-guard) (Bash) | any | **ask** / defer (per policy) |
 | any other Bash command | any | no decision (defer) |
 | `Edit` / `Write` / `MultiEdit` | file's repo on `main` / `master` | **ask** |
 | `Edit` / `Write` / `MultiEdit` | file's repo on non-protected branch | no decision (defer) |
 | any other tool | any | no decision (defer) |
 
 "No decision" means the hook emits nothing and Claude Code applies its usual
-permission rules.
+permission rules. In a non-interactive permission mode every **ask** above
+becomes a **deny** (see [the note at the top](#branch-guard)).
 
-A `git commit` is auto-approved on a feature branch only when **every** command
-in the chain is itself a `git` invocation. A chain that mixes in a non-git
-command (e.g. `git commit -m x && rm -rf foo`) is *not* auto-approved — it falls
-back to the normal permission prompt — so a trailing command can't ride along
-into a silent approval. A chain containing a `git push` is likewise never
-auto-approved; the push is evaluated by the push guard below.
+A command is auto-approved (**allow**) only when **every** segment in it is a
+`git` invocation. A chain that mixes in a non-git command (e.g.
+`git commit -m x && rm -rf foo`, or `git push && rm -rf foo`) is *not*
+auto-approved — it falls back to the normal permission prompt — so a trailing
+command can't ride along into a silent approval.
 
 ## Push guard
 
@@ -65,25 +74,26 @@ variable:
 
 | Policy | Behavior |
 |---|---|
-| `protected` *(default)* | **ask** before a push whose target is `main`/`master` (including `git push origin main`, `git push origin HEAD:main`, deleting `main`, and `--all`/`--mirror`). Any other push defers. |
-| `strict` | **ask** before any push that isn't the worktree's own current branch — also catches pushing a *different* branch (`git push origin other`), foreign refspecs (`git push origin HEAD:other`), wildcards, and `--all`/`--mirror`. |
+| `strict` *(default)* | **allow** (auto) a push of the worktree's own current branch, including a force push of it. **ask** before any other push — a *different* branch (`git push origin other`), foreign refspecs (`git push origin HEAD:other`), wildcards, `--all`/`--mirror`, or a protected target. |
+| `protected` | **ask** before a push whose target is `main`/`master` (including `git push origin main`, `git push origin HEAD:main`, deleting `main`, and `--all`/`--mirror`). Any other push defers. Never auto-approves. |
 | `off` | Pushes are not guarded at all. |
 
-Under every policy a bare `git push` / `git push origin` (which pushes the
-current branch to its same-named upstream) defers to the normal flow.
+A bare `git push` / `git push origin` pushes the current branch to its
+same-named upstream: under `strict` it is auto-approved (it's the worktree
+branch); under `protected` it defers.
 
 Set it in `~/.claude/settings.json` (or a project's `.claude/settings.json`):
 
 ```json
-{ "env": { "BRANCH_GUARD_PUSH_POLICY": "strict" } }
+{ "env": { "BRANCH_GUARD_PUSH_POLICY": "protected" } }
 ```
 
 The push guard is **best-effort**: it parses the Bash command Claude runs and so
 only governs Claude's `Bash` tool, and unusual refspecs may not be classified
-(in which case it defers rather than fails closed). For a hard guarantee that no
-push reaches a protected branch — regardless of how it's invoked or from which
-machine — pair it with a git `pre-push` hook and/or server-side branch
-protection.
+(in which case it asks under `strict` / defers under `protected`, never silently
+allowing). For a hard guarantee that no push reaches a protected branch —
+regardless of how it's invoked or from which machine — pair it with a git
+`pre-push` hook and/or server-side branch protection.
 
 ### Known limitation
 

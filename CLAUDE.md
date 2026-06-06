@@ -4,7 +4,9 @@ A Claude Code plugin that adds a `PreToolUse` hook for `Bash`, `Edit`, `Write`, 
 
 The load-bearing piece is `hooks/branch-guard.py` — a stdlib-only Python hook that reads the `PreToolUse` JSON from stdin, classifies the tool (`Bash` git-commit/git-push vs `Edit`/`Write`/`MultiEdit`), resolves the relevant branch with `git rev-parse`, and emits a decision against `PROTECTED_BRANCH_RE`. For Bash it tokenizes the command with `shlex` (matching workspace-guard's parsing model) via `command_segments`, splits it into simple-command segments, and identifies `git` subcommands robustly with `parse_git` (env prefixes, global flags, chains) rather than by substring match. For edits it resolves the branch of **the file's own repository** (`git -C <dir-of-file>`), not the session cwd.
 
-The push guard (`push_decision`/`push_policy`) is driven by the `BRANCH_GUARD_PUSH_POLICY` env var: `protected` (default — ask only when a push targets `main`/`master`), `strict` (ask unless the push is the worktree's own current branch), or `off`. A Bash chain that contains a `git push` is never auto-approved via the commit path; the push is always routed through the push guard first.
+The push guard (`push_decision`/`push_policy`) is driven by the `BRANCH_GUARD_PUSH_POLICY` env var: `strict` (default — **allow** a push of the worktree's own branch including force pushes, **ask** for anything else), `protected` (ask only when a push targets `main`/`master`, never auto-approve), or `off`. A command is auto-approved only when *every* segment is a git invocation (`all_git`), so a non-git command (`git push && rm …`) can never ride along into an allow.
+
+`confirm()` converts a would-be `ask` into a `deny` when `permission_mode` is one of `NON_INTERACTIVE_MODES` (`auto`/`dontAsk`/`bypassPermissions`) — no human is present to answer, so the guard fails safe. All three `ask` sites (commit-on-protected, edit-on-protected, push) go through `confirm()`; `allow` and defer are never downgraded.
 
 ## Model selection
 
@@ -35,10 +37,10 @@ Before introducing a new pattern or abstraction, check whether the existing tool
 - Stdlib only — no third-party deps. The hook runs on whatever `python3` the user has on their PATH (`hooks/hooks.json` invokes `python3 …`). `git` must be on PATH; the hook no longer shells out to `jq`.
 - The tool dispatch in `main()`, `PROTECTED_BRANCH_RE`, and `PUSH_POLICIES` are the contract. Adding a guarded tool, protected branch, or push policy means an explicit edit there — don't infer behavior at runtime.
 - Tokenize Bash commands with `shlex` via `command_segments`/`parse_git`; never go back to substring/regex matching on the raw command — that's the exact gap the python port closed. `GIT_VALUE_OPTS`/`PUSH_VALUE_OPTS` list the options that consume a following value token, and `PUSH_MANY_FLAGS` the ones that push more than one branch; extend these explicitly rather than guessing at parse time.
-- The push guard defers (rather than asks) on refspec forms it can't classify — secure-by-default here means *not* fooling the user into thinking a push is blocked when it isn't. Hard guarantees belong in a git `pre-push` hook or server-side branch protection; keep `README.md`'s "best-effort" framing honest.
+- The push guard leans toward asking (`strict`) / deferring (`protected`) on refspec forms it can't classify — never toward silently allowing. Hard guarantees belong in a git `pre-push` hook or server-side branch protection; keep `README.md`'s "best-effort" framing honest.
 - On any uncertainty — not a git repo, detached HEAD, empty/missing input, unbalanced quotes (`shlex` raises `ValueError`), unresolvable branch — the hook **defers silently** (returns, emits nothing) so normal permissions apply. Never fail closed without an explicit reason.
-- Default decision for a protected branch is `ask`, not `deny`. Hard-blocking is opt-in via a local edit and must be documented in `README.md` if introduced.
-- Emit decisions only through the `emit()` helper (`json.dumps`) — don't hand-build decision JSON elsewhere.
+- The interactive decision for a protected branch is `ask`, not `deny`. The one exception is non-interactive permission modes, where `confirm()` deliberately upgrades `ask` → `deny` because no human can answer — that's failing *safe*, not hard-blocking by default. Don't add a blanket `deny` for interactive modes without sign-off.
+- Emit decisions through `emit()` (`json.dumps`), and route every `ask` through `confirm()` so the non-interactive fail-safe applies uniformly — don't hand-build decision JSON or call `emit('ask', …)` directly.
 
 ## Security principles
 
@@ -49,7 +51,8 @@ Examples of regressions that must not silently become defaults:
 - Removing `main` or `master` from `PROTECTED_BRANCH_RE` because it was "noisy".
 - Treating an unresolvable branch or unparseable input as `allow` rather than deferring.
 - Auto-approving a command chain that mixes a `git commit` with a non-git command (e.g. `git commit && rm -rf foo`). Auto-allow fires only when *every* segment is a git invocation; widening this lets a trailing command ride along into a silent approval — the exact gap the Python port closed.
-- Auto-approving a chain that contains a `git push` (it must route through the push guard, never the commit auto-allow), or weakening a push policy's default — `protected` must stay the default; `off` is opt-in only.
+- Auto-approving a chain that contains a non-git segment (`all_git` gates *every* allow, push or commit), or weakening the push-policy default — `strict` must stay the default; `protected`/`off` are looser and opt-in only.
+- Downgrading the non-interactive fail-safe: in `auto`/`dontAsk`/`bypassPermissions` an `ask` must stay a `deny`. Letting it fall back to `ask` (or `allow`) means an unattended session pushes/commits to `main` with nobody to stop it.
 - Resolving the edit branch from the session cwd instead of the file's own repo (`git -C <dir-of-file>`), so edits through a checkout sitting on `main` are no longer caught.
 
 When in doubt, ask before shipping. The hook's job is to add friction at the protected-branch boundary; removing friction is the change that needs sign-off, not adding it.
@@ -62,7 +65,7 @@ Tests live in `test/run.sh`. Run with:
 ./test/run.sh
 ```
 
-It spins up a throwaway git repo under `tmp/` and asserts the emitted `permissionDecision` for each tool/branch combination (commit on a feature branch, commit on `main`, all-git and mixed chains, env-prefixed/global-flag commits, non-commit `git` invocations, edits on protected vs non-protected branches, and defer cases). The harness parses the hook's JSON with `jq`, so `jq` is a test-only dependency.
+It spins up a throwaway git repo under `tmp/` and asserts the emitted `permissionDecision` for each tool/branch combination: commits and all-git/mixed chains, env-prefixed/global-flag commits, non-commit `git` invocations, edits, all three push policies (worktree-branch and force-push allow, protected/foreign-refspec/`--all` ask, defer cases), and the non-interactive-mode `ask`→`deny` conversion. The harness sets `BRANCH_GUARD_PUSH_POLICY`/`permission_mode` per case (and `unset`s the policy up top for hermeticity), and parses the hook's JSON with `jq`, so `jq` is a test-only dependency.
 
 When changing the decision logic, the git-commit detection, or `PROTECTED_BRANCH_RE`, add the case that motivated the change as a fixture, and hand-exercise the behavior table in `README.md` against the change before committing.
 
