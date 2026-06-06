@@ -17,6 +17,11 @@ ASSIGNMENT_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
 SEPARATORS = {'|', '||', '&&', '&', ';', '\n', '(', ')'}
 REDIR = {'>', '>>', '<', '<<', '<<<', '>|', '&>', '&>>'}
 
+# Every char shlex treats as punctuation (see `punctuation_chars` in main).
+# A token built only from these is an operator run; anything else is a word
+# (so a quoted filename containing one of these survives normalization).
+PUNCT_CHARS = frozenset(';()<>|&\n')
+
 # Well-known device / FD paths that are safe to read or write regardless of
 # workspace boundary. Matched against the raw token before realpath, because
 # `/dev/stdin` resolves to `/dev/fd/0` on darwin and `/proc/self/fd/0` on Linux.
@@ -213,6 +218,32 @@ def strip_env_prefix(tokens):
     return tokens[i:]
 
 
+def split_newline_separators(tokens):
+    """Peel newlines out of operator-run tokens so each becomes its own token.
+
+    With `\\n` in shlex's `punctuation_chars` it is emitted (not swallowed as
+    whitespace), but it glues onto adjacent operators: `cmd1;\\ncmd2` tokenizes
+    `;\\n`, `cmd1 |\\ncmd2` tokenizes `|\\n`, a blank line tokenizes `\\n\\n`.
+    None of those match `SEPARATORS`, so a newline-only command boundary would
+    be missed and the two commands would merge into one group — the very bug
+    this guards against (false positives from extra tokens read as file args,
+    and a false negative when a guarded command trails an unguarded one).
+
+    Splitting is applied ONLY to pure operator runs (every char in
+    `PUNCT_CHARS`); a quoted filename that happens to contain a newline is a
+    word token with non-punctuation chars and is left intact. The non-newline
+    chunks are whatever shlex already grouped (`;`, `|`, `&>`, ...), so they
+    stay valid `SEPARATORS`/`REDIR` entries.
+    """
+    out = []
+    for t in tokens:
+        if t and '\n' in t and all(c in PUNCT_CHARS for c in t):
+            out += [p for p in re.split(r'(\n)', t) if p]
+        else:
+            out.append(t)
+    return out
+
+
 def split_eq(tok):
     """--opt=val -> ('--opt','val'); otherwise (tok, None)."""
     if tok.startswith('--') and '=' in tok:
@@ -400,9 +431,15 @@ def main():
         return
 
     try:
-        lex = shlex.shlex(cmd, posix=True, punctuation_chars=';()<>|&')
+        # `\n` is a punctuation char so a newline command boundary surfaces as
+        # a token (it is otherwise eaten as whitespace, merging the commands on
+        # either side). Removing it from `whitespace` stops shlex re-swallowing
+        # it; quoted newlines stay inside their word token regardless. The runs
+        # this produces (`;\n`, `|\n`, ...) are split back apart below.
+        lex = shlex.shlex(cmd, posix=True, punctuation_chars=';()<>|&\n')
         lex.whitespace_split = True
-        tokens = list(lex)
+        lex.whitespace = lex.whitespace.replace('\n', '')
+        tokens = split_newline_separators(list(lex))
     except ValueError:
         return                                    # unbalanced quotes -> defer
 

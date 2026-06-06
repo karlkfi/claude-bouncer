@@ -141,7 +141,9 @@ file in your repo; it should run without prompting.
 
 1. **Tokenize** the command with Python's `shlex` (POSIX mode, punctuation
    grouping) so quotes are respected and shell operators (`|`, `&&`, `>`, `;`)
-   become their own tokens.
+   become their own tokens. A newline outside quotes is also a command
+   separator — like `;` — so a guarded command on a line after another is
+   classified on its own rather than merged into its neighbour.
 2. **Split** into simple commands on those operators and pull redirect targets
    (`> file`) aside as files to check. The token after `<<` (heredoc
    delimiter) or `<<<` (here-string content) is skipped — it isn't a path.

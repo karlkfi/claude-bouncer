@@ -14,7 +14,7 @@ Single source of truth for progress and priorities in workspace-guard. Pick the 
 - **New item identified:** append it to the Queue with the next unused ID. Batch audit-discovery items in one commit.
 - **`Last touched:` is one line, date only.** Do not append session narrative.
 
-Last touched: 2026-06-01
+Last touched: 2026-06-06
 
 ---
 

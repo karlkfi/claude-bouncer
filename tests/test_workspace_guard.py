@@ -1738,6 +1738,108 @@ class HookEndToEndTests(unittest.TestCase):
         self._defer("ls > /tmp/out.txt")
 
 
+class SplitNewlineSeparatorsTests(unittest.TestCase):
+    """`split_newline_separators` peels newlines out of operator-run tokens
+    (Q18) while leaving word tokens — including quoted strings that contain a
+    newline — untouched."""
+
+    def test_semicolon_newline_run_split(self):
+        self.assertEqual(
+            guard.split_newline_separators([";\n"]), [";", "\n"])
+
+    def test_pipe_newline_run_split(self):
+        self.assertEqual(
+            guard.split_newline_separators(["|\n"]), ["|", "\n"])
+
+    def test_blank_line_double_newline_split(self):
+        self.assertEqual(
+            guard.split_newline_separators(["\n\n"]), ["\n", "\n"])
+
+    def test_redirect_newline_run_split(self):
+        self.assertEqual(
+            guard.split_newline_separators(["&>\n"]), ["&>", "\n"])
+
+    def test_operator_without_newline_unchanged(self):
+        self.assertEqual(guard.split_newline_separators(["&&"]), ["&&"])
+
+    def test_quoted_word_with_newline_left_intact(self):
+        # A filename/string from quotes contains non-punctuation chars, so it
+        # is a word token and must NOT be split even though it has a newline.
+        self.assertEqual(
+            guard.split_newline_separators(["line1\nline2"]), ["line1\nline2"])
+
+    def test_plain_tokens_pass_through(self):
+        self.assertEqual(
+            guard.split_newline_separators(["grep", "PAT", "f.txt"]),
+            ["grep", "PAT", "f.txt"])
+
+
+class NewlineSeparatorEndToEndTests(unittest.TestCase):
+    """Newline-only command boundaries split into separate groups (Q18).
+
+    Before the fix `shlex` swallowed `\\n` as whitespace, merging a command
+    with the one on the next line into a single group — producing both false
+    positives (the next command's tokens read as file args) and a false
+    negative (a guarded command after an unguarded one escaped the guard)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = os.path.realpath(self._tmp.name)
+        with open(os.path.join(self.workspace, "in.txt"), "w") as f:
+            f.write("hello\n")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _decision(self, cmd, expected):
+        out = run_hook(cmd, self.workspace, project_dir=self.workspace)
+        self.assertIsNotNone(out, f"expected a decision, got defer for: {cmd!r}")
+        got = out["hookSpecificOutput"]["permissionDecision"]
+        self.assertEqual(
+            got, expected,
+            f"expected {expected!r} for {cmd!r}; got {got!r} "
+            f"(reason: {out['hookSpecificOutput'].get('permissionDecisionReason')!r})",
+        )
+        return out
+
+    def test_false_negative_guarded_after_unguarded_newline_ask(self):
+        # The security regression: `echo` (unguarded) then a newline then a
+        # guarded `grep` of an outside path. Pre-fix the whole thing merged
+        # into the unguarded `echo` group and deferred (silent allow).
+        out = self._decision("echo hi\ngrep PAT /tmp/q18-fake-target", "ask")
+        self.assertIn(
+            "/tmp/q18-fake-target",
+            out["hookSpecificOutput"]["permissionDecisionReason"],
+        )
+
+    def test_false_positive_next_line_echo_not_a_file_arg(self):
+        # The reported case (inverted order): a guarded `grep` of an outside
+        # path, then a newline, then `echo` with an outside-looking string.
+        # Pre-fix `echo` and its string merged into the grep group and were
+        # flagged as file args. Post-fix only the real grep target is named.
+        out = self._decision(
+            'grep PAT /tmp/q18-real-target\necho "/tmp/q18-echo-string"', "ask")
+        reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("/tmp/q18-real-target", reason)
+        self.assertNotIn("/tmp/q18-echo-string", reason)
+        self.assertNotIn("echo", reason)
+
+    def test_newline_separates_guarded_groups_like_semicolon(self):
+        # `cat in.txt <newline> cat OUTSIDE` — first reads a workspace file,
+        # only the second is flagged. Mirrors the `;`-separator behavior.
+        out = self._decision("cat in.txt\ncat /tmp/q18-fake-target", "ask")
+        reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("/tmp/q18-fake-target", reason)
+        self.assertNotIn("in.txt", reason)
+
+    def test_workspace_only_multiline_allow(self):
+        self._decision("cat in.txt\ngrep PAT in.txt", "allow")
+
+    def test_trailing_semicolon_then_newline_allow(self):
+        # Exercises the `;\n` combined-run token path end-to-end.
+        self._decision("cat in.txt;\ngrep PAT in.txt", "allow")
+
+
 class BuildReasonTests(unittest.TestCase):
     """The decision reason names offenders AND tailors the fix per category."""
 
