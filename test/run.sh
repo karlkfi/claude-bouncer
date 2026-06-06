@@ -118,44 +118,72 @@ check "edit missing file_path -> none" none \
 # Push guard. Run from the worktree on the feature branch unless noted.
 git -C "$WORK" checkout -q claude/x
 
-# 7. default policy (protected): ask only when the target is a protected branch
-push() { printf '{"tool_name":"Bash","tool_input":{"command":"%s"}}' "$1"; }
+# JSON payload helpers.
+push()      { printf '{"tool_name":"Bash","tool_input":{"command":"%s"}}' "$1"; }
+push_mode() { printf '{"tool_name":"Bash","tool_input":{"command":"%s"},"permission_mode":"%s"}' "$1" "$2"; }
 
-check "[protected] push origin main -> ask" ask \
-  "$(decision_for "$(push 'git push origin main')" "$WORK")"
-check "[protected] push origin HEAD:main -> ask" ask \
-  "$(decision_for "$(push 'git push origin HEAD:main')" "$WORK")"
-check "[protected] push delete main (:main) -> ask" ask \
-  "$(decision_for "$(push 'git push origin :main')" "$WORK")"
-check "[protected] push --all -> ask" ask \
-  "$(decision_for "$(push 'git push --all origin')" "$WORK")"
-check "[protected] bare push -> none" none \
+PROT='BRANCH_GUARD_PUSH_POLICY=protected'
+OFF='BRANCH_GUARD_PUSH_POLICY=off'
+
+# 7. strict is the default: auto-approve a push of the worktree's own branch
+#    (including force pushes); ask for anything else.
+check "[default=strict] bare push -> allow" allow \
   "$(decision_for "$(push 'git push')" "$WORK")"
-check "[protected] push origin HEAD -> none" none \
+check "[default=strict] push origin HEAD -> allow" allow \
   "$(decision_for "$(push 'git push origin HEAD')" "$WORK")"
-check "[protected] push other feature branch -> none" none \
-  "$(decision_for "$(push 'git push origin feature-y')" "$WORK")"
-check "[protected] commit && push (feature) -> none" none \
+check "[default=strict] push origin claude/x -> allow" allow \
+  "$(decision_for "$(push 'git push origin claude/x')" "$WORK")"
+check "[default=strict] force-push worktree branch -> allow" allow \
+  "$(decision_for "$(push 'git push --force origin claude/x')" "$WORK")"
+check "[default=strict] force-push (-f) bare -> allow" allow \
+  "$(decision_for "$(push 'git push -f')" "$WORK")"
+check "[default=strict] commit && push (worktree) -> allow" allow \
   "$(decision_for "$(push 'git commit -m x && git push')" "$WORK")"
+check "[default=strict] push origin main -> ask" ask \
+  "$(decision_for "$(push 'git push origin main')" "$WORK")"
+check "[default=strict] push origin feature-y -> ask" ask \
+  "$(decision_for "$(push 'git push origin feature-y')" "$WORK")"
+check "[default=strict] push origin HEAD:other -> ask" ask \
+  "$(decision_for "$(push 'git push origin HEAD:other')" "$WORK")"
+check "[default=strict] force-push to main -> ask" ask \
+  "$(decision_for "$(push 'git push -f origin main')" "$WORK")"
+check "[default=strict] push --all -> ask" ask \
+  "$(decision_for "$(push 'git push --all origin')" "$WORK")"
+check "[default=strict] push && rm (worktree) -> none" none \
+  "$(decision_for "$(push 'git push && rm -rf foo')" "$WORK")"
 
-# 8. strict policy: ask for anything that isn't the worktree's own branch
-ENV='BRANCH_GUARD_PUSH_POLICY=strict'
-check "[strict] push origin HEAD -> none" none \
-  "$(decision_for "$(push 'git push origin HEAD')" "$WORK" "$ENV")"
-check "[strict] push origin claude/x -> none" none \
-  "$(decision_for "$(push 'git push origin claude/x')" "$WORK" "$ENV")"
-check "[strict] push origin feature-y -> ask" ask \
-  "$(decision_for "$(push 'git push origin feature-y')" "$WORK" "$ENV")"
-check "[strict] push origin HEAD:other -> ask" ask \
-  "$(decision_for "$(push 'git push origin HEAD:other')" "$WORK" "$ENV")"
-check "[strict] push origin main -> ask" ask \
-  "$(decision_for "$(push 'git push origin main')" "$WORK" "$ENV")"
-check "[strict] bare push -> none" none \
-  "$(decision_for "$(push 'git push')" "$WORK" "$ENV")"
+# 8. protected policy: ask only on a protected target; never auto-approve.
+check "[protected] push origin main -> ask" ask \
+  "$(decision_for "$(push 'git push origin main')" "$WORK" "$PROT")"
+check "[protected] push origin HEAD:main -> ask" ask \
+  "$(decision_for "$(push 'git push origin HEAD:main')" "$WORK" "$PROT")"
+check "[protected] delete main (:main) -> ask" ask \
+  "$(decision_for "$(push 'git push origin :main')" "$WORK" "$PROT")"
+check "[protected] worktree-branch push -> none" none \
+  "$(decision_for "$(push 'git push origin HEAD')" "$WORK" "$PROT")"
+check "[protected] push other feature branch -> none" none \
+  "$(decision_for "$(push 'git push origin feature-y')" "$WORK" "$PROT")"
 
-# 9. off policy: pushes are not guarded
+# 9. off policy: pushes are not guarded.
 check "[off] push origin main -> none" none \
-  "$(decision_for "$(push 'git push origin main')" "$WORK" 'BRANCH_GUARD_PUSH_POLICY=off')"
+  "$(decision_for "$(push 'git push origin main')" "$WORK" "$OFF")"
+
+# 10. non-interactive ('auto') modes: a would-be ask becomes deny (fail safe),
+#     while allow and defer are unaffected.
+check "[auto] push origin main -> deny" deny \
+  "$(decision_for "$(push_mode 'git push origin main' 'auto')" "$WORK")"
+check "[bypassPermissions] push origin main -> deny" deny \
+  "$(decision_for "$(push_mode 'git push origin main' 'bypassPermissions')" "$WORK")"
+check "[auto] worktree-branch push -> allow (unchanged)" allow \
+  "$(decision_for "$(push_mode 'git push' 'auto')" "$WORK")"
+check "[acceptEdits] push origin main -> ask (human present)" ask \
+  "$(decision_for "$(push_mode 'git push origin main' 'acceptEdits')" "$WORK")"
+
+# 11. non-interactive mode also converts a commit-on-protected ask to deny.
+git -C "$WORK" checkout -q main
+check "[auto] commit on main -> deny" deny \
+  "$(decision_for "$(push_mode 'git commit -m x' 'auto')" "$WORK")"
+git -C "$WORK" checkout -q claude/x
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [[ "$fail" -eq 0 ]]

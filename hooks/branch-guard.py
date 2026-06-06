@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
 """branch-guard: a Claude Code PreToolUse hook.
 
-Auto-approves git commits on non-protected branches (e.g. claude/*, feature
-branches) and prompts (ask) before commits or file edits that target a
-protected branch (main/master). Emits no decision for anything else, so the
-normal permission flow applies.
+Auto-approves git commits (and, under the strict push policy, pushes of the
+worktree's own branch) on non-protected branches, and prompts (ask) before a
+commit, file edit, or push that targets a protected branch (main/master) or,
+under strict, any branch other than the worktree's own. Emits no decision for
+anything else, so the normal permission flow applies.
 
 Reads the hook JSON on stdin, emits a PreToolUse decision on stdout. On any
 parsing uncertainty (unbalanced quotes, empty input, unresolvable branch) it
 defers silently so normal permissions apply — never fail closed.
+
+In a non-interactive permission mode (auto / dontAsk / bypassPermissions) there
+is no human to answer a prompt, so a would-be `ask` is emitted as `deny`
+instead — the guard fails safe rather than letting the action through
+unconfirmed. (`bypassPermissions` ignores hook decisions entirely, but emitting
+`deny` there is harmless and future-proof.)
 """
 import sys, os, json, re, shlex, subprocess
 
@@ -40,12 +47,19 @@ PUSH_VALUE_OPTS = {'--repo', '-o', '--push-option', '--receive-pack', '--exec'}
 PUSH_MANY_FLAGS = {'--all', '--mirror', '--branches'}
 
 # Push-guard policy (env var BRANCH_GUARD_PUSH_POLICY):
-#   protected (default) — ask before a push whose target is main/master.
-#   strict              — ask before any push that isn't the worktree's own
-#                         current branch (also blocks other branches, foreign
-#                         refspecs like HEAD:main, and --all/--mirror).
-#   off                 — don't guard pushes at all.
+#   strict (default) — auto-approve a push of the worktree's own current branch
+#                      (including force pushes); ask before any other push
+#                      (other branches, foreign refspecs like HEAD:main,
+#                      wildcards, --all/--mirror, or a protected target).
+#   protected        — ask before a push whose target is main/master; otherwise
+#                      defer. Never auto-approves a push.
+#   off              — don't guard pushes at all.
 PUSH_POLICIES = ('off', 'protected', 'strict')
+
+# Permission modes with no human present to answer a prompt; a would-be `ask`
+# is converted to `deny` so the guard fails safe. Defined as a set so unknown /
+# version-specific mode names simply don't match.
+NON_INTERACTIVE_MODES = frozenset({'auto', 'dontAsk', 'bypassPermissions'})
 
 
 def split_newline_separators(tokens):
@@ -157,10 +171,15 @@ def parse_refspec(spec, current, delete):
 
 def push_decision(args, current, policy):
     """Given the tokens after `push`, the worktree's current branch, and the
-    policy, return an `ask` reason string if the push should be confirmed, or
-    None to defer. On parsing uncertainty it leans toward deferring so the
-    normal permission flow applies (pair with a pre-push hook / server-side
-    branch protection for a hard guarantee)."""
+    policy, return (decision, reason) where decision is:
+      'allow' — strict policy, and the push is the worktree's own branch
+                (including a force push of it);
+      'ask'   — the push should be confirmed (target is protected, or strict
+                and the push isn't the worktree branch);
+      None    — defer to the normal permission flow.
+    On parsing uncertainty it leans toward asking (strict) / deferring
+    (protected) rather than silently allowing — pair with a pre-push hook or
+    server-side branch protection for a hard guarantee."""
     positionals, many, delete, i = [], False, False, 0
     while i < len(args):
         t = args[i]
@@ -178,33 +197,38 @@ def push_decision(args, current, policy):
         i += 1
 
     if many:
-        return "Push targets multiple branches (--all/--mirror) — confirm before proceeding."
+        return ('ask', "Push targets multiple branches (--all/--mirror) — confirm before proceeding.")
 
     # positionals[0] is the repository; the rest are refspecs. With no refspec,
-    # git pushes the current branch to its same-named upstream.
+    # git pushes the current branch to its same-named upstream. Force flags
+    # (-f / --force / --force-with-lease) don't change which branch is targeted,
+    # so a force push of the worktree branch is treated like any other.
     refspecs = positionals[1:] if positionals else []
     pairs = ([parse_refspec(s, current, delete) for s in refspecs]
              if refspecs else [(current, current, False)])
 
     for src_b, dst_b, glob in pairs:
         if glob:
-            return "Push uses a wildcard refspec (multiple branches) — confirm before proceeding."
+            return ('ask', "Push uses a wildcard refspec (multiple branches) — confirm before proceeding.")
         if dst_b and is_protected(dst_b):
-            return f"Push targets protected branch '{dst_b}' — confirm before proceeding."
+            return ('ask', f"Push targets protected branch '{dst_b}' — confirm before proceeding.")
         if policy == 'strict':
             if dst_b is not None and dst_b != current:
-                return (f"Push targets '{dst_b}', not the worktree branch "
-                        f"'{current}' — confirm before proceeding.")
+                return ('ask', f"Push targets '{dst_b}', not the worktree branch "
+                                f"'{current}' — confirm before proceeding.")
             if src_b is not None and src_b != current:
-                return (f"Push sends local branch '{src_b}', not the worktree "
-                        f"branch '{current}' — confirm before proceeding.")
-    return None
+                return ('ask', f"Push sends local branch '{src_b}', not the worktree "
+                                f"branch '{current}' — confirm before proceeding.")
+
+    if policy == 'strict':
+        return ('allow', f"Push of worktree branch '{current}' — auto-approved.")
+    return (None, None)
 
 
 def push_policy():
-    """Read BRANCH_GUARD_PUSH_POLICY; default and fall back to 'protected'."""
-    v = (os.environ.get('BRANCH_GUARD_PUSH_POLICY') or 'protected').strip().lower()
-    return v if v in PUSH_POLICIES else 'protected'
+    """Read BRANCH_GUARD_PUSH_POLICY; default and fall back to 'strict'."""
+    v = (os.environ.get('BRANCH_GUARD_PUSH_POLICY') or 'strict').strip().lower()
+    return v if v in PUSH_POLICIES else 'strict'
 
 
 def current_branch(cwd):
@@ -234,6 +258,12 @@ def emit(decision, reason):
     }}))
 
 
+def confirm(reason, mode):
+    """Emit `ask`, or `deny` when running in a non-interactive permission mode
+    where no human is present to answer the prompt (fail safe)."""
+    emit('deny' if mode in NON_INTERACTIVE_MODES else 'ask', reason)
+
+
 def main():
     try:
         data = json.load(sys.stdin)
@@ -244,6 +274,7 @@ def main():
 
     tool = data.get('tool_name') or ''
     tool_input = data.get('tool_input') or {}
+    mode = data.get('permission_mode') or ''
 
     if tool == 'Bash':
         cmd = tool_input.get('command') or ''
@@ -265,25 +296,32 @@ def main():
         if branch is None:
             return                                 # not a repo / detached -> defer
 
-        # Push guard takes priority: a chain containing a push is never
-        # auto-approved via the commit path (that would auto-approve the push).
+        # A command is only ever auto-approved when EVERY segment is a git
+        # invocation (e.g. `git add -A && git commit && git push`). A chain that
+        # mixes in a non-git command (`git commit && rm -rf ~`) is never
+        # auto-approved, so a trailing command can't ride along.
+        all_git = all(p is not None for p in parsed)
+
+        # Push guard takes priority: a chain containing a push is decided here,
+        # never auto-approved via the commit path (that would approve the push).
         if push_segs:
+            allow_reason = None
             for p in push_segs:
-                reason = push_decision(p['args'], branch, policy)
-                if reason:
-                    emit('ask', reason)
+                decision, reason = push_decision(p['args'], branch, policy)
+                if decision == 'ask':
+                    confirm(reason, mode)
                     return
-            return                                 # push allowed by policy -> defer
+                if decision == 'allow':
+                    allow_reason = reason
+            if allow_reason and all_git:
+                emit('allow', allow_reason)
+            return                                 # otherwise defer
 
         # Commit guard.
         if is_protected(branch):
-            emit('ask', f"Targets protected branch '{branch}' — confirm before proceeding.")
+            confirm(f"Targets protected branch '{branch}' — confirm before proceeding.", mode)
             return
-        # Non-protected branch: auto-approve only when EVERY segment is a git
-        # invocation (e.g. `git add -A && git commit -m x`). A chain that mixes
-        # in a non-git command (`git commit && rm -rf ~`) is deferred to the
-        # normal permission prompt rather than silently auto-approved.
-        if all(p is not None for p in parsed):
+        if all_git:
             emit('allow', f"Commit on non-protected branch '{branch}' — auto-approved.")
         return
 
@@ -295,7 +333,7 @@ def main():
         if branch is None:
             return
         if is_protected(branch):
-            emit('ask', f"Targets protected branch '{branch}' — confirm before proceeding.")
+            confirm(f"Targets protected branch '{branch}' — confirm before proceeding.", mode)
         return
 
     # Any other tool -> defer.
