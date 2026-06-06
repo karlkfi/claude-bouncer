@@ -4,10 +4,12 @@
 Run with: python3 -m unittest discover tests
      or:  python3 tests/test_workspace_guard.py
 
-Two layers:
+Three layers:
   * Unit tests import `files_in_command` and exercise per-command parsing.
   * End-to-end tests invoke the script as a subprocess and inspect the
     PreToolUse decision JSON it emits.
+  * Wiring tests assert the plugin config (hooks.json, plugin.json,
+    marketplace.json) is valid and points the hook at the real script.
 """
 import json
 import os
@@ -1914,6 +1916,83 @@ class ReasonAdviceEndToEndTests(unittest.TestCase):
         r = self._reason("popd && cat data.txt")
         self.assertIn("data.txt", r)
         self.assertIn("untracked cd", r)
+
+
+class PluginWiringTests(unittest.TestCase):
+    """The config plumbing that connects the script to Claude Code.
+
+    Unit/e2e tests can be green while the plugin silently fails to load
+    because a config file has a typo, a bad hook path, or invalid JSON.
+    These tests assert the wiring itself.
+    """
+
+    def _load_json(self, relpath):
+        path = REPO / relpath
+        self.assertTrue(path.is_file(), f"missing config file: {relpath}")
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except json.JSONDecodeError as e:
+            self.fail(f"{relpath} is not valid JSON: {e}")
+
+    # --- hooks/hooks.json ----------------------------------------------------
+
+    def test_hooks_json_registers_pretooluse_bash(self):
+        data = self._load_json("hooks/hooks.json")
+        pre = data.get("hooks", {}).get("PreToolUse")
+        self.assertIsInstance(pre, list, "hooks.PreToolUse must be a list")
+        matchers = [e.get("matcher") for e in pre]
+        self.assertIn("Bash", matchers, "no PreToolUse entry matches Bash")
+
+    def test_hooks_json_command_path_exists(self):
+        data = self._load_json("hooks/hooks.json")
+        entry = next(
+            e for e in data["hooks"]["PreToolUse"] if e.get("matcher") == "Bash"
+        )
+        commands = [
+            h["command"] for h in entry["hooks"]
+            if h.get("type") == "command" and "command" in h
+        ]
+        self.assertTrue(commands, "Bash matcher has no command-type hook")
+        # Every referenced "${CLAUDE_PLUGIN_ROOT}/<rel>" path must exist in the
+        # repo (the plugin root is the repo root at install time).
+        marker = "${CLAUDE_PLUGIN_ROOT}/"
+        found_ref = False
+        for cmd in commands:
+            idx = cmd.find(marker)
+            while idx != -1:
+                rest = cmd[idx + len(marker):]
+                # The path runs until the next quote/space that ends the token.
+                rel = rest.split('"')[0].split("'")[0].split()[0]
+                self.assertTrue(
+                    (REPO / rel).is_file(),
+                    f"hook command references missing file: {rel}",
+                )
+                found_ref = True
+                idx = cmd.find(marker, idx + 1)
+        self.assertTrue(
+            found_ref, "no hook command references ${CLAUDE_PLUGIN_ROOT}/"
+        )
+        # Sanity: the load-bearing script is the one that's wired up.
+        self.assertTrue(
+            any("bash-workspace-guard.py" in c for c in commands),
+            "the guard script is not registered as a hook command",
+        )
+
+    # --- .claude-plugin/*.json -----------------------------------------------
+
+    def test_plugin_json_valid_and_named(self):
+        data = self._load_json(".claude-plugin/plugin.json")
+        self.assertEqual(data.get("name"), "workspace-guard")
+        self.assertIn("version", data)
+
+    def test_marketplace_json_valid_and_lists_plugin(self):
+        data = self._load_json(".claude-plugin/marketplace.json")
+        names = [p.get("name") for p in data.get("plugins", [])]
+        self.assertIn(
+            "workspace-guard", names,
+            "marketplace.json does not list the workspace-guard plugin",
+        )
 
 
 if __name__ == "__main__":
