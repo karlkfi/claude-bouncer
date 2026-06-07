@@ -108,11 +108,22 @@ git -C "$WORK" checkout -q claude/x
 check "write on claude/x -> none" none \
   "$(decision_for "{\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$WORK/file.txt\"}}" "$REPO_ROOT")"
 
+# 5b. NotebookEdit (path comes in as `notebook_path`) is guarded like the other
+#     edit tools: ask on main, defer on a feature branch.
+git -C "$WORK" checkout -q main
+check "notebook edit on main -> ask" ask \
+  "$(decision_for "{\"tool_name\":\"NotebookEdit\",\"tool_input\":{\"notebook_path\":\"$WORK/file.txt\"}}" "$REPO_ROOT")"
+git -C "$WORK" checkout -q claude/x
+check "notebook edit on claude/x -> none" none \
+  "$(decision_for "{\"tool_name\":\"NotebookEdit\",\"tool_input\":{\"notebook_path\":\"$WORK/file.txt\"}}" "$REPO_ROOT")"
+
 # 6. unknown tool / missing file_path -> no decision
 check "unknown tool -> none" none \
   "$(decision_for '{"tool_name":"Read","tool_input":{"file_path":"/etc/hosts"}}' "$REPO_ROOT")"
 check "edit missing file_path -> none" none \
   "$(decision_for '{"tool_name":"Edit","tool_input":{}}' "$REPO_ROOT")"
+check "notebook edit missing notebook_path -> none" none \
+  "$(decision_for '{"tool_name":"NotebookEdit","tool_input":{}}' "$REPO_ROOT")"
 
 # ---------------------------------------------------------------------------
 # Push guard. Run from the worktree on the feature branch unless noted.
