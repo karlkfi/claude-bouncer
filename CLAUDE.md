@@ -20,7 +20,7 @@ Build the right thing AND build it well. Before writing any code, state the goal
 
 Make the smallest change that achieves the goal. If you notice problems outside the current task's scope, flag them rather than fixing them — mention them at the end of the turn or open a separate PR.
 
-Before introducing a new pattern or abstraction, check whether the existing tool dispatch in `main()` and `PROTECTED_BRANCH_RE` already solve the problem with a small edit. The tokenizer (`command_segments`, `git_subcommand`) is deliberately shared in spirit with workspace-guard — reuse that model rather than inventing a parallel one.
+Before introducing a new pattern or abstraction, check whether the existing tool dispatch in `main()` and `PROTECTED_BRANCH_RE` already solve the problem with a small edit. The lexing/parsing pipeline (`tokenize` → `command_segments` → `parse_invocation`) is deliberately shared in spirit with workspace-guard — reuse that model rather than inventing a parallel one.
 
 ## Workflow
 

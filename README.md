@@ -218,8 +218,8 @@ reinstall **branch-guard** from it.
    branch-sensitive mutations (`commit`, `merge`, `rebase`, `cherry-pick`,
    `stash`, `push`) allow on a feature branch and ask on a protected one;
    destructive commands (`reset --hard`, `clean -f`, `branch -D`, …) ask;
-   unknown or ambiguous forms defer. The branch is resolved with `git rev-parse`
-   (the session cwd for Bash, the file's own repo for edits).
+   unknown or ambiguous forms defer. The branch is resolved with
+   `git symbolic-ref` (the session cwd for Bash, the file's own repo for edits).
 5. **Combine** the segment verdicts: any `ask` → ask; else every segment must be
    `allow` → allow; else defer. Two things downgrade a would-be `allow` to defer
    without ever weakening a protective `ask`: an inline-config escape hatch
@@ -303,7 +303,7 @@ protected branch (main/master) or destructive git commands. To keep work flowing
 
 The hook runs entirely on your machine and has no network access, telemetry, or
 analytics. It reads the pending Bash/edit command and resolves the current branch
-with `git rev-parse`, decides in memory, and never opens file contents or writes
+with `git symbolic-ref`, decides in memory, and never opens file contents or writes
 anything to disk.
 
 ## Contributing
