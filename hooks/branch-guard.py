@@ -423,16 +423,19 @@ def classify_segment(inv, branch, policy):
 
 def current_branch(cwd):
     """Current branch via `git -C <cwd> symbolic-ref --short -q HEAD`, or None
-    if the directory isn't a repo / git is unavailable / HEAD won't resolve.
-    Unlike `rev-parse --abbrev-ref HEAD` (which prints the literal "HEAD" and
-    exits 0 on a detached HEAD), `symbolic-ref -q` exits non-zero when HEAD is
-    detached, so a detached HEAD resolves to None and the hook defers."""
+    if the directory isn't a repo / git is unavailable / HEAD won't resolve /
+    git hangs. Unlike `rev-parse --abbrev-ref HEAD` (which prints the literal
+    "HEAD" and exits 0 on a detached HEAD), `symbolic-ref -q` exits non-zero
+    when HEAD is detached, so a detached HEAD resolves to None and the hook
+    defers. The 5s timeout keeps a wedged repo or stuck git from blocking the
+    hook until Claude Code's 10s hook timeout fires, degrading every tool call —
+    on timeout we defer (fail safe) like any other unresolvable branch."""
     try:
         r = subprocess.run(
             ['git', '-C', cwd, 'symbolic-ref', '--short', '-q', 'HEAD'],
-            capture_output=True, text=True,
+            capture_output=True, text=True, timeout=5,
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         return None
     if r.returncode != 0:
         return None
