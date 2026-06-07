@@ -289,5 +289,29 @@ check "gh status && git status -> allow" allow \
 check "gh pr create -> none (defer)" none \
   "$(decision_for "$(bash_cmd 'gh pr create --fill')" "$WORK")"
 
+# 18. Shell-substitution bypass guard: a would-be `allow` defers when a raw
+#     token hides a command the classifier never sees (command/process
+#     substitution, unrecognized operator runs). Single-quote the command so
+#     the test shell doesn't expand the substitutions itself.
+check "backtick cmd-subst -> none (defer)" none \
+  "$(decision_for "$(bash_cmd 'git status `touch PWNED`')" "$WORK")"
+check "|& operator run -> none (defer)" none \
+  "$(decision_for "$(bash_cmd 'git status |& touch PWNED')" "$WORK")"
+check "process-subst <( ) -> none (defer)" none \
+  "$(decision_for "$(bash_cmd 'git status <(touch PWNED)')" "$WORK")"
+check "process-subst >( ) -> none (defer)" none \
+  "$(decision_for "$(bash_cmd 'git status >(touch PWNED)')" "$WORK")"
+check 'cmd-subst in quoted arg -> none (defer)' none \
+  "$(decision_for '{"tool_name":"Bash","tool_input":{"command":"git commit -m \"$(touch PWNED)\""}}' "$WORK")"
+# Subtler: substitution in a redirect TARGET. command_segments drops the
+# redirect operator and its target, so the check must run over the RAW tokens.
+check "cmd-subst in redirect target -> none (defer)" none \
+  "$(decision_for "$(bash_cmd 'git diff > `evil`')" "$WORK")"
+# Already-correct defers stay deferring (these split into a non-git segment).
+check "\$(...) splits into a segment -> none (defer)" none \
+  "$(decision_for "$(bash_cmd 'git status $(touch x)')" "$WORK")"
+check "; separator -> none (defer)" none \
+  "$(decision_for "$(bash_cmd 'git status; touch x')" "$WORK")"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [[ "$fail" -eq 0 ]]

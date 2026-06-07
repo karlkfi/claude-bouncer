@@ -80,17 +80,23 @@ the default `strict` [push policy](#push-guard).
 | `git pull` *(may merge or rebase)* | **ask** |
 | `git rebase`/`git merge` *(onto `main`)* | **ask** |
 | `git status && rm -rf foo` *(non-git segment)* | defer |
+| `` git status `touch evil` `` / `git commit -m "$(touch evil)"` *(hidden command substitution)* | defer |
+| `git status <(touch evil)` *(process substitution)* | defer |
 | `git checkout file.txt` *(ambiguous: branch vs. file)* | defer |
 | `git -c core.pager=cat log` *(inline-config escape hatch)* | defer |
 | `gh pr create` *(gh mutation)* | defer |
 | `ls -la` *(not a git/gh command)* | defer |
 
-Two rows show the design's caution. `git status && rm -rf foo` **defers** rather
+A few rows show the design's caution. `git status && rm -rf foo` **defers** rather
 than allowing: auto-approval requires *every* segment to be a recognized-safe
-git/gh invocation, so a trailing command can't ride along. `git checkout file.txt`
-**defers** because `checkout` is ambiguous — it could switch branches or discard a
-file's changes — and the hook defers on ambiguity rather than guess. Only the
-unambiguous branch-create form (`git checkout -b`) auto-approves.
+git/gh invocation, so a trailing command can't ride along. The substitution rows
+defer for the same reason a level down — `` `…` ``, `$(…)`, and `<(…)`/`>(…)` run
+a command the classifier never sees (even inside a quoted argument or a redirect
+target like `` git diff > `evil` ``), so a would-be `allow` is downgraded to defer.
+`git checkout file.txt` **defers** because `checkout` is ambiguous — it could
+switch branches or discard a file's changes — and the hook defers on ambiguity
+rather than guess. Only the unambiguous branch-create form (`git checkout -b`)
+auto-approves.
 
 The **ask** rows assume an interactive or `default`-mode session. In a
 non-interactive mode (`auto`, `dontAsk`, `bypassPermissions`) the same commands
@@ -215,9 +221,12 @@ reinstall **branch-guard** from it.
    unknown or ambiguous forms defer. The branch is resolved with `git rev-parse`
    (the session cwd for Bash, the file's own repo for edits).
 5. **Combine** the segment verdicts: any `ask` → ask; else every segment must be
-   `allow` → allow; else defer. An inline-config escape hatch
-   (`git -c core.pager='!sh …' log`) downgrades a would-be `allow` to defer, but
-   never weakens a protective `ask`.
+   `allow` → allow; else defer. Two things downgrade a would-be `allow` to defer
+   without ever weakening a protective `ask`: an inline-config escape hatch
+   (`git -c core.pager='!sh …' log`), and a hidden command/process substitution
+   in the raw token stream (`` `…` ``, `$(…)`, `<(…)`/`>(…)`, or an unrecognized
+   operator run like `|&`) — checked over the raw tokens, before redirect targets
+   are dropped, so `` git diff > `evil` `` is caught too.
 6. **Fail safe** in non-interactive modes: a would-be `ask` is emitted as `deny`,
    since no human is present to answer the prompt.
 
@@ -278,6 +287,13 @@ protected branch (main/master) or destructive git commands. To keep work flowing
   *destructive* set; anything outside both (an unknown subcommand, a `git config`
   form it can't classify, most `gh` mutations) **defers** to the normal
   permission flow rather than guessing.
+- Auto-approval is only ever withheld, never granted, by the shell-construct
+  check: a command carrying a command/process substitution (`` `…` ``, `$(…)`,
+  `<(…)`/`>(…)`) or an unrecognized operator run **defers** instead of
+  auto-approving, since those run code the classifier can't see. It is a
+  best-effort lexical check, not a sandbox — the filesystem boundary is
+  workspace-guard's job, and a hard guarantee belongs in a git `pre-push` hook
+  or server-side branch protection.
 - The push guard parses the command string, so unusual refspecs may not be
   classified (it asks/defers rather than allowing). Auto-approval is a
   convenience layer, not a security boundary — for hard guarantees use a git

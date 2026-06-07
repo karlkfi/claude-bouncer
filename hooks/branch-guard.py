@@ -123,19 +123,44 @@ def split_newline_separators(tokens):
     return out
 
 
-def command_segments(cmd):
-    """Tokenize a shell command and split it into simple-command segments.
-
-    Returns a list of token-lists, one per command separated by top-level
-    operators (`&&`, `||`, `;`, `|`, `&`, newlines, subshell parens) and with
-    redirect targets stripped out. Raises ValueError on unbalanced quotes.
-    """
+def tokenize(cmd):
+    """Lex a shell command into a flat token list (POSIX mode, punctuation
+    grouping) with newline separators peeled out of operator runs. Quotes are
+    respected and shell operators (`|`, `&&`, `>`, `;`, …) become their own
+    tokens. Raises ValueError on unbalanced quotes."""
     lex = shlex.shlex(cmd, posix=True, punctuation_chars=';()<>|&\n')
     lex.whitespace_split = True
     lex.whitespace = lex.whitespace.replace('\n', '')
     lex.commenters = ''            # `#` mid-command is not a comment in a shell line
-    tokens = split_newline_separators(list(lex))
+    return split_newline_separators(list(lex))
 
+
+def has_shell_substitution(tokens):
+    """True if any raw token hides a command the classifier never inspects:
+    command substitution (`` `…` `` or `$(…)`, including inside a quoted arg),
+    process substitution (`<(…)`/`>(…)`), or an unrecognized operator run
+    (`|&`, `;;`, `;&`) that would otherwise merge a trailing command into a
+    git segment's args. Must run over the RAW token stream (before redirect
+    targets are stripped) so a substitution in a redirect target
+    (`git diff > `evil``) is caught too. Like GIT_ESCAPE_HATCHES, this only
+    downgrades a would-be `allow` to defer — it never suppresses an `ask`."""
+    for t in tokens:
+        if '`' in t or '$(' in t:
+            return True
+        if t.startswith('<(') or t.startswith('>('):
+            return True
+        if t and all(c in PUNCT_CHARS for c in t) and t not in SEPARATORS and t not in REDIR:
+            return True
+    return False
+
+
+def command_segments(tokens):
+    """Split a flat token list (from `tokenize`) into simple-command segments.
+
+    Returns a list of token-lists, one per command separated by top-level
+    operators (`&&`, `||`, `;`, `|`, `&`, newlines, subshell parens) and with
+    redirect targets stripped out.
+    """
     segments, cur, i = [], [], 0
     while i < len(tokens):
         t = tokens[i]
@@ -477,9 +502,10 @@ def main():
         if not cmd.strip():
             return
         try:
-            segments = command_segments(cmd)
+            tokens = tokenize(cmd)
         except ValueError:
             return                                 # unbalanced quotes -> defer
+        segments = command_segments(tokens)
         invs = [parse_invocation(seg) for seg in segments]
         if not any(invs):
             return                                 # no git/gh command -> defer
@@ -496,6 +522,12 @@ def main():
                 confirm(reason, mode)
                 return
         if all(verdict == 'allow' for verdict, _ in verdicts):
+            # A hidden command substitution / process substitution / unrecognized
+            # operator would run code the classifier never saw, so it can't ride
+            # along into an auto-approve — defer (the protective `ask` above is
+            # left untouched).
+            if has_shell_substitution(tokens):
+                return
             emit('allow', (f"Safe git/gh operation on branch '{branch}' — auto-approved."
                            if branch else "Safe read-only git/gh operation — auto-approved."))
         return                                     # mixed / unknown -> defer
