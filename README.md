@@ -30,6 +30,7 @@ defers to your normal permission settings.
 - [Agent guidance: avoiding prompts](#agent-guidance-avoiding-prompts)
 - [Configuration](#configuration)
 - [Limitations](#limitations)
+- [Companion plugin](#companion-plugin)
 - [Privacy](#privacy)
 - [Contributing](#contributing)
 - [License](#license)
@@ -283,6 +284,8 @@ protected branch (main/master) or destructive git commands. To keep work flowing
 - The guard only governs Claude's `Bash`/`Edit`/`Write`/`MultiEdit`/`NotebookEdit`
   tools. It does **not** intercept file mutations done through other Bash
   commands — e.g. `sed -i`, `>` redirects, or `rm` — on a protected branch.
+  [workspace-guard](#companion-plugin), a companion plugin, guards those Bash
+  file commands on a path boundary.
 - It auto-approves a *safe* set of `git`/`gh` subcommands and asks on a
   *destructive* set; anything outside both (an unknown subcommand, a `git config`
   form it can't classify, most `gh` mutations) **defers** to the normal
@@ -298,6 +301,35 @@ protected branch (main/master) or destructive git commands. To keep work flowing
   classified (it asks/defers rather than allowing). Auto-approval is a
   convenience layer, not a security boundary — for hard guarantees use a git
   `pre-push` hook and/or server-side branch protection.
+
+## Companion plugin
+
+branch-guard reasons about **git/branch semantics** — which branch you're on and
+whether a `git`/`gh` command is destructive. It deliberately leaves the
+**filesystem boundary** to a sibling hook:
+[**workspace-guard**](https://github.com/karlkfi/claude-workspace-guard),
+path-aware bash permissions that prompt when a command reads or writes a file
+outside your project root (`$CLAUDE_PROJECT_DIR`). The two are complementary and
+don't overlap:
+
+| Plugin | Guards | Boundary |
+| --- | --- | --- |
+| **branch-guard** | `git`/`gh` commands and `Edit`/`Write`/`MultiEdit`/`NotebookEdit` | the **branch** (`main`/`master` vs. a feature branch) |
+| **workspace-guard** | file readers/writers like `grep`, `sed`, `cat`, `rm`, `cp`, `mv`, `tee`, `dd` | the **path** (inside vs. outside the project root) |
+
+This closes part of branch-guard's first [limitation](#limitations): the raw
+Bash file mutations branch-guard never sees (`sed -i`, `>` redirects, `rm`) are
+exactly what workspace-guard catches — when they touch a path outside your
+workspace. Run both for coverage across both dimensions. (Neither catches an
+in-repo `sed -i` on a protected branch; for a hard guarantee there, use a git
+`pre-commit`/`pre-push` hook or server-side branch protection.)
+
+Install it the same way as branch-guard:
+
+```
+/plugin marketplace add karlkfi/claude-workspace-guard
+/plugin install workspace-guard@workspace-guard
+```
 
 ## Privacy
 
