@@ -1,101 +1,106 @@
 # branch-guard
 
-A Claude Code plugin that lets routine git work flow freely on feature branches
-while keeping a human in the loop for anything that touches a protected branch
-or is destructive — cutting the approval prompts you'd otherwise click through,
-especially in `acceptEdits` and non-interactive modes.
+**Branch-aware git permissions for Claude Code.**
 
-It installs a single `PreToolUse` hook that classifies each `git`/`gh` command
-and **auto-approves the safe ones**:
+[![release](https://img.shields.io/github/v/release/karlkfi/claude-branch-guard)](https://github.com/karlkfi/claude-branch-guard/releases) [![tests](https://img.shields.io/github/actions/workflow/status/karlkfi/claude-branch-guard/tests.yml?branch=main&label=tests)](https://github.com/karlkfi/claude-branch-guard/actions/workflows/tests.yml) [![License: MIT](https://img.shields.io/github/license/karlkfi/claude-branch-guard.svg)](LICENSE) [![Claude Code plugin](https://img.shields.io/badge/Claude_Code-plugin-7e57c2)](#install)
 
-- **read-only git** — `status`, `diff`, `log`, `show`, `branch` (list), `fetch`,
-  `rev-parse`, `remote -v`, `stash list`, `config --get`, … (on any branch),
-- **safe mutations** — `add`, `restore --staged`, `switch -c` / `checkout -b`,
-  `worktree add`, branch/tag creation (on any branch),
-- **`git commit`**, and a `git push` of the worktree's own branch — including
-  force pushes — when the branch is *not* protected,
-- **read-only `gh`** — `gh pr view`/`list`/`status`, `gh repo view`, …
+> Let Claude commit and push all day on feature branches. Pause it at `main`.
 
-It **prompts you (`ask`)** before anything that needs a human:
+Claude finishes a task and runs `git add -A && git commit -m "fix" && git push` —
+straight onto whatever branch is checked out. Most of the time that's a throwaway
+`claude/*` branch and you want it to just happen. Once in a while it's `main`, or
+it's `git reset --hard`, or `git push origin HEAD:main`. The default
+`Bash(git commit:*)` permission rules can't tell these apart — they either trust
+every git command or prompt on every one.
 
-- a `git commit`, file edit (`Edit`/`Write`/`MultiEdit`), or `git push` to a
-  **protected branch** (`main`/`master`) — or, under the default `strict` push
-  policy, a push to *any* branch other than the worktree's own,
-- destructive commands on any branch — `reset --hard`, `clean -f`, `branch -D`,
-  `restore` (worktree), `worktree remove`, `stash drop`, `config --global`,
-  `filter-branch`, `gc`,
-- a `git merge`/`rebase`/`cherry-pick`/`pull` that targets a protected branch.
+branch-guard is a `PreToolUse` hook that classifies each `git`/`gh` command,
+**auto-approves the safe ones** (read-only, staging, branch/worktree creation,
+commits and pushes on a feature branch), and **prompts** before anything that
+touches a protected branch (`main`/`master`) or is destructive. Everything else
+defers to your normal permission settings.
 
-Everything else is left untouched — the hook stays silent and the normal Claude
-Code permission flow applies.
+## Contents
 
-A command is auto-approved only when **every** segment in it is a
-recognized-safe `git`/`gh` invocation, so a non-git command can't ride along
-into an approval (`git status && rm -rf foo` defers; it isn't allowed).
+- [What it does](#what-it-does)
+- [Behavior](#behavior)
+- [Push guard](#push-guard)
+- [Install](#install)
+- [Upgrade](#upgrade)
+- [How it works](#how-it-works)
+- [Agent guidance: avoiding prompts](#agent-guidance-avoiding-prompts)
+- [Configuration](#configuration)
+- [Limitations](#limitations)
+- [Privacy](#privacy)
+- [Contributing](#contributing)
+- [License](#license)
 
-In a **non-interactive permission mode** (`auto`, `dontAsk`, `bypassPermissions`)
-there is no human present to answer a prompt, so any decision that would be an
-`ask` is emitted as a **`deny`** instead — the guard fails safe rather than
-letting the action through unconfirmed.
+## What it does
 
-Commands are tokenized with Python's `shlex` (not substring matching), so the
-hook recognises subcommands through env-var prefixes
-(`GIT_AUTHOR_NAME=x git commit`), global flags (`git -C path commit`), combined
-short flags (`git clean -fd`), and command chains (`git add -A && git commit`).
-An inline-config escape hatch (`git -c core.pager='!sh …' log`) blocks
-auto-approval (the command defers) but never weakens a protective `ask`.
+The hook produces one of three outcomes per command:
 
-> **Scope:** branch-guard reasons about git/branch *semantics*. The filesystem
-> boundary — commands reading or writing files outside the workspace — is the
-> companion **workspace-guard** plugin's job; the two are complementary and
-> don't overlap.
+- **allow** — the command runs without a prompt.
+- **ask** — Claude Code shows its standard permission prompt. You approve or
+  reject. In a non-interactive mode this becomes **deny** (see
+  [Configuration](#configuration)).
+- **defer** — the hook stays silent; your normal permission settings apply.
 
-## Why
-
-In a worktree-based workflow you want zero friction committing to throwaway
-`claude/*` branches, but a deliberate pause before you commit to — or edit files
-checked out on — `main`/`master`. branch-guard encodes exactly that policy so
-you don't have to approve every routine feature-branch commit by hand, yet can't
-silently mutate a protected branch.
-
-The edit check resolves the branch of **the file's own repository**
-(`git -C <dir-of-file>`), not the session's working directory. That deliberately
-catches edits made through a checkout sitting on `main` (for example a parent
-repo path) even while your session's cwd is a feature-branch worktree.
+It guards the `Bash` tool (for `git` and `gh` commands) and the `Edit`, `Write`,
+and `MultiEdit` tools (for the branch a file's repository is on).
 
 ## Behavior
 
-For a **Bash** command, each segment is classified and the command-level
-decision is: any segment needs an `ask` → **ask**; else every segment is
-recognized-safe → **allow**; else → defer.
+For a Bash command, every segment is classified and the command-level decision
+is: **any segment needs `ask` → ask; else every segment is recognized-safe →
+allow; else defer.** So a non-git command can never ride along into an approval.
 
-| `git` / `gh` command (Bash) | Current branch | Decision |
-|---|---|---|
-| read-only git (`status`, `diff`, `log`, `branch`, `fetch`, `rev-parse`, …) | any | **allow** (auto) |
-| safe mutations (`add`, `restore --staged`, `switch -c`, `checkout -b`, `worktree add`, branch/tag create) | any | **allow** (auto) |
-| read-only gh (`gh pr view`/`list`/`status`, `gh repo view`, …) | any | **allow** (auto) |
-| `git commit`; `git merge`/`rebase`/`cherry-pick`/`stash` | non-protected (e.g. `claude/x`) | **allow** (auto) |
-| `git commit`; `git merge`/`rebase`/`cherry-pick`/`stash` | `main` / `master` | **ask** |
-| `git push` of the worktree's own branch, incl. force | non-protected, `strict` policy | **allow** (auto) |
-| `git push` elsewhere — see [Push guard](#push-guard) | any | **ask** / defer (per policy) |
-| destructive (`reset --hard`, `clean -f`, `branch -D`, `restore`, `worktree remove`, `stash drop`, `config --global`, `filter-branch`, `gc`) | any | **ask** |
-| `git pull` without `--ff-only` | any | **ask** |
-| anything mixing in a non-git/gh command, or an unrecognized subcommand | any | no decision (defer) |
-| `Edit` / `Write` / `MultiEdit` | file's repo on `main` / `master` | **ask** |
-| `Edit` / `Write` / `MultiEdit` | file's repo on non-protected branch | no decision (defer) |
-| any other tool | any | no decision (defer) |
+The table below assumes the worktree is on a feature branch (`claude/x`) under
+the default `strict` [push policy](#push-guard).
 
-"No decision" means the hook emits nothing and Claude Code applies its usual
-permission rules. In a non-interactive permission mode every **ask** above
-becomes a **deny** (see [the note at the top](#branch-guard)).
+| Command | Decision |
+| --- | --- |
+| `git status` / `git diff` / `git log` | allow |
+| `git add -A` | allow |
+| `git switch -c claude/y` / `git checkout -b claude/y` | allow |
+| `git worktree add ../wt feature` | allow |
+| `git commit -m "fix"` *(feature branch)* | allow |
+| `git add -A && git commit -m x && git push` *(feature branch)* | allow |
+| `git push` / `git push -u origin HEAD` *(worktree branch)* | allow |
+| `git push --force` *(worktree branch)* | allow |
+| `gh pr view 123` / `gh pr list` / `gh repo view` | allow |
+| `git pull --ff-only` | allow |
+| `git commit -m "fix"` *(on `main`)* | **ask** |
+| editing a file whose repo is on `main` *(Edit/Write/MultiEdit)* | **ask** |
+| `git push origin main` / `git push origin HEAD:main` | **ask** |
+| `git push origin other-branch` *(strict policy)* | **ask** |
+| `git reset --hard HEAD~1` | **ask** |
+| `git clean -fd` | **ask** |
+| `git branch -D old` | **ask** |
+| `git restore file.txt` *(discards working changes)* | **ask** |
+| `git config --global user.name x` | **ask** |
+| `git pull` *(may merge or rebase)* | **ask** |
+| `git rebase`/`git merge` *(onto `main`)* | **ask** |
+| `git status && rm -rf foo` *(non-git segment)* | defer |
+| `git checkout file.txt` *(ambiguous: branch vs. file)* | defer |
+| `git -c core.pager=cat log` *(inline-config escape hatch)* | defer |
+| `gh pr create` *(gh mutation)* | defer |
+| `ls -la` *(not a git/gh command)* | defer |
 
-A command is auto-approved (**allow**) only when **every** segment in it is a
-recognized-safe `git`/`gh` invocation. A chain that mixes in a non-git command
-(e.g. `git commit && rm -rf foo`, or `git push && rm -rf foo`) is *not*
-auto-approved — it defers to the normal permission prompt — so a trailing
-command can't ride along into a silent approval. When in doubt (an unknown
-subcommand, an inline-config escape hatch, an ambiguous `git checkout <name>`)
-the hook **defers** rather than guessing.
+Two rows show the design's caution. `git status && rm -rf foo` **defers** rather
+than allowing: auto-approval requires *every* segment to be a recognized-safe
+git/gh invocation, so a trailing command can't ride along. `git checkout file.txt`
+**defers** because `checkout` is ambiguous — it could switch branches or discard a
+file's changes — and the hook defers on ambiguity rather than guess. Only the
+unambiguous branch-create form (`git checkout -b`) auto-approves.
+
+The **ask** rows assume an interactive or `default`-mode session. In a
+non-interactive mode (`auto`, `dontAsk`, `bypassPermissions`) the same commands
+return **deny** — equally blocking, with recoverable feedback for the agent
+instead of a prompt no one can answer. See [Configuration](#configuration).
+
+The edit check resolves the branch of **the file's own repository**
+(`git -C <dir-of-file>`), not the session's working directory — so it catches an
+edit to a file checked out on `main` (e.g. a parent repo path) even while your
+session's cwd is a feature-branch worktree.
 
 ## Push guard
 
@@ -103,73 +108,57 @@ the hook **defers** rather than guessing.
 variable:
 
 | Policy | Behavior |
-|---|---|
-| `strict` *(default)* | **allow** (auto) a push of the worktree's own current branch, including a force push of it. **ask** before any other push — a *different* branch (`git push origin other`), foreign refspecs (`git push origin HEAD:other`), wildcards, `--all`/`--mirror`, or a protected target. |
-| `protected` | **ask** before a push whose target is `main`/`master` (including `git push origin main`, `git push origin HEAD:main`, deleting `main`, and `--all`/`--mirror`). Any other push defers. Never auto-approves. |
+| --- | --- |
+| `strict` *(default)* | **allow** a push of the worktree's own current branch, including a force push of it. **ask** before any other push — a *different* branch (`git push origin other`), foreign refspecs (`git push origin HEAD:other`), wildcards, `--all`/`--mirror`, or a protected target. |
+| `protected` | **ask** before a push whose target is `main`/`master` (including `git push origin main`, `HEAD:main`, deleting `main`, and `--all`/`--mirror`). Any other push defers. Never auto-approves. |
 | `off` | Pushes are not guarded at all. |
 
-A bare `git push` / `git push origin` pushes the current branch to its
-same-named upstream: under `strict` it is auto-approved (it's the worktree
-branch); under `protected` it defers.
+A bare `git push` / `git push origin` pushes the current branch to its same-named
+upstream: under `strict` it is auto-approved (it's the worktree branch); under
+`protected` it defers.
 
-Set it in `~/.claude/settings.json` (or a project's `.claude/settings.json`):
-
-```json
-{ "env": { "BRANCH_GUARD_PUSH_POLICY": "protected" } }
-```
-
-The push guard is **best-effort**: it parses the Bash command Claude runs and so
-only governs Claude's `Bash` tool, and unusual refspecs may not be classified
-(in which case it asks under `strict` / defers under `protected`, never silently
-allowing). For a hard guarantee that no push reaches a protected branch —
+The push guard is **best-effort**: it parses the Bash command Claude runs (so it
+only governs Claude's `Bash` tool), and unusual refspecs may not be classified —
+in which case it asks under `strict` / defers under `protected`, never silently
+allowing. For a hard guarantee that no push reaches a protected branch —
 regardless of how it's invoked or from which machine — pair it with a git
 `pre-push` hook and/or server-side branch protection.
 
-### Known limitations
+## Install
 
-- The guard only governs Claude's `Bash`/`Edit`/`Write`/`MultiEdit` tools. It
-  does **not** intercept file mutations done through other Bash commands —
-  e.g. `sed -i`, `>` redirects, or `rm` — on a protected branch.
-- It auto-approves a *safe* set of `git`/`gh` subcommands and asks on a
-  *destructive* set; anything outside both (an unknown subcommand, `git config`
-  reads/writes it can't classify, most `gh` mutations) **defers** to the normal
-  permission flow rather than guessing. Auto-approval is a convenience layer, not
-  a security boundary — for hard guarantees use a git `pre-push` hook and/or
-  server-side branch protection.
+Install on any Claude Code surface that runs plugin `PreToolUse` hooks — the CLI,
+the IDE extensions, or **Claude Code for Claude Desktop**.
 
-## Requirements
+**Claude Code (CLI or IDE extension)** — run the slash commands:
 
-- `python3` (standard library only) and `git` on `PATH`.
-
-## Test
-
-```bash
-./test/run.sh
 ```
-
-Spins up a throwaway git repo under `tmp/` and asserts the decision for each
-tool/branch combination. The test harness additionally needs `jq` on `PATH` to
-read the hook's JSON output.
-
-## Activation
-
-The plugin self-hosts as a single-plugin marketplace, so you can install it
-straight from this directory.
-
-### Interactive
-
-```text
-/plugin marketplace add ~/workspace/claude-branch-guard
+/plugin marketplace add karlkfi/claude-branch-guard
 /plugin install branch-guard@claude-branch-guard
 ```
 
-(CLI equivalents: `claude plugin marketplace add ~/workspace/claude-branch-guard`
-then `claude plugin install branch-guard@claude-branch-guard`.)
+**Claude Code for Claude Desktop** — use the **Customize** tab:
 
-### Via settings.json
+1. Open the **Customize** tab and go to its plugins / marketplaces section.
+2. Add `karlkfi/claude-branch-guard` as a marketplace (the repo at
+   `https://github.com/karlkfi/claude-branch-guard.git`).
+3. Find **branch-guard** in that marketplace, install it, and make sure it's
+   enabled.
 
-Add to `~/.claude/settings.json` (all projects) or a project's
-`.claude/settings.json` (this project only):
+After installing with either method:
+
+- Requires `python3` and `git` on your PATH.
+- Restart Claude Code so the hook is registered.
+- **Won't fire where plugin `PreToolUse` hooks don't run** (e.g. surfaces that
+  don't yet run plugin hooks); there the guard never fires.
+
+To verify, ask Claude to run `git commit -m test` on a checkout sitting on `main`
+— you should see a permission prompt citing the protected branch. Then ask it to
+commit on a `claude/*` or feature branch; it should run without prompting.
+
+### Local install (development)
+
+To run the plugin straight from a checkout instead of the GitHub marketplace,
+add it as a `directory` marketplace in `~/.claude/settings.json`:
 
 ```json
 {
@@ -184,5 +173,137 @@ Add to `~/.claude/settings.json` (all projects) or a project's
 }
 ```
 
-To point at a remote instead of a local path, replace the `source` with a
-`github`/`git`/`url` form (see the Claude Code plugin-marketplace docs).
+## Upgrade
+
+branch-guard installs from a GitHub marketplace, which Claude Code tracks at the
+repository's default branch (`main`). It does **not** auto-update by default, so a
+newer release won't reach you until you refresh the marketplace and reinstall.
+
+**Claude Code (CLI or IDE extension)** — run the slash commands:
+
+```
+/plugin marketplace update claude-branch-guard
+/plugin uninstall branch-guard@claude-branch-guard
+/plugin install branch-guard@claude-branch-guard
+```
+
+The first command re-fetches the marketplace manifest from the repo; the
+reinstall picks up the new version. After upgrading, run `/reload-plugins` to
+activate the updated hook without restarting, or restart Claude Code.
+
+**Claude Code for Claude Desktop** — in the **Customize** tab's plugins /
+marketplaces section, refresh the `claude-branch-guard` marketplace, then
+reinstall **branch-guard** from it.
+
+## How it works
+
+1. **Tokenize** the command with Python's `shlex` (POSIX mode, punctuation
+   grouping) so quotes are respected and shell operators (`|`, `&&`, `>`, `;`,
+   newlines) become their own tokens.
+2. **Split** into simple-command segments on those operators and drop redirect
+   targets aside.
+3. **Parse** each segment with `parse_invocation`: strip leading
+   `NAME=VALUE` env prefixes (`GIT_AUTHOR_NAME=x git …`) and program global
+   options (`git -C path`, `-c k=v`) to find the `git`/`gh` subcommand and its
+   arguments. Combined short flags (`git clean -fd`) are decomposed.
+4. **Classify** each segment as `allow` / `ask` / `defer` / non-git:
+   read-only git and gh and harmless mutations (`add`, `restore --staged`,
+   `switch -c`, `worktree add`, branch/tag create) allow on any branch;
+   branch-sensitive mutations (`commit`, `merge`, `rebase`, `cherry-pick`,
+   `stash`, `push`) allow on a feature branch and ask on a protected one;
+   destructive commands (`reset --hard`, `clean -f`, `branch -D`, …) ask;
+   unknown or ambiguous forms defer. The branch is resolved with `git rev-parse`
+   (the session cwd for Bash, the file's own repo for edits).
+5. **Combine** the segment verdicts: any `ask` → ask; else every segment must be
+   `allow` → allow; else defer. An inline-config escape hatch
+   (`git -c core.pager='!sh …' log`) downgrades a would-be `allow` to defer, but
+   never weakens a protective `ask`.
+6. **Fail safe** in non-interactive modes: a would-be `ask` is emitted as `deny`,
+   since no human is present to answer the prompt.
+
+## Agent guidance: avoiding prompts
+
+Most branch-guard prompts are intentional — they fire when Claude touches a
+protected branch or runs something destructive. But a few habits keep work
+flowing. Paste the block below into your project's `CLAUDE.md` (or `AGENTS.md`):
+
+```markdown
+## Avoiding branch-guard permission prompts
+
+This repo uses branch-guard, a hook that prompts before git/edit operations on a
+protected branch (main/master) or destructive git commands. To keep work flowing:
+
+- **Work on a feature branch, not main/master.** Commit, push, merge, and rebase
+  all run without a prompt on a `claude/*` or feature branch; the same on
+  main/master prompts. Use `git switch -c claude/<topic>` (or a worktree) before
+  editing or committing.
+- **Push the worktree's own branch.** `git push` / `git push -u origin HEAD`
+  auto-approves; pushing a different branch or a refspec like `HEAD:main` prompts.
+- **Prefer fast-forward pulls.** `git pull --ff-only` is auto-approved; a bare
+  `git pull` (which may merge or rebase) prompts.
+- **Run git commands on their own, not chained with non-git commands.**
+  `git commit && <other>` won't auto-approve — the trailing command can't ride
+  along. Run them as separate commands.
+- **Expect a prompt for destructive commands** (`reset --hard`, `clean -f`,
+  `branch -D`, `restore <path>`, `config --global`) — that's by design.
+```
+
+## Configuration
+
+- **Push policy** — set `BRANCH_GUARD_PUSH_POLICY` to `strict` (default),
+  `protected`, or `off` (see [Push guard](#push-guard)). Set it in
+  `~/.claude/settings.json` (all projects) or a project's
+  `.claude/settings.json`:
+
+  ```json
+  { "env": { "BRANCH_GUARD_PUSH_POLICY": "protected" } }
+  ```
+
+- **Protected branches** — the default set is `main` and `master`, defined by
+  `PROTECTED_BRANCH_RE` at the top of `hooks/branch-guard.py`. Edit the regex to
+  protect additional branches (e.g. `release/*`).
+
+- **Non-interactive modes** — in `auto`, `dontAsk`, and `bypassPermissions` an
+  `ask` is automatically emitted as `deny` so the guard fails safe when no human
+  is present. (Claude Code ignores hook decisions entirely under
+  `bypassPermissions`, so a hard guarantee there still needs a git `pre-push`
+  hook or server-side branch protection.)
+
+## Limitations
+
+- The guard only governs Claude's `Bash`/`Edit`/`Write`/`MultiEdit` tools. It
+  does **not** intercept file mutations done through other Bash commands —
+  e.g. `sed -i`, `>` redirects, or `rm` — on a protected branch.
+- It auto-approves a *safe* set of `git`/`gh` subcommands and asks on a
+  *destructive* set; anything outside both (an unknown subcommand, a `git config`
+  form it can't classify, most `gh` mutations) **defers** to the normal
+  permission flow rather than guessing.
+- The push guard parses the command string, so unusual refspecs may not be
+  classified (it asks/defers rather than allowing). Auto-approval is a
+  convenience layer, not a security boundary — for hard guarantees use a git
+  `pre-push` hook and/or server-side branch protection.
+
+## Privacy
+
+The hook runs entirely on your machine and has no network access, telemetry, or
+analytics. It reads the pending Bash/edit command and resolves the current branch
+with `git rev-parse`, decides in memory, and never opens file contents or writes
+anything to disk.
+
+## Contributing
+
+Bugs, ideas, and questions go in
+[GitHub Issues](https://github.com/karlkfi/claude-branch-guard/issues).
+
+Run the test suite (spins up a throwaway git repo under `tmp/` and asserts the
+decision for each command/branch combination):
+
+```bash
+./test/run.sh
+```
+
+It needs `python3` and `git`, plus `jq` to read the hook's JSON output.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
