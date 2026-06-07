@@ -45,7 +45,7 @@ The hook produces one of three outcomes per command:
 - **defer** — the hook stays silent; your normal permission settings apply.
 
 It guards the `Bash` tool (for `git` and `gh` commands) and the `Edit`, `Write`,
-and `MultiEdit` tools (for the branch a file's repository is on).
+`MultiEdit`, and `NotebookEdit` tools (for the branch a file's repository is on).
 
 ## Behavior
 
@@ -69,7 +69,7 @@ the default `strict` [push policy](#push-guard).
 | `gh pr view 123` / `gh pr list` / `gh repo view` | allow |
 | `git pull --ff-only` | allow |
 | `git commit -m "fix"` *(on `main`)* | **ask** |
-| editing a file whose repo is on `main` *(Edit/Write/MultiEdit)* | **ask** |
+| editing a file whose repo is on `main` *(Edit/Write/MultiEdit/NotebookEdit)* | **ask** |
 | `git push origin main` / `git push origin HEAD:main` | **ask** |
 | `git push origin other-branch` *(strict policy)* | **ask** |
 | `git reset --hard HEAD~1` | **ask** |
@@ -271,9 +271,9 @@ protected branch (main/master) or destructive git commands. To keep work flowing
 
 ## Limitations
 
-- The guard only governs Claude's `Bash`/`Edit`/`Write`/`MultiEdit` tools. It
-  does **not** intercept file mutations done through other Bash commands —
-  e.g. `sed -i`, `>` redirects, or `rm` — on a protected branch.
+- The guard only governs Claude's `Bash`/`Edit`/`Write`/`MultiEdit`/`NotebookEdit`
+  tools. It does **not** intercept file mutations done through other Bash
+  commands — e.g. `sed -i`, `>` redirects, or `rm` — on a protected branch.
 - It auto-approves a *safe* set of `git`/`gh` subcommands and asks on a
   *destructive* set; anything outside both (an unknown subcommand, a `git config`
   form it can't classify, most `gh` mutations) **defers** to the normal

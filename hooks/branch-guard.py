@@ -15,8 +15,8 @@ A command is auto-approved only when EVERY segment in it is a recognized-safe
 git/gh invocation, so a non-git command can't ride along into an approval
 (`git status && rm -rf foo` defers rather than allows).
 
-Also guards file edits (Edit/Write/MultiEdit) against the branch of the file's
-own repository, and `git push` according to BRANCH_GUARD_PUSH_POLICY.
+Also guards file edits (Edit/Write/MultiEdit/NotebookEdit) against the branch of
+the file's own repository, and `git push` according to BRANCH_GUARD_PUSH_POLICY.
 
 Reads the hook JSON on stdin, emits a PreToolUse decision on stdout. On any
 parsing uncertainty (unbalanced quotes, empty input, unresolvable branch,
@@ -497,8 +497,9 @@ def main():
                            if branch else "Safe read-only git/gh operation — auto-approved."))
         return                                     # mixed / unknown -> defer
 
-    if tool in ('Edit', 'Write', 'MultiEdit'):
-        file_path = tool_input.get('file_path') or ''
+    if tool in ('Edit', 'Write', 'MultiEdit', 'NotebookEdit'):
+        # NotebookEdit names the path `notebook_path`; the others use `file_path`.
+        file_path = tool_input.get('notebook_path') or tool_input.get('file_path') or ''
         if not file_path:
             return
         branch = current_branch(os.path.dirname(file_path) or '.')
