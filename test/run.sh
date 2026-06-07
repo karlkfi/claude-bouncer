@@ -185,6 +185,14 @@ check "[auto] commit on main -> deny" deny \
   "$(decision_for "$(push_mode 'git commit -m x' 'auto')" "$WORK")"
 git -C "$WORK" checkout -q claude/x
 
+# 11b. detached HEAD resolves to no branch, so the hook defers (even though the
+#      detached commit is really main's) — `rev-parse --abbrev-ref` would print
+#      "HEAD" and mis-treat it as an ordinary feature branch.
+git -C "$WORK" checkout -q --detach
+check "[detached HEAD] commit -> none (defer)" none \
+  "$(decision_for '{"tool_name":"Bash","tool_input":{"command":"git commit -m x"}}' "$WORK")"
+git -C "$WORK" checkout -q claude/x
+
 # ---------------------------------------------------------------------------
 # 12. Read-only git allowlist — auto-allow on any branch.
 bash_cmd() { printf '{"tool_name":"Bash","tool_input":{"command":"%s"}}' "$1"; }

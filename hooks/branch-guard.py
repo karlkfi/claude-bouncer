@@ -422,11 +422,14 @@ def classify_segment(inv, branch, policy):
 
 
 def current_branch(cwd):
-    """Current branch via `git -C <cwd> rev-parse --abbrev-ref HEAD`, or None
-    if the directory isn't a repo / git is unavailable / HEAD won't resolve."""
+    """Current branch via `git -C <cwd> symbolic-ref --short -q HEAD`, or None
+    if the directory isn't a repo / git is unavailable / HEAD won't resolve.
+    Unlike `rev-parse --abbrev-ref HEAD` (which prints the literal "HEAD" and
+    exits 0 on a detached HEAD), `symbolic-ref -q` exits non-zero when HEAD is
+    detached, so a detached HEAD resolves to None and the hook defers."""
     try:
         r = subprocess.run(
-            ['git', '-C', cwd, 'rev-parse', '--abbrev-ref', 'HEAD'],
+            ['git', '-C', cwd, 'symbolic-ref', '--short', '-q', 'HEAD'],
             capture_output=True, text=True,
         )
     except OSError:
