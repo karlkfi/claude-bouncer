@@ -1,21 +1,36 @@
 #!/usr/bin/env python3
 """branch-guard: a Claude Code PreToolUse hook.
 
-Auto-approves git commits (and, under the strict push policy, pushes of the
-worktree's own branch) on non-protected branches, and prompts (ask) before a
-commit, file edit, or push that targets a protected branch (main/master) or,
-under strict, any branch other than the worktree's own. Emits no decision for
-anything else, so the normal permission flow applies.
+Reduces git/branch-related approval prompts while keeping a human in the loop
+for anything that touches a protected branch (main/master) or is destructive.
+For Bash `git`/`gh` commands it emits a per-command decision:
+
+  allow  — safe to auto-approve (read-only git/gh, staging, branch creation,
+           fetch, a commit/push of a feature/worktree branch, …);
+  ask    — confirm first (commit/edit/push to a protected branch, or a
+           destructive command like `reset --hard`, `clean -f`, `branch -D`);
+  (none) — defer: emit nothing, so the normal permission flow applies.
+
+A command is auto-approved only when EVERY segment in it is a recognized-safe
+git/gh invocation, so a non-git command can't ride along into an approval
+(`git status && rm -rf foo` defers rather than allows).
+
+Also guards file edits (Edit/Write/MultiEdit) against the branch of the file's
+own repository, and `git push` according to BRANCH_GUARD_PUSH_POLICY.
 
 Reads the hook JSON on stdin, emits a PreToolUse decision on stdout. On any
-parsing uncertainty (unbalanced quotes, empty input, unresolvable branch) it
-defers silently so normal permissions apply — never fail closed.
+parsing uncertainty (unbalanced quotes, empty input, unresolvable branch,
+unknown subcommand) it defers silently so normal permissions apply — never
+fail closed.
 
 In a non-interactive permission mode (auto / dontAsk / bypassPermissions) there
 is no human to answer a prompt, so a would-be `ask` is emitted as `deny`
-instead — the guard fails safe rather than letting the action through
-unconfirmed. (`bypassPermissions` ignores hook decisions entirely, but emitting
-`deny` there is harmless and future-proof.)
+instead — the guard fails safe. (`bypassPermissions` ignores hook decisions
+entirely, but emitting `deny` there is harmless and future-proof.)
+
+Scope note: branch-guard reasons about git/branch *semantics*. The filesystem
+boundary (commands touching paths outside the workspace) is workspace-guard's
+job; the two don't overlap.
 """
 import sys, os, json, re, shlex, subprocess
 
@@ -40,6 +55,34 @@ GIT_VALUE_OPTS = {
     '-C', '-c', '--git-dir', '--work-tree', '--namespace',
     '--super-prefix', '--config-env', '--exec-path',
 }
+# gh global options that consume a following value token.
+GH_VALUE_OPTS = {'-R', '--repo'}
+
+# git global flags that let an otherwise-safe command run arbitrary code via
+# inline config (`git -c core.pager='!sh -c …' log`). Their presence blocks
+# auto-allow (the command defers) but never suppresses an `ask`.
+GIT_ESCAPE_HATCHES = {'-c', '--config-env'}
+
+# Read-only git subcommands — auto-allowed on any branch.
+READONLY_GIT = frozenset({
+    'status', 'diff', 'log', 'show', 'blame', 'describe', 'shortlog',
+    'whatchanged', 'ls-files', 'ls-tree', 'cat-file', 'rev-parse', 'rev-list',
+    'merge-base', 'name-rev', 'show-branch', 'for-each-ref', 'cherry',
+    'diff-tree', 'diff-index', 'count-objects', 'var', 'version', 'help',
+    'grep', 'fetch', 'ls-remote',
+})
+
+# Read-only gh (subcommand, sub-subcommand) pairs — auto-allowed.
+READONLY_GH = frozenset({
+    ('pr', 'view'), ('pr', 'list'), ('pr', 'status'), ('pr', 'diff'), ('pr', 'checks'),
+    ('issue', 'view'), ('issue', 'list'), ('issue', 'status'),
+    ('repo', 'view'),
+    ('run', 'view'), ('run', 'list'),
+    ('release', 'view'), ('release', 'list'),
+    ('workflow', 'view'), ('workflow', 'list'),
+    ('auth', 'status'),
+    ('status', ''),
+})
 
 # `git push` options that consume a separate following value token.
 PUSH_VALUE_OPTS = {'--repo', '-o', '--push-option', '--receive-pack', '--exec'}
@@ -112,17 +155,22 @@ def command_segments(cmd):
     return segments
 
 
-def parse_git(tokens):
-    """If a segment is a `git` invocation, return {'sub': <subcommand or None>,
-    'args': [tokens after the subcommand]}; otherwise return None. Strips
-    leading env assignments and git global options so
-    `FOO=bar git -C path -c k=v commit -m x` -> {'sub': 'commit', 'args': ['-m', 'x']}."""
+def parse_invocation(tokens):
+    """If a segment is a `git` or `gh` invocation, return
+    {'prog', 'sub', 'args', 'globals'}; otherwise None. Strips leading env
+    assignments and program global options so
+    `FOO=bar git -C path -c k=v commit -m x` ->
+    {'prog': 'git', 'sub': 'commit', 'args': ['-m','x'], 'globals': ['-C','path','-c','k=v']}."""
     i = 0
     while i < len(tokens) and ASSIGNMENT_RE.match(tokens[i]):
         i += 1
-    if i >= len(tokens) or tokens[i].rsplit('/', 1)[-1] != 'git':
+    if i >= len(tokens):
         return None
-    i += 1
+    prog = tokens[i].rsplit('/', 1)[-1]
+    if prog not in ('git', 'gh'):
+        return None
+    start = i = i + 1
+    value_opts = GIT_VALUE_OPTS if prog == 'git' else GH_VALUE_OPTS
     while i < len(tokens):
         t = tokens[i]
         if t == '--':
@@ -130,10 +178,10 @@ def parse_git(tokens):
             break
         if not t.startswith('-'):
             break
-        i += 2 if t in GIT_VALUE_OPTS else 1
-    if i >= len(tokens):
-        return {'sub': None, 'args': []}
-    return {'sub': tokens[i], 'args': tokens[i + 1:]}
+        i += 2 if t in value_opts else 1
+    sub = tokens[i] if i < len(tokens) else None
+    args = tokens[i + 1:] if i < len(tokens) else []
+    return {'prog': prog, 'sub': sub, 'args': args, 'globals': tokens[start:i]}
 
 
 def ref_to_branch(ref, current):
@@ -171,15 +219,10 @@ def parse_refspec(spec, current, delete):
 
 def push_decision(args, current, policy):
     """Given the tokens after `push`, the worktree's current branch, and the
-    policy, return (decision, reason) where decision is:
-      'allow' — strict policy, and the push is the worktree's own branch
-                (including a force push of it);
-      'ask'   — the push should be confirmed (target is protected, or strict
-                and the push isn't the worktree branch);
-      None    — defer to the normal permission flow.
-    On parsing uncertainty it leans toward asking (strict) / deferring
-    (protected) rather than silently allowing — pair with a pre-push hook or
-    server-side branch protection for a hard guarantee."""
+    policy, return (decision, reason) where decision is 'allow', 'ask', or None
+    (defer). strict auto-approves a push of the worktree branch (incl. force);
+    protected only asks on a protected target. Leans toward asking (strict) /
+    deferring (protected) on parsing uncertainty, never toward allowing."""
     positionals, many, delete, i = [], False, False, 0
     while i < len(args):
         t = args[i]
@@ -229,6 +272,153 @@ def push_policy():
     """Read BRANCH_GUARD_PUSH_POLICY; default and fall back to 'strict'."""
     v = (os.environ.get('BRANCH_GUARD_PUSH_POLICY') or 'strict').strip().lower()
     return v if v in PUSH_POLICIES else 'strict'
+
+
+def _feature(branch, reason=None):
+    """Verdict for a mutation that's routine on a feature branch but should be
+    confirmed on a protected one: allow on non-protected, ask on protected,
+    defer when the branch can't be resolved."""
+    if branch is None:
+        return ('defer', None)
+    if is_protected(branch):
+        return ('ask', reason or f"Targets protected branch '{branch}' — confirm before proceeding.")
+    return ('allow', None)
+
+
+def short_flag_letters(args):
+    """Letters from combined short-flag tokens (`-fd` -> {'f','d'}), so a
+    bundled flag is recognized the same as if it were written separately."""
+    letters = set()
+    for a in args:
+        if len(a) > 1 and a[0] == '-' and a[1] != '-':
+            letters |= set(a[1:])
+    return letters
+
+
+def classify_git(sub, args, branch, policy):
+    """Verdict ('allow' | 'ask' | 'defer', reason) for a `git <sub>` command."""
+    flags = {a for a in args if a.startswith('-')}
+    short = short_flag_letters(args)
+    pos = [a for a in args if not a.startswith('-')]
+    first = pos[0] if pos else ''
+
+    if sub in READONLY_GIT:
+        return ('allow', None)
+    if sub == 'commit':
+        return _feature(branch)
+    if sub == 'push':
+        if policy == 'off' or branch is None:
+            return ('defer', None)
+        decision, reason = push_decision(args, branch, policy)
+        return (decision or 'defer', reason)
+
+    # Harmless mutations — don't put work onto or rewrite a branch's history.
+    if sub == 'add':
+        return ('allow', None)
+    if sub == 'restore':
+        # `--staged`/`-S` unstages (safe); restoring the worktree discards changes.
+        staged = '--staged' in flags or 'S' in short
+        worktree = '--worktree' in flags or 'W' in short
+        if staged and not worktree:
+            return ('allow', None)
+        return ('ask', "`git restore` discards working-tree changes — confirm before proceeding.")
+    if sub == 'switch':
+        if 'f' in short or flags & {'--force', '--discard-changes'}:
+            return ('ask', "`git switch` would discard changes — confirm before proceeding.")
+        return ('allow', None)            # create (-c) or plain switch; git refuses if unsafe
+    if sub == 'checkout':
+        if short & {'b', 'B'}:
+            return ('allow', None)        # unambiguous branch create
+        return ('defer', None)            # ambiguous (branch vs path discard) -> normal flow
+    if sub == 'branch':
+        if short & {'d', 'D', 'm', 'M', 'f'} or flags & {'--delete', '--move', '--force'}:
+            return ('ask', "Deleting/renaming a git branch — confirm before proceeding.")
+        return ('allow', None)            # list or create
+    if sub == 'tag':
+        if 'd' in short or '--delete' in flags:
+            return ('ask', "Deleting a git tag — confirm before proceeding.")
+        return ('allow', None)            # list or create
+    if sub == 'worktree':
+        if first in ('add', 'list', 'lock', 'unlock'):
+            return ('allow', None)
+        if first in ('remove', 'prune', 'move'):
+            return ('ask', "Removing/moving a git worktree — confirm before proceeding.")
+        return ('defer', None)
+    if sub == 'stash':
+        if first in ('list', 'show'):
+            return ('allow', None)
+        if first in ('drop', 'clear'):
+            return ('ask', "Dropping stashed changes — confirm before proceeding.")
+        return _feature(branch, "Stash operation on a protected branch — confirm before proceeding.")
+    if sub in ('merge', 'cherry-pick', 'revert', 'am'):
+        if flags & {'--abort', '--continue', '--skip', '--quit'}:
+            return ('allow', None)        # control ops are safe
+        return _feature(branch, f"`git {sub}` onto a protected branch — confirm before proceeding.")
+    if sub == 'rebase':
+        if flags & {'--abort', '--continue', '--skip', '--quit', '--edit-todo'}:
+            return ('allow', None)
+        return _feature(branch, "`git rebase` on a protected branch — confirm before proceeding.")
+    if sub == 'pull':
+        if '--ff-only' in flags:
+            return ('allow', None)
+        return ('ask', "`git pull` may merge or rebase — use --ff-only or confirm.")
+    if sub == 'reset':
+        if flags & {'--hard', '--merge', '--keep'}:
+            return ('ask', "`git reset --hard` discards changes — confirm before proceeding.")
+        return ('defer', None)            # soft/mixed -> normal flow
+    if sub == 'clean':
+        # clean is a no-op without --force; -f is what makes it delete.
+        if 'f' in short or '--force' in flags:
+            return ('ask', "`git clean` deletes untracked files — confirm before proceeding.")
+        return ('defer', None)
+    if sub == 'config':
+        if flags & {'--global', '--system', '--add', '--unset', '--unset-all',
+                    '--replace-all', '--remove-section', '--rename-section', '-e', '--edit'}:
+            return ('ask', "Writing git config — confirm before proceeding.")
+        if flags & {'--get', '--get-all', '--get-regexp', '--get-urlmatch', '--list', '-l'}:
+            return ('allow', None)
+        return ('defer', None)            # ambiguous `git config key [value]`
+    if sub == 'remote':
+        if first in ('', 'show', 'get-url'):
+            return ('allow', None)
+        return ('defer', None)
+    if sub == 'reflog':
+        if first in ('', 'show'):
+            return ('allow', None)
+        if first in ('expire', 'delete'):
+            return ('ask', "Rewriting the reflog — confirm before proceeding.")
+        return ('defer', None)
+    if sub in ('filter-branch', 'gc'):
+        return ('ask', f"`git {sub}` can rewrite or prune history — confirm before proceeding.")
+
+    return ('defer', None)                # unknown subcommand -> normal flow
+
+
+def classify_gh(sub, args):
+    """Verdict for a `gh <sub>` command: allow read-only ones, defer the rest."""
+    pos = [a for a in args if not a.startswith('-')]
+    subsub = pos[0] if pos else ''
+    if (sub, subsub) in READONLY_GH or (sub, '') in READONLY_GH:
+        return ('allow', None)
+    return ('defer', None)
+
+
+def classify_segment(inv, branch, policy):
+    """Verdict ('nongit' | 'allow' | 'ask' | 'defer', reason) for one segment.
+    'nongit' marks a segment that isn't a git/gh invocation (so the whole
+    command can't be auto-approved)."""
+    if inv is None:
+        return ('nongit', None)
+    if inv['prog'] == 'gh':
+        return classify_gh(inv['sub'] or '', inv['args'])
+    if inv['sub'] is None:
+        return ('defer', None)            # bare `git`
+    verdict, reason = classify_git(inv['sub'], inv['args'], branch, policy)
+    # An inline-config escape hatch blocks auto-allow, but must not weaken a
+    # protective `ask` (e.g. `git -c k=v commit` on main still asks).
+    if verdict == 'allow' and (set(inv['globals']) & GIT_ESCAPE_HATCHES):
+        return ('defer', None)
+    return (verdict, reason)
 
 
 def current_branch(cwd):
@@ -284,46 +474,25 @@ def main():
             segments = command_segments(cmd)
         except ValueError:
             return                                 # unbalanced quotes -> defer
-        parsed = [parse_git(seg) for seg in segments]
-        has_commit = any(p and p['sub'] == 'commit' for p in parsed)
+        invs = [parse_invocation(seg) for seg in segments]
+        if not any(invs):
+            return                                 # no git/gh command -> defer
+
         policy = push_policy()
-        push_segs = ([p for p in parsed if p and p['sub'] == 'push']
-                     if policy != 'off' else [])
-        if not has_commit and not push_segs:
-            return                                 # nothing we guard -> defer
-
         branch = current_branch(data.get('cwd') or os.getcwd())
-        if branch is None:
-            return                                 # not a repo / detached -> defer
+        verdicts = [classify_segment(inv, branch, policy) for inv in invs]
 
-        # A command is only ever auto-approved when EVERY segment is a git
-        # invocation (e.g. `git add -A && git commit && git push`). A chain that
-        # mixes in a non-git command (`git commit && rm -rf ~`) is never
-        # auto-approved, so a trailing command can't ride along.
-        all_git = all(p is not None for p in parsed)
-
-        # Push guard takes priority: a chain containing a push is decided here,
-        # never auto-approved via the commit path (that would approve the push).
-        if push_segs:
-            allow_reason = None
-            for p in push_segs:
-                decision, reason = push_decision(p['args'], branch, policy)
-                if decision == 'ask':
-                    confirm(reason, mode)
-                    return
-                if decision == 'allow':
-                    allow_reason = reason
-            if allow_reason and all_git:
-                emit('allow', allow_reason)
-            return                                 # otherwise defer
-
-        # Commit guard.
-        if is_protected(branch):
-            confirm(f"Targets protected branch '{branch}' — confirm before proceeding.", mode)
-            return
-        if all_git:
-            emit('allow', f"Commit on non-protected branch '{branch}' — auto-approved.")
-        return
+        # A protective ask wins over everything (and becomes deny when no human
+        # is present). Otherwise the command is auto-approved only when EVERY
+        # segment is recognized-safe, so a non-git command can't ride along.
+        for verdict, reason in verdicts:
+            if verdict == 'ask':
+                confirm(reason, mode)
+                return
+        if all(verdict == 'allow' for verdict, _ in verdicts):
+            emit('allow', (f"Safe git/gh operation on branch '{branch}' — auto-approved."
+                           if branch else "Safe read-only git/gh operation — auto-approved."))
+        return                                     # mixed / unknown -> defer
 
     if tool in ('Edit', 'Write', 'MultiEdit'):
         file_path = tool_input.get('file_path') or ''

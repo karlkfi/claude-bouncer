@@ -68,8 +68,8 @@ git -C "$WORK" checkout -q main
 check "commit on main -> ask" ask \
   "$(decision_for '{"tool_name":"Bash","tool_input":{"command":"git commit -m x"}}' "$WORK")"
 
-# 3. non-commit bash -> no decision
-check "git status -> none" none \
+# 3. read-only git auto-approves; non-git defers.
+check "git status -> allow" allow \
   "$(decision_for '{"tool_name":"Bash","tool_input":{"command":"git status"}}' "$WORK")"
 check "ls -> none" none \
   "$(decision_for '{"tool_name":"Bash","tool_input":{"command":"ls -la"}}' "$WORK")"
@@ -94,8 +94,8 @@ check "commit && rm on main -> ask" ask \
 check "env-prefixed commit on main -> ask" ask \
   "$(decision_for "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"GIT_AUTHOR_NAME=x git -C $WORK commit -m y\"}}" "$WORK")"
 
-# 3f. commit substring that is NOT a git commit invocation -> defer
-check "git log --grep=commit -> none" none \
+# 3f. `git log` is read-only (the `commit` substring is not a commit invocation).
+check "git log --grep=commit -> allow" allow \
   "$(decision_for '{"tool_name":"Bash","tool_input":{"command":"git log --grep=commit"}}' "$WORK")"
 
 # 4. edit of a file whose repo is on main -> ask
@@ -184,6 +184,91 @@ git -C "$WORK" checkout -q main
 check "[auto] commit on main -> deny" deny \
   "$(decision_for "$(push_mode 'git commit -m x' 'auto')" "$WORK")"
 git -C "$WORK" checkout -q claude/x
+
+# ---------------------------------------------------------------------------
+# 12. Read-only git allowlist — auto-allow on any branch.
+bash_cmd() { printf '{"tool_name":"Bash","tool_input":{"command":"%s"}}' "$1"; }
+
+for c in "git diff" "git log --oneline -5" "git show HEAD" "git branch" \
+         "git rev-parse HEAD" "git fetch origin" "git remote -v" \
+         "git stash list" "git config --get user.name" "git status && git log"; do
+  check "readonly: $c -> allow" allow "$(decision_for "$(bash_cmd "$c")" "$WORK")"
+done
+
+# 13. Feature-safe mutations: allow on any branch (staging/branch-create) or on
+#     a feature branch (commit-bearing); destructive variants ask.
+check "git add -A -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git add -A')" "$WORK")"
+check "git switch -c new -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git switch -c newbranch')" "$WORK")"
+check "git checkout -b new -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git checkout -b newbranch')" "$WORK")"
+check "git worktree add -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git worktree add ../wt feature')" "$WORK")"
+check "git restore --staged -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git restore --staged file.txt')" "$WORK")"
+check "git checkout <ambiguous> -> none (defer)" none \
+  "$(decision_for "$(bash_cmd 'git checkout file.txt')" "$WORK")"
+
+# 14. Destructive git commands ask (and deny when unattended).
+check "git reset --hard -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git reset --hard HEAD~1')" "$WORK")"
+check "git reset --soft -> none (defer)" none \
+  "$(decision_for "$(bash_cmd 'git reset --soft HEAD~1')" "$WORK")"
+check "git clean -fd -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git clean -fd')" "$WORK")"
+check "git branch -D -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git branch -D old')" "$WORK")"
+check "git restore (worktree) -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git restore file.txt')" "$WORK")"
+check "git worktree remove -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git worktree remove ../wt')" "$WORK")"
+check "git config --global -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git config --global user.name x')" "$WORK")"
+check "git stash drop -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git stash drop')" "$WORK")"
+check "readonly + destructive chain -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git status && git reset --hard')" "$WORK")"
+check "[auto] git reset --hard -> deny" deny \
+  "$(decision_for "$(push_mode 'git reset --hard' 'auto')" "$WORK")"
+
+# 15. Branch-sensitive mutations: feature -> allow, protected -> ask.
+check "git rebase on feature -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git rebase origin/main')" "$WORK")"
+check "git merge on feature -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git merge feature-y')" "$WORK")"
+check "git rebase --abort -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git rebase --abort')" "$WORK")"
+check "git pull --ff-only -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git pull --ff-only')" "$WORK")"
+check "git pull (non-ff) -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git pull')" "$WORK")"
+git -C "$WORK" checkout -q main
+check "git rebase on main -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git rebase origin/main')" "$WORK")"
+check "git merge on main -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git merge feature-y')" "$WORK")"
+git -C "$WORK" checkout -q claude/x
+
+# 16. Inline-config escape hatch blocks auto-allow but not a protective ask.
+check "git -c pager log -> none (defer, not allow)" none \
+  "$(decision_for "$(bash_cmd 'git -c core.pager=cat log')" "$WORK")"
+git -C "$WORK" checkout -q main
+check "git -c k=v commit on main -> ask (still gated)" ask \
+  "$(decision_for "$(bash_cmd 'git -c user.name=x commit -m y')" "$WORK")"
+git -C "$WORK" checkout -q claude/x
+
+# 17. Read-only gh allowlist; gh mutations defer to the normal flow.
+check "gh pr list -> allow" allow \
+  "$(decision_for "$(bash_cmd 'gh pr list')" "$WORK")"
+check "gh pr view 1 -> allow" allow \
+  "$(decision_for "$(bash_cmd 'gh pr view 1')" "$WORK")"
+check "gh repo view -> allow" allow \
+  "$(decision_for "$(bash_cmd 'gh repo view')" "$WORK")"
+check "gh status && git status -> allow" allow \
+  "$(decision_for "$(bash_cmd 'gh pr list && git status')" "$WORK")"
+check "gh pr create -> none (defer)" none \
+  "$(decision_for "$(bash_cmd 'gh pr create --fill')" "$WORK")"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [[ "$fail" -eq 0 ]]
