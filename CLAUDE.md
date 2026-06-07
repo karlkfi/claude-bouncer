@@ -95,3 +95,4 @@ Human-facing docs (`README.md` and anything user-facing) must never link to `CLA
 | Hook registration / matcher | `hooks/hooks.json` |
 | Plugin packaging / marketplace listing | `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` |
 | Testing the decision matrix | `test/run.sh` |
+| Rendering or regenerating brand images (social preview, favicon) | `docs/development/rendering-images.md` |
