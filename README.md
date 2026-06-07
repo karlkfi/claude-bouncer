@@ -28,6 +28,7 @@ silently.
 - [Agent guidance: avoiding prompts](#agent-guidance-avoiding-prompts)
 - [Configuration](#configuration)
 - [Limitations](#limitations)
+- [Companion plugin: branch-guard](#companion-plugin-branch-guard)
 - [Design](#design)
 - [Privacy](#privacy)
 - [Contributing](#contributing)
@@ -286,6 +287,38 @@ final output.
   (`bypassPermissions`) the hook emits `deny` rather than `ask` for
   outside-workspace paths: equally blocking, but the agent receives the reason
   and can recover instead of stalling. See [Configuration](#configuration).
+
+## Companion plugin: branch-guard
+
+workspace-guard draws its boundary along the **filesystem**: it asks before a
+guarded command reads or writes a path outside `$CLAUDE_PROJECT_DIR`. It says
+nothing about *git history* — once a path is in-root, an in-root
+`git commit && git push` to `main`, a `git reset --hard`, or a `git clean -fd`
+runs without a second look. Those are exactly the operations that turn an
+in-workspace edit into an unrecoverable one.
+
+[**branch-guard**](https://github.com/karlkfi/claude-branch-guard) covers that
+gap. It's a sibling plugin with the same secure-by-default, `ask`-based design,
+but its axis is the **git branch** rather than the filesystem path. Its motto:
+*"Let Claude commit and push all day on feature branches. Pause it at main."*
+It parses pending `git`/`gh` commands (and blocks file edits when the repo is on
+a protected branch), then:
+
+- **asks** before committing or pushing to `main`/`master`, force-pushing, or
+  running destructive commands (`reset --hard`, `clean -fd`, `branch -D`,
+  `restore <path>`);
+- **allows** read-only git, staging, branch creation, and commits/pushes on
+  feature/worktree branches to run silently;
+- **defers** unknown commands to your normal permission settings.
+
+The two are complementary and run side by side — workspace-guard watches the
+path boundary, branch-guard watches the history boundary. Install it the same
+way you installed this one:
+
+```
+/plugin marketplace add karlkfi/claude-branch-guard
+/plugin install branch-guard@claude-branch-guard
+```
 
 ## Design
 
