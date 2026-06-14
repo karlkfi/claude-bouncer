@@ -289,8 +289,9 @@ flowing, avoid triggering it:
 ```
 
 The plugin also ships a **`reduce-workspace-guard-prompts`** skill: ask Claude
-"why am I getting so many permission prompts?" and it will diagnose the cause
-from recent prompts and walk through these fixes.
+"why am I getting so many permission prompts?" and it will diagnose the cause —
+grounding itself in your real prompt history via the bundled
+`scripts/friction-report.py` analyzer — and walk through these fixes.
 
 ## Configuration
 

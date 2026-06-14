@@ -15,19 +15,51 @@ outside files.
 
 ## Diagnose
 
-Look at the recent prompts (the hook's reason names the offending path and the
-fix). Map each to a cause:
+Don't guess about past friction — measure it. The plugin ships an analyzer,
+`scripts/friction-report.py`, that re-reads the hook decisions Claude Code
+already recorded in the local session transcripts and ranks them by category,
+offending path, and triggering command. Run it first so the diagnosis is
+grounded in the user's real prompt history:
 
-1. **A `$VAR`, `$(...)`, or leading `~` in a guarded file argument.** The hook
-   can't expand these, so it treats them as outside the root and prompts — even
-   when they'd resolve in-root. Reason starts with "Runtime-expanded arg(s)".
-2. **A `cd` outside the root, or bare `cd` / `cd -` / `cd $HOME`.** These lose
-   the hook's working-directory tracking, so every later relative path in the
-   same command prompts. Reason starts with "Relative path(s) after an untracked
-   cd".
+```
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/friction-report.py" --repo "$(basename "$CLAUDE_PROJECT_DIR")"
+```
+
+This reports the friction ratio (ask+deny share), a **By category** breakdown,
+the **top offending paths**, and the **top triggering commands** for the current
+project over the last 7 days. Useful adjustments:
+
+- `--since 24h` / `--since 2026-06-01` / `--since all` — widen or narrow the
+  window (default `7d`).
+- `--repo ''` — drop the project filter to see friction across every repo.
+- `--raw` — show exact path tokens instead of collapsing per-session temp paths.
+- `--json` — machine-readable, if you'd rather parse it than read the table.
+
+**Fall back gracefully.** If the script can't be found (`$CLAUDE_PLUGIN_ROOT`
+unset — try the in-repo path `scripts/friction-report.py`), exits with "No
+transcripts …", or prints "No guard decisions found" (a fresh setup with no
+recorded prompts yet), skip the data step and diagnose from the **most recent
+prompts in this session** instead — the hook's reason text names the offending
+path and the fix for each.
+
+Either way, map what you find to a cause. The report's category names line up
+one-to-one with these:
+
+1. **A `$VAR`, `$(...)`, or leading `~` in a guarded file argument** — category
+   `expand`. The hook can't expand these, so it treats them as outside the root
+   and prompts — even when they'd resolve in-root. Reason starts with
+   "Runtime-expanded arg(s)".
+2. **A `cd` outside the root, or bare `cd` / `cd -` / `cd $HOME`** — category
+   `untracked`. These lose the hook's working-directory tracking, so every later
+   relative path in the same command prompts. Reason starts with "Relative
+   path(s) after an untracked cd".
 3. **A path that genuinely resolves outside the root** (including `../`
-   traversal, or temp files written to `/tmp`). Reason starts with
-   "Outside-workspace path(s)".
+   traversal, or temp files written to `/tmp`) — category `outside`. Reason
+   starts with "Outside-workspace path(s)".
+
+The **top offending paths** and **top triggering commands** rankings tell you
+*which* files and commands to target first — fix the highest-count rows for the
+biggest reduction.
 
 ## Fix
 
