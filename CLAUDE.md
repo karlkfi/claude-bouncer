@@ -104,5 +104,6 @@ When working on specific tasks, read the relevant doc before starting:
 | Changing parsing behavior or the `SPEC` table | `scripts/bash-workspace-guard.py` + `README.md` decision table |
 | Plugin packaging / marketplace listing | `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` |
 | Cutting a release (version bump, tag, GitHub Release) | `docs/development/release-process.md` |
+| Measuring where prompts accumulate (friction review) | `docs/development/measuring-friction.md` + `scripts/friction-report.py` |
 | Rendering or regenerating brand images (social preview, favicon) | `docs/development/rendering-images.md` |
 | Hook registration | `hooks/hooks.json` |
