@@ -69,6 +69,8 @@ and file-writing commands Claude reaches for most often; tools like `ls`,
 | `dd if=./in of=./out bs=1M`          | allow    |
 | `echo foo \| tee log.txt`            | allow    |
 | `cat data.txt > /dev/null`           | allow    |
+| `grep foo data.txt 2>/dev/null`      | allow    |
+| `grep foo data.txt 2>&1`             | allow    |
 | `cat <<<"/etc/foo"` (here-string)    | allow    |
 | `cat ~/proj/notes.md` (root `~/proj`) | allow   |
 | `grep secret /etc/passwd`            | **ask**  |
@@ -182,7 +184,11 @@ After upgrading either way:
    classified on its own rather than merged into its neighbour.
 2. **Split** into simple commands on those operators and pull redirect targets
    (`> file`) aside as files to check. The token after `<<` (heredoc
-   delimiter) or `<<<` (here-string content) is skipped — it isn't a path.
+   delimiter) or `<<<` (here-string content) is skipped — it isn't a path. An
+   fd number written before a redirect (`2>file`) and an fd-duplication or
+   close (`2>&1`, `2>&-`) are recognised so the digit and the dup target don't
+   leak as phantom file arguments; `>&file` (a redirect to a file, not a dup)
+   still has its target checked.
 3. **Strip** leading POSIX `NAME=VALUE` command-prefix assignments from each
    simple command (`LC_ALL=C cat …` → `cat …`) so the assignment doesn't mask
    the command-name lookup.
@@ -290,6 +296,12 @@ final output.
   original workspace cwd, and absolute redirect targets are caught.
 - Multi-source `ln a b destdir/` (3+ positionals, symbolic or hard) is not
   staged. The hook recognises the one- and two-positional forms only.
+- An all-digits token immediately before a redirect operator is treated as an
+  fd prefix (`2>file`) and dropped. `shlex` discards the original spacing, so a
+  guarded command reading a file literally *named* with digits right before a
+  redirect (`cat 2 >out`, where `2` is a file) is indistinguishable from the fd
+  form and won't be checked. Such a path resolves in-root (and is allowed)
+  anyway except after a `cd` outside the root — a pathological combination.
 - In non-interactive / headless runs there is no one to answer an `ask` prompt,
   so an `ask` still **blocks** the command (verified on CLI 2.1.159 — it does
   not silently allow). Under `--dangerously-skip-permissions`

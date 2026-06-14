@@ -16,6 +16,10 @@ ASSIGNMENT_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
 # Command separators and redirect operators (after shlex punctuation grouping).
 SEPARATORS = {'|', '||', '&&', '&', ';', '\n', '(', ')'}
 REDIR = {'>', '>>', '<', '<<', '<<<', '>|', '&>', '&>>'}
+# fd-duplication operators: `2>&1`, `1>&2`, `2>&-` (close), `0<&3`. The token
+# after one is a duplication/close target (a bare fd number or `-`), NOT a file
+# — unless it's a filename, in which case bash's `>&file` redirects to it (Q20).
+DUP = {'>&', '<&'}
 
 # Every char shlex treats as punctuation (see `punctuation_chars` in main).
 # A token built only from these is an operator run; anything else is a word
@@ -466,7 +470,26 @@ def main():
         if t in SEPARATORS:
             if cur: groups.append(cur); cur = []
             i += 1; continue
-        if t in REDIR:
+        if t in REDIR or t in DUP:
+            # An fd number written immediately before a redirect/dup operator
+            # (`2>file`, `2>&1`) tokenizes as a bare digit token glued to the
+            # operator. shlex drops the adjacency, so it lands as the previous
+            # `cur` token; pop it so it doesn't leak as a positional file arg.
+            # (A literal file *named* `2` right before a redirect is
+            # indistinguishable post-tokenization — see Limitations.)
+            if cur and cur[-1].isdigit():
+                cur.pop()
+            if t in DUP:
+                # `2>&1`, `2>&-`, `<&3`: the target is a bare fd number or `-`
+                # (a duplication/close target, not a path) — skip it. But
+                # `>&file` (target isn't a bare fd) redirects to a file, so
+                # treat that target like any other redirect target.
+                if i + 1 < len(tokens):
+                    nxt = tokens[i+1]
+                    if not nxt.isdigit() and nxt != '-':
+                        redir_files.append(nxt)
+                    i += 2; continue
+                i += 1; continue
             if i + 1 < len(tokens):
                 # `<<TAG` heredoc delimiter and `<<<STR` here-string content
                 # are not file paths — skip without adding to redir_files.

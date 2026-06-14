@@ -982,6 +982,49 @@ class HookEndToEndTests(unittest.TestCase):
     def test_redirect_append_outside_ask(self):
         self._decision("cat in.txt >> /tmp/out.txt", "ask")
 
+    # --- fd-prefixed redirects & fd duplication (Q20) -----------------------
+    # `2>file`, `2>&1`, `>&-` tokenize with the fd digit as a bare token glued
+    # to nothing (shlex drops adjacency). The digit, the `>&` dup operator, and
+    # the dup target (a bare fd number) must not leak as positional file args.
+
+    def test_stderr_redirect_to_dev_null_allow(self):
+        self._decision("grep PAT in.txt 2>/dev/null", "allow")
+
+    def test_fd_dup_stderr_to_stdout_allow(self):
+        self._decision("grep PAT in.txt 2>&1", "allow")
+
+    def test_combined_redirect_and_fd_dup_allow(self):
+        self._decision("grep PAT in.txt >out.txt 2>&1", "allow")
+
+    def test_fd_close_target_allow(self):
+        self._decision("grep PAT in.txt 2>&-", "allow")
+
+    def test_fd_digit_not_leaked_after_cd_outside(self):
+        # The motivating bug: after a cd-shift the leaked `2`/`>&`/`1` tokens
+        # resolve against the new cwd and spuriously flag. Reading an absolute
+        # in-workspace file should stay allow despite the cd.
+        abs_in = os.path.join(self.workspace, "in.txt")
+        self._decision(f"cd /tmp/q20-fake-dir && grep PAT {abs_in} 2>&1", "allow")
+
+    def test_fd_prefixed_redirect_to_outside_still_ask(self):
+        # Dropping the fd digit must not drop the redirect target itself.
+        out = self._decision("grep PAT in.txt 2>/tmp/q20-fake-out", "ask")
+        self.assertIn(
+            "/tmp/q20-fake-out",
+            out["hookSpecificOutput"]["permissionDecisionReason"],
+        )
+
+    def test_ampersand_redirect_to_outside_file_still_ask(self):
+        # `>&file` (target isn't a bare fd) is a redirect to a file, not a dup.
+        out = self._decision("grep PAT in.txt >&/tmp/q20-fake-out", "ask")
+        self.assertIn(
+            "/tmp/q20-fake-out",
+            out["hookSpecificOutput"]["permissionDecisionReason"],
+        )
+
+    def test_ampersand_redirect_to_inside_file_allow(self):
+        self._decision("grep PAT in.txt >&out.txt", "allow")
+
     # --- shell expansions (Q5) ----------------------------------------------
 
     def test_tilde_path_outside_ask(self):
