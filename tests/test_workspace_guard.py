@@ -1075,6 +1075,67 @@ class HookEndToEndTests(unittest.TestCase):
     def test_ampersand_redirect_to_inside_file_allow(self):
         self._decision("grep PAT in.txt >&out.txt", "allow")
 
+    # --- redirect targets track cd-shifts (Q16) -----------------------------
+    # A redirect target attaches to the command group it appears in, so it
+    # resolves against that group's cwd — a `cd` earlier in the chain shifts
+    # where bash actually opens the file.
+
+    def test_redirect_relative_target_tracks_cd_outside_ask(self):
+        # The motivating bug: after `cd /tmp`, the relative redirect `evil`
+        # resolves to /tmp/evil — outside the workspace — even though it looks
+        # in-workspace at the chain's original cwd. `/dev/null` is an allowed
+        # device, so only the redirect target can flag.
+        out = self._decision("cd /tmp && cat /dev/null > evil", "ask")
+        self.assertIn(
+            "evil",
+            out["hookSpecificOutput"]["permissionDecisionReason"],
+        )
+
+    def test_redirect_relative_target_no_cd_stays_inside_allow(self):
+        # Regression: without a cd, a relative redirect still resolves against
+        # the original (workspace) cwd and stays allow.
+        self._decision("cat /dev/null > evil", "allow")
+
+    def test_redirect_relative_target_tracks_cd_into_workspace_allow(self):
+        # cd into a workspace subdir: the relative redirect resolves inside the
+        # workspace and stays allow. Reads an absolute in-workspace source so
+        # only the redirect routing is under test.
+        os.mkdir(os.path.join(self.workspace, "sub"))
+        abs_in = os.path.join(self.workspace, "in.txt")
+        self._decision(f"cd sub && cat {abs_in} > out.txt", "allow")
+
+    def test_fd_prefixed_redirect_target_tracks_cd_outside_ask(self):
+        # fd-prefix popping must route the surviving target into the post-cd
+        # group: `2>err.log` after `cd /tmp` writes /tmp/err.log (outside).
+        abs_in = os.path.join(self.workspace, "in.txt")
+        out = self._decision(f"cd /tmp && grep PAT {abs_in} 2>err.log", "ask")
+        self.assertIn(
+            "err.log",
+            out["hookSpecificOutput"]["permissionDecisionReason"],
+        )
+
+    def test_ampersand_redirect_file_target_tracks_cd_outside_ask(self):
+        # `>&file` (DUP operator, target is a filename not an fd) routes into
+        # the post-cd group too: /tmp/dup.out is outside.
+        abs_in = os.path.join(self.workspace, "in.txt")
+        out = self._decision(f"cd /tmp && grep PAT {abs_in} >&dup.out", "ask")
+        self.assertIn(
+            "dup.out",
+            out["hookSpecificOutput"]["permissionDecisionReason"],
+        )
+
+    def test_here_string_after_cd_not_routed_as_redirect_allow(self):
+        # `<<<` here-string content is stdin data, not a redirect target — it
+        # must stay skipped even after a cd, so a path-like here-string body
+        # doesn't spuriously flag. Absolute in-workspace source stays allow.
+        abs_in = os.path.join(self.workspace, "in.txt")
+        self._decision(f'cd /tmp && cat {abs_in} <<<"/etc/foo"', "allow")
+
+    def test_top_level_redirect_still_outside_ask(self):
+        # Regression: a top-level (no-cd) absolute redirect target is still
+        # checked — the per-group routing didn't drop the common case.
+        self._decision("cat in.txt > /tmp/q16-fake-target", "ask")
+
     # --- shell expansions (Q5) ----------------------------------------------
 
     def test_tilde_path_outside_ask(self):

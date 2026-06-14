@@ -101,6 +101,7 @@ still asks.
 | `cat ~user/notes.md`                 | **ask**  |
 | `cat $HOME/.ssh/id_rsa`              | **ask**  |
 | `cd /etc && cat passwd`              | **ask**  |
+| `cd /tmp && cat in.txt > evil`       | **ask**  |
 | `LC_ALL=C cat /etc/passwd`           | **ask**  |
 | `ln -s /etc/passwd link && cat link` | **ask**  |
 | `ln /etc/passwd link && cat link`    | **ask**  |
@@ -191,13 +192,14 @@ After upgrading either way:
    become their own tokens. A newline outside quotes is also a command
    separator — like `;` — so a guarded command on a line after another is
    classified on its own rather than merged into its neighbour.
-2. **Split** into simple commands on those operators and pull redirect targets
-   (`> file`) aside as files to check. The token after `<<` (heredoc
-   delimiter) or `<<<` (here-string content) is skipped — it isn't a path. An
-   fd number written before a redirect (`2>file`) and an fd-duplication or
-   close (`2>&1`, `2>&-`) are recognised so the digit and the dup target don't
-   leak as phantom file arguments; `>&file` (a redirect to a file, not a dup)
-   still has its target checked.
+2. **Split** into simple commands on those operators and collect each redirect
+   target (`> file`) into the command group it belongs to, so it's later
+   resolved against that group's cwd (see step 5). The token after `<<`
+   (heredoc delimiter) or `<<<` (here-string content) is skipped — it isn't a
+   path. An fd number written before a redirect (`2>file`) and an
+   fd-duplication or close (`2>&1`, `2>&-`) are recognised so the digit and the
+   dup target don't leak as phantom file arguments; `>&file` (a redirect to a
+   file, not a dup) still has its target checked.
 3. **Strip** leading POSIX `NAME=VALUE` command-prefix assignments from each
    simple command (`LC_ALL=C cat …` → `cat …`) so the assignment doesn't mask
    the command-name lookup.
@@ -208,10 +210,11 @@ After upgrading either way:
    all `KEY=VALUE` pairs — `if=PATH` and `of=PATH` are the file operands; the
    rest (`bs=`, `count=`, `conv=`, `iflag=`, `oflag=`, …) are values, not paths.
 5. **Track** cwd shifts across the chain. A `cd`/`pushd` in an earlier group
-   re-roots relative file paths in later guarded groups (so
-   `cd /etc && cat passwd` flags `passwd` as `/etc/passwd`). When the new cwd
-   can't be resolved at hook time — bare `cd`, `cd -`, `cd $HOME`, `popd` —
-   later relative paths short-circuit to `ask`.
+   re-roots relative file paths — including relative redirect targets — in
+   later guarded groups (so `cd /etc && cat passwd` flags `passwd` as
+   `/etc/passwd`, and `cd /tmp && cat in.txt > evil` flags `evil` as
+   `/tmp/evil`). When the new cwd can't be resolved at hook time — bare `cd`,
+   `cd -`, `cd $HOME`, `popd` — later relative paths short-circuit to `ask`.
 6. **Stage** symlinks *and* hard links created by an earlier `ln OUTSIDE LINK`
    in the chain (with or without `-s`). `LINK`'s resolved path is recorded so
    a later `cat LINK` is flagged — bash hasn't materialised the link yet at
@@ -320,9 +323,9 @@ final output.
   contains a guarded command — the hook keys off guarded commands, so a bare
   redirect from an unguarded command (`echo secret > /tmp/out`) is not checked
   and defers to normal permissions. When a guarded command *is* present, the
-  redirect target is resolved against the original cwd, not any `cd`-shifted
-  cwd: a relative redirect after `cd /etc` is still checked against the
-  original workspace cwd, and absolute redirect targets are caught.
+  redirect target is resolved against the cwd of the command group it appears
+  in, so a relative target tracks `cd`-shifts the same way file arguments do
+  (`cd /tmp && cat in.txt > evil` flags `/tmp/evil`).
 - Multi-source `ln a b destdir/` (3+ positionals, symbolic or hard) is not
   staged. The hook recognises the one- and two-positional forms only.
 - An all-digits token immediately before a redirect operator is treated as an

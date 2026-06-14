@@ -503,11 +503,16 @@ def main():
     except ValueError:
         return                                    # unbalanced quotes -> defer
 
-    groups, cur, redir_files, i = [], [], [], 0
+    # Each group is a `(cmd_tokens, redir_targets)` pair: a redirect target is
+    # collected into the group it textually appears in, so it later resolves
+    # against THAT group's cwd rather than the chain's original cwd. This is
+    # what lets `cd /tmp && cat /dev/null > evil` flag `/tmp/evil` (Q16).
+    groups, cur, cur_redir, i = [], [], [], 0
     while i < len(tokens):
         t = tokens[i]
         if t in SEPARATORS:
-            if cur: groups.append(cur); cur = []
+            if cur or cur_redir:
+                groups.append((cur, cur_redir)); cur, cur_redir = [], []
             i += 1; continue
         if t in REDIR or t in DUP:
             # An fd number written immediately before a redirect/dup operator
@@ -526,18 +531,18 @@ def main():
                 if i + 1 < len(tokens):
                     nxt = tokens[i+1]
                     if not nxt.isdigit() and nxt != '-':
-                        redir_files.append(nxt)
+                        cur_redir.append(nxt)
                     i += 2; continue
                 i += 1; continue
             if i + 1 < len(tokens):
                 # `<<TAG` heredoc delimiter and `<<<STR` here-string content
-                # are not file paths — skip without adding to redir_files.
+                # are not file paths — skip without recording a redirect target.
                 if t in ('<<', '<<<'):
                     i += 2; continue
-                redir_files.append(tokens[i+1]); i += 2; continue
+                cur_redir.append(tokens[i+1]); i += 2; continue
             i += 1; continue
         cur.append(t); i += 1
-    if cur: groups.append(cur)
+    if cur or cur_redir: groups.append((cur, cur_redir))
 
     def is_outside(rp):
         return rp != proj and not rp.startswith(proj + os.sep)
@@ -636,10 +641,19 @@ def main():
     # unresolvable `cd` arg (`cd -`, `$HOME`, etc.) loses tracking.
     outside, guarded = [], False
     group_cwd, group_cwd_unknown = cwd, False
-    for g in groups:
-        if not g: continue
+    for g, g_redir in groups:
         g = strip_env_prefix(g)
-        if not g: continue                        # group was env-only (no cmd)
+        # Redirect targets attach to this group, so resolve them against the
+        # group's cwd *before* any `cd` this group performs takes effect — bash
+        # opens a redirect relative to the cwd in force when the redirection is
+        # set up. A group never contains a `cd` plus another command (cd is its
+        # own group, split by `&&`/`;`/`|`), so for the common case the group
+        # cwd is simply the cwd a preceding `cd` left us in. (Q16)
+        for f in g_redir:
+            o = check_file(f, group_cwd, group_cwd_unknown)
+            if o is not None:
+                outside.append(o)
+        if not g: continue                        # env-only / redirect-only group
         kind, arg = classify_cd(g)
         if kind is not None:
             if kind == 'arg':
@@ -670,13 +684,6 @@ def main():
                 outside.append(o)
     if not guarded:
         return                                    # no guarded command -> defer
-
-    # Redirects are collected at the top level (not associated with a group),
-    # so resolve them against the original cwd — they don't track cd-shifts.
-    for f in redir_files:
-        o = check_file(f, cwd, False)
-        if o is not None:
-            outside.append(o)
 
     if outside:
         # In `bypassPermissions` / full-auto runs there is no human to answer an
