@@ -252,6 +252,22 @@ def split_eq(tok):
     return tok, None
 
 
+def expand_tilde(tok):
+    """Expand a leading `~` or `~/…` to `$HOME` (bash does this deterministically).
+
+    Returns the expanded absolute path, or the token unchanged when it can't be
+    resolved here: a `~user`/`~+`/`~-` prefix (no plain `~` or `~/`) or an unset
+    `$HOME`. Callers still defer on a returned token that begins with `~` or
+    contains `$`, so only the deterministic, fully-resolvable cases are expanded
+    — `~user`'s pwd lookup and `~+`/`~-`'s dir-stack state stay out of scope.
+    """
+    if tok == '~' or tok.startswith('~/'):
+        home = os.environ.get('HOME')
+        if home:
+            return home if tok == '~' else os.path.join(home, tok[2:])
+    return tok
+
+
 def classify_ln(tokens):
     """For an `ln ...` command, return `(target_token, link_token_or_None)`.
 
@@ -333,9 +349,10 @@ def classify_cd(tokens):
     for t in tokens[1:]:
         if t.startswith('-'):
             continue                              # option flag, keep looking
-        if t.startswith('+') or t.startswith('~') or '$' in t:
+        arg = expand_tilde(t)                     # `cd ~/proj` tracks via $HOME
+        if arg.startswith('+') or arg.startswith('~') or '$' in arg:
             return ('unknown', None)
-        return ('arg', t)
+        return ('arg', arg)
     return ('unknown', None)                      # bare `cd` -> $HOME
 
 
@@ -484,7 +501,10 @@ def main():
             return ('skip', None)
         if is_allowed_device(f):
             return ('skip', None)
-        # Bash expands `~` and `$VAR` at runtime; shlex leaves them literal.
+        # Bash expands `~`/`~/…` to $HOME deterministically — resolve it here so
+        # an in-workspace home path isn't needlessly flagged. `~user`/`~+`/`~-`,
+        # an unset $HOME, and any `$VAR`/`$(...)` stay 'expand' (unresolvable).
+        f = expand_tilde(f)
         if f.startswith('~') or '$' in f:
             return ('expand', None)
         if os.path.isabs(f):

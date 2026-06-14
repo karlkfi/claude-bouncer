@@ -985,13 +985,18 @@ class HookEndToEndTests(unittest.TestCase):
     # --- shell expansions (Q5) ----------------------------------------------
 
     def test_tilde_path_outside_ask(self):
-        # `~/...` is expanded by bash to $HOME at runtime; shlex leaves it
-        # literal. Lexical resolution would put it inside cwd — must ask.
+        # Q19: `~/...` is expanded to $HOME, which is outside this tempdir
+        # workspace, so it resolves outside and asks. The reason still names
+        # the original `~/.ssh/id_rsa` token.
         out = self._decision("cat ~/.ssh/id_rsa", "ask")
         self.assertIn(
             "~/.ssh/id_rsa",
             out["hookSpecificOutput"]["permissionDecisionReason"],
         )
+
+    def test_tilde_user_path_outside_ask(self):
+        # `~user` can't be expanded here (needs a pwd lookup) — still ask.
+        self._decision("cat ~someuser/.ssh/id_rsa", "ask")
 
     def test_dollar_var_path_outside_ask(self):
         out = self._decision("cat $HOME/.aws/credentials", "ask")
@@ -1019,6 +1024,28 @@ class HookEndToEndTests(unittest.TestCase):
         # tilde-expands at word start. A literal `foo~bak` inside workspace
         # should still allow.
         self._decision("cat foo~bak", "allow")
+
+    def test_tilde_path_into_workspace_allow(self):
+        # Q19: when the project lives under $HOME, `~/<rel>/in.txt` expands to
+        # an in-workspace path and should allow (previously a spurious ask).
+        home = os.environ["HOME"]
+        with tempfile.TemporaryDirectory(dir=home) as ws:
+            ws = os.path.realpath(ws)
+            with open(os.path.join(ws, "in.txt"), "w") as f:
+                f.write("hi\n")
+            rel = os.path.relpath(ws, home)            # e.g. "tmpXXXX"
+            self._decision(f"cat ~/{rel}/in.txt", "allow", cwd=ws)
+
+    def test_cd_tilde_into_workspace_relative_allow(self):
+        # `cd ~/<rel> && cat in.txt` — cd tracks through the expanded $HOME
+        # path, so the subsequent relative read resolves in-workspace.
+        home = os.environ["HOME"]
+        with tempfile.TemporaryDirectory(dir=home) as ws:
+            ws = os.path.realpath(ws)
+            with open(os.path.join(ws, "in.txt"), "w") as f:
+                f.write("hi\n")
+            rel = os.path.relpath(ws, home)
+            self._decision(f"cd ~/{rel} && cat in.txt", "allow", cwd=ws)
 
     # --- cd / pushd / popd shift cwd (Q7) -----------------------------------
 
@@ -1078,8 +1105,15 @@ class HookEndToEndTests(unittest.TestCase):
         # cd target with `$` can't be resolved at hook time.
         self._decision("cd $HOME && cat in.txt", "ask")
 
-    def test_cd_tilde_taints_subsequent_relative_outside_ask(self):
+    def test_cd_tilde_to_home_relative_outside_ask(self):
+        # Q19: `cd ~` now tracks to $HOME (no longer untracked), so `in.txt`
+        # resolves to $HOME/in.txt — outside this tempdir workspace — and asks.
         self._decision("cd ~ && cat in.txt", "ask")
+
+    def test_cd_tilde_user_taints_subsequent_relative_outside_ask(self):
+        # `~user` stays unresolvable, so the cd is untracked and the relative
+        # read is treated as outside.
+        self._decision("cd ~user && cat in.txt", "ask")
 
     def test_cd_does_not_taint_absolute_paths(self):
         # `cd /etc && cat /etc/passwd` already had `/etc/passwd` flagged via
@@ -1107,11 +1141,29 @@ class HookEndToEndTests(unittest.TestCase):
     def test_classify_cd_helper_unknown(self):
         self.assertEqual(guard.classify_cd(["cd"]), ("unknown", None))
         self.assertEqual(guard.classify_cd(["cd", "-"]), ("unknown", None))
-        self.assertEqual(guard.classify_cd(["cd", "~/foo"]), ("unknown", None))
         self.assertEqual(guard.classify_cd(["cd", "$HOME"]), ("unknown", None))
+        self.assertEqual(guard.classify_cd(["cd", "~/$VAR"]), ("unknown", None))
+        # `~user`/`~+`/`~-` aren't plain `~`/`~/` — still unresolvable (Q19).
+        self.assertEqual(guard.classify_cd(["cd", "~user"]), ("unknown", None))
+        self.assertEqual(guard.classify_cd(["cd", "~+"]), ("unknown", None))
+        self.assertEqual(guard.classify_cd(["cd", "~-"]), ("unknown", None))
         self.assertEqual(guard.classify_cd(["pushd", "+1"]), ("unknown", None))
         self.assertEqual(guard.classify_cd(["popd"]), ("unknown", None))
         self.assertEqual(guard.classify_cd(["popd", "+0"]), ("unknown", None))
+
+    def test_classify_cd_helper_expands_tilde(self):
+        # Q19: bare `~` and `~/…` expand to $HOME deterministically, so cd
+        # tracking follows them instead of dropping to ('unknown', None).
+        home = os.environ["HOME"]
+        self.assertEqual(guard.classify_cd(["cd", "~"]), ("arg", home))
+        self.assertEqual(
+            guard.classify_cd(["cd", "~/foo"]),
+            ("arg", os.path.join(home, "foo")),
+        )
+        self.assertEqual(
+            guard.classify_cd(["pushd", "~/a/b"]),
+            ("arg", os.path.join(home, "a/b")),
+        )
 
     def test_classify_cd_helper_not_cd(self):
         self.assertEqual(guard.classify_cd(["cat", "foo"]), (None, None))
@@ -1902,9 +1954,19 @@ class ReasonAdviceEndToEndTests(unittest.TestCase):
         self.assertIn("/etc/hosts", r)
         self.assertIn("Read/Grep", r)
 
-    def test_tilde_token_reason_uses_expand_advice(self):
+    def test_tilde_home_token_reason_uses_outside_advice(self):
+        # Q19: `~/…` now expands to $HOME, which is outside this tempdir
+        # workspace, so the offender lands in the 'outside' bucket (not
+        # 'expand') and gets the Read/Grep advice.
         r = self._reason("cat ~/.ssh/id_rsa")
         self.assertIn("~/.ssh/id_rsa", r)
+        self.assertIn("Read/Grep", r)
+
+    def test_tilde_user_token_reason_uses_expand_advice(self):
+        # `~user` isn't deterministically resolvable (needs a pwd lookup), so
+        # it still defers to the runtime-expanded advice path.
+        r = self._reason("cat ~someuser/secret")
+        self.assertIn("~someuser/secret", r)
         self.assertIn("literal path", r)
 
     def test_dollar_token_reason_uses_expand_advice(self):

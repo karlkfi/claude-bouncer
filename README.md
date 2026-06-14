@@ -70,6 +70,7 @@ and file-writing commands Claude reaches for most often; tools like `ls`,
 | `echo foo \| tee log.txt`            | allow    |
 | `cat data.txt > /dev/null`           | allow    |
 | `cat <<<"/etc/foo"` (here-string)    | allow    |
+| `cat ~/proj/notes.md` (root `~/proj`) | allow   |
 | `grep secret /etc/passwd`            | **ask**  |
 | `jq '.x' /etc/hosts`                 | **ask**  |
 | `yq -o json /etc/hosts`              | **ask**  |
@@ -86,6 +87,7 @@ and file-writing commands Claude reaches for most often; tools like `ls`,
 | `less /var/log/syslog`               | **ask**  |
 | `cat ../../etc/passwd`               | **ask**  |
 | `cat ~/.aws/credentials`             | **ask**  |
+| `cat ~user/notes.md`                 | **ask**  |
 | `cat $HOME/.ssh/id_rsa`              | **ask**  |
 | `cd /etc && cat passwd`              | **ask**  |
 | `LC_ALL=C cat /etc/passwd`           | **ask**  |
@@ -202,9 +204,13 @@ After upgrading either way:
    inside the workspace and let it through.
 7. **Resolve** every file argument against `$CLAUDE_PROJECT_DIR` with
    `realpath`, collapsing `../` and following symlinks. Anything that resolves
-   outside the root yields `ask`; otherwise `allow`. Tokens that bash would
-   expand at runtime — leading `~` or any `$` — short-circuit to `ask`, since
-   `realpath` would otherwise lexically place them inside `cwd`. Well-known
+   outside the root yields `ask`; otherwise `allow`. A leading `~` or `~/…` is
+   expanded to `$HOME` first (bash does this deterministically), so a home path
+   inside the root is allowed instead of needlessly prompted. Tokens that bash
+   would still expand unpredictably at runtime — `~user`/`~+`/`~-`, an unset
+   `$HOME`, or any `$` (variables and command substitutions) — short-circuit to
+   `ask`, since `realpath` would otherwise lexically place them inside `cwd`.
+   Well-known
    device paths (`/dev/null`, `/dev/stdin`, `/dev/stdout`, `/dev/stderr`,
    `/dev/zero`, `/dev/tty`, `/dev/random`, `/dev/urandom`, `/dev/fd/N`) are
    allowlisted and skip the workspace check.
@@ -233,10 +239,11 @@ flowing, avoid triggering it:
   hook, and are the right tool for reading and searching code.
 - **Keep guarded file arguments inside the project root.** A path that resolves
   outside the root (including via `../` traversal) prompts every time.
-- **Don't put `$VAR`, `$(...)`, or a leading `~` in a guarded file argument.**
+- **Don't put `$VAR`, `$(...)`, or a `~user` prefix in a guarded file argument.**
   The hook can't expand them, so it treats them as outside the root and prompts —
-  even when they'd resolve in-root. Write the literal in-root path instead
-  (e.g. `cat ./config/app.json`, not `cat "$HOME/proj/config/app.json"`).
+  even when they'd resolve in-root. (A bare `~`/`~/…` *is* expanded to `$HOME`,
+  so home-relative paths inside the root are fine.) Write the literal in-root
+  path instead (e.g. `cat ./config/app.json`, not `cat "$HOME/proj/config/app.json"`).
 - **Don't `cd` outside the project root**, and avoid bare `cd`, `cd -`, and
   `cd $HOME` — they lose the hook's working-directory tracking, so every later
   relative path in the same command prompts. Stay in the root, or `cd` into a
@@ -266,10 +273,12 @@ final output.
 
 ## Limitations
 
-- Tokens that bash would expand at runtime — leading `~` or any unquoted `$`
-  (variables and command substitutions) — are treated as outside-workspace.
-  This is the secure-by-default choice: a literal filename containing `$`
-  will get an `ask` prompt rather than slip through.
+- A leading `~`/`~/…` is expanded to `$HOME` (bash does this deterministically),
+  so a home path inside the root is allowed. Tokens that bash would expand
+  *unpredictably* at runtime — `~user`/`~+`/`~-`, an unset `$HOME`, or any
+  unquoted `$` (variables and command substitutions) — are still treated as
+  outside-workspace. This is the secure-by-default choice: a literal filename
+  containing `$` will get an `ask` prompt rather than slip through.
 - `realpath` only follows symlinks for files that already exist; nonexistent
   paths are normalized lexically (fine for read-style commands).
 - Redirect targets (`> file`) are only inspected when the command chain also
