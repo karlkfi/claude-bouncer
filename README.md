@@ -280,6 +280,12 @@ flowing, avoid triggering it:
   prompt. Reading back this session's *own* background-task output under
   `/tmp/claude-<uid>/…/<session>/…` is also exempt — that path is managed by
   Claude Code, not something you choose.)
+- **Read dependency source from in-workspace vendored/pinned copies, not the
+  global cache.** Out-of-tree caches (Go's `~/go/pkg/mod`, npm's `~/.npm`, pip's
+  `~/.cache/pip`, cargo's `~/.cargo/registry`) are outside the project root, so
+  every guarded read of them prompts. Vendor the source into the tree instead
+  (e.g. `go mod vendor` → `vendor/`, npm's `node_modules/`) and read from there,
+  or use the Read/Grep tools, which skip the hook entirely.
 ```
 
 The plugin also ships a **`reduce-workspace-guard-prompts`** skill: ask Claude
