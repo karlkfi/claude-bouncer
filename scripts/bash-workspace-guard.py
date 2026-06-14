@@ -45,6 +45,40 @@ def is_allowed_device(path):
         return rest.isdigit()
     return False
 
+
+def claude_tmp_root():
+    """Realpath of Claude Code's per-user temp root, ``/tmp/claude-<uid>``.
+
+    Claude Code stores each session's background-task output under
+    ``<root>/<encoded-project>/<session-uuid>/tasks/<id>.output`` (mode 0700,
+    per-UID). This layout is an undocumented internal convention — there is no
+    hook field that names it — so we infer it from ``os.getuid()``. If Claude
+    Code ever relocates the dir, paths simply stop matching the allow below and
+    revert to ``ask`` (fail-safe), so inferring it never weakens the boundary.
+    """
+    return os.path.realpath('/tmp/claude-%d' % os.getuid())
+
+
+def is_session_tmp_path(rp, session_id, tmp_root):
+    """True when resolved path ``rp`` is THIS session's own Claude-managed
+    scratch — i.e. inside ``tmp_root`` AND carrying ``session_id`` as a path
+    segment (the ``<session-uuid>`` directory).
+
+    Reading back the agent's own background-task output is not the boundary
+    this hook guards, so such paths are allowed silently. The scope is
+    deliberately per-session, NOT the whole ``/tmp/claude-<uid>`` root: another
+    session's or project's task output can contain secrets, and allowing a
+    different session to read it would be a cross-context leak. Matched against
+    the resolved realpath (not the raw token), so a symlink planted in the temp
+    dir that escapes the root resolves outside ``tmp_root`` and is still
+    flagged. An empty ``session_id`` (hook field absent) disables the allow. (Q21)
+    """
+    if not session_id:
+        return False
+    if rp != tmp_root and not rp.startswith(tmp_root + os.sep):
+        return False
+    return session_id in rp.split(os.sep)
+
 # Per-command parsing spec:
 #   consume:    flag -> N following tokens to skip (flag *values*, never files)
 #   file_flags: flag -> (N_consumed, [indices among consumed that ARE files])
@@ -448,6 +482,11 @@ def main():
     cmd = (data.get('tool_input') or {}).get('command', '') or ''
     cwd = data.get('cwd') or os.getcwd()
     proj = os.path.realpath(os.environ.get('CLAUDE_PROJECT_DIR') or cwd)
+    # Current session id (a UUID). Used to scope the Claude-managed-temp allow
+    # to THIS session's own task output. Absent for older CLIs -> allow stays
+    # off (every temp path keeps prompting, the secure-by-default direction).
+    session_id = data.get('session_id') or ''
+    session_tmp_root = claude_tmp_root()
     if not cmd.strip():
         return
 
@@ -557,7 +596,18 @@ def main():
             return None
         if kind in ('expand', 'untracked'):
             return (f, kind)
-        if rp in staged_outside_paths or is_outside(rp):
+        # A path staged outside by an earlier `ln` (symbolic or hard) is flagged
+        # even when it physically lives under the session temp dir — checked
+        # BEFORE the session-tmp allow so the ln-staging defense (Q8/Q17) can't
+        # be bypassed by pointing a link inside the allowed scratch dir.
+        if rp in staged_outside_paths:
+            return (f, 'outside')
+        # Claude Code's own per-session task-output/scratch is the agent reading
+        # back its own background-command output — not the boundary we guard.
+        # Allowed only for the current session (see is_session_tmp_path). (Q21)
+        if is_session_tmp_path(rp, session_id, session_tmp_root):
+            return None
+        if is_outside(rp):
             return (f, 'outside')
         return None
 

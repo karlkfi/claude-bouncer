@@ -52,6 +52,14 @@ and file-writing commands Claude reaches for most often; tools like `ls`,
 `find`, and `xargs` aren't covered yet (see
 [`docs/STATUS.md`](docs/STATUS.md)).
 
+It also stays quiet for paths that aren't really "outside your project":
+`/dev/null` and friends, and the session's **own** background-task output under
+`/tmp/claude-<uid>/…` that the agent polls with `cat`/`tail`/`grep`. So
+sessions that spawn and manage background work aren't spammed with prompts for
+reading their own output — in real usage that one case accounted for ~37% of
+all prompts. It's scoped to the current session, so another session's scratch
+still asks.
+
 | Command                              | Decision |
 | ------------------------------------ | -------- |
 | `grep foo ./src.txt`                 | allow    |
@@ -73,6 +81,7 @@ and file-writing commands Claude reaches for most often; tools like `ls`,
 | `grep foo data.txt 2>&1`             | allow    |
 | `cat <<<"/etc/foo"` (here-string)    | allow    |
 | `cat ~/proj/notes.md` (root `~/proj`) | allow   |
+| `tail /tmp/claude-501/…/<this-session>/…` (own task output) | allow |
 | `grep secret /etc/passwd`            | **ask**  |
 | `jq '.x' /etc/hosts`                 | **ask**  |
 | `yq -o json /etc/hosts`              | **ask**  |
@@ -220,6 +229,17 @@ After upgrading either way:
    device paths (`/dev/null`, `/dev/stdin`, `/dev/stdout`, `/dev/stderr`,
    `/dev/zero`, `/dev/tty`, `/dev/random`, `/dev/urandom`, `/dev/fd/N`) are
    allowlisted and skip the workspace check.
+8. **Allow** the current session's own Claude-managed scratch. Claude Code
+   writes each background task's output to
+   `/tmp/claude-<uid>/<encoded-project>/<session-uuid>/tasks/<id>.output`, and
+   the agent reads it back with `cat`/`tail`/`grep`. Reading your own
+   command output isn't the boundary this hook guards, so a path whose resolved
+   `realpath` is under `/tmp/claude-<uid>/` **and** carries the current
+   session's id as a path segment is allowed silently. The scope is
+   per-session, not the whole temp root: another session's or project's task
+   output (which can contain secrets) still prompts. Because the match is on
+   the resolved `realpath`, a symlink planted in the scratch dir that escapes
+   the root is still flagged.
 
 ## Agent guidance: avoiding prompts
 
@@ -257,7 +277,9 @@ flowing, avoid triggering it:
 - **Write temp files inside the project root, not `/tmp`.** Use a path like
   `./.tmp/out.txt` rather than `/tmp/out.txt`. (Redirects and command output to
   `/dev/null`, `/dev/stdout`, `/dev/stderr`, and `/dev/fd/N` are exempt and never
-  prompt.)
+  prompt. Reading back this session's *own* background-task output under
+  `/tmp/claude-<uid>/…/<session>/…` is also exempt — that path is managed by
+  Claude Code, not something you choose.)
 ```
 
 The plugin also ships a **`reduce-workspace-guard-prompts`** skill: ask Claude
@@ -302,6 +324,13 @@ final output.
   redirect (`cat 2 >out`, where `2` is a file) is indistinguishable from the fd
   form and won't be checked. Such a path resolves in-root (and is allowed)
   anyway except after a `cd` outside the root — a pathological combination.
+- The current session's own Claude-managed task-output dir
+  (`/tmp/claude-<uid>/…/<session>/…`) is allowed silently, scoped to the
+  session via the hook's `session_id`. The `/tmp/claude-<uid>/` prefix is an
+  undocumented Claude Code convention inferred from the UID; if Claude Code
+  relocates the dir, these paths simply revert to `ask` (fail-safe — the allow
+  never widens the boundary). A session with no `session_id` (older CLIs)
+  disables the allow entirely.
 - In non-interactive / headless runs there is no one to answer an `ask` prompt,
   so an `ask` still **blocks** the command (verified on CLI 2.1.159 — it does
   not silently allow). Under `--dangerously-skip-permissions`

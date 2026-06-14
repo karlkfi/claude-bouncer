@@ -827,13 +827,63 @@ class AllowedDeviceTests(unittest.TestCase):
         self.assertFalse(guard.is_allowed_device("dev/null"))  # relative
 
 
-def run_hook(cmd, cwd, project_dir=None, permission_mode=None):
+class SessionTmpPathTests(unittest.TestCase):
+    """Per-session allow for Claude Code's own task-output scratch (Q21)."""
+
+    def setUp(self):
+        self.uid = os.getuid()
+        self.root = guard.claude_tmp_root()
+        self.sess = "11111111-2222-3333-4444-555555555555"
+        # A realistic per-session task-output path under the temp root.
+        self.path = os.path.join(
+            self.root, "-Users-me-proj", self.sess, "tasks", "abc.output")
+
+    def test_claude_tmp_root_is_realpath_of_uid_dir(self):
+        self.assertEqual(
+            self.root, os.path.realpath("/tmp/claude-%d" % self.uid))
+
+    def test_current_session_path_allowed(self):
+        self.assertTrue(
+            guard.is_session_tmp_path(self.path, self.sess, self.root))
+
+    def test_temp_root_itself_allowed_for_session(self):
+        # The root with the session segment somewhere below it is the only
+        # match; the bare root has no session segment, so it is not allowed.
+        self.assertFalse(
+            guard.is_session_tmp_path(self.root, self.sess, self.root))
+
+    def test_other_session_path_not_allowed(self):
+        other = "99999999-8888-7777-6666-555555555555"
+        self.assertFalse(
+            guard.is_session_tmp_path(self.path, other, self.root))
+
+    def test_empty_session_id_disables_allow(self):
+        self.assertFalse(guard.is_session_tmp_path(self.path, "", self.root))
+
+    def test_path_outside_temp_root_not_allowed(self):
+        # Even though the session id appears as a segment, the path is not under
+        # the temp root, so it is not allowed.
+        outside = "/var/data/%s/x.output" % self.sess
+        self.assertFalse(
+            guard.is_session_tmp_path(outside, self.sess, self.root))
+
+    def test_sibling_root_prefix_not_matched(self):
+        # `/tmp/claude-501-evil/...` must not match `/tmp/claude-501` via a
+        # naive prefix check — the os.sep boundary guards against it.
+        sibling = self.root + "-evil/" + self.sess + "/x"
+        self.assertFalse(
+            guard.is_session_tmp_path(sibling, self.sess, self.root))
+
+
+def run_hook(cmd, cwd, project_dir=None, permission_mode=None, session_id=None):
     """Invoke the hook as a subprocess. Returns parsed JSON or None on defer."""
     env = os.environ.copy()
     env["CLAUDE_PROJECT_DIR"] = project_dir or cwd
     data = {"tool_input": {"command": cmd}, "cwd": cwd}
     if permission_mode is not None:
         data["permission_mode"] = permission_mode
+    if session_id is not None:
+        data["session_id"] = session_id
     payload = json.dumps(data)
     result = subprocess.run(
         [sys.executable, str(SCRIPT)],
@@ -864,9 +914,9 @@ class HookEndToEndTests(unittest.TestCase):
         self._tmp.cleanup()
 
     def _decision(self, cmd, expected, *, cwd=None, project_dir=None,
-                  permission_mode=None):
+                  permission_mode=None, session_id=None):
         out = run_hook(cmd, cwd or self.workspace, project_dir=project_dir,
-                       permission_mode=permission_mode)
+                       permission_mode=permission_mode, session_id=session_id)
         self.assertIsNotNone(out, f"expected a decision, got defer for: {cmd!r}")
         got = out["hookSpecificOutput"]["permissionDecision"]
         self.assertEqual(
@@ -1483,6 +1533,64 @@ class HookEndToEndTests(unittest.TestCase):
     def test_cat_dev_sda_outside_ask(self):
         # Only the explicit allowlist bypasses; other /dev/ paths still ask.
         self._decision("cat /dev/sda1", "ask")
+
+    # --- Claude per-session temp allow (Q21) --------------------------------
+    # Claude Code writes each background task's output to
+    # /tmp/claude-<uid>/<encoded-project>/<session-uuid>/tasks/<id>.output and
+    # the agent reads it back. That is the agent's own scratch, not the boundary
+    # this hook guards, so it's allowed — but ONLY for the current session.
+    # Paths use os.getuid() so they match what the script computes; the dirs
+    # need not exist (the script resolves lexically and the subprocess never
+    # execs the command). Synthetic project/uuid segments, per the repo rule on
+    # never using real outside paths in fixtures.
+
+    def _session_tmp(self, session_id, name="abc.output"):
+        return os.path.join(
+            guard.claude_tmp_root(), "-Users-me-proj",
+            session_id, "tasks", name)
+
+    def test_claude_session_tmp_read_allow(self):
+        sess = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        self._decision(f"cat {self._session_tmp(sess)}", "allow",
+                       session_id=sess)
+
+    def test_claude_session_tmp_tail_allow(self):
+        sess = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        self._decision(f"tail -20 {self._session_tmp(sess)}", "allow",
+                       session_id=sess)
+
+    def test_claude_session_tmp_redirect_target_allow(self):
+        # Writing into the current session's scratch via a redirect is allowed.
+        sess = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        self._decision(f"cat in.txt > {self._session_tmp(sess, 'log')}",
+                       "allow", session_id=sess)
+
+    def test_claude_other_session_tmp_ask(self):
+        # A path carrying a DIFFERENT session's uuid must still prompt — this is
+        # the cross-session leak the per-session scope prevents.
+        owner = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        current = "ffffffff-0000-1111-2222-333333333333"
+        out = self._decision(f"cat {self._session_tmp(owner)}", "ask",
+                             session_id=current)
+        self.assertIn(self._session_tmp(owner),
+                      out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_claude_tmp_without_session_id_ask(self):
+        # No session_id field (older CLI) -> allow disabled -> still prompts.
+        sess = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        self._decision(f"cat {self._session_tmp(sess)}", "ask")
+
+    def test_claude_session_tmp_symlink_escape_still_ask(self):
+        # Defense-in-depth: an `ln` staging an OUTSIDE target to a link that
+        # lives inside the allowed session scratch must still be flagged. The
+        # staged-path check runs before the session-tmp allow.
+        sess = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        link = self._session_tmp(sess, "link")
+        out = self._decision(
+            f"ln -s /tmp/q21-fake-target {link} && cat {link}", "ask",
+            session_id=sess)
+        self.assertIn(link,
+                      out["hookSpecificOutput"]["permissionDecisionReason"])
 
     # --- alias end-to-end ---------------------------------------------------
 
