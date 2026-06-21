@@ -36,11 +36,16 @@ silently.
 
 ## What it does
 
-The hook produces one of three outcomes:
+The hook produces one of four outcomes:
 
 - **allow** — the command runs without a prompt.
 - **ask** — Claude Code shows its standard permission prompt for the command
   (as above). You approve or reject.
+- **deny** — the command is blocked with a constructive reason. This is the
+  default for **host-wide temp** paths (`/tmp`, `/var/tmp`, `$TMPDIR`): they're
+  shared across every session and worktree and live outside the project root, so
+  instead of prompting, the hook steers you to a repo-local gitignored scratch
+  dir (`./tmp/`). Configurable down to `ask`; see [Configuration](#configuration).
 - **defer** — the hook stays silent; your normal permission settings apply.
 
 Guarded commands: `grep` (and `egrep`, `fgrep`), `rg`, `sed`, `awk` (and
@@ -85,26 +90,30 @@ still asks.
 | `grep secret /etc/passwd`            | **ask**  |
 | `jq '.x' /etc/hosts`                 | **ask**  |
 | `yq -o json /etc/hosts`              | **ask**  |
-| `sed -f /tmp/evil.sed notes.md`      | **ask**  |
-| `grep foo data.txt > /tmp/out.txt`   | **ask**  |
-| `sort -o /tmp/out.txt data.txt`      | **ask**  |
 | `wc --files0-from=/etc/list`         | **ask**  |
 | `diff --from-file=/etc/hosts in.txt` | **ask**  |
-| `cp ./secret.txt /tmp/exfil`         | **ask**  |
 | `mv .env ~/leaked`                   | **ask**  |
-| `rm -rf /tmp/foo`                    | **ask**  |
 | `tee /etc/hosts`                     | **ask**  |
-| `dd if=./in of=/tmp/out`             | **ask**  |
 | `less /var/log/syslog`               | **ask**  |
 | `cat ../../etc/passwd`               | **ask**  |
 | `cat ~/.aws/credentials`             | **ask**  |
 | `cat ~user/notes.md`                 | **ask**  |
 | `cat $HOME/.ssh/id_rsa`              | **ask**  |
 | `cd /etc && cat passwd`              | **ask**  |
-| `cd /tmp && cat in.txt > evil`       | **ask**  |
 | `LC_ALL=C cat /etc/passwd`           | **ask**  |
 | `ln -s /etc/passwd link && cat link` | **ask**  |
 | `ln /etc/passwd link && cat link`    | **ask**  |
+| `cat /tmp/out` · `cat /var/tmp/x`    | **deny** |
+| `sed -f /tmp/evil.sed notes.md`      | **deny** |
+| `grep foo data.txt > /tmp/out.txt`   | **deny** |
+| `sort -o /tmp/out.txt data.txt`      | **deny** |
+| `cp ./secret.txt /tmp/exfil`         | **deny** |
+| `rm -rf /tmp/foo`                    | **deny** |
+| `dd if=./in of=/tmp/out`             | **deny** |
+| `cd /tmp && cat in.txt > evil`       | **deny** |
+| `cat ./tmp/out` (repo-local scratch) | allow    |
+| `grep '/tmp' data.txt` (`/tmp` is the pattern) | allow |
+| `cat /tmpfoo/x` (not under `/tmp`)   | **ask**  |
 | `echo secret > /tmp/out`             | defer    |
 | `ls /etc`                            | defer    |
 
@@ -113,6 +122,15 @@ knows the difference because it parses each command against a per-command spec
 of which positions are programs, which are files, and which flags take values.
 A naive string match would either miss real file arguments or false-positive on
 program syntax.
+
+The **deny** rows are **host-wide temp** paths — at or under `/tmp`, `/var/tmp`,
+or `$TMPDIR` after symlink resolution. They're classified from the *same*
+resolved file arguments the hook already extracts, so `/tmp` appearing only as
+text (a grep pattern, a commit message, an `echo` string) is never matched. The
+deny is the default and can be softened to `ask` or narrowed with an allowlist —
+see [Configuration](#configuration). It applies only to the commands the hook
+already guards: an unguarded command targeting `/tmp` (e.g. `echo secret > /tmp/out`)
+still defers.
 
 The **ask** rows assume an interactive or `default`-mode session. In full-auto
 `bypassPermissions` mode (`--dangerously-skip-permissions`) those same paths
@@ -243,6 +261,18 @@ After upgrading either way:
    output (which can contain secrets) still prompts. Because the match is on
    the resolved `realpath`, a symlink planted in the scratch dir that escapes
    the root is still flagged.
+9. **Deny** host-wide temp. After the steps above, any *remaining*
+   outside-workspace file argument whose resolved `realpath` is at or under a
+   host-temp root (`/tmp`, `/var/tmp`, `$TMPDIR`, all resolved first — so macOS's
+   `/tmp → /private/tmp` and a `$TMPDIR` under `/var/folders/…` are caught) is
+   reclassified from `ask` to `deny`, with a message steering to a repo-local
+   gitignored scratch dir. Because this runs on the already-resolved file
+   arguments, a `/tmp` that appears only as text (a grep pattern, an `echo`
+   string) is never matched. The Claude-managed temp root from step 8 is
+   excluded — another session's task output keeps its cross-session `ask` rather
+   than this steer-to-`./tmp/` deny. The action, scratch-dir name, extra roots,
+   and an allowlist escape hatch are all configurable; see
+   [Configuration](#configuration).
 
 ## Agent guidance: avoiding prompts
 
@@ -277,12 +307,14 @@ flowing, avoid triggering it:
   `cd $HOME` — they lose the hook's working-directory tracking, so every later
   relative path in the same command prompts. Stay in the root, or `cd` into a
   subdirectory of it with a literal path.
-- **Write temp files inside the project root, not `/tmp`.** Use a path like
-  `./.tmp/out.txt` rather than `/tmp/out.txt`. (Redirects and command output to
-  `/dev/null`, `/dev/stdout`, `/dev/stderr`, and `/dev/fd/N` are exempt and never
-  prompt. Reading back this session's *own* background-task output under
-  `/tmp/claude-<uid>/…/<session>/…` is also exempt — that path is managed by
-  Claude Code, not something you choose.)
+- **Write temp files inside the project root, not `/tmp`.** Host-wide temp
+  (`/tmp`, `/var/tmp`, `$TMPDIR`) is **denied** by default — not just prompted —
+  because it's shared across sessions and worktrees and lives outside the root.
+  Use a repo-local gitignored scratch dir like `./tmp/out.txt` instead. (Redirects
+  and command output to `/dev/null`, `/dev/stdout`, `/dev/stderr`, and `/dev/fd/N`
+  are exempt and never prompt. Reading back this session's *own* background-task
+  output under `/tmp/claude-<uid>/…/<session>/…` is also exempt — that path is
+  managed by Claude Code, not something you choose.)
 - **Read dependency source from in-workspace vendored/pinned copies, not the
   global cache.** Out-of-tree caches (Go's `~/go/pkg/mod`, npm's `~/.npm`, pip's
   `~/.cache/pip`, cargo's `~/.cargo/registry`) are outside the project root, so
@@ -310,6 +342,28 @@ It passes its arguments straight through to the script, so the same flags work:
 
 The set of guarded commands lives in the `SPEC` and `ALIASES` tables at the top
 of `scripts/bash-workspace-guard.py`. Add a row to guard another command.
+
+### Host-wide temp (`/tmp`) deny
+
+A guarded file argument that resolves at or under a host-temp root is **denied**
+by default and steered to a repo-local gitignored scratch dir. Four environment
+variables tune this — all read at hook time, so no restart is needed:
+
+| Env var | Default | Effect |
+| --- | --- | --- |
+| `WORKSPACE_GUARD_TMP_ACTION` | `deny` | `deny` blocks host-temp paths; `ask` softens to a confirmation prompt. Any other value falls back to `deny`. |
+| `WORKSPACE_GUARD_SCRATCH_DIR` | `tmp/` | The repo-local scratch dir named in the deny message. |
+| `WORKSPACE_GUARD_TMP_ROOTS` | (empty) | Extra host-temp roots, `:`- or `,`-separated. **Additive** — it extends the built-in `/tmp`, `/var/tmp`, and `$TMPDIR`; it can't shrink them. |
+| `WORKSPACE_GUARD_TMP_ALLOW` | (empty) | Allowlist of exact-prefix or glob paths (`:`/`,`-separated) that **escape** the deny — for the rare tool that genuinely needs `/tmp`. |
+
+`WORKSPACE_GUARD_TMP_ALLOW` is the one knob that *loosens* the guard, so it's
+empty by default and opt-in: an allowlisted host-temp path is allowed silently
+rather than denied. Scope each entry tightly (an exact path or a narrow glob like
+`/tmp/myapp-*`), since anything it matches bypasses the boundary. The deny itself
+is the secure default — softening to `ask` (`WORKSPACE_GUARD_TMP_ACTION=ask`) is
+the gentler way to keep a human in the loop.
+
+### Outside-workspace ask vs. deny
 
 For outside-workspace paths the hook returns `ask` so you get a confirmation
 prompt. In full-auto runs (`--dangerously-skip-permissions`, i.e.
@@ -357,6 +411,12 @@ final output.
   (`bypassPermissions`) the hook emits `deny` rather than `ask` for
   outside-workspace paths: equally blocking, but the agent receives the reason
   and can recover instead of stalling. See [Configuration](#configuration).
+- The host-temp `deny` only upgrades paths the hook already extracts as file
+  arguments — the same paths it would otherwise have prompted on. Command shapes
+  the hook doesn't parse as file args still defer: a standalone `cd /tmp`, a
+  temp-creating tool that isn't in the `SPEC` table (`mktemp -p /tmp`), and a
+  redirect from an *unguarded* command (`go test > /tmp/log`). These are out of
+  scope by design; guarding more of them is a tracked follow-up.
 
 ## Companion plugin: branch-guard
 

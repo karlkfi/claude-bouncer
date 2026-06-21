@@ -875,10 +875,21 @@ class SessionTmpPathTests(unittest.TestCase):
             guard.is_session_tmp_path(sibling, self.sess, self.root))
 
 
-def run_hook(cmd, cwd, project_dir=None, permission_mode=None, session_id=None):
-    """Invoke the hook as a subprocess. Returns parsed JSON or None on defer."""
+def run_hook(cmd, cwd, project_dir=None, permission_mode=None, session_id=None,
+             env_extra=None):
+    """Invoke the hook as a subprocess. Returns parsed JSON or None on defer.
+
+    `env_extra` overrides/adds environment variables for the subprocess — used
+    to exercise `$TMPDIR` resolution and the `WORKSPACE_GUARD_TMP_*` config
+    knobs. A value of None deletes the key from the inherited environment so a
+    test can clear an inherited `$TMPDIR`."""
     env = os.environ.copy()
     env["CLAUDE_PROJECT_DIR"] = project_dir or cwd
+    for k, v in (env_extra or {}).items():
+        if v is None:
+            env.pop(k, None)
+        else:
+            env[k] = v
     data = {"tool_input": {"command": cmd}, "cwd": cwd}
     if permission_mode is not None:
         data["permission_mode"] = permission_mode
@@ -963,8 +974,8 @@ class HookEndToEndTests(unittest.TestCase):
         self._decision("jq .x /etc/hosts", "ask")
 
     def test_sed_pattern_file_outside_ask(self):
-        # -f /tmp/evil.sed -> pattern file itself is outside.
-        self._decision("sed -f /tmp/evil.sed in.txt", "ask")
+        # -f /etc/evil.sed -> pattern file itself is outside.
+        self._decision("sed -f /etc/evil.sed in.txt", "ask")
 
     def test_grep_prog_suppressed_e_outside_ask(self):
         self._decision("grep -e PAT /etc/hosts", "ask")
@@ -985,27 +996,27 @@ class HookEndToEndTests(unittest.TestCase):
 
     def test_outside_bypass_permissions_deny(self):
         out = self._decision(
-            "cat /tmp/q17-fake-target", "deny",
+            "cat /etc/q17-fake-target", "deny",
             permission_mode="bypassPermissions",
         )
         self.assertIn(
-            "/tmp/q17-fake-target",
+            "/etc/q17-fake-target",
             out["hookSpecificOutput"]["permissionDecisionReason"],
         )
 
     def test_outside_default_mode_ask(self):
-        self._decision("cat /tmp/q17-fake-target", "ask", permission_mode="default")
+        self._decision("cat /etc/q17-fake-target", "ask", permission_mode="default")
 
     def test_outside_no_permission_mode_ask(self):
         # Field absent (interactive sessions don't always send it) -> ask.
-        self._decision("cat /tmp/q17-fake-target", "ask")
+        self._decision("cat /etc/q17-fake-target", "ask")
 
     def test_outside_accept_edits_ask(self):
         # Only bypassPermissions flips to deny; acceptEdits still has a human.
-        self._decision("cat /tmp/q17-fake-target", "ask", permission_mode="acceptEdits")
+        self._decision("cat /etc/q17-fake-target", "ask", permission_mode="acceptEdits")
 
     def test_outside_plan_mode_ask(self):
-        self._decision("cat /tmp/q17-fake-target", "ask", permission_mode="plan")
+        self._decision("cat /etc/q17-fake-target", "ask", permission_mode="plan")
 
     def test_workspace_bypass_permissions_still_allow(self):
         # deny only applies to outside paths; in-workspace reads stay allow.
@@ -1020,9 +1031,9 @@ class HookEndToEndTests(unittest.TestCase):
     # --- redirect capture ---------------------------------------------------
 
     def test_redirect_target_outside_ask(self):
-        out = self._decision("cat in.txt > /tmp/out.txt", "ask")
+        out = self._decision("cat in.txt > /etc/out.txt", "ask")
         self.assertIn(
-            "/tmp/out.txt",
+            "/etc/out.txt",
             out["hookSpecificOutput"]["permissionDecisionReason"],
         )
 
@@ -1030,7 +1041,7 @@ class HookEndToEndTests(unittest.TestCase):
         self._decision("cat in.txt > out.txt", "allow")
 
     def test_redirect_append_outside_ask(self):
-        self._decision("cat in.txt >> /tmp/out.txt", "ask")
+        self._decision("cat in.txt >> /etc/out.txt", "ask")
 
     # --- fd-prefixed redirects & fd duplication (Q20) -----------------------
     # `2>file`, `2>&1`, `>&-` tokenize with the fd digit as a bare token glued
@@ -1058,17 +1069,17 @@ class HookEndToEndTests(unittest.TestCase):
 
     def test_fd_prefixed_redirect_to_outside_still_ask(self):
         # Dropping the fd digit must not drop the redirect target itself.
-        out = self._decision("grep PAT in.txt 2>/tmp/q20-fake-out", "ask")
+        out = self._decision("grep PAT in.txt 2>/etc/q20-fake-out", "ask")
         self.assertIn(
-            "/tmp/q20-fake-out",
+            "/etc/q20-fake-out",
             out["hookSpecificOutput"]["permissionDecisionReason"],
         )
 
     def test_ampersand_redirect_to_outside_file_still_ask(self):
         # `>&file` (target isn't a bare fd) is a redirect to a file, not a dup.
-        out = self._decision("grep PAT in.txt >&/tmp/q20-fake-out", "ask")
+        out = self._decision("grep PAT in.txt >&/etc/q20-fake-out", "ask")
         self.assertIn(
-            "/tmp/q20-fake-out",
+            "/etc/q20-fake-out",
             out["hookSpecificOutput"]["permissionDecisionReason"],
         )
 
@@ -1081,11 +1092,12 @@ class HookEndToEndTests(unittest.TestCase):
     # where bash actually opens the file.
 
     def test_redirect_relative_target_tracks_cd_outside_ask(self):
-        # The motivating bug: after `cd /tmp`, the relative redirect `evil`
-        # resolves to /tmp/evil — outside the workspace — even though it looks
+        # The motivating bug: after `cd /etc`, the relative redirect `evil`
+        # resolves to /etc/evil — outside the workspace — even though it looks
         # in-workspace at the chain's original cwd. `/dev/null` is an allowed
-        # device, so only the redirect target can flag.
-        out = self._decision("cd /tmp && cat /dev/null > evil", "ask")
+        # device, so only the redirect target can flag. (Uses /etc, not /tmp, so
+        # the redirect-routing intent isn't entangled with the host-temp deny.)
+        out = self._decision("cd /etc && cat /dev/null > evil", "ask")
         self.assertIn(
             "evil",
             out["hookSpecificOutput"]["permissionDecisionReason"],
@@ -1106,9 +1118,9 @@ class HookEndToEndTests(unittest.TestCase):
 
     def test_fd_prefixed_redirect_target_tracks_cd_outside_ask(self):
         # fd-prefix popping must route the surviving target into the post-cd
-        # group: `2>err.log` after `cd /tmp` writes /tmp/err.log (outside).
+        # group: `2>err.log` after `cd /etc` writes /etc/err.log (outside).
         abs_in = os.path.join(self.workspace, "in.txt")
-        out = self._decision(f"cd /tmp && grep PAT {abs_in} 2>err.log", "ask")
+        out = self._decision(f"cd /etc && grep PAT {abs_in} 2>err.log", "ask")
         self.assertIn(
             "err.log",
             out["hookSpecificOutput"]["permissionDecisionReason"],
@@ -1116,9 +1128,9 @@ class HookEndToEndTests(unittest.TestCase):
 
     def test_ampersand_redirect_file_target_tracks_cd_outside_ask(self):
         # `>&file` (DUP operator, target is a filename not an fd) routes into
-        # the post-cd group too: /tmp/dup.out is outside.
+        # the post-cd group too: /etc/dup.out is outside.
         abs_in = os.path.join(self.workspace, "in.txt")
-        out = self._decision(f"cd /tmp && grep PAT {abs_in} >&dup.out", "ask")
+        out = self._decision(f"cd /etc && grep PAT {abs_in} >&dup.out", "ask")
         self.assertIn(
             "dup.out",
             out["hookSpecificOutput"]["permissionDecisionReason"],
@@ -1134,7 +1146,7 @@ class HookEndToEndTests(unittest.TestCase):
     def test_top_level_redirect_still_outside_ask(self):
         # Regression: a top-level (no-cd) absolute redirect target is still
         # checked — the per-group routing didn't drop the common case.
-        self._decision("cat in.txt > /tmp/q16-fake-target", "ask")
+        self._decision("cat in.txt > /etc/q16-fake-target", "ask")
 
     # --- shell expansions (Q5) ----------------------------------------------
 
@@ -1687,13 +1699,13 @@ class HookEndToEndTests(unittest.TestCase):
 
     def test_yq_from_file_outside_ask(self):
         # Both kislyuk and mikefarah read the program/expression from FILE.
-        self._decision("yq --from-file /tmp/evil.yq in.txt", "ask")
+        self._decision("yq --from-file /etc/evil.yq in.txt", "ask")
 
     def test_yq_short_f_outside_ask(self):
         # kislyuk's jq-pass-through -f. For mikefarah this is --front-matter
         # (a string value), but an absolute outside path is unusual there and
         # asking is the secure default.
-        self._decision("yq -f /tmp/evil.jq in.txt", "ask")
+        self._decision("yq -f /etc/evil.jq in.txt", "ask")
 
     def test_yq_slurpfile_outside_ask(self):
         self._decision("yq --slurpfile d /etc/hosts . in.txt", "ask")
@@ -1738,10 +1750,10 @@ class HookEndToEndTests(unittest.TestCase):
         self._decision("sort in.txt", "allow")
 
     def test_sort_output_outside_ask(self):
-        # `-o /tmp/out.txt` writes outside — must ask, citing /tmp/out.txt.
-        out = self._decision("sort -o /tmp/out.txt in.txt", "ask")
+        # `-o /etc/out.txt` writes outside — must ask, citing /etc/out.txt.
+        out = self._decision("sort -o /etc/out.txt in.txt", "ask")
         self.assertIn(
-            "/tmp/out.txt",
+            "/etc/out.txt",
             out["hookSpecificOutput"]["permissionDecisionReason"],
         )
 
@@ -1783,7 +1795,7 @@ class HookEndToEndTests(unittest.TestCase):
         self._decision("file /etc/passwd", "ask")
 
     def test_file_dash_f_outside_ask(self):
-        self._decision("file -f /tmp/list.txt", "ask")
+        self._decision("file -f /etc/list.txt", "ask")
 
     def test_hexdump_workspace_allow(self):
         self._decision("hexdump in.txt", "allow")
@@ -1792,7 +1804,7 @@ class HookEndToEndTests(unittest.TestCase):
         self._decision("hexdump /etc/passwd", "ask")
 
     def test_hexdump_format_file_outside_ask(self):
-        self._decision("hexdump -f /tmp/fmt.txt in.txt", "ask")
+        self._decision("hexdump -f /etc/fmt.txt in.txt", "ask")
 
     # Cat-shape aliases: pick a couple of representative end-to-end checks
     # rather than re-testing each alias — the alias resolution table is
@@ -1807,7 +1819,7 @@ class HookEndToEndTests(unittest.TestCase):
         self._decision("zcat in.txt", "allow")
 
     def test_zcat_outside_ask(self):
-        self._decision("zcat /tmp/archive.gz", "ask")
+        self._decision("zcat /etc/archive.gz", "ask")
 
     def test_cmp_outside_ask(self):
         self._decision("cmp in.txt /etc/hosts", "ask")
@@ -1829,32 +1841,33 @@ class HookEndToEndTests(unittest.TestCase):
         )
 
     def test_cp_outside_dest_ask(self):
-        # `cp ./in.txt /tmp/exfil` — outside dest must ask (the net-new
+        # `cp ./in.txt /etc/exfil` — outside dest must ask (the net-new
         # coverage Q11 adds).
-        out = self._decision("cp ./in.txt /tmp/exfil", "ask")
+        out = self._decision("cp ./in.txt /etc/exfil", "ask")
         self.assertIn(
-            "/tmp/exfil",
+            "/etc/exfil",
             out["hookSpecificOutput"]["permissionDecisionReason"],
         )
 
     def test_cp_target_directory_outside_ask(self):
-        # `cp -t /tmp a.txt` — DIR must be checked.
-        out = self._decision("cp -t /tmp in.txt", "ask")
+        # `cp -t /etc a.txt` — DIR must be checked. (Non-temp outside dir so the
+        # target-directory parsing intent isn't entangled with host-temp deny.)
+        out = self._decision("cp -t /etc in.txt", "ask")
         self.assertIn(
-            "/tmp",
+            "/etc",
             out["hookSpecificOutput"]["permissionDecisionReason"],
         )
 
     def test_cp_target_directory_inline_outside_ask(self):
-        self._decision("cp --target-directory=/tmp in.txt", "ask")
+        self._decision("cp --target-directory=/etc in.txt", "ask")
 
     def test_cp_recursive_outside_ask(self):
-        self._decision("cp -r ./dir /tmp/exfil", "ask")
+        self._decision("cp -r ./dir /etc/exfil", "ask")
 
     def test_cp_after_cd_relative_outside_ask(self):
-        # `cd /etc && cp passwd /tmp/x` — both positionals resolve outside
-        # the workspace via Q7's cd-tracking.
-        self._decision("cd /etc && cp passwd /tmp/x", "ask")
+        # `cd /etc && cp passwd out` — both positionals resolve outside
+        # the workspace via Q7's cd-tracking (/etc/passwd, /etc/out).
+        self._decision("cd /etc && cp passwd out", "ask")
 
     def test_mv_inside_workspace_allow(self):
         with open(os.path.join(self.workspace, "src.txt"), "w") as f:
@@ -1870,7 +1883,7 @@ class HookEndToEndTests(unittest.TestCase):
         )
 
     def test_mv_outside_source_ask(self):
-        self._decision("mv /tmp/payload ./app.py", "ask")
+        self._decision("mv /etc/payload ./app.py", "ask")
 
     def test_tee_inside_workspace_allow(self):
         self._decision("tee log.txt", "allow")
@@ -1900,17 +1913,20 @@ class HookEndToEndTests(unittest.TestCase):
         self._decision("rm -rf ./build", "allow")
 
     def test_rm_outside_absolute_ask(self):
-        out = self._decision("rm -rf /tmp/q11-fake-target", "ask")
+        out = self._decision("rm -rf /etc/q11-fake-target", "ask")
         self.assertIn(
-            "/tmp/q11-fake-target",
+            "/etc/q11-fake-target",
             out["hookSpecificOutput"]["permissionDecisionReason"],
         )
 
     def test_rm_traversal_outside_ask(self):
-        # `rm -rf ../../foo` from inside the workspace escapes via realpath.
+        # `rm -rf ../../../…/etc/foo` from inside the workspace escapes via
+        # realpath. Over-traversal clamps at `/`, so this deterministically
+        # resolves to /etc/foo (outside, and not host-temp) on any platform —
+        # the temp workspace itself may live under /tmp or /var/folders.
         nested = os.path.join(self.workspace, "sub")
         os.mkdir(nested)
-        self._decision("rm -rf ../../../tmp/foo", "ask", cwd=nested)
+        self._decision("rm -rf ../../../../../../../../etc/foo", "ask", cwd=nested)
 
     def test_rm_tilde_outside_ask(self):
         out = self._decision("rm ~/secret", "ask")
@@ -1925,15 +1941,15 @@ class HookEndToEndTests(unittest.TestCase):
 
     def test_rm_mixed_positionals_one_outside_ask(self):
         # Mixed list — any outside positional triggers ask, citing only it.
-        out = self._decision("rm -rf in.txt /tmp/q11-fake-target", "ask")
+        out = self._decision("rm -rf in.txt /etc/q11-fake-target", "ask")
         reason = out["hookSpecificOutput"]["permissionDecisionReason"]
-        self.assertIn("/tmp/q11-fake-target", reason)
+        self.assertIn("/etc/q11-fake-target", reason)
         self.assertNotIn("in.txt", reason)
 
     def test_rm_double_dash_then_outside_ask(self):
         # `rm -- /etc/passwd` — end-of-options doesn't change the workspace
         # check; absolute outside path still asks.
-        self._decision("rm -- /tmp/q11-fake-target", "ask")
+        self._decision("rm -- /etc/q11-fake-target", "ask")
 
     # --- Q11 PR3: dd end-to-end ---------------------------------------------
 
@@ -1943,10 +1959,10 @@ class HookEndToEndTests(unittest.TestCase):
 
     def test_dd_outside_of_ask(self):
         out = self._decision(
-            "dd if=/dev/urandom of=/tmp/q11-fake-target bs=1M count=1", "ask",
+            "dd if=/dev/urandom of=/etc/q11-fake-target bs=1M count=1", "ask",
         )
         self.assertIn(
-            "/tmp/q11-fake-target",
+            "/etc/q11-fake-target",
             out["hookSpecificOutput"]["permissionDecisionReason"],
         )
 
@@ -2001,7 +2017,7 @@ class HookEndToEndTests(unittest.TestCase):
         # even though the redirect target is outside-workspace. The redirect
         # collector only consults `outside` once at least one guarded simple
         # command is present.
-        self._defer("ls > /tmp/out.txt")
+        self._defer("ls > /etc/out.txt")
 
 
 class SplitNewlineSeparatorsTests(unittest.TestCase):
@@ -2072,9 +2088,9 @@ class NewlineSeparatorEndToEndTests(unittest.TestCase):
         # The security regression: `echo` (unguarded) then a newline then a
         # guarded `grep` of an outside path. Pre-fix the whole thing merged
         # into the unguarded `echo` group and deferred (silent allow).
-        out = self._decision("echo hi\ngrep PAT /tmp/q18-fake-target", "ask")
+        out = self._decision("echo hi\ngrep PAT /etc/q18-fake-target", "ask")
         self.assertIn(
-            "/tmp/q18-fake-target",
+            "/etc/q18-fake-target",
             out["hookSpecificOutput"]["permissionDecisionReason"],
         )
 
@@ -2084,18 +2100,18 @@ class NewlineSeparatorEndToEndTests(unittest.TestCase):
         # Pre-fix `echo` and its string merged into the grep group and were
         # flagged as file args. Post-fix only the real grep target is named.
         out = self._decision(
-            'grep PAT /tmp/q18-real-target\necho "/tmp/q18-echo-string"', "ask")
+            'grep PAT /etc/q18-real-target\necho "/tmp/q18-echo-string"', "ask")
         reason = out["hookSpecificOutput"]["permissionDecisionReason"]
-        self.assertIn("/tmp/q18-real-target", reason)
+        self.assertIn("/etc/q18-real-target", reason)
         self.assertNotIn("/tmp/q18-echo-string", reason)
         self.assertNotIn("echo", reason)
 
     def test_newline_separates_guarded_groups_like_semicolon(self):
         # `cat in.txt <newline> cat OUTSIDE` — first reads a workspace file,
         # only the second is flagged. Mirrors the `;`-separator behavior.
-        out = self._decision("cat in.txt\ncat /tmp/q18-fake-target", "ask")
+        out = self._decision("cat in.txt\ncat /etc/q18-fake-target", "ask")
         reason = out["hookSpecificOutput"]["permissionDecisionReason"]
-        self.assertIn("/tmp/q18-fake-target", reason)
+        self.assertIn("/etc/q18-fake-target", reason)
         self.assertNotIn("in.txt", reason)
 
     def test_workspace_only_multiline_allow(self):
@@ -2190,6 +2206,238 @@ class ReasonAdviceEndToEndTests(unittest.TestCase):
         r = self._reason("popd && cat data.txt")
         self.assertIn("data.txt", r)
         self.assertIn("untracked cd", r)
+
+
+class HostTempHelperTests(unittest.TestCase):
+    """Unit coverage for the host-temp classification helpers."""
+
+    def test_path_at_or_under_boundary(self):
+        self.assertTrue(guard.path_at_or_under("/tmp", "/tmp"))
+        self.assertTrue(guard.path_at_or_under("/tmp/x", "/tmp"))
+        self.assertTrue(guard.path_at_or_under("/tmp/a/b", "/tmp"))
+        # Sibling lookalikes must NOT match (the os.sep boundary).
+        self.assertFalse(guard.path_at_or_under("/tmpfoo", "/tmp"))
+        self.assertFalse(guard.path_at_or_under("/tmpfs/x", "/tmp"))
+        self.assertFalse(guard.path_at_or_under("/var/tmpx", "/var/tmp"))
+
+    def test_is_host_temp_with_explicit_roots(self):
+        roots = {"/tmp", "/var/tmp"}
+        self.assertTrue(guard.is_host_temp("/tmp/out", roots))
+        self.assertTrue(guard.is_host_temp("/var/tmp/x", roots))
+        self.assertFalse(guard.is_host_temp("/etc/passwd", roots))
+        self.assertFalse(guard.is_host_temp("/tmpfoo/x", roots))
+
+    def test_split_pathlist_colon_and_comma(self):
+        self.assertEqual(
+            guard._split_pathlist("/a:/b,/c"), ["/a", "/b", "/c"])
+        self.assertEqual(guard._split_pathlist(""), [])
+        self.assertEqual(guard._split_pathlist("  /a , , /b "), ["/a", "/b"])
+
+    def test_matches_allowlist_exact_and_prefix(self):
+        # Callers always pass an already-resolved realpath, so mirror that
+        # (on macOS /tmp/ok -> /private/tmp/ok); the pattern stays user-written.
+        ok = os.path.realpath("/tmp/ok")
+        self.assertTrue(guard.matches_allowlist(ok, ["/tmp/ok"]))
+        self.assertTrue(guard.matches_allowlist(os.path.join(ok, "x"), ["/tmp/ok"]))
+        self.assertFalse(
+            guard.matches_allowlist(os.path.realpath("/tmp/nope"), ["/tmp/ok"]))
+        self.assertFalse(guard.matches_allowlist(ok, []))
+
+    def test_matches_allowlist_glob(self):
+        # The resolved realpath (possibly /private-prefixed on macOS) still
+        # matches a user-written /tmp glob.
+        self.assertTrue(guard.matches_allowlist(
+            os.path.realpath("/tmp/build-123"), ["/tmp/build-*"]))
+        self.assertFalse(guard.matches_allowlist(
+            os.path.realpath("/tmp/other"), ["/tmp/build-*"]))
+
+    def test_host_temp_roots_includes_defaults(self):
+        roots = guard.host_temp_roots()
+        # Defaults are always present (resolved), regardless of env.
+        self.assertIn(os.path.realpath("/tmp"), roots)
+        self.assertIn(os.path.realpath("/var/tmp"), roots)
+
+    def test_build_scratch_hint_present_vs_absent(self):
+        with tempfile.TemporaryDirectory() as proj:
+            # No scratch dir yet -> "create it" guidance.
+            absent = guard.build_scratch_hint(proj, "tmp/")
+            self.assertIn("Create a gitignored `tmp`", absent)
+            self.assertIn(".gitignore", absent)
+            self.assertIn("WORKSPACE_GUARD_TMP_ACTION=ask", absent)
+            # Once present -> names it concretely.
+            os.mkdir(os.path.join(proj, "tmp"))
+            present = guard.build_scratch_hint(proj, "tmp/")
+            self.assertIn("Use the repo-local scratch dir `./tmp/`", present)
+
+
+class HostTempDenyTests(unittest.TestCase):
+    """Host-wide temp (/tmp, /var/tmp, $TMPDIR) is denied (default) and steered
+    to a repo-local scratch dir — reusing the same path extraction/resolution as
+    the outside-workspace check, so text mentions and lookalike paths don't fire.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = os.path.realpath(self._tmp.name)
+        with open(os.path.join(self.workspace, "in.txt"), "w") as f:
+            f.write("hello\n")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run(self, cmd, **kw):
+        return run_hook(cmd, self.workspace, project_dir=self.workspace, **kw)
+
+    def _expect(self, cmd, expected, **kw):
+        out = self._run(cmd, **kw)
+        self.assertIsNotNone(out, f"expected a decision, got defer for: {cmd!r}")
+        got = out["hookSpecificOutput"]["permissionDecision"]
+        self.assertEqual(
+            got, expected,
+            f"expected {expected!r} for {cmd!r}; got {got!r} "
+            f"(reason: {out['hookSpecificOutput'].get('permissionDecisionReason')!r})")
+        return out
+
+    # --- DENY cases ---------------------------------------------------------
+
+    def test_cat_tmp_deny(self):
+        out = self._expect("cat /tmp/q-hosttemp-out", "deny")
+        reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("/tmp/q-hosttemp-out", reason)
+        self.assertIn("./tmp/", reason)                 # steers to repo-local
+        self.assertIn("WORKSPACE_GUARD_TMP_ACTION=ask", reason)
+
+    def test_rm_quoted_tmp_deny(self):
+        self._expect('rm "/tmp/q-hosttemp-x"', "deny")
+
+    def test_var_tmp_deny(self):
+        self._expect("cat /var/tmp/q-hosttemp-x", "deny")
+
+    def test_sort_output_tmp_deny(self):
+        # `-o /tmp/...` is a write target — host temp, denied.
+        self._expect("sort -o /tmp/q-hosttemp-out in.txt", "deny")
+
+    def test_redirect_to_tmp_deny(self):
+        # Redirect target under /tmp, with a guarded command present.
+        self._expect("cat in.txt > /tmp/q-hosttemp-log", "deny")
+
+    def test_cd_tmp_then_relative_redirect_deny(self):
+        # `cd /tmp && cat /dev/null > evil` -> /tmp/evil (host temp).
+        self._expect("cd /tmp && cat /dev/null > evil", "deny")
+
+    def test_mktemp_style_dest_under_tmp_deny(self):
+        # `cp` into /tmp is the common "scratch file" pattern -> deny.
+        self._expect("cp ./in.txt /tmp/q-hosttemp-copy", "deny")
+
+    def test_tmpdir_resolved_path_deny(self):
+        # macOS-style: $TMPDIR resolves under /var/folders/...; a path under it
+        # is host temp. Simulated cross-platform via a custom TMPDIR root.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir = os.path.realpath(tmpdir)
+            target = os.path.join(tmpdir, "session-scratch")
+            self._expect(f"cat {target}", "deny",
+                         env_extra={"TMPDIR": tmpdir})
+
+    # --- NO-MATCH cases (must NOT deny) -------------------------------------
+
+    def test_repo_local_dot_tmp_allow(self):
+        self._expect("cat ./tmp/out.txt", "allow")
+
+    def test_relative_tmp_allow(self):
+        self._expect("cat tmp/out.txt", "allow")
+
+    def test_tmp_in_middle_of_relative_path_allow(self):
+        self._expect("cat foo/tmp/bar", "allow")
+
+    def test_tmpfs_lookalike_not_host_temp_ask(self):
+        # `/tmpfs` is a different absolute path — outside, but NOT host temp,
+        # so it asks (the generic outside decision), it does not deny.
+        self._expect("cat /tmpfs/x", "ask")
+
+    def test_tmpfoo_lookalike_not_host_temp_ask(self):
+        self._expect("cat /tmpfoo/x", "ask")
+
+    def test_home_tmp_not_host_temp_ask(self):
+        # `~/tmp` expands to $HOME/tmp — outside this workspace but not under a
+        # host-temp root, so it asks rather than denies.
+        self._expect("cat ~/tmp", "ask")
+
+    def test_url_with_tmp_component_not_a_path_allow(self):
+        # A URL is not an absolute path token; it resolves cwd-relative and
+        # lands in-workspace -> allow (never treated as host temp).
+        self._expect("cat https://host/tmp/x", "allow")
+
+    def test_tmp_as_grep_pattern_text_allow(self):
+        # `/tmp` as the search *pattern* is not a file argument — the only file
+        # is the in-workspace in.txt. No deny, no false positive.
+        self._expect("grep /tmp in.txt", "allow")
+
+    def test_tmp_as_sed_program_text_allow(self):
+        self._expect("sed 's#/tmp#X#' in.txt", "allow")
+
+    # --- config knobs -------------------------------------------------------
+
+    def test_action_ask_softens_to_prompt(self):
+        self._expect("cat /tmp/q-hosttemp-x", "ask",
+                     env_extra={"WORKSPACE_GUARD_TMP_ACTION": "ask"})
+
+    def test_unknown_action_falls_back_to_deny(self):
+        self._expect("cat /tmp/q-hosttemp-x", "deny",
+                     env_extra={"WORKSPACE_GUARD_TMP_ACTION": "bogus"})
+
+    def test_allowlist_exact_path_escapes_to_allow(self):
+        self._expect("cat /tmp/ok-scratch", "allow",
+                     env_extra={"WORKSPACE_GUARD_TMP_ALLOW": "/tmp/ok-scratch"})
+
+    def test_allowlist_does_not_exempt_other_tmp_paths(self):
+        self._expect("cat /tmp/not-listed", "deny",
+                     env_extra={"WORKSPACE_GUARD_TMP_ALLOW": "/tmp/ok-scratch"})
+
+    def test_allowlist_glob_escapes_to_allow(self):
+        self._expect("cat /tmp/build-42/log", "allow",
+                     env_extra={"WORKSPACE_GUARD_TMP_ALLOW": "/tmp/build-*"})
+
+    def test_extra_root_extends_deny(self):
+        # An additional root makes a non-default location host temp too.
+        with tempfile.TemporaryDirectory() as extra:
+            extra = os.path.realpath(extra)
+            target = os.path.join(extra, "x")
+            self._expect(f"cat {target}", "deny",
+                         env_extra={"WORKSPACE_GUARD_TMP_ROOTS": extra})
+
+    def test_scratch_dir_name_config_in_reason(self):
+        out = self._expect("cat /tmp/q-hosttemp-x", "deny",
+                           env_extra={"WORKSPACE_GUARD_SCRATCH_DIR": "scratch/"})
+        self.assertIn("./scratch/",
+                      out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_present_scratch_dir_named_concretely(self):
+        os.mkdir(os.path.join(self.workspace, "tmp"))
+        out = self._expect("cat /tmp/q-hosttemp-x", "deny")
+        self.assertIn("Use the repo-local scratch dir `./tmp/`",
+                      out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    # --- interactions -------------------------------------------------------
+
+    def test_claude_managed_other_session_stays_ask_not_deny(self):
+        # Another session's task output under /tmp/claude-<uid> is a
+        # cross-session decision for a human (`ask`), NOT the host-temp deny —
+        # its "use ./tmp/" message would be wrong there.
+        owner = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        current = "ffffffff-0000-1111-2222-333333333333"
+        path = os.path.join(guard.claude_tmp_root(), "-Users-me-proj",
+                            owner, "tasks", "abc.output")
+        self._expect(f"cat {path}", "ask", session_id=current)
+
+    def test_unguarded_command_to_tmp_still_defers(self):
+        # The capability only upgrades paths the hook already extracts. An
+        # unguarded command (no SPEC row) is untouched, even targeting /tmp.
+        out = self._run("ls /tmp/whatever")
+        self.assertIsNone(out, f"expected defer, got {out!r}")
+
+    def test_bare_redirect_from_unguarded_to_tmp_defers(self):
+        out = self._run("echo hi > /tmp/whatever")
+        self.assertIsNone(out, f"expected defer, got {out!r}")
 
 
 class PluginWiringTests(unittest.TestCase):

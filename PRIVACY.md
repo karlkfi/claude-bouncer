@@ -15,7 +15,9 @@ ships as a single Python script that uses only the standard library.
 ## How your data is handled
 
 - The hook receives the Bash command Claude Code is about to run (via standard
-  input) and your `CLAUDE_PROJECT_DIR` path (via an environment variable).
+  input) and your `CLAUDE_PROJECT_DIR` path, plus a few optional
+  `WORKSPACE_GUARD_*` configuration values and `TMPDIR` (via environment
+  variables).
 - It processes these **in memory** to decide allow / ask / deny, then writes
   the decision to standard output.
 - It resolves file paths with `realpath` to catch symlink and `../` traversal.

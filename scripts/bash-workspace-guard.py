@@ -4,7 +4,7 @@ outside the workspace; allow when it only touches workspace files or pipes.
 
 Reads the hook JSON on stdin, emits a PreToolUse decision on stdout.
 """
-import sys, os, json, re, shlex
+import sys, os, json, re, shlex, fnmatch
 
 # POSIX command-prefix assignment: NAME starts with letter/underscore,
 # followed by letters/digits/underscores, then `=`. Anything after the `=`
@@ -78,6 +78,141 @@ def is_session_tmp_path(rp, session_id, tmp_root):
     if rp != tmp_root and not rp.startswith(tmp_root + os.sep):
         return False
     return session_id in rp.split(os.sep)
+
+
+def path_at_or_under(rp, root):
+    """True when ``rp`` is ``root`` itself or lives below it. Uses the os.sep
+    boundary so `/tmpfoo` is NOT considered under `/tmp`."""
+    return rp == root or rp.startswith(root + os.sep)
+
+
+# Host-wide temp roots. A guarded file argument that resolves at or under one of
+# these — AFTER symlink and $TMPDIR resolution — is "host temp": shared across
+# every session/process and every worktree, colliding between concurrent runs
+# and living outside the project root. Such a path gets a stronger, constructive
+# `deny` (steering to a repo-local gitignored scratch dir) instead of the usual
+# outside-workspace `ask`. The list is extensible; see host_temp_roots().
+HOST_TEMP_DEFAULT_ROOTS = ('/tmp', '/var/tmp')
+
+
+def _split_pathlist(raw):
+    """Split a `:`/`,`-separated env list into non-empty, stripped entries."""
+    if not raw:
+        return []
+    parts = []
+    for chunk in raw.replace(os.pathsep, ',').split(','):
+        chunk = chunk.strip()
+        if chunk:
+            parts.append(chunk)
+    return parts
+
+
+def host_temp_roots():
+    """Resolved set of host-temp roots: the defaults, any extra roots from
+    ``WORKSPACE_GUARD_TMP_ROOTS`` (additive — never replaces the defaults, so the
+    boundary can't be weakened by clearing it), and ``$TMPDIR`` if set.
+
+    Each root is run through ``realpath`` so a path under macOS's
+    ``/tmp -> /private/tmp`` symlink or a ``$TMPDIR`` under ``/var/folders/...``
+    is matched after the file argument is itself resolved. A root that can't be
+    resolved is skipped (fail-open)."""
+    raw = list(HOST_TEMP_DEFAULT_ROOTS)
+    raw += _split_pathlist(os.environ.get('WORKSPACE_GUARD_TMP_ROOTS', ''))
+    tmpdir = os.environ.get('TMPDIR')
+    if tmpdir:
+        raw.append(tmpdir)
+    out = set()
+    for r in raw:
+        if not r:
+            continue
+        try:
+            out.add(os.path.realpath(r))
+        except OSError:
+            continue
+    return out
+
+
+def is_host_temp(rp, roots):
+    """True when resolved path ``rp`` is at or under any host-temp root."""
+    return any(path_at_or_under(rp, r) for r in roots)
+
+
+def host_temp_action():
+    """`deny` (default) or `ask` for host-temp paths, from
+    ``WORKSPACE_GUARD_TMP_ACTION``. Any unrecognised value falls back to the
+    secure default (`deny`)."""
+    v = (os.environ.get('WORKSPACE_GUARD_TMP_ACTION') or 'deny').strip().lower()
+    return v if v in ('deny', 'ask') else 'deny'
+
+
+def host_temp_allowlist():
+    """Opt-in escape hatch: resolved paths matching one of these patterns are
+    NOT treated as host temp (they fall through to normal handling, i.e. allowed
+    when they'd otherwise only be flagged for being host temp). Empty by default
+    — this is a documented trade-off for the rare tool that genuinely needs
+    ``/tmp``. From ``WORKSPACE_GUARD_TMP_ALLOW``."""
+    return _split_pathlist(os.environ.get('WORKSPACE_GUARD_TMP_ALLOW', ''))
+
+
+def matches_allowlist(rp, patterns):
+    """True when resolved path ``rp`` matches an allowlist entry. An entry with
+    glob metacharacters is matched with ``fnmatch``; otherwise it's an exact or
+    directory-prefix match, resolved with ``realpath`` first so a configured
+    ``/tmp/ok`` matches the realpath ``/private/tmp/ok`` on macOS.
+
+    Matching is tried against ``rp`` and, on macOS, against ``rp`` with the
+    leading ``/private`` stripped — so a user-written glob like ``/tmp/build-*``
+    still matches the resolved ``/private/tmp/build-42`` without forcing users to
+    know about the platform symlink."""
+    cands = [rp]
+    if rp.startswith('/private/'):
+        cands.append(rp[len('/private'):])
+    for p in patterns:
+        if not p:
+            continue
+        if any(c in p for c in '*?['):
+            if any(fnmatch.fnmatch(c, p) for c in cands):
+                return True
+            continue
+        try:
+            rp_pat = os.path.realpath(p)
+        except OSError:
+            rp_pat = p
+        base = rp_pat.rstrip(os.sep)
+        if any(c == rp_pat or path_at_or_under(c, base) for c in cands):
+            return True
+    return False
+
+
+def scratch_dir_name():
+    """Repo-local scratch dir named in the deny message (default ``tmp/``), from
+    ``WORKSPACE_GUARD_SCRATCH_DIR``."""
+    return (os.environ.get('WORKSPACE_GUARD_SCRATCH_DIR') or 'tmp/').strip() or 'tmp/'
+
+
+def build_scratch_hint(proj, scratch):
+    """One-line guidance steering off host temp toward a repo-local scratch dir.
+
+    Names the dir concretely when it already exists under the project root
+    (an ``os.path.isdir`` stat — no file contents are read), otherwise tells the
+    user to create and gitignore it. Closes with the two config knobs."""
+    name = scratch.rstrip('/') or 'tmp'
+    rel = './' + name + '/'
+    present = False
+    try:
+        present = os.path.isdir(os.path.join(proj, name))
+    except OSError:
+        present = False
+    if present:
+        where = "Use the repo-local scratch dir `%s` instead (keep it gitignored)." % rel
+    else:
+        where = ("Create a gitignored `%s` at the repo root (add `/%s/` to "
+                 "`.gitignore`) and use `%s` instead." % (name, name, rel))
+    return ("Host-wide temp is shared across every session and worktree and "
+            "lives outside the project root, so concurrent runs collide and the "
+            "write escapes the workspace. " + where
+            + " To soften this to a prompt set WORKSPACE_GUARD_TMP_ACTION=ask; "
+            "to exempt a specific path set WORKSPACE_GUARD_TMP_ALLOW.")
 
 # Per-command parsing spec:
 #   consume:    flag -> N following tokens to skip (flag *values*, never files)
@@ -433,13 +568,16 @@ def files_in_command(tokens):
     return files
 
 
-def build_reason(offenders):
+def build_reason(offenders, scratch_hint=''):
     """Build the permissionDecisionReason for a blocked command.
 
     `offenders` is a list of `(token, category)` pairs from `check_file`.
     The message names the offending token(s) AND tells the agent how to avoid
     the prompt, tailored per category so each gets the fix that applies:
 
+      * 'hosttemp'  — a path under a host-wide temp root (`/tmp`, `/var/tmp`,
+                      `$TMPDIR`). Steered to a repo-local gitignored scratch dir
+                      via `scratch_hint` (see build_scratch_hint).
       * 'outside'   — a path that genuinely resolves outside the project root.
       * 'expand'    — a `~`/`$VAR`/`$(...)` token bash expands at runtime; the
                       hook can't see where it lands, so it may in fact be
@@ -449,11 +587,16 @@ def build_reason(offenders):
     Categories are emitted in a stable order; tokens within each are sorted and
     de-duplicated.
     """
-    buckets = {'outside': [], 'expand': [], 'untracked': []}
+    buckets = {'hosttemp': [], 'outside': [], 'expand': [], 'untracked': []}
     for tok, cat in offenders:
         buckets[cat].append(tok)
 
     hints = []
+    if buckets['hosttemp']:
+        hints.append(
+            "Host-wide temp path(s): "
+            + ", ".join(sorted(set(buckets['hosttemp'])))
+            + ". " + scratch_hint)
     if buckets['outside']:
         hints.append(
             "Outside-workspace path(s): "
@@ -487,6 +630,13 @@ def main():
     # off (every temp path keeps prompting, the secure-by-default direction).
     session_id = data.get('session_id') or ''
     session_tmp_root = claude_tmp_root()
+    # Host-temp config (resolved once per invocation). A guarded file arg that
+    # resolves under one of these roots — but NOT under the Claude-managed temp
+    # root, which keeps its own ask-on-cross-session behavior — is denied
+    # (default) and steered to a repo-local scratch dir. See host_temp_* above.
+    tmp_roots = host_temp_roots()
+    tmp_allow = host_temp_allowlist()
+    tmp_action = host_temp_action()
     if not cmd.strip():
         return
 
@@ -613,6 +763,16 @@ def main():
         if is_session_tmp_path(rp, session_id, session_tmp_root):
             return None
         if is_outside(rp):
+            # Host-wide temp (/tmp, /var/tmp, $TMPDIR) gets a stronger, steered
+            # decision than a generic outside path — UNLESS it's under the
+            # Claude-managed temp root (another session's task output), which
+            # keeps its existing cross-session `ask`, or it's explicitly
+            # allowlisted (opt-in escape hatch -> fall through to allow).
+            if is_host_temp(rp, tmp_roots) \
+                    and not path_at_or_under(rp, session_tmp_root):
+                if matches_allowlist(rp, tmp_allow):
+                    return None
+                return (f, 'hosttemp')
             return (f, 'outside')
         return None
 
@@ -686,18 +846,29 @@ def main():
         return                                    # no guarded command -> defer
 
     if outside:
-        # In `bypassPermissions` / full-auto runs there is no human to answer an
-        # `ask`. Verified behavior (CLI 2.1.159): `ask` still *blocks* there, but
-        # only feeds the model an unanswerable approval prompt it stalls on.
-        # `deny` blocks identically *and* feeds the reason back, so the model can
-        # route around the outside path instead of stalling. Interactive/headless
-        # `default` mode keeps `ask` so a human still gets the approve/reject
-        # prompt. Both decisions are equally blocking — this is a recoverability
-        # choice, not a weakening of the boundary. `default` is indistinguishable
-        # from interactive at the hook, so `bypassPermissions` is the only clean
-        # "no human" signal we can act on. (Q17)
-        block = "deny" if data.get("permission_mode") == "bypassPermissions" else "ask"
-        decision, reason = block, build_reason(outside)
+        # Two reasons to block with `deny` rather than `ask`:
+        #
+        #  1. Host-temp paths (/tmp, /var/tmp, $TMPDIR). These get a constructive
+        #     `deny` by default (WORKSPACE_GUARD_TMP_ACTION) that steers the agent
+        #     to a repo-local gitignored scratch dir — host temp collides across
+        #     sessions/worktrees and lives outside the root, so prompting to
+        #     approve it is the wrong nudge.
+        #  2. `bypassPermissions` / full-auto runs, where there is no human to
+        #     answer an `ask`. Verified behavior (CLI 2.1.159): `ask` still
+        #     *blocks* there, but only feeds the model an unanswerable approval
+        #     prompt it stalls on. `deny` blocks identically *and* feeds the
+        #     reason back, so the model can route around the path instead of
+        #     stalling. (Q17)
+        #
+        # Interactive/headless `default` mode keeps `ask` for plain outside
+        # paths so a human still gets the approve/reject prompt. Both decisions
+        # are equally blocking — this is a recoverability/steering choice, not a
+        # weakening of the boundary.
+        bypass = data.get("permission_mode") == "bypassPermissions"
+        host_temp_hit = any(cat == 'hosttemp' for _, cat in outside)
+        deny_now = bypass or (host_temp_hit and tmp_action == 'deny')
+        decision = "deny" if deny_now else "ask"
+        reason = build_reason(outside, build_scratch_hint(proj, scratch_dir_name()))
     else:
         decision, reason = "allow", "Guarded commands target workspace/pipe only"
     print(json.dumps({"hookSpecificOutput": {
