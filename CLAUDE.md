@@ -16,11 +16,14 @@ Make the smallest change that achieves the goal. If you notice problems outside 
 - New near-term work → add a row to the Queue in `docs/STATUS.md` in priority order.
 - Larger / speculative work → add a Queue row marked `💤 deferred` with a one-line rationale.
 
+Capture knowledge durably, don't leave it in chat. When the user states a standing preference or decision, persist it in the repo (CLAUDE.md, the relevant `docs/` file, or memory) rather than applying it once and moving on. When follow-up work surfaces mid-task, record it on the Queue in `docs/STATUS.md` — including the *why* of any decision it depends on — instead of only mentioning it in the response.
+
 Before introducing a new pattern or abstraction, check whether the existing `SPEC`/`ALIASES` model already solves the problem with a new row.
 
 ## Workflow
 
 1. **At session start, check whether the worktree is stale.** New worktrees are branched from `main` at creation time, but `main` may have advanced since then — particularly if a previous session merged a PR. Run `git fetch origin main` and compare with `git log --oneline HEAD..origin/main`; if `origin/main` has new commits, rebase with `git rebase origin/main` before doing any other work. This avoids editing files against an outdated baseline and surfacing phantom conflicts at PR time.
+   - **Work on a `claude/`-prefixed branch, never on `main`.** In a worktree session, do all work via the worktree path — never edit files through the parent repo's path.
 2. **Before making changes** — read `README.md` and skim `scripts/bash-workspace-guard.py` so the proposed change matches the existing parsing model. If picking the next task, run `gh pr list` first and skip any Queue item from `docs/STATUS.md` already covered by an open PR.
    - **Verify 🚫 blockers are still real.** A previous session may have silently completed the dependency without flipping the Queue row. Grep for the deliverables before treating the item as truly blocked.
    - **Investigation findings marked ✅ must be end-to-end verified, not just source-read.** If a `§Findings` block claims "command X with flag Y produces Z" because of source inspection, actually run the command and confirm. Shell parsing is full of surprises that only show up when you exec the thing.
@@ -87,11 +90,16 @@ This applies to anything you'd run through the user's `Bash` tool while developi
 - After pushing, check whether a PR exists (`gh pr view`). If one does, update its description with `gh pr edit` to reflect any new commits.
 - Always commit `docs/STATUS.md` changes in their own isolated commit, separate from code and plan-doc changes. STATUS.md is high-contention across parallel sessions; isolating it makes rebase conflicts trivial to resolve.
 - If a change doesn't belong in the current PR, open a separate PR for it. Working multiple PRs in parallel is fine and preferable to bundling unrelated concerns.
+- Act only on your own branch and PR. Never re-run, edit, or push to a PR or branch owned by another session; when CI fails on another session's PR, reproduce the failure locally instead.
 - Queue items have `Q`-prefixed IDs (e.g. `Q1`). Use the bare ID in commit messages and PR bodies — the `Q` stops GitHub from auto-linking the number to PR/issue 1.
 
 ## Documentation conventions
 
+Spell out acronyms on first use: write the full term first, then the acronym in parentheses — e.g. "continuous integration (CI)". Subsequent uses may use the acronym alone.
+
 Human-facing docs (`README.md`, anything under `docs/` outside `docs/development/maintaining-backlog.md`) must never link to `CLAUDE.md` or `AGENTS.md`. This file is the entrypoint for Claude/agents only; humans start at `README.md`. The dependency direction is one-way: `CLAUDE.md` may link out to `docs/` and `README.md`, but nothing under those may link back to it.
+
+**Editing `CLAUDE.md` — protect the context budget.** This file is loaded in full into every session, so every line costs context. Keep it lean: add only load-bearing, must-act-on rules, and put the explanation/how-to in the relevant `docs/` page with a one-line pointer here rather than growing a self-contained copy past a few sentences. When in doubt, write the detail in `docs/` and link it; prefer tightening an existing line over adding a new one.
 
 ## Agent reference docs
 
