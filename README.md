@@ -261,7 +261,19 @@ After upgrading either way:
    output (which can contain secrets) still prompts. Because the match is on
    the resolved `realpath`, a symlink planted in the scratch dir that escapes
    the root is still flagged.
-9. **Deny** host-wide temp. After the steps above, any *remaining*
+9. **Allow reads of Claude-owned project data.** For read-only commands (`cat`,
+   `head`, `tail`, `grep`, `rg`, `sed`, `awk`, `jq`, `yq`, `diff`, `sort`,
+   `wc`, `file`, `hexdump`, and their aliases), a path whose resolved
+   `realpath` is under `~/.claude/projects/` is allowed silently. That
+   directory is written exclusively by the Claude Code harness (session
+   metadata, sub-agent data, workflow journals) and reading it back is not
+   the boundary this hook guards. Write commands (`cp`, `mv`, `tee`, `rm`)
+   are **not** exempt — they must still pass the workspace check. The
+   exemption also does not apply to redirect targets, since the hook cannot
+   verify redirect direction without running the command. Users can extend
+   the list with `WORKSPACE_GUARD_READ_ALLOW_PREFIXES`; see
+   [Configuration](#configuration).
+10. **Deny** host-wide temp. After the steps above, any *remaining*
    outside-workspace file argument whose resolved `realpath` is at or under a
    host-temp root (`/tmp`, `/var/tmp`, `$TMPDIR`, all resolved first — so macOS's
    `/tmp → /private/tmp` and a `$TMPDIR` under `/var/folders/…` are caught) is
@@ -314,7 +326,9 @@ flowing, avoid triggering it:
   and command output to `/dev/null`, `/dev/stdout`, `/dev/stderr`, and `/dev/fd/N`
   are exempt and never prompt. Reading back this session's *own* background-task
   output under `/tmp/claude-<uid>/…/<session>/…` is also exempt — that path is
-  managed by Claude Code, not something you choose.)
+  managed by Claude Code, not something you choose.) Reading files under
+  `~/.claude/projects/` (Claude Code's own session and sub-agent data) is
+  also exempt for read-only commands.
 - **Read dependency source from in-workspace vendored/pinned copies, not the
   global cache.** Out-of-tree caches (Go's `~/go/pkg/mod`, npm's `~/.npm`, pip's
   `~/.cache/pip`, cargo's `~/.cargo/registry`) are outside the project root, so
@@ -362,6 +376,24 @@ rather than denied. Scope each entry tightly (an exact path or a narrow glob lik
 `/tmp/myapp-*`), since anything it matches bypasses the boundary. The deny itself
 is the secure default — softening to `ask` (`WORKSPACE_GUARD_TMP_ACTION=ask`) is
 the gentler way to keep a human in the loop.
+
+### Allowed read prefixes
+
+A set of path prefixes are always allowed for **read-only** guarded commands
+(`cat`, `head`, `tail`, `grep`, `rg`, `sed`, `awk`, `jq`, `yq`, `diff`,
+`sort`, `wc`, `file`, `hexdump`, and their aliases). Write commands (`cp`,
+`mv`, `tee`, `rm`) and redirect targets are never exempt.
+
+The built-in default is `~/.claude/projects/` (Claude Code's own session and
+sub-agent data). You can extend it with additional prefixes:
+
+| Env var | Default | Effect |
+| --- | --- | --- |
+| `WORKSPACE_GUARD_READ_ALLOW_PREFIXES` | (empty) | Extra read-exempt prefixes, `:`- or `,`-separated. **Additive** — it extends the built-in list. |
+
+Each entry is run through `realpath` so platform symlinks resolve correctly.
+Scope entries tightly: anything under a configured prefix is silently allowed
+for read commands without a confirmation prompt.
 
 ### Outside-workspace ask vs. deny
 

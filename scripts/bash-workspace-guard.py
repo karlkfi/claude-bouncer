@@ -26,6 +26,12 @@ DUP = {'>&', '<&'}
 # (so a quoted filename containing one of these survives normalization).
 PUNCT_CHARS = frozenset(';()<>|&\n')
 
+# SPEC commands that write or mutate files. The ALLOWED_READ_PREFIXES exemption
+# (see allowed_read_prefixes()) does NOT apply to these commands, even if the
+# target path is under an allowed prefix — write access to Claude-owned dirs
+# is not exempt from the workspace check.
+WRITE_COMMANDS = frozenset({'cp', 'mv', 'tee', 'rm'})
+
 # Well-known device / FD paths that are safe to read or write regardless of
 # workspace boundary. Matched against the raw token before realpath, because
 # `/dev/stdin` resolves to `/dev/fd/0` on darwin and `/proc/self/fd/0` on Linux.
@@ -44,6 +50,49 @@ def is_allowed_device(path):
         rest = path[len('/dev/fd/'):]
         return rest.isdigit()
     return False
+
+
+def claude_projects_dir():
+    """Realpath of Claude Code's per-user project-data dir, ``~/.claude/projects/``.
+
+    Claude Code writes session and sub-agent data (workflow journals, task
+    output indices, etc.) under this directory. Reading these files back is
+    not the boundary this hook guards: the data is written by the harness
+    itself, not by external inputs. Returns None if $HOME is unset or the
+    path cannot be resolved.
+    """
+    home = os.environ.get('HOME')
+    if not home:
+        return None
+    try:
+        return os.path.realpath(os.path.join(home, '.claude', 'projects'))
+    except OSError:
+        return None
+
+
+def allowed_read_prefixes():
+    """Resolved list of absolute path prefixes exempt from the workspace check
+    for **read-only** guarded commands (see WRITE_COMMANDS for exclusions).
+
+    Default: Claude Code's per-user project-data dir (~/.claude/projects/).
+    Additive extension via WORKSPACE_GUARD_READ_ALLOW_PREFIXES (colon- or
+    comma-separated). Each entry is run through realpath so platform symlinks
+    (e.g. /tmp -> /private/tmp on macOS) resolve correctly. Entries that
+    cannot be resolved are skipped (fail-open on config, fail-safe on the
+    boundary: a bad entry just loses its exemption).
+    """
+    defaults = []
+    cpd = claude_projects_dir()
+    if cpd:
+        defaults.append(cpd)
+    extras = _split_pathlist(os.environ.get('WORKSPACE_GUARD_READ_ALLOW_PREFIXES', ''))
+    out = []
+    for p in defaults + extras:
+        try:
+            out.append(os.path.realpath(p))
+        except OSError:
+            continue
+    return out
 
 
 def claude_tmp_root():
@@ -637,6 +686,8 @@ def main():
     tmp_roots = host_temp_roots()
     tmp_allow = host_temp_allowlist()
     tmp_action = host_temp_action()
+    # Prefixes always allowed for read-only commands (never for write commands).
+    read_prefixes = allowed_read_prefixes()
     if not cmd.strip():
         return
 
@@ -737,7 +788,7 @@ def main():
     # lexical-realpath check (Q8 + Q17).
     staged_outside_paths = set()
 
-    def check_file(f, group_cwd, group_cwd_unknown):
+    def check_file(f, group_cwd, group_cwd_unknown, is_read=False):
         """Return `(token, category)` if the file resolves outside the
         workspace (directly, or via a link staged by an earlier `ln` —
         symbolic or hard — in this chain), else None.
@@ -745,7 +796,11 @@ def main():
         `category` is one of 'outside' (a resolved path outside the root),
         'expand' (a runtime-expanded `~`/`$` token), or 'untracked' (a
         relative path after a `cd` we couldn't follow). All three block
-        identically; the category only steers the advice in the reason."""
+        identically; the category only steers the advice in the reason.
+
+        `is_read=True` enables the ALLOWED_READ_PREFIXES exemption for
+        commands that only read files (see WRITE_COMMANDS). Redirect
+        targets and write commands pass is_read=False."""
         kind, rp = resolve_token(f, group_cwd, group_cwd_unknown)
         if kind == 'skip':
             return None
@@ -763,6 +818,11 @@ def main():
         if is_session_tmp_path(rp, session_id, session_tmp_root):
             return None
         if is_outside(rp):
+            # Read-only commands are exempt for well-known Claude-owned paths
+            # (~/.claude/projects/ and any WORKSPACE_GUARD_READ_ALLOW_PREFIXES
+            # additions). Write commands (cp, mv, tee, rm) are never exempt.
+            if is_read and any(path_at_or_under(rp, p) for p in read_prefixes):
+                return None
             # Host-wide temp (/tmp, /var/tmp, $TMPDIR) gets a stronger, steered
             # decision than a generic outside path — UNLESS it's under the
             # Claude-managed temp root (another session's task output), which
@@ -838,8 +898,10 @@ def main():
         fs = files_in_command(g)
         if fs is None: continue
         guarded = True
+        cmd_name = ALIASES.get(os.path.basename(g[0]), os.path.basename(g[0]))
+        is_read = cmd_name not in WRITE_COMMANDS
         for f in fs:
-            o = check_file(f, group_cwd, group_cwd_unknown)
+            o = check_file(f, group_cwd, group_cwd_unknown, is_read=is_read)
             if o is not None:
                 outside.append(o)
     if not guarded:

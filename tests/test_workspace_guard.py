@@ -875,6 +875,51 @@ class SessionTmpPathTests(unittest.TestCase):
             guard.is_session_tmp_path(sibling, self.sess, self.root))
 
 
+class AllowedReadPrefixesUnitTests(unittest.TestCase):
+    """Unit tests for claude_projects_dir() and allowed_read_prefixes()."""
+
+    def test_claude_projects_dir_under_home(self):
+        cpd = guard.claude_projects_dir()
+        if cpd is None:
+            self.skipTest("HOME not set")
+        home = os.environ.get("HOME")
+        self.assertTrue(cpd.startswith(home.rstrip("/") + "/") or cpd == home,
+                        f"expected {cpd!r} under HOME {home!r}")
+        self.assertTrue(cpd.endswith("projects") or "projects" in cpd)
+
+    def test_allowed_read_prefixes_includes_projects_dir(self):
+        cpd = guard.claude_projects_dir()
+        if cpd is None:
+            self.skipTest("HOME not set")
+        prefixes = guard.allowed_read_prefixes()
+        self.assertIn(cpd, prefixes)
+
+    def test_allowed_read_prefixes_extras_via_env(self):
+        fake = "/fake/read-allow-test"
+        old = os.environ.get("WORKSPACE_GUARD_READ_ALLOW_PREFIXES")
+        try:
+            os.environ["WORKSPACE_GUARD_READ_ALLOW_PREFIXES"] = fake
+            prefixes = guard.allowed_read_prefixes()
+        finally:
+            if old is None:
+                os.environ.pop("WORKSPACE_GUARD_READ_ALLOW_PREFIXES", None)
+            else:
+                os.environ["WORKSPACE_GUARD_READ_ALLOW_PREFIXES"] = old
+        # realpath of /fake/read-allow-test on most systems = itself
+        self.assertTrue(any(p.endswith("read-allow-test") for p in prefixes))
+
+    def test_allowed_read_prefixes_no_home(self):
+        old_home = os.environ.get("HOME")
+        try:
+            os.environ.pop("HOME", None)
+            prefixes = guard.allowed_read_prefixes()
+        finally:
+            if old_home is not None:
+                os.environ["HOME"] = old_home
+        # Without HOME, claude_projects_dir() returns None; env var still works.
+        self.assertIsInstance(prefixes, list)
+
+
 def run_hook(cmd, cwd, project_dir=None, permission_mode=None, session_id=None,
              env_extra=None):
     """Invoke the hook as a subprocess. Returns parsed JSON or None on defer.
@@ -1664,6 +1709,86 @@ class HookEndToEndTests(unittest.TestCase):
             session_id=sess)
         self.assertIn(link,
                       out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    # --- ALLOWED_READ_PREFIXES end-to-end -----------------------------------
+    # Claude Code writes workflow journals and sub-agent data under
+    # ~/.claude/projects/. Reading them back should not prompt. The tests use a
+    # synthetic path under the real ~/.claude/projects/ dir (the dirs need not
+    # exist — the hook resolves lexically). Write commands must still prompt.
+
+    def _claude_projects_path(self, *parts):
+        """Return a synthetic path under ~/.claude/projects/."""
+        cpd = guard.claude_projects_dir()
+        if cpd is None:
+            self.skipTest("HOME not set, skipping ~/.claude/projects/ tests")
+        return os.path.join(cpd, *parts)
+
+    def test_cat_claude_projects_allow(self):
+        # Reading a workflow journal under ~/.claude/projects/ is allowed.
+        target = self._claude_projects_path(
+            "-Users-me-proj", "wf_abc123", "journal.jsonl")
+        self._decision(f"cat {target}", "allow")
+
+    def test_grep_claude_projects_allow(self):
+        target = self._claude_projects_path(
+            "-Users-me-proj", "subagents", "data.json")
+        self._decision(f"grep 'key' {target}", "allow")
+
+    def test_head_claude_projects_allow(self):
+        target = self._claude_projects_path(
+            "-Users-me-proj", "wf_abc123", "journal.jsonl")
+        self._decision(f"head -20 {target}", "allow")
+
+    def test_tail_claude_projects_allow(self):
+        target = self._claude_projects_path(
+            "-Users-me-proj", "wf_abc123", "journal.jsonl")
+        self._decision(f"tail -f {target}", "allow")
+
+    def test_cp_from_claude_projects_ask(self):
+        # cp reads source and writes dest — write command; prefix exemption
+        # does NOT apply even when the source is under ~/.claude/projects/.
+        target = self._claude_projects_path(
+            "-Users-me-proj", "wf_abc123", "journal.jsonl")
+        self._decision(f"cp {target} ./local-copy.jsonl", "ask")
+
+    def test_cp_to_claude_projects_ask(self):
+        # Writing into ~/.claude/projects/ is also not exempt.
+        target = self._claude_projects_path(
+            "-Users-me-proj", "wf_abc123", "out.txt")
+        self._decision(f"cp ./in.txt {target}", "ask")
+
+    def test_rm_claude_projects_ask(self):
+        # Deletion is a write command; exemption does not apply.
+        target = self._claude_projects_path(
+            "-Users-me-proj", "wf_abc123", "journal.jsonl")
+        self._decision(f"rm {target}", "ask")
+
+    def test_redirect_to_claude_projects_ask(self):
+        # A redirect target is conservative (is_read=False) even for
+        # allowed prefixes — the hook can't verify the redirect direction.
+        target = self._claude_projects_path(
+            "-Users-me-proj", "wf_abc123", "out.txt")
+        self._decision(f"cat in.txt > {target}", "ask")
+
+    def test_read_allow_prefixes_env_var(self):
+        # WORKSPACE_GUARD_READ_ALLOW_PREFIXES lets users add their own prefixes.
+        with tempfile.TemporaryDirectory() as td:
+            td = os.path.realpath(td)
+            target = os.path.join(td, "safe-data.json")
+            out = run_hook(f"cat {target}", self.workspace,
+                           env_extra={"WORKSPACE_GUARD_READ_ALLOW_PREFIXES": td})
+            self.assertIsNotNone(out)
+            self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "allow")
+
+    def test_read_allow_prefix_does_not_exempt_write_command(self):
+        # Even with a user-configured prefix, write commands must still prompt.
+        # Use a synthetic path outside /tmp to avoid the host-temp deny path.
+        fake_prefix = "/var/fake-read-allow-test"
+        target = fake_prefix + "/safe-data.json"
+        out = run_hook(f"cp ./in.txt {target}", self.workspace,
+                       env_extra={"WORKSPACE_GUARD_READ_ALLOW_PREFIXES": fake_prefix})
+        self.assertIsNotNone(out)
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "ask")
 
     # --- alias end-to-end ---------------------------------------------------
 
