@@ -5,7 +5,7 @@
   "plugins": [
     {
       "name": "workspace-guard",
-      "version": "1.2.0",
+      "version": "1.3.0",
       "description": "Prompt before grep/sed/jq/awk/cat/head/tail touch files outside the workspace.",
       "author": { "name": "Karl" },
       "source": {
