@@ -57,6 +57,14 @@ This is the asymmetry behind the "secure by default" principle the plugin holds 
 
 The bar for adding a row to `SPEC`: **users pre-approve this command in permission settings, and it can read arbitrary files**. `cut`, `wc`, `xxd`, `od`, `strings` are reasonable candidates; `ls` is not (doesn't read file contents); `bash` is not (different threat model — see [`security-notes.md`](security-notes.md)).
 
+### Why the Edit/Write hook is the one non-Bash surface
+
+The filesystem boundary is really "don't touch files outside the workspace," and for *reads* the Bash guard covers the cases that matter (the Read/Grep/Glob tools already scope themselves to the workspace). The exception is a **write into a sibling checkout of the same repo** when the session runs in a git worktree: the edit silently lands on the wrong branch, and `Edit`/`Write`/`MultiEdit`/`NotebookEdit` bypass Bash entirely. So those tools get one narrow `PreToolUse` hook whose *only* active rule is the sibling-checkout deny — everything else defers to the builtin permission system. This is the single deliberate scope expansion beyond `Bash`.
+
+Detection lives in the same script the Bash hook uses (dispatched on `tool_name`), not a separate plugin: a standalone "worktree-guard" would duplicate the root detection, path resolution, and cwd tracking this plugin already has, and both hooks would fire on the same Bash calls with competing messages. `branch-guard` (which already hooks `Edit`/`Write`) was considered too, but its axis is "protected branch," and the hazard here is "wrong checkout" — it exists even when the sibling has a feature branch checked out. The worktree-aware filesystem boundary is this plugin's mission.
+
+The deny (rather than `ask`) is the secure default here specifically because the failure mode is an approvable-by-reflex prompt whose only correct answer was "reject and retype the path"; a deny self-heals in one agent round trip. `WORKSPACE_GUARD_OVERRIDE=<reason>` is the documented, reasoned escape hatch for deliberate cross-checkout work.
+
 ## Alternatives considered and rejected
 
 - **Sandboxing (seccomp, App Sandbox, bind mounts, chroot).** Too heavyweight; platform-specific; breaks legitimate cross-workspace reads. A user who wants this level of isolation should run the whole agent in a container, not bolt on a partial sandbox.

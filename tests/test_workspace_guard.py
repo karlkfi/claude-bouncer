@@ -2486,6 +2486,27 @@ class BuildReasonTests(unittest.TestCase):
         self.assertEqual(r.count("/a"), 1)
         self.assertLess(r.index("/a"), r.index("/b"))
 
+    def test_sibling_category_names_checkout_branch_and_fix(self):
+        r = guard.build_reason([(
+            "/repo/main/cmd/x.go", "sibling",
+            {"root": "/repo/main", "branch": "main",
+             "corrected": "/repo/wt/cmd/x.go"},
+        )])
+        self.assertIn("Sibling-checkout", r)
+        self.assertIn("/repo/main", r)
+        self.assertIn("on branch main", r)
+        self.assertIn("/repo/wt/cmd/x.go", r)
+        self.assertIn("WORKSPACE_GUARD_OVERRIDE", r)
+
+    def test_sibling_override_wording_downgrades(self):
+        r = guard.build_reason(
+            [("/repo/main/x", "sibling",
+              {"root": "/repo/main", "branch": "main",
+               "corrected": "/repo/wt/x"})],
+            override="deliberate")
+        self.assertIn("prompting because", r)
+        self.assertIn("deliberate", r)
+
 
 class ReasonAdviceEndToEndTests(unittest.TestCase):
     """The emitted reason carries actionable advice end-to-end (subprocess)."""
@@ -2765,6 +2786,261 @@ class HostTempDenyTests(unittest.TestCase):
         self.assertIsNone(out, f"expected defer, got {out!r}")
 
 
+def _have_git():
+    try:
+        subprocess.run(["git", "--version"], capture_output=True, check=True)
+        return True
+    except Exception:
+        return False
+
+
+@unittest.skipUnless(_have_git(), "git not available")
+class SiblingCheckoutTests(unittest.TestCase):
+    """Worktree-aware sibling-checkout deny (issue 62).
+
+    Builds a REAL git repo with linked worktrees (so the parser is exercised
+    against git's actual on-disk metadata, not a hand-rolled mock) and asserts
+    the Bash + Edit/Write deny behavior. The fixture lives under $HOME rather
+    than a system tempdir so its paths are not classified as host-temp — that
+    keeps the sibling decision cleanly separated from the /tmp deny.
+    """
+
+    def _git(self, args, cwd):
+        env = os.environ.copy()
+        # Isolate from the developer's global/system git config (templates,
+        # hooksPath, signing) and supply a deterministic identity.
+        env.update({
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_SYSTEM": os.devnull,
+            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+            "GIT_TERMINAL_PROMPT": "0",
+        })
+        return subprocess.run(["git"] + args, cwd=cwd, env=env,
+                              capture_output=True, text=True, check=True)
+
+    def setUp(self):
+        home = os.environ.get("HOME")
+        if not home or not os.path.isdir(home):
+            self.skipTest("HOME not set")
+        self._tmp = tempfile.TemporaryDirectory(dir=home)
+        self.base = os.path.realpath(self._tmp.name)
+        self.main = os.path.join(self.base, "main")
+        os.mkdir(self.main)
+        self._git(["init"], self.main)
+        with open(os.path.join(self.main, "root.txt"), "w") as f:
+            f.write("x\n")
+        self._git(["add", "."], self.main)
+        self._git(["commit", "-m", "init"], self.main)
+        self.main_branch = self._git(
+            ["rev-parse", "--abbrev-ref", "HEAD"], self.main).stdout.strip()
+        self.wt = os.path.join(self.base, "wt-a")
+        self._git(["worktree", "add", "-b", "feat-a", self.wt], self.main)
+        self.other = os.path.join(self.base, "wt-b")
+        self._git(["worktree", "add", "-b", "feat-b", self.other], self.main)
+        self.main = os.path.realpath(self.main)
+        self.wt = os.path.realpath(self.wt)
+        self.other = os.path.realpath(self.other)
+
+    def tearDown(self):
+        # Worktrees hold no locks once the subprocesses exit; plain cleanup is
+        # enough (the whole tree is removed).
+        self._tmp.cleanup()
+
+    def _run(self, data, proj=None, cwd=None, env_extra=None):
+        env = os.environ.copy()
+        env["CLAUDE_PROJECT_DIR"] = proj or self.wt
+        for k, v in (env_extra or {}).items():
+            if v is None:
+                env.pop(k, None)
+            else:
+                env[k] = v
+        data = dict(data)
+        data.setdefault("cwd", cwd or self.wt)
+        r = subprocess.run(
+            [sys.executable, str(SCRIPT)], input=json.dumps(data),
+            capture_output=True, text=True, env=env, timeout=10)
+        self.assertEqual(r.returncode, 0, f"hook errored: {r.stderr!r}")
+        out = r.stdout.strip()
+        return json.loads(out) if out else None
+
+    def _bash(self, cmd, **kw):
+        return self._run({"tool_input": {"command": cmd}}, **kw)
+
+    def _edit(self, tool, file_path, **kw):
+        return self._run(
+            {"tool_name": tool, "tool_input": {"file_path": file_path}}, **kw)
+
+    def _decision(self, out):
+        self.assertIsNotNone(out, "expected a decision, got defer")
+        return out["hookSpecificOutput"]["permissionDecision"]
+
+    def _reason(self, out):
+        return out["hookSpecificOutput"]["permissionDecisionReason"]
+
+    # --- unit: detection helpers --------------------------------------------
+
+    def test_resolve_session_worktree_in_worktree(self):
+        s = guard.resolve_session_worktree(self.wt)
+        self.assertIsNotNone(s)
+        self.assertTrue(s["in_worktree"])
+        self.assertEqual(s["root"], self.wt)
+        self.assertEqual(s["common"], os.path.realpath(
+            os.path.join(self.main, ".git")))
+
+    def test_resolve_session_worktree_main_checkout_not_worktree(self):
+        s = guard.resolve_session_worktree(self.main)
+        self.assertIsNotNone(s)
+        self.assertFalse(s["in_worktree"])
+
+    def test_resolve_checkout_non_repo_returns_none(self):
+        self.assertIsNone(guard._resolve_checkout(self.base))
+
+    def test_sibling_checkout_for_primary(self):
+        s = guard.resolve_session_worktree(self.wt)
+        root, branch = guard.sibling_checkout_for(
+            os.path.join(self.main, "cmd", "main.go"), s)
+        self.assertEqual(root, self.main)
+        self.assertEqual(branch, self.main_branch)
+
+    def test_sibling_checkout_for_other_worktree(self):
+        s = guard.resolve_session_worktree(self.wt)
+        root, branch = guard.sibling_checkout_for(
+            os.path.join(self.other, "x.py"), s)
+        self.assertEqual(root, self.other)
+        self.assertEqual(branch, "feat-b")
+
+    def test_sibling_checkout_for_own_workspace_is_none(self):
+        s = guard.resolve_session_worktree(self.wt)
+        self.assertIsNone(
+            guard.sibling_checkout_for(os.path.join(self.wt, "x"), s))
+
+    def test_sibling_checkout_for_unrelated_repo_is_none(self):
+        # A different git repo entirely -> different common-dir -> not a sibling.
+        with tempfile.TemporaryDirectory(dir=self.base) as other_repo:
+            other_repo = os.path.realpath(other_repo)
+            self._git(["init"], other_repo)
+            s = guard.resolve_session_worktree(self.wt)
+            self.assertIsNone(guard.sibling_checkout_for(
+                os.path.join(other_repo, "x"), s))
+
+    def test_branch_label_reads_head(self):
+        admin = os.path.realpath(os.path.join(self.main, ".git"))
+        self.assertEqual(guard._branch_label(admin), self.main_branch)
+
+    # --- Bash: writes into a sibling checkout deny --------------------------
+
+    def test_bash_redirect_into_primary_deny(self):
+        target = os.path.join(self.main, "root.txt")
+        out = self._bash(f"cat /dev/null > {target}")
+        self.assertEqual(self._decision(out), "deny")
+        r = self._reason(out)
+        self.assertIn("Sibling-checkout", r)
+        self.assertIn(self.main, r)
+        self.assertIn(self.main_branch, r)
+        # Names the corrected in-session path (same relative path).
+        self.assertIn(os.path.join(self.wt, "root.txt"), r)
+
+    def test_bash_cp_into_other_worktree_deny(self):
+        target = os.path.join(self.other, "copy.txt")
+        out = self._bash(f"cp root.txt {target}")
+        self.assertEqual(self._decision(out), "deny")
+        self.assertIn("feat-b", self._reason(out))
+
+    def test_bash_tee_into_primary_deny(self):
+        out = self._bash(f"echo hi | tee {os.path.join(self.main, 'log.txt')}")
+        self.assertEqual(self._decision(out), "deny")
+
+    def test_bash_rm_in_sibling_deny(self):
+        out = self._bash(f"rm -f {os.path.join(self.main, 'root.txt')}")
+        self.assertEqual(self._decision(out), "deny")
+
+    # --- Bash: reads keep today's behavior (ask, not deny) ------------------
+
+    def test_bash_read_of_sibling_asks_not_deny(self):
+        out = self._bash(f"cat {os.path.join(self.main, 'root.txt')}")
+        self.assertEqual(self._decision(out), "ask")
+        self.assertNotIn("Sibling-checkout", self._reason(out))
+
+    def test_bash_grep_of_sibling_asks(self):
+        out = self._bash(f"grep x {os.path.join(self.other, 'root.txt')}")
+        self.assertEqual(self._decision(out), "ask")
+
+    # --- Bash: override downgrades to ask -----------------------------------
+
+    def test_bash_override_downgrades_deny_to_ask(self):
+        target = os.path.join(self.main, "root.txt")
+        out = self._bash(f"cat /dev/null > {target}",
+                         env_extra={"WORKSPACE_GUARD_OVERRIDE": "deliberate sync"})
+        self.assertEqual(self._decision(out), "ask")
+        r = self._reason(out)
+        self.assertIn("WORKSPACE_GUARD_OVERRIDE", r)
+        self.assertIn("deliberate sync", r)
+
+    # --- Bash: no-op when the session isn't in a worktree -------------------
+
+    def test_bash_main_session_write_into_worktree_is_ask_not_deny(self):
+        # Session is the main checkout (not a worktree): sibling detection is a
+        # no-op, so a write into a linked worktree gets the generic outside ask.
+        target = os.path.join(self.other, "x.txt")
+        out = self._bash(f"cat /dev/null > {target}",
+                         proj=self.main, cwd=self.main)
+        self.assertEqual(self._decision(out), "ask")
+        self.assertNotIn("Sibling-checkout", self._reason(out))
+
+    # --- Edit/Write/MultiEdit/NotebookEdit ----------------------------------
+
+    def test_edit_into_primary_deny(self):
+        target = os.path.join(self.main, "cmd", "main.go")
+        out = self._edit("Edit", target)
+        self.assertEqual(self._decision(out), "deny")
+        r = self._reason(out)
+        self.assertIn(self.main_branch, r)
+        self.assertIn(os.path.join(self.wt, "cmd", "main.go"), r)
+
+    def test_write_into_other_worktree_deny(self):
+        out = self._edit("Write", os.path.join(self.other, "new.txt"))
+        self.assertEqual(self._decision(out), "deny")
+        self.assertIn("feat-b", self._reason(out))
+
+    def test_multiedit_into_primary_deny(self):
+        out = self._edit("MultiEdit", os.path.join(self.main, "root.txt"))
+        self.assertEqual(self._decision(out), "deny")
+
+    def test_notebook_edit_notebook_path_into_primary_deny(self):
+        out = self._run({"tool_name": "NotebookEdit",
+                         "tool_input": {"notebook_path":
+                                        os.path.join(self.main, "nb.ipynb")}})
+        self.assertEqual(self._decision(out), "deny")
+
+    def test_edit_override_downgrades_to_ask(self):
+        out = self._edit("Write", os.path.join(self.main, "root.txt"),
+                         env_extra={"WORKSPACE_GUARD_OVERRIDE": "porting"})
+        self.assertEqual(self._decision(out), "ask")
+        self.assertIn("porting", self._reason(out))
+
+    def test_edit_inside_session_workspace_defers(self):
+        out = self._edit("Write", os.path.join(self.wt, "in-session.txt"))
+        self.assertIsNone(out, f"expected defer, got {out!r}")
+
+    def test_edit_unrelated_outside_path_defers(self):
+        # Outside the repo and not a sibling checkout -> the Edit hook stays
+        # silent and lets the builtin permission system handle it.
+        out = self._edit("Write", os.path.join(self.base, "stray.txt"))
+        self.assertIsNone(out, f"expected defer, got {out!r}")
+
+    def test_edit_main_session_defers(self):
+        # Not in a worktree -> the Edit hook is a no-op even into a worktree.
+        out = self._edit("Write", os.path.join(self.other, "x.txt"),
+                         proj=self.main, cwd=self.main)
+        self.assertIsNone(out, f"expected defer, got {out!r}")
+
+    def test_edit_relative_tilde_defers(self):
+        # A `~`/`$` path can't be resolved here -> defer to builtin.
+        out = self._edit("Write", "~/somewhere/x.txt")
+        self.assertIsNone(out, f"expected defer, got {out!r}")
+
+
 class PluginWiringTests(unittest.TestCase):
     """The config plumbing that connects the script to Claude Code.
 
@@ -2790,6 +3066,20 @@ class PluginWiringTests(unittest.TestCase):
         self.assertIsInstance(pre, list, "hooks.PreToolUse must be a list")
         matchers = [e.get("matcher") for e in pre]
         self.assertIn("Bash", matchers, "no PreToolUse entry matches Bash")
+
+    def test_hooks_json_registers_pretooluse_edit_tools(self):
+        # Issue 62: the sibling-checkout deny also hooks the file-editing tools.
+        data = self._load_json("hooks/hooks.json")
+        pre = data.get("hooks", {}).get("PreToolUse")
+        self.assertIsInstance(pre, list)
+        matchers = [e.get("matcher") for e in pre]
+        edit_matcher = next(
+            (m for m in matchers if m and "Edit" in m and "Write" in m), None)
+        self.assertIsNotNone(
+            edit_matcher, "no PreToolUse entry matches the Edit/Write tools")
+        for tool in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
+            self.assertIn(tool, edit_matcher,
+                          f"{tool} not covered by matcher {edit_matcher!r}")
 
     def test_hooks_json_command_path_exists(self):
         data = self._load_json("hooks/hooks.json")

@@ -276,6 +276,139 @@ def build_scratch_hint(proj, scratch):
             + " To soften this to a prompt set WORKSPACE_GUARD_TMP_ACTION=ask; "
             "to exempt a specific path set WORKSPACE_GUARD_TMP_ALLOW.")
 
+
+# --- Sibling-checkout (git worktree) detection --------------------------------
+# When a session runs inside a git worktree, a WRITE that lands in a *sibling
+# checkout of the same repo* — the primary checkout or another worktree —
+# silently targets the wrong branch (often `main`, or another session's in-flight
+# branch). We detect this by resolving the offending path's enclosing checkout
+# and comparing its git common-dir to the session's: same common-dir + a
+# different checkout root == a sibling checkout. This is the `--git-common-dir`
+# equivalence, done per-path so we never enumerate every worktree (a repo can
+# have dozens). A path in an *unrelated* git repo has a different common-dir and
+# is never treated as a sibling.
+#
+# Only tiny git metadata files are read (`.git`, `commondir`, `HEAD`) — never
+# version-controlled file contents, no network. Any read/parse failure yields
+# None (fail-safe: the path keeps its normal outside `ask`; the boundary is
+# never weakened).
+
+def _read_git_meta(path, limit=8192):
+    """Read a small git metadata file, or None on any error. Size-capped."""
+    try:
+        with open(path, 'r') as f:
+            return f.read(limit)
+    except OSError:
+        return None
+
+
+def _resolve_checkout(start_dir):
+    """Walk up from ``start_dir`` to the nearest enclosing git checkout.
+
+    Returns ``{'root', 'admin', 'common'}`` (all realpaths) or None:
+      * ``.git`` is a **directory** -> main checkout; admin == common == that dir.
+      * ``.git`` is a **file** (``gitdir: <admin>``) -> linked worktree; the
+        common-dir comes from ``<admin>/commondir`` (falling back to the
+        ``<common>/worktrees/<name>`` layout).
+      * no enclosing ``.git`` -> None (not a git repo).
+    """
+    d = start_dir
+    seen = set()
+    while d and d not in seen:
+        seen.add(d)
+        gitpath = os.path.join(d, '.git')
+        try:
+            is_dir = os.path.isdir(gitpath)
+            is_file = os.path.isfile(gitpath)
+        except OSError:
+            is_dir = is_file = False
+        if is_dir:
+            common = os.path.realpath(gitpath)
+            return {'root': os.path.realpath(d), 'admin': common, 'common': common}
+        if is_file:
+            content = _read_git_meta(gitpath)
+            m = re.match(r'\s*gitdir:\s*(.+?)\s*$', content or '')
+            if not m:
+                return None                       # malformed -> fail-safe
+            admin = m.group(1)
+            if not os.path.isabs(admin):
+                admin = os.path.join(d, admin)
+            admin = os.path.realpath(admin)
+            cc = _read_git_meta(os.path.join(admin, 'commondir'))
+            if cc and cc.strip():
+                cc = cc.strip()
+                common = cc if os.path.isabs(cc) else os.path.join(admin, cc)
+            else:
+                common = os.path.join(admin, os.pardir, os.pardir)
+            return {'root': os.path.realpath(d), 'admin': admin,
+                    'common': os.path.realpath(common)}
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    return None
+
+
+def resolve_session_worktree(proj):
+    """Resolve the session's checkout from ``proj``.
+
+    Returns the ``_resolve_checkout`` dict augmented with ``in_worktree`` (True
+    when the session's ``.git`` is a linked-worktree admin dir, i.e. admin !=
+    common), or None when ``proj`` isn't in a git repo. Sibling detection is a
+    no-op unless ``in_worktree`` — this is the "no-op when the session isn't in
+    a worktree" rule.
+    """
+    co = _resolve_checkout(proj)
+    if co is None:
+        return None
+    co['in_worktree'] = (co['admin'] != co['common'])
+    return co
+
+
+def _branch_label(admin):
+    """Human-readable branch of the checkout whose admin dir is ``admin``.
+
+    ``ref: refs/heads/X`` -> ``X``; a detached SHA -> ``(detached <sha12>)``;
+    unreadable -> None."""
+    head = _read_git_meta(os.path.join(admin, 'HEAD'))
+    if not head:
+        return None
+    head = head.strip()
+    if head.startswith('ref:'):
+        ref = head[len('ref:'):].strip()
+        if ref.startswith('refs/heads/'):
+            return ref[len('refs/heads/'):]
+        return ref
+    return '(detached %s)' % head[:12] if head else None
+
+
+def sibling_checkout_for(rp, session):
+    """If resolved path ``rp`` lies inside another checkout of the SAME repo as
+    the session worktree, return ``(root, branch)``; else None.
+
+    ``session`` is the ``resolve_session_worktree`` dict. Self-gates: returns
+    None unless the session is itself a linked worktree, so callers can invoke
+    it unconditionally.
+    """
+    if not session or not session.get('in_worktree'):
+        return None
+    co = _resolve_checkout(os.path.dirname(rp))
+    if co is None:
+        return None
+    if co['common'] != session['common']:
+        return None                               # different repo -> not sibling
+    if co['root'] == session['root']:
+        return None                               # same checkout -> not sibling
+    return (co['root'], _branch_label(co['admin']))
+
+
+def sibling_override():
+    """Reason string from ``WORKSPACE_GUARD_OVERRIDE`` (downgrades the sibling
+    deny to ``ask`` for deliberate cross-checkout work), or None when unset."""
+    v = (os.environ.get('WORKSPACE_GUARD_OVERRIDE') or '').strip()
+    return v or None
+
+
 # Per-command parsing spec:
 #   consume:    flag -> N following tokens to skip (flag *values*, never files)
 #   file_flags: flag -> (N_consumed, [indices among consumed that ARE files])
@@ -743,13 +876,48 @@ def files_in_command(tokens):
     return files
 
 
-def build_reason(offenders, scratch_hint=''):
+def build_sibling_hint(siblings, override=None):
+    """One-line guidance for writes into a sibling checkout of the same repo.
+
+    `siblings` is a list of `(token, detail)` where `detail` carries the
+    offending checkout `root`, its `branch`, and the `corrected` path under the
+    session's own checkout (same relative path). When `override` is set the
+    write is downgraded to a prompt rather than blocked, so the wording adjusts.
+    """
+    seen, parts = set(), []
+    for tok, d in siblings:
+        key = (tok, d.get('root'), d.get('corrected'))
+        if key in seen:
+            continue
+        seen.add(key)
+        parts.append(
+            "`%s` is inside another checkout of this repo (%s, on branch %s) — "
+            "write to `%s` under this session's checkout instead"
+            % (tok, d.get('root'), d.get('branch') or '(unknown)',
+               d.get('corrected')))
+    body = "; ".join(parts) + "."
+    if override:
+        lead = ("Sibling-checkout write(s) — prompting because "
+                "WORKSPACE_GUARD_OVERRIDE is set (%s): " % override)
+        tail = ""
+    else:
+        lead = ("Sibling-checkout write(s) blocked: writing into a different "
+                "checkout of this repo lands your change on the wrong branch. ")
+        tail = (" For deliberate cross-checkout work set "
+                "WORKSPACE_GUARD_OVERRIDE=<reason> to downgrade this to a prompt.")
+    return lead + body + tail
+
+
+def build_reason(offenders, scratch_hint='', override=None):
     """Build the permissionDecisionReason for a blocked command.
 
-    `offenders` is a list of `(token, category)` pairs from `check_file`.
-    The message names the offending token(s) AND tells the agent how to avoid
-    the prompt, tailored per category so each gets the fix that applies:
+    `offenders` is a list of `(token, category[, detail])` items from
+    `check_file` / `handle_edit`. The message names the offending token(s) AND
+    tells the agent how to avoid the prompt, tailored per category:
 
+      * 'sibling'   — a WRITE into a sibling checkout of the same repo (primary
+                      checkout or another worktree). `detail` carries the
+                      checkout root, branch, and corrected in-session path.
       * 'hosttemp'  — a path under a host-wide temp root (`/tmp`, `/var/tmp`,
                       `$TMPDIR`). Steered to a repo-local gitignored scratch dir
                       via `scratch_hint` (see build_scratch_hint).
@@ -763,10 +931,18 @@ def build_reason(offenders, scratch_hint=''):
     de-duplicated.
     """
     buckets = {'hosttemp': [], 'outside': [], 'expand': [], 'untracked': []}
-    for tok, cat in offenders:
-        buckets[cat].append(tok)
+    siblings = []
+    for item in offenders:
+        tok, cat = item[0], item[1]
+        detail = item[2] if len(item) > 2 else None
+        if cat == 'sibling':
+            siblings.append((tok, detail or {}))
+        else:
+            buckets[cat].append(tok)
 
     hints = []
+    if siblings:
+        hints.append(build_sibling_hint(siblings, override))
     if buckets['hosttemp']:
         hints.append(
             "Host-wide temp path(s): "
@@ -795,11 +971,23 @@ def build_reason(offenders, scratch_hint=''):
     return " ".join(hints)
 
 
-def main():
-    data = json.load(sys.stdin)
+def emit(decision, reason):
+    """Print a PreToolUse decision as the hook's stdout JSON."""
+    print(json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": decision,
+        "permissionDecisionReason": reason}}))
+
+
+def handle_bash(data):
     cmd = (data.get('tool_input') or {}).get('command', '') or ''
     cwd = data.get('cwd') or os.getcwd()
     proj = os.path.realpath(os.environ.get('CLAUDE_PROJECT_DIR') or cwd)
+    # Session's own checkout, for the sibling-checkout (worktree) deny. A no-op
+    # unless the session is itself a linked worktree (see resolve_session_worktree
+    # / sibling_checkout_for). Resolved once per invocation.
+    session_wt = resolve_session_worktree(proj)
+    sib_override = sibling_override()
     # Current session id (a UUID). Used to scope the Claude-managed-temp allow
     # to THIS session's own task output. Absent for older CLIs -> allow stays
     # off (every temp path keeps prompting, the secure-by-default direction).
@@ -923,14 +1111,15 @@ def main():
     staged_outside_paths = set()
 
     def check_file(f, group_cwd, group_cwd_unknown, is_read=False):
-        """Return `(token, category)` if the file resolves outside the
+        """Return `(token, category, detail)` if the file resolves outside the
         workspace (directly, or via a link staged by an earlier `ln` —
         symbolic or hard — in this chain), else None.
 
-        `category` is one of 'outside' (a resolved path outside the root),
-        'expand' (a runtime-expanded `~`/`$` token), or 'untracked' (a
-        relative path after a `cd` we couldn't follow). All three block
-        identically; the category only steers the advice in the reason.
+        `category` is one of 'sibling' (a WRITE into a sibling checkout of the
+        same repo), 'outside' (a resolved path outside the root), 'expand' (a
+        runtime-expanded `~`/`$` token), or 'untracked' (a relative path after a
+        `cd` we couldn't follow). All block identically; the category steers the
+        advice, and 'sibling' additionally carries a `detail` dict (else None).
 
         `is_read=True` enables the ALLOWED_READ_PREFIXES exemption for
         commands that only read files (see WRITE_COMMANDS). Redirect
@@ -939,13 +1128,13 @@ def main():
         if kind == 'skip':
             return None
         if kind in ('expand', 'untracked'):
-            return (f, kind)
+            return (f, kind, None)
         # A path staged outside by an earlier `ln` (symbolic or hard) is flagged
         # even when it physically lives under the session temp dir — checked
         # BEFORE the session-tmp allow so the ln-staging defense (Q8/Q17) can't
         # be bypassed by pointing a link inside the allowed scratch dir.
         if rp in staged_outside_paths:
-            return (f, 'outside')
+            return (f, 'outside', None)
         # Claude Code's own per-session task-output/scratch is the agent reading
         # back its own background-command output — not the boundary we guard.
         # Allowed only for the current session (see is_session_tmp_path). (Q21)
@@ -957,6 +1146,20 @@ def main():
             # additions). Write commands (cp, mv, tee, rm) are never exempt.
             if is_read and any(path_at_or_under(rp, p) for p in read_prefixes):
                 return None
+            # Sibling checkout of the same repo: a WRITE landing in the primary
+            # checkout or another worktree silently targets the wrong branch.
+            # Only writes (is_read False — redirect targets, cp/mv/tee/rm, dd)
+            # upgrade to this deny; reads keep today's behavior (staleness risk,
+            # not damage). Checked before host-temp so a worktree that happens to
+            # live under /tmp still gets the more specific sibling message.
+            if not is_read:
+                sib = sibling_checkout_for(rp, session_wt)
+                if sib is not None:
+                    root, branch = sib
+                    corrected = os.path.join(
+                        session_wt['root'], os.path.relpath(rp, root))
+                    return (f, 'sibling', {'root': root, 'branch': branch,
+                                           'corrected': corrected})
             # Host-wide temp (/tmp, /var/tmp, $TMPDIR) gets a stronger, steered
             # decision than a generic outside path — UNLESS it's under the
             # Claude-managed temp root (another session's task output), which
@@ -966,8 +1169,8 @@ def main():
                     and not path_at_or_under(rp, session_tmp_root):
                 if matches_allowlist(rp, tmp_allow):
                     return None
-                return (f, 'hosttemp')
-            return (f, 'outside')
+                return (f, 'hosttemp', None)
+            return (f, 'outside', None)
         return None
 
     def stage_ln(target, link, group_cwd, group_cwd_unknown):
@@ -1060,17 +1263,67 @@ def main():
         # paths so a human still gets the approve/reject prompt. Both decisions
         # are equally blocking — this is a recoverability/steering choice, not a
         # weakening of the boundary.
+        #
+        # A third deny driver: a WRITE into a sibling checkout of the same repo
+        # (the 'sibling' category). It denies by default — self-heals in one
+        # agent round trip — unless WORKSPACE_GUARD_OVERRIDE is set, which
+        # downgrades it to `ask` for deliberate cross-checkout work.
         bypass = data.get("permission_mode") == "bypassPermissions"
-        host_temp_hit = any(cat == 'hosttemp' for _, cat in outside)
-        deny_now = bypass or (host_temp_hit and tmp_action == 'deny')
+        host_temp_hit = any(cat == 'hosttemp' for _, cat, _ in outside)
+        sibling_hit = any(cat == 'sibling' for _, cat, _ in outside)
+        sibling_deny = sibling_hit and sib_override is None
+        deny_now = bypass or (host_temp_hit and tmp_action == 'deny') \
+            or sibling_deny
         decision = "deny" if deny_now else "ask"
-        reason = build_reason(outside, build_scratch_hint(proj, scratch_dir_name()))
+        reason = build_reason(outside, build_scratch_hint(proj, scratch_dir_name()),
+                              override=sib_override)
     else:
         decision, reason = "allow", "Guarded commands target workspace/pipe only"
-    print(json.dumps({"hookSpecificOutput": {
-        "hookEventName": "PreToolUse",
-        "permissionDecision": decision,
-        "permissionDecisionReason": reason}}))
+    emit(decision, reason)
+
+
+def handle_edit(data):
+    """Narrow sibling-checkout deny for the file-editing tools (Edit, Write,
+    MultiEdit, NotebookEdit). Its ONLY active rule is the sibling-checkout deny;
+    everything else defers (emits nothing) so the builtin permission system
+    handles it. Reads keep today's behavior — these tools always write.
+    """
+    ti = data.get('tool_input') or {}
+    raw = ti.get('file_path') or ti.get('notebook_path') or ''
+    if not raw or not isinstance(raw, str):
+        return
+    cwd = data.get('cwd') or os.getcwd()
+    proj = os.path.realpath(os.environ.get('CLAUDE_PROJECT_DIR') or cwd)
+    session_wt = resolve_session_worktree(proj)
+    if not session_wt or not session_wt.get('in_worktree'):
+        return                                    # not in a worktree -> defer
+    path = expand_tilde(raw)
+    if path.startswith('~') or '$' in path:
+        return                                    # unresolved expansion -> defer
+    rp = os.path.realpath(path if os.path.isabs(path)
+                          else os.path.join(cwd, path))
+    if rp == proj or rp.startswith(proj + os.sep):
+        return                                    # inside session workspace
+    sib = sibling_checkout_for(rp, session_wt)
+    if sib is None:
+        return                                    # not a sibling -> defer
+    root, branch = sib
+    corrected = os.path.join(session_wt['root'], os.path.relpath(rp, root))
+    override = sibling_override()
+    detail = {'root': root, 'branch': branch, 'corrected': corrected}
+    reason = build_reason([(raw, 'sibling', detail)], override=override)
+    emit('ask' if override else 'deny', reason)
+
+
+def main():
+    data = json.load(sys.stdin)
+    tool = data.get('tool_name') or ''
+    # Absent tool_name (older CLIs, or the Bash-only matcher) -> Bash handling,
+    # preserving the original behavior.
+    if tool in ('Edit', 'Write', 'MultiEdit', 'NotebookEdit'):
+        handle_edit(data)
+    else:
+        handle_bash(data)
 
 
 if __name__ == "__main__":

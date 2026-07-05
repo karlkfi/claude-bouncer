@@ -45,7 +45,9 @@ The hook produces one of four outcomes:
   default for **host-wide temp** paths (`/tmp`, `/var/tmp`, `$TMPDIR`): they're
   shared across every session and worktree and live outside the project root, so
   instead of prompting, the hook steers you to a repo-local gitignored scratch
-  dir (`./tmp/`). Configurable down to `ask`; see [Configuration](#configuration).
+  dir (`./tmp/`). It's also the default for **writes into a sibling checkout of
+  the same repo** when the session runs in a git worktree (see below).
+  Configurable down to `ask`; see [Configuration](#configuration).
 - **defer** — the hook stays silent; your normal permission settings apply.
 
 Guarded commands: `grep` (and `egrep`, `fgrep`), `rg`, `sed`, `awk` (and
@@ -136,6 +138,35 @@ The **ask** rows assume an interactive or `default`-mode session. In full-auto
 `bypassPermissions` mode (`--dangerously-skip-permissions`) those same paths
 return `deny` instead — equally blocking, with recoverable feedback for the
 agent. See [Configuration](#configuration).
+
+### Worktree-aware sibling-checkout deny
+
+When your session runs inside a **git worktree**, a write that lands in a
+*sibling checkout of the same repo* — the primary checkout or another worktree —
+is a distinct, high-consequence mistake: the edit silently lands on the wrong
+branch (often `main`, or another session's in-flight branch). This is easy to do
+by absolute path (`<repo>/cmd/main.go` instead of
+`<repo>/.worktrees/mine/cmd/main.go`).
+
+The hook treats "sibling checkout" as a recognized tier of the outside-workspace
+check and **denies writes into it** — upgraded from the generic outside-workspace
+`ask`, because a deny self-heals in one agent round trip instead of relying on a
+human to notice and retype the path. The message names the offending checkout,
+its checked-out branch, and the corrected path under your session's checkout
+(same relative path). This applies to:
+
+- **Bash writes and redirect targets** — `cp`/`mv`/`tee`/`rm`/`dd` operands and
+  `> file` targets that resolve inside a sibling checkout.
+- **The `Edit`, `Write`, `MultiEdit`, and `NotebookEdit` tools** — the one place
+  the hook reaches beyond `Bash`. Its *only* active rule there is this
+  sibling-checkout deny; every other edit defers to your normal permissions.
+
+**Reads keep today's behavior** — reading a sibling checkout risks staleness,
+not damage, so it stays an `ask`. Detection is a no-op when the session isn't in
+a worktree, and a path in an *unrelated* git repo is never treated as a sibling
+(it shares no git common-dir with your repo). For deliberate cross-checkout work,
+`WORKSPACE_GUARD_OVERRIDE=<reason>` downgrades the deny to `ask`; see
+[Configuration](#configuration).
 
 ## Install
 
@@ -293,6 +324,17 @@ After upgrading either way:
    than this steer-to-`./tmp/` deny. The action, scratch-dir name, extra roots,
    and an allowlist escape hatch are all configurable; see
    [Configuration](#configuration).
+11. **Deny** writes into a sibling checkout of the same repo. When the session
+   root is inside a git worktree, the hook resolves the enclosing git checkout of
+   each *write* path (walking up to the nearest `.git`, reading only tiny git
+   metadata) and compares its shared `--git-common-dir` to the session's. A path
+   inside a *different* checkout of the *same* repo (same common-dir, different
+   root) is reclassified to `deny`, naming the checkout, its branch, and the
+   corrected in-session path. Only writes upgrade — reads keep step 7's `ask`.
+   A path in an unrelated repo has a different common-dir and stays a generic
+   outside `ask`. The same rule is the sole active check on the `Edit`, `Write`,
+   `MultiEdit`, and `NotebookEdit` tools. `WORKSPACE_GUARD_OVERRIDE=<reason>`
+   downgrades it to `ask`; see [Configuration](#configuration).
 
 ## Agent guidance: avoiding prompts
 
@@ -343,6 +385,12 @@ flowing, avoid triggering it:
   every guarded read of them prompts. Vendor the source into the tree instead
   (e.g. `go mod vendor` → `vendor/`, npm's `node_modules/`) and read from there,
   or use the Read/Grep tools, which skip the hook entirely.
+- **In a git worktree, edit only via this session's checkout — never another
+  checkout's path.** A write (bash or `Edit`/`Write`) into the primary checkout
+  or another worktree of the same repo is **denied**: it would land your change
+  on the wrong branch. Use the same relative path under your session root. For
+  deliberate cross-checkout work, set `WORKSPACE_GUARD_OVERRIDE=<reason>` to
+  downgrade the deny to a prompt.
 ```
 
 The plugin also ships a **`reduce-workspace-guard-prompts`** skill: ask Claude
@@ -402,6 +450,23 @@ sub-agent data). You can extend it with additional prefixes:
 Each entry is run through `realpath` so platform symlinks resolve correctly.
 Scope entries tightly: anything under a configured prefix is silently allowed
 for read commands without a confirmation prompt.
+
+### Sibling-checkout (worktree) deny
+
+When the session runs in a git worktree, writes into a sibling checkout of the
+same repo are **denied** (see
+[Worktree-aware sibling-checkout deny](#worktree-aware-sibling-checkout-deny)).
+One env var tunes this, read at hook time (no restart needed):
+
+| Env var | Default | Effect |
+| --- | --- | --- |
+| `WORKSPACE_GUARD_OVERRIDE` | (empty) | When set to a non-empty reason string, downgrades the sibling-checkout deny to `ask` for deliberate cross-checkout work. The reason is echoed back in the prompt. |
+
+`WORKSPACE_GUARD_OVERRIDE` is the one knob that *loosens* this guard, so it's
+empty by default and opt-in. The deny is the secure default: it self-heals in one
+agent round trip, whereas an approvable prompt invites the reflexive "yes" that
+lands the change on the wrong branch. Scope the override to the moment you
+actually need it (e.g. one command), not the whole session.
 
 ### Outside-workspace ask vs. deny
 
@@ -464,6 +529,19 @@ final output.
   temp-creating tool that isn't in the `SPEC` table (`mktemp -p /tmp`), and a
   redirect from an *unguarded* command (`go test > /tmp/log`). These are out of
   scope by design; guarding more of them is a tracked follow-up.
+- The sibling-checkout `deny` classifies *write-context* file arguments — the
+  same set the read-prefix exemption treats as writes: redirect targets, `dd`
+  operands, and every operand of `cp`/`mv`/`tee`/`rm`. So a `cp` **source** or a
+  `dd if=` reading *from* a sibling checkout is denied too, not just the
+  destination. That's stricter than a pure "destination only" reading, in the
+  secure direction, and recoverable with `WORKSPACE_GUARD_OVERRIDE`. Pure read
+  commands (`cat`, `grep`, …) of a sibling are unaffected and keep their `ask`.
+- Sibling detection reads git worktree metadata (`.git`, `commondir`, `HEAD`)
+  under the offending path and the session root. Any read/parse failure — or a
+  session that isn't in a worktree — falls back to the normal outside `ask`
+  (fail-safe: the deny is never applied on uncertainty, so the boundary is never
+  weakened). A main-checkout session is a deliberate no-op even when worktrees
+  exist.
 
 ## Companion plugin: branch-guard
 
@@ -507,8 +585,10 @@ Out-of-scope security observations from audits live in
 ## Privacy
 
 The hook runs entirely on your machine and has no network access, telemetry,
-or analytics. It reads the pending Bash command and your project path, decides
-in memory, and never opens file contents or writes anything to disk. See
+or analytics. It reads the pending command (or edit target) and your project
+path, decides in memory, and never opens version-controlled file contents or
+writes anything to disk. To detect sibling worktree checkouts it reads a few
+small git metadata files (`.git`, `commondir`, `HEAD`) locally. See
 [`PRIVACY.md`](PRIVACY.md) for the full policy.
 
 ## Contributing
