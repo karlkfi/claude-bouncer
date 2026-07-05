@@ -3387,6 +3387,386 @@ class SiblingSessionScratchE2ETests(unittest.TestCase):
                       out["hookSpecificOutput"]["permissionDecisionReason"])
 
 
+class LiteralAssignmentValueTests(unittest.TestCase):
+    """Purity check for assignment RHS values (issue 58)."""
+
+    def test_plain_relative_path_pure(self):
+        self.assertEqual(guard.literal_assignment_value("sub/x.txt"), "sub/x.txt")
+
+    def test_plain_absolute_path_pure(self):
+        self.assertEqual(guard.literal_assignment_value("/opt/x"), "/opt/x")
+
+    def test_empty_value_impure(self):
+        # `f=(a b)` tokenizes as `f=` + a paren run; treating the empty
+        # scalar as the value would miss the array's real $f.
+        self.assertIsNone(guard.literal_assignment_value(""))
+
+    def test_dollar_impure(self):
+        self.assertIsNone(guard.literal_assignment_value("$HOME/x"))
+
+    def test_backtick_impure(self):
+        self.assertIsNone(guard.literal_assignment_value("`cmd`"))
+
+    def test_glob_chars_impure(self):
+        for v in ("*.txt", "a?b", "a[0]"):
+            self.assertIsNone(guard.literal_assignment_value(v), v)
+
+    def test_whitespace_impure(self):
+        # An unquoted use would word-split on default IFS.
+        for v in ("a b", "a\tb", "a\nb"):
+            self.assertIsNone(guard.literal_assignment_value(v), repr(v))
+
+    def test_colon_impure(self):
+        # PATH-style values are excluded so an exotic inherited IFS can't
+        # split them into pieces the single-token check misses.
+        self.assertIsNone(guard.literal_assignment_value("/a:/b"))
+
+    def test_leading_tilde_slash_expands_to_home(self):
+        home = os.environ.get("HOME")
+        if not home:
+            self.skipTest("HOME not set")
+        self.assertEqual(
+            guard.literal_assignment_value("~/x"), os.path.join(home, "x"))
+
+    def test_tilde_user_impure(self):
+        self.assertIsNone(guard.literal_assignment_value("~someuser/x"))
+
+    def test_embedded_tilde_pure(self):
+        # Bash only tilde-expands at value start; `x~y` is literal.
+        self.assertEqual(guard.literal_assignment_value("x~y"), "x~y")
+
+
+class SubstituteVarsTests(unittest.TestCase):
+    """$NAME / ${NAME} substitution against known literals (issue 58)."""
+
+    MAP = {"SP": "/opt/scratch", "f": "in.txt"}
+
+    def test_plain_use_substituted(self):
+        self.assertEqual(
+            guard.substitute_vars("$SP/q.csv", self.MAP), "/opt/scratch/q.csv")
+
+    def test_braced_use_substituted(self):
+        self.assertEqual(
+            guard.substitute_vars("${SP}.bak", self.MAP), "/opt/scratch.bak")
+
+    def test_name_boundary_respected(self):
+        # `$SPX` is a different variable — must not match `SP`.
+        self.assertEqual(guard.substitute_vars("$SPX", self.MAP), "$SPX")
+
+    def test_unknown_name_left_in_place(self):
+        self.assertEqual(guard.substitute_vars("$nope/x", self.MAP), "$nope/x")
+
+    def test_expansion_operator_not_substituted(self):
+        # `${f%.txt}` is a parameter expansion the hook can't evaluate.
+        self.assertEqual(
+            guard.substitute_vars("${f%.txt}", self.MAP), "${f%.txt}")
+
+    def test_backtick_token_untouched(self):
+        self.assertEqual(
+            guard.substitute_vars("$f`cmd`", self.MAP), "$f`cmd`")
+
+    def test_empty_map_untouched(self):
+        self.assertEqual(guard.substitute_vars("$SP", {}), "$SP")
+
+
+class ApplyAssignmentGroupTests(unittest.TestCase):
+    """Recognition and folding of assignment-only groups (issue 58)."""
+
+    def test_single_assignment_sets(self):
+        m = {}
+        self.assertEqual(
+            guard.apply_assignment_group(["f=in.txt"], m, True), ["f"])
+        self.assertEqual(m, {"f": "in.txt"})
+
+    def test_multiple_assignments_set_sequentially(self):
+        # bash applies assignment-only commands left to right: `a=x b=$a`.
+        m = {}
+        guard.apply_assignment_group(["a=sub", "b=$a/x.txt"], m, True)
+        self.assertEqual(m, {"a": "sub", "b": "sub/x.txt"})
+
+    def test_export_form_sets(self):
+        m = {}
+        self.assertEqual(
+            guard.apply_assignment_group(["export", "f=in.txt"], m, True),
+            ["f"])
+        self.assertEqual(m, {"f": "in.txt"})
+
+    def test_export_bare_name_is_noop(self):
+        # `export NAME` re-exports without changing the value.
+        m = {"f": "in.txt"}
+        self.assertEqual(
+            guard.apply_assignment_group(["export", "f"], m, True), [])
+        self.assertEqual(m, {"f": "in.txt"})
+
+    def test_impure_value_poisons(self):
+        m = {"f": "in.txt"}
+        guard.apply_assignment_group(["f=$(cmd)"], m, True)
+        self.assertEqual(m, {})
+
+    def test_non_persisting_group_poisons(self):
+        # Subshell / pipeline-segment / backgrounded assignment: pop, not set.
+        m = {"f": "old.txt"}
+        guard.apply_assignment_group(["f=new.txt"], m, False)
+        self.assertEqual(m, {})
+
+    def test_special_names_never_propagate(self):
+        m = {}
+        guard.apply_assignment_group(["RANDOM=5", "PWD=/x", "_=/y"], m, True)
+        self.assertEqual(m, {})
+
+    def test_command_with_prefix_assignment_not_an_assignment_group(self):
+        m = {}
+        self.assertIsNone(
+            guard.apply_assignment_group(["f=x", "cat", "y"], m, True))
+        self.assertEqual(m, {})
+
+    def test_plain_command_not_an_assignment_group(self):
+        self.assertIsNone(
+            guard.apply_assignment_group(["cat", "x"], {}, True))
+
+
+class PoisonVarsTests(unittest.TestCase):
+    """Conservative invalidation for groups that might mutate variables."""
+
+    def test_eval_clears_map(self):
+        m = {"f": "x", "g": "y"}
+        guard.poison_vars(["eval", "echo"], m)
+        self.assertEqual(m, {})
+
+    def test_source_and_dot_clear_map(self):
+        for cmd in ("source", "."):
+            m = {"f": "x"}
+            guard.poison_vars([cmd, "lib.sh"], m)
+            self.assertEqual(m, {}, cmd)
+
+    def test_read_poisons_named_vars(self):
+        m = {"f": "x", "g": "y"}
+        guard.poison_vars(["read", "-r", "f"], m)
+        self.assertEqual(m, {"g": "y"})
+
+    def test_read_with_dollar_arg_clears_map(self):
+        # `read $n` assigns to a variable the hook can't name.
+        m = {"f": "x"}
+        guard.poison_vars(["read", "$n"], m)
+        self.assertEqual(m, {})
+
+    def test_read_clobbers_reply(self):
+        m = {"REPLY": "x", "g": "y"}
+        guard.poison_vars(["read"], m)
+        self.assertEqual(m, {"g": "y"})
+
+    def test_keyword_prefix_skipped_before_dispatch(self):
+        # `while read -r f` — the `while` keyword must not hide `read`.
+        m = {"f": "x"}
+        guard.poison_vars(["while", "read", "-r", "f"], m)
+        self.assertEqual(m, {})
+
+    def test_for_poisons_loop_var(self):
+        m = {"f": "x"}
+        guard.poison_vars(["for", "f", "in", "a", "b"], m)
+        self.assertNotIn("f", m)
+
+    def test_prefix_assignment_poisons(self):
+        m = {"f": "x"}
+        guard.poison_vars(["f=/y", "cat", "z"], m)
+        self.assertEqual(m, {})
+
+    def test_append_and_array_and_increment_poison(self):
+        for tok in ("f+=/y", "f[0]=/y", "f++"):
+            m = {"f": "x"}
+            guard.poison_vars([tok], m)
+            self.assertEqual(m, {}, tok)
+
+    def test_torn_arithmetic_assignment_poisons(self):
+        # `(( f = x ))` tokenizes with `f` and `=` as separate tokens.
+        m = {"f": "x"}
+        guard.poison_vars(["f", "=", "5"], m)
+        self.assertEqual(m, {})
+
+    def test_plain_command_leaves_map_alone(self):
+        m = {"f": "x"}
+        guard.poison_vars(["grep", "PAT", "y.txt"], m)
+        self.assertEqual(m, {"f": "x"})
+
+
+class VarPropagationEndToEndTests(unittest.TestCase):
+    """Issue 58: `VAR=literal; use $VAR` resolves through the workspace check.
+
+    Every uncertain shape must land on today's `ask` (or the pre-existing
+    defer) — the feature is a precision improvement, never a new allow for a
+    path bash could resolve differently.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = os.path.realpath(self._tmp.name)
+        with open(os.path.join(self.workspace, "in.txt"), "w") as f:
+            f.write("hello\n")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _decision(self, cmd, expected, *, cwd=None):
+        out = run_hook(cmd, cwd or self.workspace)
+        self.assertIsNotNone(out, f"expected a decision, got defer for: {cmd!r}")
+        got = out["hookSpecificOutput"]["permissionDecision"]
+        self.assertEqual(
+            got, expected,
+            f"expected {expected!r} for {cmd!r}; got {got!r} "
+            f"(reason: {out['hookSpecificOutput'].get('permissionDecisionReason')!r})",
+        )
+        return out
+
+    # --- the motivating shapes resolve ---------------------------------------
+
+    def test_literal_var_inside_workspace_allow(self):
+        self._decision("f=in.txt; cat $f", "allow")
+
+    def test_braced_use_inside_workspace_allow(self):
+        self._decision("f=in.txt; cat ${f}", "allow")
+
+    def test_export_literal_var_allow(self):
+        self._decision("export f=in.txt; cat $f", "allow")
+
+    def test_literal_var_outside_workspace_ask(self):
+        out = self._decision("f=/etc/q58-fake-target; cat $f", "ask")
+        # The resolved path (not the $f token) is named in the reason.
+        self.assertIn(
+            "/etc/q58-fake-target",
+            out["hookSpecificOutput"]["permissionDecisionReason"],
+        )
+
+    def test_literal_var_host_temp_deny(self):
+        # The issue's motivating example: `SP=/tmp/...; tail -5 $SP/x.csv`.
+        self._decision("SP=/tmp/q58-fake-dir; tail -5 $SP/q265.csv", "deny")
+
+    def test_chained_assignment_allow(self):
+        # `b=$a/…` sees the already-known literal `a` (bash does the same).
+        self._decision("a=sub; b=$a/x.txt; cat $b", "allow")
+
+    def test_cd_through_literal_var_allow(self):
+        # cd tracking benefits too: `cd $d` re-roots later relative paths.
+        self._decision("d=sub; cd $d && cat x.txt", "allow")
+
+    def test_cd_through_literal_var_outside_ask(self):
+        self._decision("d=/etc; cd $d && cat q58-fake", "ask")
+
+    def test_redirect_target_through_literal_var_allow(self):
+        self._decision("o=out.txt; cat in.txt > $o", "allow")
+
+    def test_redirect_target_through_literal_var_outside_ask(self):
+        self._decision("o=/etc/q58-fake-target; cat in.txt > $o", "ask")
+
+    def test_use_inside_subshell_allow(self):
+        # The subshell inherits the parent's variables.
+        self._decision("f=in.txt; (cat $f)", "allow")
+
+    def test_expanded_command_name_becomes_guarded(self):
+        # Closes a former silent bypass: `C=cat; $C /etc/x` used to defer.
+        self._decision("C=cat; $C /etc/q58-fake-target", "ask")
+        self._decision("C=cat; $C in.txt", "allow")
+
+    # --- uncertainty keeps today's ask ----------------------------------------
+
+    def test_unknown_var_still_ask(self):
+        self._decision("cat $q58_unset_var", "ask")
+
+    def test_command_substitution_value_still_ask(self):
+        self._decision('f="x$(cmd)"; cat $f', "ask")
+
+    def test_reassigned_literal_uses_last_value(self):
+        self._decision("f=in.txt; f=/etc/q58-fake-target; cat $f", "ask")
+
+    def test_impure_reassignment_poisons(self):
+        self._decision('f=in.txt; f="x$(cmd)"; cat $f', "ask")
+
+    def test_pipeline_segment_assignment_does_not_persist(self):
+        self._decision("true | f=in.txt; cat $f", "ask")
+
+    def test_backgrounded_assignment_does_not_persist(self):
+        self._decision("f=in.txt & cat $f", "ask")
+
+    def test_read_poisons_var(self):
+        self._decision("f=in.txt; read f; cat $f", "ask")
+
+    def test_keyword_hidden_read_poisons_var(self):
+        self._decision("f=in.txt; while read -r f; do :; done; cat $f", "ask")
+
+    def test_eval_clears_all(self):
+        self._decision("f=in.txt; eval echo hi; cat $f", "ask")
+
+    def test_unset_poisons_var(self):
+        self._decision("f=in.txt; unset f; cat $f", "ask")
+
+    def test_declare_reassignment_poisons(self):
+        self._decision("f=in.txt; declare f=/etc/q58-fake; cat $f", "ask")
+
+    def test_printf_v_poisons(self):
+        self._decision("f=in.txt; printf -v f /etc/q58-fake; cat $f", "ask")
+
+    def test_array_element_assignment_poisons(self):
+        # `f[0]=…` mutates f (a scalar f is f[0]).
+        self._decision("f=in.txt; f[0]=/etc/q58-fake; cat $f", "ask")
+
+    def test_function_body_assignment_poisons(self):
+        self._decision("f=in.txt; g() { f=/etc/q58-fake; }; g; cat $f", "ask")
+
+    def test_value_with_space_not_propagated(self):
+        # An unquoted use would word-split into multiple paths.
+        self._decision('f="a b"; cat $f', "ask")
+
+    def test_value_with_glob_not_propagated(self):
+        self._decision("f=*.txt; cat $f", "ask")
+
+    def test_expansion_operator_still_ask(self):
+        self._decision("f=in.txt; cat ${f%.txt}", "ask")
+
+    def test_ifs_reassignment_disables_propagation(self):
+        self._decision("IFS=,; f=in.txt; cat $f", "ask")
+
+    def test_heredoc_disables_propagation(self):
+        # Heredoc bodies tokenize as commands; a body line shaped like an
+        # assignment could pollute the map, so `<<` turns the feature off.
+        self._decision('f=in.txt; cat $f <<EOF\nx\nEOF', "ask")
+
+    def test_prefix_assignment_does_not_persist(self):
+        # `F=… cat …` exports F only into cat's environment; a later $F is
+        # NOT the assigned value (and F is poisoned, not propagated).
+        self._decision(
+            "F=/etc/q58-fake cat in.txt; cat $F", "ask")
+
+    def test_expanded_token_cannot_form_assignment(self):
+        # bash decides what is an assignment before expansion: `$g` expanding
+        # to `f=…` runs a command named `f=…`, it does not assign f. The map
+        # must not be polluted by the expanded token (f stays in.txt here;
+        # conservative poisoning keeps this at ask, never allow-with-wrong-f).
+        out = run_hook("f=/etc/q58-fake-target; g=f=in.txt; $g; cat $f",
+                       self.workspace)
+        self.assertIsNotNone(out)
+        self.assertNotEqual(
+            out["hookSpecificOutput"]["permissionDecision"], "allow")
+
+    def test_subshell_assignment_overwrite_not_trusted(self):
+        # `f=out; (f=in); cat $f` — bash reads the OUTER f. The inner
+        # assignment must not overwrite the map with the "safe" value.
+        out = run_hook(
+            "f=/etc/q58-fake-target; (f=in.txt; cat $f); cat $f",
+            self.workspace)
+        self.assertIsNotNone(out)
+        self.assertNotEqual(
+            out["hookSpecificOutput"]["permissionDecision"], "allow")
+
+    def test_array_assignment_not_treated_as_empty_scalar(self):
+        # `f=(x)` tokenizes as `f=` + parens; the empty-looking scalar must
+        # not enter the map (bash's $f is the first array element). The glued
+        # `);` run keeps this a pre-existing defer — assert only that it can
+        # never become allow.
+        out = run_hook("f=(/etc/q58-fake-target); cat $f", self.workspace)
+        if out is not None:
+            self.assertNotEqual(
+                out["hookSpecificOutput"]["permissionDecision"], "allow")
+
+
 class PluginWiringTests(unittest.TestCase):
     """The config plumbing that connects the script to Claude Code.
 

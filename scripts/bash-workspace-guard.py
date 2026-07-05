@@ -13,6 +13,58 @@ import sys, os, json, re, shlex, fnmatch
 # they do not change the command name lookup.
 ASSIGNMENT_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
 
+# --- Literal variable propagation (issue 58) --------------------------------
+# `SP=/path; tail $SP/x` binds SP to a literal earlier in the same command
+# string; bash expands `$SP` deterministically, so the hook can too and run
+# the resolved path through the normal workspace check instead of flagging it
+# as runtime-expanded. Everything below only ever narrows what is propagated:
+# any uncertainty drops (poisons) the variable, which restores today's `ask`.
+
+# A plain `$NAME` / `${NAME}` use. Parameter-expansion operators (`${f:-x}`,
+# `${f%.*}`, ...) deliberately don't match — the `$` stays in the token and
+# keeps the runtime-expanded `ask`.
+VAR_USE_RE = re.compile(r'\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))')
+
+IDENT_RE = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
+
+# Token that mutates a shell variable outside the plain-assignment form:
+# `f=…` (command prefix), `f+=…` (append), `f[0]=…` (array element),
+# `f++`/`f--` (arithmetic).
+ASSIGNISH_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)(\+?=|\[|\+\+|--)')
+
+# Chars that make an assignment RHS unsafe to treat as a literal, checked
+# AFTER shlex quote removal: expansions (`$`, backticks), glob metachars
+# (`*?[` — an unquoted use of the variable would glob), and word-splitting
+# chars (whitespace for the default IFS; `:` so a PATH-style value can't be
+# split by an exotic inherited IFS into pieces the single-token check misses).
+IMPURE_VALUE_CHARS = frozenset(' \t\n$`*?[:')
+
+# Names bash treats specially — assigning them does not make `$NAME` expand
+# to the assigned literal (dynamic values, readonly, or reset by the shell).
+NEVER_PROPAGATE = frozenset({
+    '_', 'IFS', 'PWD', 'OLDPWD', 'RANDOM', 'SRANDOM', 'SECONDS', 'LINENO',
+    'BASHPID', 'PPID', 'UID', 'EUID', 'GROUPS', 'EPOCHSECONDS',
+    'EPOCHREALTIME', 'BASH_SUBSHELL', 'BASH_COMMAND', 'PIPESTATUS',
+    'FUNCNAME', 'DIRSTACK',
+})
+
+# Commands that can assign to ANY variable invisibly -> the whole map dies.
+POISON_ALL_CMDS = frozenset({'eval', 'source', '.'})
+
+# Builtins/keywords that assign to variables named by their arguments
+# (`read f`, `for f in …`, `declare f=…`, `printf -v f …`, `unset f`, ...).
+ARG_ASSIGNER_CMDS = frozenset({
+    'read', 'readarray', 'mapfile', 'getopts', 'declare', 'typeset',
+    'local', 'readonly', 'export', 'unset', 'let', 'printf', 'for', 'select',
+})
+
+# Reserved words that may prefix the real command in a group (`while read f`,
+# `if f=…`) — skipped before dispatching the poison rules above.
+SH_KEYWORDS = frozenset({
+    'while', 'until', 'if', 'then', 'elif', 'else', 'do', 'done', 'fi',
+    'case', 'esac', 'in', 'time', 'function', '!', '{', '}', '[[', ']]',
+})
+
 # Command separators and redirect operators (after shlex punctuation grouping).
 SEPARATORS = {'|', '||', '&&', '&', ';', '\n', '(', ')'}
 REDIR = {'>', '>>', '<', '<<', '<<<', '>|', '&>', '&>>'}
@@ -734,6 +786,135 @@ def glue_dollar_paren(tokens):
     return out
 
 
+def literal_assignment_value(raw):
+    """Return the literal an assignment RHS resolves to, or None if bash
+    might expand or word-split it into something the hook can't predict.
+
+    ``raw`` is post-shlex (quotes removed). A leading ``~``/``~/…`` is
+    expanded like bash expands it in assignments; ``~user``/unset-``$HOME``
+    stay unresolvable. An empty value is rejected because ``f=(a b)``
+    tokenizes as ``f=`` + a paren run — treating it as the scalar empty
+    string would miss the array's real ``$f`` (its first element).
+    """
+    if not raw:
+        return None
+    if raw == '~' or raw.startswith('~/'):
+        raw = expand_tilde(raw)
+    if raw.startswith('~'):
+        return None
+    if any(c in IMPURE_VALUE_CHARS for c in raw):
+        return None
+    return raw
+
+
+def substitute_vars(tok, varmap):
+    """Replace plain `$NAME`/`${NAME}` uses whose literal value is known.
+
+    Unknown names are left in place (the remaining `$` keeps today's
+    runtime-expanded `ask`). Tokens containing backticks are returned
+    untouched: they hold old-style command substitution the hook can't
+    evaluate, and leaving the `$` alone keeps the secure default.
+    """
+    if not varmap or '$' not in tok or '`' in tok:
+        return tok
+
+    def repl(m):
+        name = m.group(1) or m.group(2)
+        return varmap[name] if name in varmap else m.group(0)
+
+    return VAR_USE_RE.sub(repl, tok)
+
+
+def apply_assignment_group(g, varmap, persists):
+    """If ``g`` is nothing but variable assignments — ``NAME=VAL ...`` or
+    ``export [-flag] NAME=VAL ...`` — fold them into ``varmap`` and return
+    the list of assigned names; else return None with ``varmap`` untouched.
+
+    Must be called on the PRE-substitution tokens: bash decides what is an
+    assignment before expansion, so ``$f`` expanding to ``g=x`` runs a
+    command named ``g=x`` rather than assigning ``g``.
+
+    Values are substituted and applied left to right, matching bash
+    (``a=x b=$a`` sets ``b`` from the new ``a``). A name is dropped from the
+    map instead of set when its value isn't a provable literal, when the
+    group can't persist to later commands (``persists`` False: inside a
+    subshell, a pipeline segment, or backgrounded), or when bash treats the
+    name specially (NEVER_PROPAGATE). Dropping only ever restores the
+    runtime-expanded `ask`. A bare ``export NAME`` re-exports without
+    changing the value, so it neither sets nor drops.
+    """
+    toks = g
+    if toks and toks[0] == 'export':
+        pairs = []
+        for t in toks[1:]:
+            if t.startswith('-'):
+                continue
+            if ASSIGNMENT_RE.match(t):
+                pairs.append(t)
+            elif not IDENT_RE.fullmatch(t):
+                return None
+    else:
+        if not toks or not all(ASSIGNMENT_RE.match(t) for t in toks):
+            return None
+        pairs = toks
+    names = []
+    for t in pairs:
+        name, raw = t.split('=', 1)
+        names.append(name)
+        val = literal_assignment_value(substitute_vars(raw, varmap))
+        if val is None or not persists or name in NEVER_PROPAGATE:
+            varmap.pop(name, None)
+        else:
+            varmap[name] = val
+    return names
+
+
+def poison_vars(g, varmap):
+    """Conservatively drop map entries a (non-assignment) command group might
+    mutate. Called on the post-substitution tokens so an expanded builtin
+    name (``R=read; $R f``) is still recognised.
+
+    ``eval``/``source``/``.`` can assign anything — the whole map dies.
+    Arg-assigner builtins (`read f`, `for f in …`, `declare f=…`, ...) poison
+    every argument that could be a variable name; an argument still holding a
+    ``$`` names a variable the hook can't identify, so the whole map dies
+    (and ``read`` & co. also clobber their implicit result vars). Any token
+    shaped like a mutation (``f=…`` command prefix, ``f+=…``, ``f[0]=…``,
+    ``f++``, or an ``f`` immediately followed by an ``=…`` token from a torn
+    ``(( f = x ))``) poisons that name. Poisoning only removes entries, so
+    it can only cause an `ask`, never an `allow`.
+    """
+    if not varmap:
+        return
+    i = 0
+    while i < len(g) and g[i] in SH_KEYWORDS:
+        i += 1
+    rest = g[i:]
+    if rest:
+        name0 = os.path.basename(rest[0])
+        if name0 in POISON_ALL_CMDS:
+            varmap.clear()
+            return
+        if name0 in ARG_ASSIGNER_CMDS:
+            for t in rest[1:]:
+                if '$' in t:
+                    varmap.clear()
+                    return
+                m = IDENT_RE.match(t)
+                if m:
+                    varmap.pop(m.group(0), None)
+            for n in ('REPLY', 'MAPFILE', 'OPTARG', 'OPTIND'):
+                varmap.pop(n, None)
+            return
+    for j, t in enumerate(g):
+        m = ASSIGNISH_RE.match(t)
+        if m:
+            varmap.pop(m.group(1), None)
+        elif IDENT_RE.fullmatch(t) and j + 1 < len(g) \
+                and g[j + 1].startswith('='):
+            varmap.pop(t, None)
+
+
 def split_newline_separators(tokens):
     """Peel newlines out of operator-run tokens so each becomes its own token.
 
@@ -1054,8 +1235,9 @@ def build_reason(offenders, scratch_hint='', override=None):
             "Runtime-expanded arg(s) bash resolves but the hook can't: "
             + ", ".join(sorted(set(buckets['expand'])))
             + ". Fix: if this lands inside the project root, write the literal "
-            "path (drop the $VAR / $(...) / leading ~); otherwise use the "
-            "Read/Grep tools.")
+            "path (drop the $VAR / $(...) / leading ~), or assign the variable "
+            "a plain literal earlier in the same command (VAR=./path; ...) so "
+            "the hook can resolve it; otherwise use the Read/Grep tools.")
     if buckets['untracked']:
         hints.append(
             "Relative path(s) after an untracked cd: "
@@ -1123,16 +1305,30 @@ def handle_bash(data):
     except ValueError:
         return                                    # unbalanced quotes -> defer
 
-    # Each group is a `(cmd_tokens, redir_targets)` pair: a redirect target is
-    # collected into the group it textually appears in, so it later resolves
-    # against THAT group's cwd rather than the chain's original cwd. This is
-    # what lets `cd /tmp && cat /dev/null > evil` flag `/tmp/evil` (Q16).
+    # Each group is a `(cmd_tokens, redir_targets, persists)` triple: a
+    # redirect target is collected into the group it textually appears in, so
+    # it later resolves against THAT group's cwd rather than the chain's
+    # original cwd — this is what lets `cd /tmp && cat /dev/null > evil` flag
+    # `/tmp/evil` (Q16). `persists` is True only when a variable assignment in
+    # the group survives into later commands of the same string: at paren
+    # depth 0 (not a subshell — `(f=x); cat $f` doesn't set f), not a pipeline
+    # segment (each side of `|` runs in a subshell), and not backgrounded
+    # (`f=x & …` assigns in the background copy only).
     groups, cur, cur_redir, i = [], [], [], 0
+    depth, prev_sep = 0, ''
     while i < len(tokens):
         t = tokens[i]
         if t in SEPARATORS:
             if cur or cur_redir:
-                groups.append((cur, cur_redir)); cur, cur_redir = [], []
+                persists = (depth == 0 and prev_sep != '|'
+                            and t in (';', '\n', '&&', '||'))
+                groups.append((cur, cur_redir, persists))
+                cur, cur_redir = [], []
+            if t == '(':
+                depth += 1
+            elif t == ')':
+                depth = max(0, depth - 1)
+            prev_sep = t
             i += 1; continue
         if t in REDIR or t in DUP:
             # An fd number written immediately before a redirect/dup operator
@@ -1162,7 +1358,8 @@ def handle_bash(data):
                 cur_redir.append(tokens[i+1]); i += 2; continue
             i += 1; continue
         cur.append(t); i += 1
-    if cur or cur_redir: groups.append((cur, cur_redir))
+    if cur or cur_redir:
+        groups.append((cur, cur_redir, depth == 0 and prev_sep != '|'))
 
     def is_outside(rp):
         return rp != proj and not rp.startswith(proj + os.sep)
@@ -1310,8 +1507,21 @@ def handle_bash(data):
     # unresolvable `cd` arg (`cd -`, `$HOME`, etc.) loses tracking.
     outside, guarded = [], False
     group_cwd, group_cwd_unknown = cwd, False
-    for g, g_redir in groups:
-        g = strip_env_prefix(g)
+    # Literal variable propagation (issue 58): values of `NAME=literal`
+    # assignments seen so far in this command string. Heredocs disable the
+    # whole feature — their body lines tokenize as commands, so a body line
+    # shaped like an assignment could otherwise pollute the map with values
+    # bash never assigns.
+    varmap, propagate = {}, '<<' not in tokens
+    for g, g_redir, persists in groups:
+        # Substitute known literals for path checking. The pre-substitution
+        # tokens are kept for assignment parsing below — bash decides what is
+        # an assignment before expansion.
+        if varmap:
+            sub_g = [substitute_vars(t, varmap) for t in g]
+            g_redir = [substitute_vars(t, varmap) for t in g_redir]
+        else:
+            sub_g = g
         # Redirect targets attach to this group, so resolve them against the
         # group's cwd *before* any `cd` this group performs takes effect — bash
         # opens a redirect relative to the cwd in force when the redirection is
@@ -1322,6 +1532,17 @@ def handle_bash(data):
             o = check_file(f, group_cwd, group_cwd_unknown)
             if o is not None:
                 outside.append(o)
+        if propagate:
+            assigned = apply_assignment_group(g, varmap, persists)
+            if assigned is not None:
+                if 'IFS' in assigned:
+                    # A changed IFS alters how bash word-splits every later
+                    # expansion — stop propagating for the rest of the string.
+                    varmap.clear()
+                    propagate = False
+                continue                          # assignment-only group
+            poison_vars(sub_g, varmap)
+        g = strip_env_prefix(sub_g)
         if not g: continue                        # env-only / redirect-only group
         kind, arg = classify_cd(g)
         if kind is not None:

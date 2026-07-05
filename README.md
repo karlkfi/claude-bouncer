@@ -94,6 +94,8 @@ different project's scratch still asks entirely.
 | `cd "$(pwd)" && cat README.md`       | allow    |
 | `tail /tmp/claude-501/…/<this-session>/…` (own task output) | allow |
 | `tail /tmp/claude-501/<this-project>/<sibling-session>/…` (sibling read) | allow |
+| `f=notes.md; cat $f`                 | allow    |
+| `d=sub; cd $d && cat x.txt`          | allow    |
 | `grep secret /etc/passwd`            | **ask**  |
 | `jq '.x' /etc/hosts`                 | **ask**  |
 | `yq -o json /etc/hosts`              | **ask**  |
@@ -109,6 +111,9 @@ different project's scratch still asks entirely.
 | `cd /etc && cat passwd`              | **ask**  |
 | `cd "$(mktemp -d)" && cat x.txt`     | **ask**  |
 | `LC_ALL=C cat /etc/passwd`           | **ask**  |
+| `f=/etc/passwd; cat $f`              | **ask**  |
+| `f=$HOME/x; cat $f` (non-literal value) | **ask** |
+| `C=cat; $C /etc/passwd`              | **ask**  |
 | `ln -s /etc/passwd link && cat link` | **ask**  |
 | `ln /etc/passwd link && cat link`    | **ask**  |
 | `cp x /tmp/claude-501/<this-project>/<sibling>/…` (sibling write) | **ask** |
@@ -256,7 +261,7 @@ After upgrading either way:
    is never parsed as commands or file arguments.
 2. **Split** into simple commands on those operators and collect each redirect
    target (`> file`) into the command group it belongs to, so it's later
-   resolved against that group's cwd (see step 5). The token after `<<`
+   resolved against that group's cwd (see step 6). The token after `<<`
    (heredoc delimiter) or `<<<` (here-string content) is skipped — it isn't a
    path. An fd number written before a redirect (`2>file`) and an
    fd-duplication or close (`2>&1`, `2>&-`) are recognised so the digit and the
@@ -265,31 +270,48 @@ After upgrading either way:
 3. **Strip** leading POSIX `NAME=VALUE` command-prefix assignments from each
    simple command (`LC_ALL=C cat …` → `cat …`) so the assignment doesn't mask
    the command-name lookup.
-4. **Classify** each token using a per-command spec table that knows which flags
+4. **Resolve** literal in-command variable assignments (one-pass constant
+   propagation). A standalone `NAME=value` or `export NAME=value` command
+   whose value survives quote removal as a plain literal — non-empty, no `$`,
+   backticks, glob characters, whitespace, or `:` — is remembered, and later
+   plain `$NAME`/`${NAME}` uses in the *same* command string are substituted
+   before the workspace check. So `SP=./out; tail -5 $SP/run.csv` resolves
+   and allows instead of prompting as runtime-expanded, and
+   `f=/etc/passwd; cat $f` prompts on the *resolved* path. This evaluates
+   exactly the expansion bash will perform, using only text already inside
+   the command; the substituted path still goes through every step below.
+   Anything uncertain — a value built from another expansion, a variable
+   later touched by `read`/`eval`/`declare`/`unset`/a `for` loop, an
+   assignment inside a subshell, pipeline segment, or backgrounded command —
+   drops the variable and keeps today's runtime-expanded `ask`. As a side
+   effect, a guarded command reached *through* a variable (`C=cat; $C file`)
+   is now recognised and guarded too.
+5. **Classify** each token using a per-command spec table that knows which flags
    take values (`grep -e PAT`), which flag-values are themselves files
    (`grep -f`, `jq --slurpfile`), and how many leading positionals are the
    program/pattern to skip. `dd` is handled separately because its operands are
    all `KEY=VALUE` pairs — `if=PATH` and `of=PATH` are the file operands; the
    rest (`bs=`, `count=`, `conv=`, `iflag=`, `oflag=`, …) are values, not paths.
-5. **Track** cwd shifts across the chain. A `cd`/`pushd` in an earlier group
+6. **Track** cwd shifts across the chain. A `cd`/`pushd` in an earlier group
    re-roots relative file paths — including relative redirect targets — in
    later guarded groups (so `cd /etc && cat passwd` flags `passwd` as
    `/etc/passwd`, and `cd /tmp && cat in.txt > evil` flags `evil` as
-   `/tmp/evil`). Two pure, deterministic command substitutions are recognised
-   as `cd`/`pushd` targets and resolved from the tracked cwd instead of
-   dropping tracking: `$(git rev-parse --show-toplevel)` (computed by walking
-   up to the nearest `.git` entry — git is never executed) and `$(pwd)` (the
-   identity). The whitelist is closed and matched on the exact
-   whitespace-normalized token — there is no general `$( )` evaluation. When
-   the new cwd can't be resolved at hook time — bare `cd`,
-   `cd -`, `cd $HOME`, `popd`, any other substitution — later relative paths
-   short-circuit to `ask`.
-6. **Stage** symlinks *and* hard links created by an earlier `ln OUTSIDE LINK`
+   `/tmp/evil`). A `cd`/`pushd` target that is a propagated literal variable
+   (step 4) re-roots the same way (`d=sub; cd $d && cat x.txt`). Two pure,
+   deterministic command substitutions are also recognised as `cd`/`pushd`
+   targets and resolved from the tracked cwd instead of dropping tracking:
+   `$(git rev-parse --show-toplevel)` (computed by walking up to the nearest
+   `.git` entry — git is never executed) and `$(pwd)` (the identity). The
+   whitelist is closed and matched on the exact whitespace-normalized token —
+   there is no general `$( )` evaluation. When the new cwd can't be resolved at
+   hook time — bare `cd`, `cd -`, `cd $HOME`, `popd`, any other substitution —
+   later relative paths short-circuit to `ask`.
+7. **Stage** symlinks *and* hard links created by an earlier `ln OUTSIDE LINK`
    in the chain (with or without `-s`). `LINK`'s resolved path is recorded so
    a later `cat LINK` is flagged — bash hasn't materialised the link yet at
    hook time, so a naive `realpath` would otherwise place `LINK` lexically
    inside the workspace and let it through.
-7. **Resolve** every file argument against `$CLAUDE_PROJECT_DIR` with
+8. **Resolve** every file argument against `$CLAUDE_PROJECT_DIR` with
    `realpath`, collapsing `../` and following symlinks. Anything that resolves
    outside the root yields `ask`; otherwise `allow`. A leading `~` or `~/…` is
    expanded to `$HOME` first (bash does this deterministically), so a home path
@@ -304,7 +326,7 @@ After upgrading either way:
    device paths (`/dev/null`, `/dev/stdin`, `/dev/stdout`, `/dev/stderr`,
    `/dev/zero`, `/dev/tty`, `/dev/random`, `/dev/urandom`, `/dev/fd/N`) are
    allowlisted and skip the workspace check.
-8. **Allow** the current session's own Claude-managed scratch — and, for
+9. **Allow** the current session's own Claude-managed scratch — and, for
    read-only commands, sibling sessions of the same project. Claude Code writes
    each background task's output to
    `/tmp/claude-<uid>/<encoded-project>/<session-uuid>/tasks/<id>.output`, and
@@ -325,7 +347,7 @@ After upgrading either way:
    project's* scratch, still prompt. Because these allows match on the resolved
    `realpath` — and run *after* the `ln`-staging check — a symlink planted in
    the scratch dir that escapes the root is still flagged.
-9. **Allow reads of Claude-owned project data.** For read-only commands (`cat`,
+10. **Allow reads of Claude-owned project data.** For read-only commands (`cat`,
    `head`, `tail`, `grep`, `rg`, `sed`, `awk`, `jq`, `yq`, `diff`, `sort`,
    `wc`, `file`, `hexdump`, and their aliases), a path whose resolved
    `realpath` is under `~/.claude/projects/` is allowed silently. That
@@ -337,26 +359,26 @@ After upgrading either way:
    verify redirect direction without running the command. Users can extend
    the list with `WORKSPACE_GUARD_READ_ALLOW_PREFIXES`; see
    [Configuration](#configuration).
-10. **Deny** host-wide temp. After the steps above, any *remaining*
+11. **Deny** host-wide temp. After the steps above, any *remaining*
    outside-workspace file argument whose resolved `realpath` is at or under a
    host-temp root (`/tmp`, `/var/tmp`, `$TMPDIR`, all resolved first — so macOS's
    `/tmp → /private/tmp` and a `$TMPDIR` under `/var/folders/…` are caught) is
    reclassified from `ask` to `deny`, with a message steering to a repo-local
    gitignored scratch dir. Because this runs on the already-resolved file
    arguments, a `/tmp` that appears only as text (a grep pattern, an `echo`
-   string) is never matched. The Claude-managed temp root from step 8 is
+   string) is never matched. The Claude-managed temp root from step 9 is
    excluded — another session's task output keeps its `ask` (or, for a
-   same-project read, the step 8 allow) rather than this steer-to-`./tmp/` deny.
+   same-project read, the step 9 allow) rather than this steer-to-`./tmp/` deny.
    The action, scratch-dir name, extra roots,
    and an allowlist escape hatch are all configurable; see
    [Configuration](#configuration).
-11. **Deny** writes into a sibling checkout of the same repo. When the session
+12. **Deny** writes into a sibling checkout of the same repo. When the session
    root is inside a git worktree, the hook resolves the enclosing git checkout of
    each *write* path (walking up to the nearest `.git`, reading only tiny git
    metadata) and compares its shared `--git-common-dir` to the session's. A path
    inside a *different* checkout of the *same* repo (same common-dir, different
    root) is reclassified to `deny`, naming the checkout, its branch, and the
-   corrected in-session path. Only writes upgrade — reads keep step 7's `ask`.
+   corrected in-session path. Only writes upgrade — reads keep step 8's `ask`.
    A path in an unrelated repo has a different common-dir and stays a generic
    outside `ask`. The same rule is the sole active check on the `Edit`, `Write`,
    `MultiEdit`, and `NotebookEdit` tools. `WORKSPACE_GUARD_OVERRIDE=<reason>`
@@ -389,8 +411,10 @@ flowing, avoid triggering it:
 - **Don't put `$VAR`, `$(...)`, or a `~user` prefix in a guarded file argument.**
   The hook can't expand them, so it treats them as outside the root and prompts —
   even when they'd resolve in-root. (A bare `~`/`~/…` *is* expanded to `$HOME`,
-  so home-relative paths inside the root are fine.) Write the literal in-root
-  path instead (e.g. `cat ./config/app.json`, not `cat "$HOME/proj/config/app.json"`).
+  so home-relative paths inside the root are fine. A variable assigned a plain
+  literal path *earlier in the same command string* — `f=./config/app.json; cat $f`
+  — is also resolved and doesn't prompt.) Otherwise write the literal in-root
+  path (e.g. `cat ./config/app.json`, not `cat "$HOME/proj/config/app.json"`).
 - **Don't `cd` outside the project root**, and avoid bare `cd`, `cd -`, and
   `cd $HOME` — they lose the hook's working-directory tracking, so every later
   relative path in the same command prompts. Stay in the root, or `cd` into a
@@ -523,6 +547,19 @@ final output.
   end of the command (matching bash). A `<<` produced by unquoted arithmetic
   (`$((x<<2))`) can arm a spurious delimiter — if a newline follows, later
   tokens may be skipped and the hook defers (fail-safe, never a silent allow).
+- Literal variable propagation is deliberately narrow. Only standalone
+  `NAME=value` / `export NAME=value` assignments whose value is a plain
+  literal after quote removal (non-empty; no `$`, backticks, glob characters,
+  whitespace, or `:`) are propagated, and only into plain `$NAME`/`${NAME}`
+  uses. Parameter-expansion operators (`${f:-x}`, `${f%.*}`), arrays, values
+  built from other expansions, and variables later touched by
+  `read`/`eval`/`declare`/`unset`/`for` or assigned inside a subshell,
+  pipeline segment, or backgrounded command all keep the runtime-expanded
+  `ask`. A heredoc (`<<`) anywhere in the command or an in-command `IFS=`
+  reassignment disables propagation for that command entirely (heredoc bodies
+  tokenize as commands; a changed `IFS` alters word splitting). Uncertainty
+  always falls back to `ask` — propagation only ever adds allows for
+  expansions bash performs deterministically.
 - `realpath` only follows symlinks for files that already exist; nonexistent
   paths are normalized lexically (fine for read-style commands).
 - Redirect targets (`> file`) are only inspected when the command chain also
