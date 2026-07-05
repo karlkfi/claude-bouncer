@@ -207,9 +207,14 @@ After upgrading either way:
 
 1. **Tokenize** the command with Python's `shlex` (POSIX mode, punctuation
    grouping) so quotes are respected and shell operators (`|`, `&&`, `>`, `;`)
-   become their own tokens. A newline outside quotes is also a command
+   become their own tokens. Unquoted `#` comments are stripped first, keeping
+   the newline that ends each one so the next line stays its own command group.
+   A newline outside quotes is also a command
    separator — like `;` — so a guarded command on a line after another is
-   classified on its own rather than merged into its neighbour.
+   classified on its own rather than merged into its neighbour. Heredoc body
+   lines (everything between `<<TAG` and a line matching `TAG`, `<<-` included)
+   are dropped so body content — HTML like `</div>`, a script, path-like text —
+   is never parsed as commands or file arguments.
 2. **Split** into simple commands on those operators and collect each redirect
    target (`> file`) into the command group it belongs to, so it's later
    resolved against that group's cwd (see step 5). The token after `<<`
@@ -244,8 +249,11 @@ After upgrading either way:
    expanded to `$HOME` first (bash does this deterministically), so a home path
    inside the root is allowed instead of needlessly prompted. Tokens that bash
    would still expand unpredictably at runtime — `~user`/`~+`/`~-`, an unset
-   `$HOME`, or any `$` (variables and command substitutions) — short-circuit to
+   `$HOME`, or a `$` that introduces an expansion (`$VAR`, `${VAR}`, `$(...)`,
+   `$1`, `$?`) — short-circuit to
    `ask`, since `realpath` would otherwise lexically place them inside `cwd`.
+   A `$` bash keeps literal — trailing (`foo$`) or before a non-name char
+   (`a$.b`) — is treated as part of the filename and resolved normally.
    Well-known
    device paths (`/dev/null`, `/dev/stdin`, `/dev/stdout`, `/dev/stderr`,
    `/dev/zero`, `/dev/tty`, `/dev/random`, `/dev/urandom`, `/dev/fd/N`) are
@@ -409,10 +417,17 @@ final output.
 
 - A leading `~`/`~/…` is expanded to `$HOME` (bash does this deterministically),
   so a home path inside the root is allowed. Tokens that bash would expand
-  *unpredictably* at runtime — `~user`/`~+`/`~-`, an unset `$HOME`, or any
-  unquoted `$` (variables and command substitutions) — are still treated as
-  outside-workspace. This is the secure-by-default choice: a literal filename
-  containing `$` will get an `ask` prompt rather than slip through.
+  *unpredictably* at runtime — `~user`/`~+`/`~-`, an unset `$HOME`, or a `$`
+  that introduces an expansion (`$VAR`, `${VAR}`, `$(...)`, `$1`, `$?`) — are
+  still treated as outside-workspace. A `$` bash keeps literal (trailing, or
+  before a non-name char like `.`/`/`) is part of the filename and resolved
+  normally, so a `price$` or `a$.b` argument no longer prompts spuriously.
+- Heredoc body lines are dropped before parsing, so path-like body content
+  (`</div>`, `/title`) is never mistaken for a file argument. The `<<TAG`
+  terminator is matched by an exact line; an unterminated body swallows to the
+  end of the command (matching bash). A `<<` produced by unquoted arithmetic
+  (`$((x<<2))`) can arm a spurious delimiter — if a newline follows, later
+  tokens may be skipped and the hook defers (fail-safe, never a silent allow).
 - `realpath` only follows symlinks for files that already exist; nonexistent
   paths are normalized lexically (fine for read-style commands).
 - Redirect targets (`> file`) are only inspected when the command chain also

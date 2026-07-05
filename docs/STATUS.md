@@ -14,7 +14,7 @@ Single source of truth for progress and priorities in workspace-guard. Pick the 
 - **New item identified:** append it to the Queue with the next unused ID. Batch audit-discovery items in one commit.
 - **`Last touched:` is one line, date only.** Do not append session narrative.
 
-Last touched: 2026-06-20
+Last touched: 2026-07-05
 
 ---
 
@@ -24,6 +24,5 @@ Specific actionable items in priority order. Pick from the top; skip 🚫 items 
 
 | ID | Item | Labels | St | Sz | Notes |
 |---|---|---|---|---|---|
-| <a id="Q15"></a>Q15 | Heredoc body content tokenizes as positional args | `parsing` | 💤 | M | Discovered during [Q4](#Q4): `cat <<EOF\n/etc/passwd\nEOF` flags `/etc/passwd` because stdlib `shlex` parses the body as positional tokens — bash slurps until the delimiter, we can't. Deferred: needs a real bash parser or heredoc-delimiter-aware splitter; Claude rarely emits multi-line heredocs to guarded commands. |
 | <a id="Q23"></a>Q23 | Opt-in extra-roots for shared cross-worktree files | `security` | 💤 | M | Files legitimately shared across worktrees (coordination/mailbox files, the main checkout above `.claude/worktrees/`, sibling worktrees) are by definition outside `$CLAUDE_PROJECT_DIR`, so every Bash read/write prompts. Deferred: add an opt-in, empty-by-default extra-roots env var (analogous to `additionalDirectories`) — secure-by-default, but real demand is unproven (the one session that hit it abandoned file-mailboxes). |
 | <a id="Q26"></a>Q26 | Extend host-temp `deny` to currently-unguarded shapes | `security` `parsing` | 💤 | M | The host-temp deny only fires on file args the hook already extracts; a standalone `cd /tmp`, `mktemp -p /tmp`, and redirects from unguarded commands (`go test > /tmp/log`) still defer. Deferred: would need guarding those shapes (new `SPEC` rows / standalone-cd handling) — adds parsing surface for marginal coverage. |

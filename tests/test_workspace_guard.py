@@ -1627,8 +1627,8 @@ class HookEndToEndTests(unittest.TestCase):
     def test_heredoc_path_like_delimiter_allow(self):
         # `<<TAG` delimiter is a sentinel string, not a file path. Even when
         # the delimiter resembles an outside path, the hook must not flag it.
-        # (The heredoc body still tokenizes as positional args — that's a
-        # separate limitation of stdlib shlex, not in scope for Q4.)
+        # (Heredoc body lines are dropped before parsing as of Q60 — see
+        # StripHeredocBodiesTests and Issue60EndToEndTests.)
         self._decision("cat <</etc/passwd\nbody\n", "allow")
 
     # --- device allowlist ---------------------------------------------------
@@ -2245,6 +2245,206 @@ class NewlineSeparatorEndToEndTests(unittest.TestCase):
     def test_trailing_semicolon_then_newline_allow(self):
         # Exercises the `;\n` combined-run token path end-to-end.
         self._decision("cat in.txt;\ngrep PAT in.txt", "allow")
+
+
+class StripCommentsTests(unittest.TestCase):
+    """`strip_comments` removes unquoted `#` comments but keeps the newline
+    that ends each one, so the next line stays its own command group (Q60)."""
+
+    def test_trailing_comment_removed_newline_kept(self):
+        self.assertEqual(
+            guard.strip_comments("tee log # note\nEXIT=1"),
+            "tee log \nEXIT=1")
+
+    def test_full_line_comment_removed(self):
+        self.assertEqual(
+            guard.strip_comments("# note\ncat f"), "\ncat f")
+
+    def test_hash_in_single_quotes_kept(self):
+        self.assertEqual(
+            guard.strip_comments("grep '#include' f"), "grep '#include' f")
+
+    def test_hash_in_double_quotes_kept(self):
+        self.assertEqual(
+            guard.strip_comments('echo "a # b"'), 'echo "a # b"')
+
+    def test_midword_hash_not_a_comment(self):
+        # bash only starts a comment at a word boundary; `file#1` is literal.
+        self.assertEqual(guard.strip_comments("cat file#1"), "cat file#1")
+
+    def test_dollar_hash_not_a_comment(self):
+        # `$#` (positional count) — the `#` follows `$`, not a word boundary.
+        self.assertEqual(guard.strip_comments("echo $#"), "echo $#")
+
+    def test_escaped_hash_kept(self):
+        self.assertEqual(guard.strip_comments(r"cat foo\#bar"), r"cat foo\#bar")
+
+    def test_comment_after_operator(self):
+        # `#` right after a `|`/`;` operator still starts a comment.
+        self.assertEqual(guard.strip_comments("cat f |# c\ngrep x f"),
+                         "cat f |\ngrep x f")
+
+
+class StripHeredocBodiesTests(unittest.TestCase):
+    """`strip_heredoc_bodies` drops heredoc body tokens so body text (HTML,
+    scripts, path-like content) is never parsed as commands/file args (Q60)."""
+
+    def test_body_dropped_terminator_removed(self):
+        toks = ["cat", "<<", "EOF", "\n", "<", "/div", "\n", "EOF"]
+        self.assertEqual(
+            guard.strip_heredoc_bodies(toks), ["cat", "<<", "EOF", "\n"])
+
+    def test_redirect_on_heredoc_line_survives(self):
+        # `cat <<EOF > out` — the redirect is on the command line, not the body.
+        toks = ["cat", "<<", "EOF", ">", "out", "\n", "body", "\n", "EOF"]
+        self.assertEqual(
+            guard.strip_heredoc_bodies(toks),
+            ["cat", "<<", "EOF", ">", "out", "\n"])
+
+    def test_tab_strip_dash_delimiter_matches(self):
+        # `<<-EOF` allows the terminator to match `EOF` (tabs stripped).
+        toks = ["cat", "<<", "-EOF", "\n", "x", "\n", "EOF"]
+        self.assertEqual(
+            guard.strip_heredoc_bodies(toks), ["cat", "<<", "-EOF", "\n"])
+
+    def test_command_after_heredoc_preserved(self):
+        toks = ["cat", "<<", "EOF", "\n", "b", "\n", "EOF", "\n", "cat", "x"]
+        self.assertEqual(
+            guard.strip_heredoc_bodies(toks),
+            ["cat", "<<", "EOF", "\n", "\n", "cat", "x"])
+
+    def test_here_string_not_treated_as_heredoc(self):
+        # `<<<` is a distinct operator token — never arms a delimiter.
+        toks = ["cat", "<<<", "/etc/foo"]
+        self.assertEqual(guard.strip_heredoc_bodies(toks), toks)
+
+    def test_no_heredoc_passthrough(self):
+        toks = ["grep", "PAT", "f.txt", "\n", "cat", "g.txt"]
+        self.assertEqual(guard.strip_heredoc_bodies(toks), toks)
+
+
+class GlueDollarParenTests(unittest.TestCase):
+    """`glue_dollar_paren` re-attaches `(` to a preceding `$` so `$(...)`
+    reads as a runtime expansion, not a bare literal `$` filename (Q60)."""
+
+    def test_dollar_paren_glued(self):
+        self.assertEqual(
+            guard.glue_dollar_paren(["cat", "$", "(", "echo", "x", ")"]),
+            ["cat", "$(", "(", "echo", "x", ")"])
+
+    def test_bare_dollar_not_glued_without_paren(self):
+        self.assertEqual(
+            guard.glue_dollar_paren(["grep", "foo", "bar", "$"]),
+            ["grep", "foo", "bar", "$"])
+
+    def test_subshell_paren_not_glued_to_word(self):
+        # A `(` after a normal word (subshell group) is left alone.
+        self.assertEqual(
+            guard.glue_dollar_paren(["(", "cat", "f", ")"]),
+            ["(", "cat", "f", ")"])
+
+
+class ExpansionRegexTests(unittest.TestCase):
+    """EXPANSION_RE distinguishes a real `$`-expansion from a literal `$`."""
+
+    def test_variables_are_expansions(self):
+        for tok in ("$HOME", "${HOME}", "$1", "$?", "$@", "$(cmd)", "a/$x"):
+            self.assertTrue(guard.EXPANSION_RE.search(tok), tok)
+
+    def test_literal_dollars_not_expansions(self):
+        for tok in ("$", "foo$", "a$.b", "price$", "$/tmp"):
+            self.assertFalse(guard.EXPANSION_RE.search(tok), tok)
+
+
+class Issue60EndToEndTests(unittest.TestCase):
+    """False-positive tokens from issue #60 no longer prompt, while every
+    real outside-workspace read/write in the same shapes still does."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = os.path.realpath(self._tmp.name)
+        with open(os.path.join(self.workspace, "in.txt"), "w") as f:
+            f.write("hello\n")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _decision(self, cmd, expected):
+        out = run_hook(cmd, self.workspace, project_dir=self.workspace)
+        self.assertIsNotNone(out, f"expected a decision, got defer for: {cmd!r}")
+        got = out["hookSpecificOutput"]["permissionDecision"]
+        self.assertEqual(
+            got, expected,
+            f"expected {expected!r} for {cmd!r}; got {got!r} "
+            f"(reason: {out['hookSpecificOutput'].get('permissionDecisionReason')!r})",
+        )
+        return out
+
+    # --- assignment word / PIPESTATUS after a trailing comment --------------
+
+    def test_pipestatus_after_comment_line_allow(self):
+        # The reported case: `tee log # note` then a newline then an
+        # assignment word. Pre-fix shlex swallowed the newline, merging
+        # `EXIT=${PIPESTATUS[0]}` into the tee group as a runtime-expanded arg.
+        self._decision(
+            "make test 2>&1 | tee build.log # show\nEXIT=${PIPESTATUS[0]}",
+            "allow")
+
+    # --- HTML/SVG heredoc body content --------------------------------------
+
+    def test_heredoc_html_body_not_flagged_allow(self):
+        # `</div>` etc. in a heredoc body previously parsed as a `<` redirect
+        # whose target `/div` looked like an outside path.
+        self._decision(
+            "cat > page.html <<'EOF'\n<div>hi</div>\n<script>x</script>\nEOF",
+            "allow")
+
+    def test_heredoc_svg_body_not_flagged_allow(self):
+        self._decision(
+            "cat > i.svg <<'EOF'\n<svg><defs><radialGradient/></defs></svg>\nEOF",
+            "allow")
+
+    # --- prose in echo/log strings after a comment --------------------------
+
+    def test_echo_prose_after_comment_allow(self):
+        self._decision(
+            'grep -q ready in.txt # check\necho "worker pod: ${pod:-none}"',
+            "allow")
+
+    # --- bare / literal dollar ----------------------------------------------
+
+    def test_lone_dollar_arg_allow(self):
+        self._decision("grep foo in.txt $", "allow")
+
+    # --- security preserved: real outside targets in the same shapes --------
+
+    def test_outside_read_with_trailing_comment_ask(self):
+        out = self._decision("cat /etc/q60-fake # peek", "ask")
+        self.assertIn("/etc/q60-fake",
+                      out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_guarded_after_commented_line_ask(self):
+        # Comment line must not hide a following guarded outside read.
+        self._decision("echo note # x\ncat /etc/q60-fake", "ask")
+
+    def test_heredoc_line_redirect_outside_ask(self):
+        # The heredoc body is skipped, but a redirect on the command line to
+        # an outside path is still checked.
+        self._decision("cat <<EOF > /etc/q60-fake\nbody\nEOF", "ask")
+
+    def test_command_after_heredoc_outside_ask(self):
+        self._decision(
+            "cat > f.txt <<EOF\nbody\nEOF\ncat /etc/q60-fake", "ask")
+
+    def test_command_substitution_still_conservative_ask(self):
+        # `$(...)` is unresolvable — must stay ask, not slip through as a
+        # literal `$`.
+        self._decision("cat $(echo /etc/q60-fake)", "ask")
+
+    def test_quoted_hash_pattern_outside_ask(self):
+        # A `#` inside quotes is a pattern char, not a comment — the outside
+        # file after it must still be checked.
+        self._decision("grep '#include' /etc/q60-fake", "ask")
 
 
 class BuildReasonTests(unittest.TestCase):

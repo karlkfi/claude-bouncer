@@ -26,6 +26,19 @@ DUP = {'>&', '<&'}
 # (so a quoted filename containing one of these survives normalization).
 PUNCT_CHARS = frozenset(';()<>|&\n')
 
+# Characters that may precede an unquoted `#` for it to start a comment: bash
+# only comments at the start of a word (after whitespace, a newline, or an
+# operator). `$#`, `${#x}`, and mid-word `file#1` are not comments.
+COMMENT_PRECEDERS = frozenset(' \t\n;|&()<>')
+
+# A `$` introduces a bash expansion only when followed by a name char, digit,
+# `{`, `(`, or a special-parameter char (`# ? $ ! @ * -`). Any other `$` —
+# trailing, or before e.g. `.`/`/` — is literal, so a token containing only
+# such dollars is a plain filename, not a runtime expansion. Command
+# substitution split across tokens (`$` + `(`) is re-glued by
+# glue_dollar_paren() before this is consulted.
+EXPANSION_RE = re.compile(r'\$[A-Za-z0-9_{(#?$!@*-]')
+
 # SPEC commands that write or mutate files. The ALLOWED_READ_PREFIXES exemption
 # (see allowed_read_prefixes()) does NOT apply to these commands, even if the
 # target path is under an allowed prefix — write access to Claude-owned dirs
@@ -440,6 +453,118 @@ def strip_env_prefix(tokens):
     return tokens[i:]
 
 
+def strip_comments(cmd):
+    """Remove unquoted `#` comments, keeping the newline that ends each one.
+
+    shlex's built-in comment handling (`commenters='#'`) swallows the comment
+    AND its trailing newline, so the next line's tokens merge into the
+    commented line's command group — `tee log # note\\nEXIT=${PIPESTATUS[0]}`
+    read the assignment as a file arg of `tee` (false positive), and
+    `echo hi # note\\ncat outside` hid the `cat` inside the unguarded `echo`
+    group (false negative). shlex also starts a comment at a mid-word `#`
+    (`file#1`), which bash does not. Comments are therefore stripped here
+    with bash's actual rule — an unquoted `#` at the start of a word — and
+    shlex comment processing is disabled in main().
+    """
+    out = []
+    in_single = in_double = False
+    i, n = 0, len(cmd)
+    while i < n:
+        c = cmd[i]
+        if in_single:
+            out.append(c)
+            in_single = c != "'"
+            i += 1
+            continue
+        if not in_double and c == "'":
+            in_single = True
+            out.append(c); i += 1
+            continue
+        if c == '\\' and i + 1 < n:                # escape survives both modes
+            out.append(c); out.append(cmd[i+1]); i += 2
+            continue
+        if c == '"':
+            in_double = not in_double
+            out.append(c); i += 1
+            continue
+        if not in_double and c == '#' \
+                and (not out or out[-1] in COMMENT_PRECEDERS):
+            while i < n and cmd[i] != '\n':        # keep the newline itself
+                i += 1
+            continue
+        out.append(c); i += 1
+    return ''.join(out)
+
+
+def strip_heredoc_bodies(tokens):
+    """Drop heredoc body tokens so body text is never parsed as commands.
+
+    Bash slurps everything between the newline after `<<TAG` and a line that
+    is exactly TAG as literal stdin data. shlex has no heredoc concept, so
+    those body lines otherwise tokenize as command groups: HTML like
+    `</div>` becomes a `<` redirect with target `/div` (flagged as an
+    outside-workspace path) and script text becomes phantom file args (Q15).
+
+    On `<<`, the following word token is recorded as a pending delimiter —
+    `<<-EOF` and `<< EOF` both arrive as `<<` + word, so a leading `-` on the
+    word is accepted as the tab-strip modifier when matching the terminator.
+    The rest of the command line is kept (a trailing `> out.txt` redirect
+    still parses); at the next newline the body starts and tokens are dropped
+    until a line consisting of exactly the delimiter. Multiple pending
+    heredocs consume consecutive bodies in order. An unterminated body
+    swallows to end-of-input, matching bash. `<<<` here-strings arrive as a
+    distinct operator token and never match here. A `<<` from unquoted
+    arithmetic (`$((x<<2))`) can arm a bogus delimiter; if a newline follows,
+    later tokens may be skipped and the hook defers — fail-safe, never a
+    silent allow of a checked path.
+    """
+    out, pending = [], []
+    i, n = 0, len(tokens)
+    while i < n:
+        t = tokens[i]
+        if t == '<<' and i + 1 < n \
+                and not all(c in PUNCT_CHARS for c in tokens[i+1]):
+            out.append(t); out.append(tokens[i+1])
+            pending.append(tokens[i+1])
+            i += 2
+            continue
+        out.append(t)
+        i += 1
+        if t == '\n' and pending:
+            while pending and i < n:
+                delim = pending.pop(0)
+                cands = {delim, delim[1:]} if delim.startswith('-') else {delim}
+                line_start = True
+                while i < n:
+                    tok = tokens[i]
+                    if line_start and tok in cands \
+                            and (i + 1 >= n or tokens[i+1] == '\n'):
+                        i += 1                    # drop the terminator line
+                        break
+                    line_start = tok == '\n'
+                    i += 1
+    return out
+
+
+def glue_dollar_paren(tokens):
+    """Re-attach a `(` to a preceding word ending in `$`.
+
+    `(` is a punctuation char, so `$(cmd)` tokenizes as `$` + `(` + … — the
+    lone `$` looks like a literal filename (bash treats a `$` not followed by
+    a name/brace/paren as literal, see EXPANSION_RE) and the command
+    substitution would slip through as an allow. Gluing makes the word `$(`,
+    which EXPANSION_RE recognises as a runtime expansion, while the `(` is
+    kept in the stream so group splitting (and checking of guarded commands
+    *inside* the substitution) is unchanged.
+    """
+    out = []
+    for t in tokens:
+        if t == '(' and out and out[-1].endswith('$'):
+            out[-1] += '('
+        out.append(t)
+    return out
+
+
 def split_newline_separators(tokens):
     """Peel newlines out of operator-run tokens so each becomes its own token.
 
@@ -480,7 +605,8 @@ def expand_tilde(tok):
     Returns the expanded absolute path, or the token unchanged when it can't be
     resolved here: a `~user`/`~+`/`~-` prefix (no plain `~` or `~/`) or an unset
     `$HOME`. Callers still defer on a returned token that begins with `~` or
-    contains `$`, so only the deterministic, fully-resolvable cases are expanded
+    contains an expanding `$` (see EXPANSION_RE), so only the deterministic,
+    fully-resolvable cases are expanded
     — `~user`'s pwd lookup and `~+`/`~-`'s dir-stack state stay out of scope.
     """
     if tok == '~' or tok.startswith('~/'):
@@ -697,10 +823,16 @@ def main():
         # either side). Removing it from `whitespace` stops shlex re-swallowing
         # it; quoted newlines stay inside their word token regardless. The runs
         # this produces (`;\n`, `|\n`, ...) are split back apart below.
-        lex = shlex.shlex(cmd, posix=True, punctuation_chars=';()<>|&\n')
+        # Comments are stripped up front (see strip_comments) and shlex's own
+        # comment handling is disabled — it would swallow the newline after a
+        # comment and merge the next line into the commented command's group.
+        lex = shlex.shlex(strip_comments(cmd), posix=True,
+                          punctuation_chars=';()<>|&\n')
         lex.whitespace_split = True
         lex.whitespace = lex.whitespace.replace('\n', '')
-        tokens = split_newline_separators(list(lex))
+        lex.commenters = ''
+        tokens = glue_dollar_paren(
+            strip_heredoc_bodies(split_newline_separators(list(lex))))
     except ValueError:
         return                                    # unbalanced quotes -> defer
 
@@ -772,8 +904,10 @@ def main():
         # Bash expands `~`/`~/…` to $HOME deterministically — resolve it here so
         # an in-workspace home path isn't needlessly flagged. `~user`/`~+`/`~-`,
         # an unset $HOME, and any `$VAR`/`$(...)` stay 'expand' (unresolvable).
+        # A `$` bash keeps literal (trailing, or before e.g. `.`/`/` — see
+        # EXPANSION_RE) is part of the filename and falls through to realpath.
         f = expand_tilde(f)
-        if f.startswith('~') or '$' in f:
+        if f.startswith('~') or EXPANSION_RE.search(f):
             return ('expand', None)
         if os.path.isabs(f):
             return ('path', os.path.realpath(f))
