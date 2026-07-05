@@ -88,6 +88,8 @@ still asks.
 | `grep foo data.txt 2>&1`             | allow    |
 | `cat <<<"/etc/foo"` (here-string)    | allow    |
 | `cat ~/proj/notes.md` (root `~/proj`) | allow   |
+| `cd "$(git rev-parse --show-toplevel)" && cat README.md` | allow |
+| `cd "$(pwd)" && cat README.md`       | allow    |
 | `tail /tmp/claude-501/…/<this-session>/…` (own task output) | allow |
 | `grep secret /etc/passwd`            | **ask**  |
 | `jq '.x' /etc/hosts`                 | **ask**  |
@@ -102,6 +104,7 @@ still asks.
 | `cat ~user/notes.md`                 | **ask**  |
 | `cat $HOME/.ssh/id_rsa`              | **ask**  |
 | `cd /etc && cat passwd`              | **ask**  |
+| `cd "$(mktemp -d)" && cat x.txt`     | **ask**  |
 | `LC_ALL=C cat /etc/passwd`           | **ask**  |
 | `ln -s /etc/passwd link && cat link` | **ask**  |
 | `ln /etc/passwd link && cat link`    | **ask**  |
@@ -267,8 +270,15 @@ After upgrading either way:
    re-roots relative file paths — including relative redirect targets — in
    later guarded groups (so `cd /etc && cat passwd` flags `passwd` as
    `/etc/passwd`, and `cd /tmp && cat in.txt > evil` flags `evil` as
-   `/tmp/evil`). When the new cwd can't be resolved at hook time — bare `cd`,
-   `cd -`, `cd $HOME`, `popd` — later relative paths short-circuit to `ask`.
+   `/tmp/evil`). Two pure, deterministic command substitutions are recognised
+   as `cd`/`pushd` targets and resolved from the tracked cwd instead of
+   dropping tracking: `$(git rev-parse --show-toplevel)` (computed by walking
+   up to the nearest `.git` entry — git is never executed) and `$(pwd)` (the
+   identity). The whitelist is closed and matched on the exact
+   whitespace-normalized token — there is no general `$( )` evaluation. When
+   the new cwd can't be resolved at hook time — bare `cd`,
+   `cd -`, `cd $HOME`, `popd`, any other substitution — later relative paths
+   short-circuit to `ask`.
 6. **Stage** symlinks *and* hard links created by an earlier `ln OUTSIDE LINK`
    in the chain (with or without `-s`). `LINK`'s resolved path is recorded so
    a later `cat LINK` is flagged — bash hasn't materialised the link yet at
@@ -369,6 +379,9 @@ flowing, avoid triggering it:
   `cd $HOME` — they lose the hook's working-directory tracking, so every later
   relative path in the same command prompts. Stay in the root, or `cd` into a
   subdirectory of it with a literal path.
+  (`cd "$(git rev-parse --show-toplevel)"` and `cd "$(pwd)"` are fine — the
+  hook resolves these two substitutions itself and tracking survives; any
+  other `$(...)` target still drops it.)
 - **Write temp files inside the project root, not `/tmp`.** Host-wide temp
   (`/tmp`, `/var/tmp`, `$TMPDIR`) is **denied** by default — not just prompted —
   because it's shared across sessions and worktrees and lives outside the root.
@@ -504,6 +517,15 @@ final output.
   (`cd /tmp && cat in.txt > evil` flags `/tmp/evil`).
 - Multi-source `ln a b destdir/` (3+ positionals, symbolic or hard) is not
   staged. The hook recognises the one- and two-positional forms only.
+- The whitelisted `cd` substitutions are matched after quote stripping, so the
+  *single*-quoted form (`cd '$(git rev-parse --show-toplevel)'`) — which bash
+  treats literally, failing the `cd` unless a directory with that literal name
+  exists — is indistinguishable from the double-quoted form and is tracked as
+  if it substituted. The mis-track is safe: the resolved directory is derived
+  from the already-tracked cwd (the repo toplevel is an ancestor checked
+  against the same workspace boundary), so it never admits a path the
+  double-quoted form wouldn't. The unquoted form tokenizes into separate
+  groups and keeps today's untracked behavior.
 - An all-digits token immediately before a redirect operator is treated as an
   fd prefix (`2>file`) and dropped. `shlex` discards the original spacing, so a
   guarded command reading a file literally *named* with digits right before a

@@ -71,6 +71,9 @@ Tell the user the cause(s) you found, then apply the habits that prevent them:
   in-root path (`cat ./config/app.json`), not a `$VAR`/`~`/`$(...)` form.
 - **Stay in the project root** — don't `cd` outside it; avoid bare `cd`, `cd -`,
   and `cd $HOME`. `cd` into a subdirectory with a literal path if you must.
+  (`cd "$(git rev-parse --show-toplevel)"` and `cd "$(pwd)"` are fine — the
+  hook resolves these two substitutions itself; other `$(...)` targets still
+  drop tracking.)
 - **Write temp files inside the root** (`./.tmp/out.txt`), not `/tmp`. Redirects
   to `/dev/null`, `/dev/stdout`, `/dev/stderr`, and `/dev/fd/N` are exempt.
 

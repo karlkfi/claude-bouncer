@@ -1380,6 +1380,210 @@ class HookEndToEndTests(unittest.TestCase):
         self.assertEqual(guard.classify_cd(["cat", "foo"]), (None, None))
         self.assertEqual(guard.classify_cd([]), (None, None))
 
+    # --- whitelisted pure substitutions in cd targets (issue 59) -------------
+    # `cd "$(git rev-parse --show-toplevel)"` / `cd "$(pwd)"` are resolved from
+    # the tracked cwd instead of dropping tracking, so subsequent in-repo
+    # relative paths verify normally. The whitelist is closed: any other
+    # substitution keeps the untracked-cd behavior. The hook never executes
+    # the substitution text — the toplevel is a filesystem walk to `.git`.
+
+    def test_classify_cd_helper_whitelisted_substs(self):
+        self.assertEqual(
+            guard.classify_cd(["cd", "$(git rev-parse --show-toplevel)"]),
+            ("subst", "toplevel"),
+        )
+        self.assertEqual(guard.classify_cd(["cd", "$(pwd)"]), ("subst", "pwd"))
+        self.assertEqual(
+            guard.classify_cd(["pushd", "$(git rev-parse --show-toplevel)"]),
+            ("subst", "toplevel"),
+        )
+        # Option flags before the target are skipped, same as the 'arg' path.
+        self.assertEqual(
+            guard.classify_cd(["cd", "-P", "$(git rev-parse --show-toplevel)"]),
+            ("subst", "toplevel"),
+        )
+
+    def test_classify_cd_helper_subst_whitespace_normalized(self):
+        # Extra internal whitespace and the optional spaces just inside
+        # `$( ... )` are canonicalized before the whitelist lookup.
+        self.assertEqual(
+            guard.classify_cd(["cd", "$(git  rev-parse   --show-toplevel)"]),
+            ("subst", "toplevel"),
+        )
+        self.assertEqual(
+            guard.classify_cd(["cd", "$( git rev-parse --show-toplevel )"]),
+            ("subst", "toplevel"),
+        )
+        self.assertEqual(guard.classify_cd(["cd", "$( pwd )"]), ("subst", "pwd"))
+
+    def test_classify_cd_helper_non_whitelisted_subst_unknown(self):
+        # Anything outside the closed whitelist stays untracked.
+        self.assertEqual(
+            guard.classify_cd(["cd", "$(mktemp -d)"]), ("unknown", None))
+        self.assertEqual(
+            guard.classify_cd(["cd", "$(git rev-parse --git-dir)"]),
+            ("unknown", None),
+        )
+        # A whitelisted substitution with a suffix is NOT the exact canonical
+        # token — no general `$( )` evaluation.
+        self.assertEqual(
+            guard.classify_cd(["cd", "$(git rev-parse --show-toplevel)/docs"]),
+            ("unknown", None),
+        )
+        self.assertEqual(
+            guard.classify_cd(["cd", "$(pwd)/sub"]), ("unknown", None))
+
+    def test_normalize_subst_helper(self):
+        self.assertEqual(
+            guard.normalize_subst("$( git  rev-parse  --show-toplevel )"),
+            "$(git rev-parse --show-toplevel)",
+        )
+        self.assertEqual(guard.normalize_subst("$(pwd)"), "$(pwd)")
+        # Non-substitution tokens pass through (possibly collapsed) unmatched.
+        self.assertEqual(guard.normalize_subst("/etc"), "/etc")
+
+    def test_git_toplevel_walks_up_to_dot_git_dir(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = os.path.realpath(d)
+            os.mkdir(os.path.join(root, ".git"))
+            nested = os.path.join(root, "a", "b")
+            os.makedirs(nested)
+            self.assertEqual(guard.git_toplevel(nested), root)
+            self.assertEqual(guard.git_toplevel(root), root)
+
+    def test_git_toplevel_dot_git_file_is_boundary(self):
+        # Worktrees and submodules use a `.git` *file* (gitdir pointer).
+        with tempfile.TemporaryDirectory() as d:
+            root = os.path.realpath(d)
+            with open(os.path.join(root, ".git"), "w") as f:
+                f.write("gitdir: /elsewhere\n")
+            nested = os.path.join(root, "sub")
+            os.mkdir(nested)
+            self.assertEqual(guard.git_toplevel(nested), root)
+
+    def test_git_toplevel_no_boundary_returns_none(self):
+        # A tempdir with no `.git` anywhere up its parent chain.
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(guard.git_toplevel(os.path.realpath(d)))
+
+    def test_git_toplevel_discovery_env_disables(self):
+        # GIT_DIR & co. can change git's answer — bail to untracked.
+        with tempfile.TemporaryDirectory() as d:
+            root = os.path.realpath(d)
+            os.mkdir(os.path.join(root, ".git"))
+            for var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_CEILING_DIRECTORIES"):
+                old = os.environ.get(var)
+                try:
+                    os.environ[var] = "/somewhere"
+                    self.assertIsNone(guard.git_toplevel(root), var)
+                finally:
+                    if old is None:
+                        os.environ.pop(var, None)
+                    else:
+                        os.environ[var] = old
+
+    def _make_git_workspace(self):
+        """Mark the E2E workspace tempdir as a git toplevel."""
+        os.mkdir(os.path.join(self.workspace, ".git"))
+
+    def test_cd_git_toplevel_subst_relative_allow(self):
+        # The issue-59 motivating case: cwd tracking survives the substitution
+        # and the in-repo relative read is allowed instead of untracked-asked.
+        self._make_git_workspace()
+        self._decision(
+            'cd "$(git rev-parse --show-toplevel)" && cat in.txt', "allow")
+
+    def test_cd_git_toplevel_subst_from_subdir_allow(self):
+        # From a nested cwd the substitution resolves back to the workspace
+        # root, so a root-relative read is allowed.
+        self._make_git_workspace()
+        nested = os.path.join(self.workspace, "a", "b")
+        os.makedirs(nested)
+        self._decision(
+            'cd "$(git rev-parse --show-toplevel)" && cat in.txt', "allow",
+            cwd=nested, project_dir=self.workspace)
+
+    def test_cd_git_toplevel_subst_whitespace_variant_allow(self):
+        self._make_git_workspace()
+        self._decision(
+            'cd "$( git  rev-parse --show-toplevel )" && cat in.txt', "allow")
+
+    def test_cd_git_toplevel_subst_no_repo_stays_untracked_ask(self):
+        # No `.git` boundary above the workspace tempdir -> the substitution
+        # can't be resolved, so the cd stays untracked and the relative read
+        # asks (unchanged secure default).
+        self._decision(
+            'cd "$(git rev-parse --show-toplevel)" && cat in.txt', "ask")
+
+    def test_cd_git_toplevel_subst_outside_file_still_ask(self):
+        # Resolving the cd must not weaken the boundary: an outside path
+        # after the tracked cd still asks.
+        self._make_git_workspace()
+        self._decision(
+            'cd "$(git rev-parse --show-toplevel)" && cat /etc/q59-fake-target',
+            "ask")
+
+    def test_cd_git_toplevel_subst_outside_repo_relative_blocked(self):
+        # cd into an outside repo first: the substitution resolves to that
+        # repo's root — outside the workspace — so the relative read is
+        # blocked. Whether that block is `ask` or `deny` depends on where the
+        # OS places the tempdir (a tempdir under /tmp is host-temp -> deny;
+        # elsewhere -> ask); the substitution-resolution behavior under test
+        # is the same either way, so assert only that it's not allowed and the
+        # relative target is named in the reason.
+        with tempfile.TemporaryDirectory() as d:
+            outside = os.path.realpath(d)
+            os.mkdir(os.path.join(outside, ".git"))
+            out = run_hook(
+                f'cd {outside} && cd "$(git rev-parse --show-toplevel)" '
+                "&& cat data.txt",
+                self.workspace,
+            )
+            self.assertIsNotNone(out)
+            self.assertIn(
+                out["hookSpecificOutput"]["permissionDecision"], ("ask", "deny"))
+            self.assertIn(
+                "data.txt",
+                out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_cd_git_toplevel_subst_after_untracked_cd_stays_ask(self):
+        # An already-untracked cwd can't seed the walk-up — the substitution
+        # must not "re-track" from a wrong starting point.
+        self._make_git_workspace()
+        self._decision(
+            'cd - && cd "$(git rev-parse --show-toplevel)" && cat in.txt',
+            "ask")
+
+    def test_cd_pwd_subst_relative_allow(self):
+        # `$(pwd)` is the identity on the tracked cwd — no `.git` needed.
+        self._decision('cd "$(pwd)" && cat in.txt', "allow")
+
+    def test_cd_pwd_subst_after_cd_outside_relative_ask(self):
+        # Identity on a tracked *outside* cwd: relative reads still ask.
+        self._decision('cd /etc && cd "$(pwd)" && cat passwd', "ask")
+
+    def test_cd_subst_with_suffix_stays_untracked_ask(self):
+        # `$(...)/sub` is not the exact canonical token — still untracked.
+        self._make_git_workspace()
+        self._decision(
+            'cd "$(git rev-parse --show-toplevel)/sub" && cat in.txt', "ask")
+
+    def test_cd_non_whitelisted_subst_stays_untracked_ask(self):
+        self._decision('cd "$(mktemp -d)" && cat in.txt', "ask")
+
+    def test_cd_git_toplevel_subst_git_dir_env_stays_untracked_ask(self):
+        # GIT_DIR in the environment can change git's answer, so the
+        # substitution is not resolved and the cd stays untracked.
+        self._make_git_workspace()
+        out = run_hook(
+            'cd "$(git rev-parse --show-toplevel)" && cat in.txt',
+            self.workspace,
+            env_extra={"GIT_DIR": "/somewhere/else"},
+        )
+        self.assertIsNotNone(out)
+        self.assertEqual(
+            out["hookSpecificOutput"]["permissionDecision"], "ask")
+
     # --- ln -s symlink staging (Q8) -----------------------------------------
 
     def test_ln_outside_target_then_cat_link_ask(self):

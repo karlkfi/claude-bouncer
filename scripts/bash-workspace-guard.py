@@ -811,11 +811,66 @@ def classify_dd(tokens):
     return files
 
 
+# Closed whitelist of pure, deterministic command substitutions accepted as a
+# cd/pushd target (issue 59). Keys are the canonical whitespace-normalized
+# token after shlex quote-stripping; values name the resolution strategy
+# applied in main() against the tracked group cwd. The hook computes the same
+# value bash will — it NEVER executes the substitution text — so anything not
+# matching a key exactly keeps the untracked-cd behavior (secure default).
+CD_SUBST = {
+    '$(git rev-parse --show-toplevel)': 'toplevel',
+    '$(pwd)': 'pwd',
+}
+
+
+def normalize_subst(tok):
+    """Whitespace-normalize a candidate substitution token for CD_SUBST lookup:
+    collapse internal whitespace runs and drop the optional spaces bash allows
+    just inside `$( ... )`. Pure canonicalization for a closed-list match —
+    a token that still doesn't match a key is simply not whitelisted."""
+    t = ' '.join(tok.split())
+    if t.startswith('$( '):
+        t = '$(' + t[3:]
+    if t.endswith(' )'):
+        t = t[:-2] + ')'
+    return t
+
+
+def git_toplevel(start):
+    """Nearest ancestor of `start` (inclusive) containing a `.git` entry — the
+    value `git rev-parse --show-toplevel` prints from `start`. The `.git` entry
+    may be a directory (normal repo) or a file (worktree/submodule gitdir
+    pointer); both mark the toplevel.
+
+    Returns None — leaving the cd untracked — when no `.git` boundary is found,
+    or when a git-discovery env var (GIT_DIR, GIT_WORK_TREE,
+    GIT_CEILING_DIRECTORIES) is set, since those can change git's answer away
+    from the plain walk-up. Purely a filesystem walk: git is never executed.
+    """
+    if any(os.environ.get(v) for v in
+           ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_CEILING_DIRECTORIES')):
+        return None
+    d = start
+    while True:
+        try:
+            if os.path.exists(os.path.join(d, '.git')):
+                return d
+        except OSError:
+            return None
+        parent = os.path.dirname(d)
+        if parent == d:
+            return None
+        d = parent
+
+
 def classify_cd(tokens):
     """Classify a command group as a cwd-shifting builtin.
 
     Returns:
       ('arg', path)      — cd/pushd with a resolvable positional path
+      ('subst', kind)    — cd/pushd whose target is a whitelisted pure
+                           substitution (see CD_SUBST); resolved in main()
+                           against the tracked group cwd
       ('unknown', None)  — cd/pushd/popd whose effect we can't track precisely
                            (no arg, `cd -`, `pushd +N`, popd, `~`/`$` arg, etc.)
       (None, None)       — not a cd-family command
@@ -830,6 +885,9 @@ def classify_cd(tokens):
     for t in tokens[1:]:
         if t.startswith('-'):
             continue                              # option flag, keep looking
+        sub = CD_SUBST.get(normalize_subst(t))
+        if sub is not None:
+            return ('subst', sub)
         arg = expand_tilde(t)                     # `cd ~/proj` tracks via $HOME
         if arg.startswith('+') or arg.startswith('~') or '$' in arg:
             return ('unknown', None)
@@ -1217,6 +1275,17 @@ def handle_bash(data):
                 new_cwd = arg if os.path.isabs(arg) else os.path.join(group_cwd, arg)
                 group_cwd = os.path.realpath(new_cwd)
                 group_cwd_unknown = False
+            elif kind == 'subst' and not group_cwd_unknown:
+                # Whitelisted pure substitution: compute the same value bash
+                # will, from the tracked cwd. `$(pwd)` is the identity;
+                # `$(git rev-parse --show-toplevel)` is the nearest `.git`
+                # ancestor. Unresolvable (no `.git` boundary, git-discovery
+                # env vars set) -> cd stays untracked.
+                new_cwd = group_cwd if arg == 'pwd' else git_toplevel(group_cwd)
+                if new_cwd is not None:
+                    group_cwd = new_cwd
+                else:
+                    group_cwd_unknown = True
             else:
                 group_cwd_unknown = True
             continue
