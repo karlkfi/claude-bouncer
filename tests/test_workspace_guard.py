@@ -13,6 +13,7 @@ Three layers:
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -873,6 +874,48 @@ class SessionTmpPathTests(unittest.TestCase):
         sibling = self.root + "-evil/" + self.sess + "/x"
         self.assertFalse(
             guard.is_session_tmp_path(sibling, self.sess, self.root))
+
+
+class SessionProjectDirTests(unittest.TestCase):
+    """claude_session_project_dir() scan for same-project sibling scratch (#61).
+
+    Uses a throwaway temp dir as the scan root (the function takes it as a
+    parameter), so nothing touches the real Claude temp root."""
+
+    def setUp(self):
+        self.root = os.path.realpath(tempfile.mkdtemp())
+        self.sess = "11111111-2222-3333-4444-555555555555"
+        self.slug = "-Users-me-proj"
+        self.proj = os.path.join(self.root, self.slug)
+        os.makedirs(os.path.join(self.proj, self.sess))
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_finds_project_dir_holding_session(self):
+        self.assertEqual(
+            guard.claude_session_project_dir(self.sess, self.root),
+            os.path.realpath(self.proj))
+
+    def test_empty_session_id_returns_none(self):
+        self.assertIsNone(guard.claude_session_project_dir("", self.root))
+
+    def test_unknown_session_returns_none(self):
+        self.assertIsNone(
+            guard.claude_session_project_dir("no-such-session", self.root))
+
+    def test_missing_root_returns_none(self):
+        self.assertIsNone(
+            guard.claude_session_project_dir(self.sess, self.root + "-absent"))
+
+    def test_ignores_sibling_project_without_this_session(self):
+        # A second project dir that does NOT hold this session must not match;
+        # the one that holds it wins.
+        other = os.path.join(self.root, "-Users-me-other")
+        os.makedirs(os.path.join(other, "99999999-0000-0000-0000-000000000000"))
+        self.assertEqual(
+            guard.claude_session_project_dir(self.sess, self.root),
+            os.path.realpath(self.proj))
 
 
 class AllowedReadPrefixesUnitTests(unittest.TestCase):
@@ -3243,6 +3286,105 @@ class SiblingCheckoutTests(unittest.TestCase):
         # A `~`/`$` path can't be resolved here -> defer to builtin.
         out = self._edit("Write", "~/somewhere/x.txt")
         self.assertIsNone(out, f"expected defer, got {out!r}")
+
+
+class SiblingSessionScratchE2ETests(unittest.TestCase):
+    """#61 end-to-end: read-only guarded commands on a SAME-project sibling
+    session's Claude scratch are allowed (the dispatcher-tails-worker case);
+    writes, redirect targets, and cross-project reads still prompt.
+
+    Creates a synthetic ``<tmp_root>/<slug>/<session>/`` layout under the real
+    Claude temp root so the hook's directory scan (claude_session_project_dir)
+    can anchor on the current session; cleaned up in tearDown. The slug carries
+    os.getpid() to avoid colliding with real session dirs or parallel runs. No
+    real outside paths are used as targets (repo rule)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = os.path.realpath(self._tmp.name)
+        with open(os.path.join(self.workspace, "in.txt"), "w") as f:
+            f.write("hello\n")
+        self.root = guard.claude_tmp_root()
+        self.slug = "-guardtest-sibling-%d" % os.getpid()
+        self.proj_dir = os.path.join(self.root, self.slug)
+        self.current = "cccccccc-1111-2222-3333-444444444444"
+        self.worker = "wwwwwwww-1111-2222-3333-444444444444"
+        # The current session's own scratch dir (scan anchor) and a sibling
+        # worker session's dir, both under the same project slug.
+        os.makedirs(os.path.join(self.proj_dir, self.current, "tasks"),
+                    exist_ok=True)
+        os.makedirs(os.path.join(self.proj_dir, self.worker, "tasks"),
+                    exist_ok=True)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+        shutil.rmtree(self.proj_dir, ignore_errors=True)
+
+    def _sibling(self, session_id, name="out.output"):
+        return os.path.join(self.proj_dir, session_id, "tasks", name)
+
+    def _expect(self, cmd, expected, **kw):
+        out = run_hook(cmd, self.workspace, project_dir=self.workspace, **kw)
+        self.assertIsNotNone(out, f"expected a decision, got defer for: {cmd!r}")
+        got = out["hookSpecificOutput"]["permissionDecision"]
+        self.assertEqual(
+            got, expected,
+            f"expected {expected!r} for {cmd!r}; got {got!r} "
+            f"(reason: {out['hookSpecificOutput'].get('permissionDecisionReason')!r})")
+        return out
+
+    def test_sibling_worker_tail_allow(self):
+        # The motivating case: a dispatcher tailing a worker's task output.
+        self._expect(f"tail -20 {self._sibling(self.worker)}", "allow",
+                     session_id=self.current)
+
+    def test_sibling_worker_grep_allow(self):
+        self._expect(f'grep -q "EXIT=" {self._sibling(self.worker)}', "allow",
+                     session_id=self.current)
+
+    def test_own_session_read_allow(self):
+        # Own-session scratch is allowed here too (via the per-session rule).
+        self._expect(f"cat {self._sibling(self.current)}", "allow",
+                     session_id=self.current)
+
+    def test_sibling_worker_cp_write_still_ask(self):
+        # Copying INTO a sibling session's scratch is a write -> not exempt.
+        self._expect(f"cp ./in.txt {self._sibling(self.worker)}", "ask",
+                     session_id=self.current)
+
+    def test_redirect_into_sibling_worker_still_ask(self):
+        # Redirect targets pass is_read=False, so they stay guarded.
+        self._expect(f"cat in.txt > {self._sibling(self.worker)}", "ask",
+                     session_id=self.current)
+
+    def test_rm_sibling_worker_still_ask(self):
+        self._expect(f"rm {self._sibling(self.worker)}", "ask",
+                     session_id=self.current)
+
+    def test_no_session_id_still_ask(self):
+        # Without session_id the scan can't anchor -> exemption off -> ask.
+        self._expect(f"tail -20 {self._sibling(self.worker)}", "ask")
+
+    def test_cross_project_sibling_still_ask(self):
+        # A different project slug (not holding the current session) is NOT
+        # exempt even for reads — Option 1 is same-project-scoped.
+        other_proj = os.path.join(self.root, "-guardtest-other-%d" % os.getpid())
+        other_path = os.path.join(other_proj, self.worker, "tasks", "out.output")
+        try:
+            os.makedirs(os.path.dirname(other_path), exist_ok=True)
+            self._expect(f"cat {other_path}", "ask", session_id=self.current)
+        finally:
+            shutil.rmtree(other_proj, ignore_errors=True)
+
+    def test_sibling_symlink_escape_still_ask(self):
+        # The ln-staging defense runs before the sibling-read exemption: a link
+        # inside the sibling scratch pointing outside is still flagged.
+        link = self._sibling(self.worker, "link")
+        out = self._expect(
+            f"ln -s /tmp/q61-fake-target {link} && cat {link}", "ask",
+            session_id=self.current)
+        self.assertIn(link,
+                      out["hookSpecificOutput"]["permissionDecisionReason"])
 
 
 class PluginWiringTests(unittest.TestCase):

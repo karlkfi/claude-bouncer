@@ -142,6 +142,42 @@ def is_session_tmp_path(rp, session_id, tmp_root):
     return session_id in rp.split(os.sep)
 
 
+def claude_session_project_dir(session_id, tmp_root):
+    """Resolved path of the current session's Claude-managed *project* scratch
+    dir — the ``<tmp_root>/<project-slug>`` that contains this session.
+
+    Claude Code lays out background-task scratch as
+    ``<tmp_root>/<project-slug>/<session-uuid>/tasks/<id>.output``. Sibling
+    sessions of the SAME project (a dispatcher plus its parallel workers) share
+    the ``<project-slug>`` parent, so a dispatcher tailing a worker's output
+    reads a path under this dir. We locate it by scanning ``tmp_root`` for the
+    single ``<project-slug>`` child that already holds a ``<session_id>``
+    subdirectory — ground truth from the filesystem, so it does NOT depend on
+    Claude's undocumented slug-encoding (which differs between a worktree cwd
+    and the main checkout, and could change without notice). This is a
+    directory ``listdir``/``isdir`` scan only — no file contents are read.
+
+    Returns None when ``session_id`` is empty, ``tmp_root`` can't be listed, or
+    no project dir holds this session (the sibling-read exemption then simply
+    doesn't apply and such paths keep prompting — the secure-by-default
+    direction). (#61)
+    """
+    if not session_id:
+        return None
+    try:
+        slugs = os.listdir(tmp_root)
+    except OSError:
+        return None
+    for slug in slugs:
+        proj_dir = os.path.join(tmp_root, slug)
+        try:
+            if os.path.isdir(os.path.join(proj_dir, session_id)):
+                return os.path.realpath(proj_dir)
+        except OSError:
+            continue
+    return None
+
+
 def path_at_or_under(rp, root):
     """True when ``rp`` is ``root`` itself or lives below it. Uses the os.sep
     boundary so `/tmpfoo` is NOT considered under `/tmp`."""
@@ -1051,6 +1087,11 @@ def handle_bash(data):
     # off (every temp path keeps prompting, the secure-by-default direction).
     session_id = data.get('session_id') or ''
     session_tmp_root = claude_tmp_root()
+    # This session's Claude-managed project scratch dir (<tmp_root>/<slug>).
+    # Read-only guarded commands on sibling sessions' scratch under the SAME
+    # project dir are exempt (see check_file) — the dispatcher/worker tail case
+    # from #61. None when it can't be located; the exemption then stays off.
+    session_proj_dir = claude_session_project_dir(session_id, session_tmp_root)
     # Host-temp config (resolved once per invocation). A guarded file arg that
     # resolves under one of these roots — but NOT under the Claude-managed temp
     # root, which keeps its own ask-on-cross-session behavior — is denied
@@ -1203,6 +1244,19 @@ def handle_bash(data):
             # (~/.claude/projects/ and any WORKSPACE_GUARD_READ_ALLOW_PREFIXES
             # additions). Write commands (cp, mv, tee, rm) are never exempt.
             if is_read and any(path_at_or_under(rp, p) for p in read_prefixes):
+                return None
+            # Sibling Claude sessions of the SAME project share a scratch parent
+            # at <tmp_root>/<project-slug>/ (a dispatcher plus its parallel
+            # workers). Reading another session's task output back is not the
+            # boundary we guard — the same data is persisted into
+            # ~/.claude/projects/ transcripts, which are already read-exempt
+            # (#56). Read-only and same-project-scoped (see
+            # claude_session_project_dir); write commands and redirect targets
+            # pass is_read=False and stay guarded. Checked AFTER the ln-staging
+            # defense (above) so a link planted here can't launder an outside
+            # target. (#61)
+            if is_read and session_proj_dir \
+                    and path_at_or_under(rp, session_proj_dir):
                 return None
             # Sibling checkout of the same repo: a WRITE landing in the primary
             # checkout or another worktree silently targets the wrong branch.
