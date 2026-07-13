@@ -12,10 +12,11 @@ outside your repo into `jq`. The default `Bash(grep:*)` permission rules can't
 tell these apart from the dozens of in-repo greps Claude runs every session —
 they either trust every invocation or prompt on every one.
 
-workspace-guard is a `PreToolUse` hook for `Bash` that parses the command, finds
-its file arguments, and asks for confirmation only when a path resolves outside
-your project root (`$CLAUDE_PROJECT_DIR`). In-repo reads and pure pipelines run
-silently.
+workspace-guard is a `PreToolUse` hook for `Bash` — and for Claude's native file
+tools (`Read`, `Grep`, `Glob`, `Edit`, `Write`, …) — that parses the command,
+finds its file arguments, and asks for confirmation only when a path resolves
+outside your project root (`$CLAUDE_PROJECT_DIR`). In-repo reads and pure
+pipelines run silently.
 
 ![Claude Code's permission prompt when grep targets a file outside the project root](docs/img/ask-prompt.png)
 
@@ -58,6 +59,13 @@ On the write side: `cp`, `mv`, `tee`, `rm`, `dd`. These are the file-reading
 and file-writing commands Claude reaches for most often; tools like `ls`,
 `find`, and `xargs` aren't covered yet (see
 [`docs/STATUS.md`](docs/STATUS.md)).
+
+The same outside-workspace check also runs on Claude's **native file tools**, so
+the guard can't be sidestepped by switching from a bash command to the
+equivalent tool — `Read`-ing `/etc/passwd` prompts exactly like `cat /etc/passwd`
+would. `Read`, `Grep`, and `Glob` are treated as reads (they keep the self-read
+exemptions below); `Edit`, `Write`, `MultiEdit`, and `NotebookEdit` are treated
+as writes. See [Beyond Bash](#beyond-bash-native-file-tools).
 
 It also stays quiet for paths that aren't really "outside your project":
 `/dev/null` and friends, and the session's **own** background-task output under
@@ -152,6 +160,35 @@ The **ask** rows assume an interactive or `default`-mode session. In full-auto
 return `deny` instead — equally blocking, with recoverable feedback for the
 agent. See [Configuration](#configuration).
 
+### Beyond Bash: native file tools
+
+The hook is registered for Claude's native file tools as well as `Bash`, and runs
+the *same* path check on them — a native tool receives a structured path
+argument, so there's no command to parse, just a path to resolve and classify.
+
+| Tool call                                         | Decision |
+| ------------------------------------------------- | -------- |
+| `Read` an in-repo file                            | defer    |
+| `Read` the session's own task output              | defer    |
+| `Read` / `Grep` / `Glob` an outside path          | **ask**  |
+| `Read` / `Grep` / `Glob` under `/tmp`, `/var/tmp` | **deny** |
+| `Edit` / `Write` / `MultiEdit` an in-repo file    | defer    |
+| `Edit` / `Write` / `MultiEdit` an outside path    | **ask**  |
+| `Write` under `/tmp`, `/var/tmp`                   | **deny** |
+| `Write` into a sibling checkout (in a worktree)   | **deny** |
+
+The read/write split matters: `Read`, `Grep`, and `Glob` get the read-only
+exemptions (the session's own and sibling workers' task output, and any
+[`WORKSPACE_GUARD_READ_ALLOW_PREFIXES`](#configuration)), so the agent reading
+back its own output is never prompted. `Edit`, `Write`, `MultiEdit`, and
+`NotebookEdit` are writes, so they also pick up the sibling-checkout deny below.
+
+A path the hook can't resolve without a shell — one containing `$VAR` or a
+`~user` prefix — **defers** on these tools, since they don't shell-expand.
+`Bash` remains the only surface with full command parsing (pipelines, redirects,
+`cd` tracking, variable propagation); the native handlers are a straight
+path-in, decision-out check.
+
 ### Worktree-aware sibling-checkout deny
 
 When your session runs inside a **git worktree**, a write that lands in a
@@ -170,9 +207,9 @@ its checked-out branch, and the corrected path under your session's checkout
 
 - **Bash writes and redirect targets** — `cp`/`mv`/`tee`/`rm`/`dd` operands and
   `> file` targets that resolve inside a sibling checkout.
-- **The `Edit`, `Write`, `MultiEdit`, and `NotebookEdit` tools** — the one place
-  the hook reaches beyond `Bash`. Its *only* active rule there is this
-  sibling-checkout deny; every other edit defers to your normal permissions.
+- **The `Edit`, `Write`, `MultiEdit`, and `NotebookEdit` tools** — a write into a
+  sibling checkout through these tools denies too (they are guarded as writes;
+  see [Beyond Bash](#beyond-bash-native-file-tools)).
 
 **Reads keep today's behavior** — reading a sibling checkout risks staleness,
 not damage, so it stays an `ask`. Detection is a no-op when the session isn't in

@@ -3270,21 +3270,25 @@ class SiblingCheckoutTests(unittest.TestCase):
         out = self._edit("Write", os.path.join(self.wt, "in-session.txt"))
         self.assertIsNone(out, f"expected defer, got {out!r}")
 
-    def test_edit_unrelated_outside_path_defers(self):
-        # Outside the repo and not a sibling checkout -> the Edit hook stays
-        # silent and lets the builtin permission system handle it.
+    def test_edit_unrelated_outside_path_asks(self):
+        # Outside the repo and not a sibling checkout -> the widened Edit hook
+        # treats it as a generic outside write and asks (was defer before the
+        # multi-tool widening; the sibling *deny* stays a no-op here).
         out = self._edit("Write", os.path.join(self.base, "stray.txt"))
-        self.assertIsNone(out, f"expected defer, got {out!r}")
+        self.assertEqual(self._decision(out), "ask")
 
-    def test_edit_main_session_defers(self):
-        # Not in a worktree -> the Edit hook is a no-op even into a worktree.
+    def test_edit_main_session_outside_asks(self):
+        # Not in a worktree -> the sibling deny is a no-op, but writing into a
+        # sibling worktree is still outside proj(main), so the generic outside
+        # `ask` applies.
         out = self._edit("Write", os.path.join(self.other, "x.txt"),
                          proj=self.main, cwd=self.main)
-        self.assertIsNone(out, f"expected defer, got {out!r}")
+        self.assertEqual(self._decision(out), "ask")
 
-    def test_edit_relative_tilde_defers(self):
-        # A `~`/`$` path can't be resolved here -> defer to builtin.
-        out = self._edit("Write", "~/somewhere/x.txt")
+    def test_edit_unresolved_expansion_defers(self):
+        # A `$`/`~user` path can't be resolved here (native tools don't
+        # shell-expand) -> defer to builtin permissions.
+        out = self._edit("Write", "$HOME/somewhere/x.txt")
         self.assertIsNone(out, f"expected defer, got {out!r}")
 
 
@@ -3807,6 +3811,20 @@ class PluginWiringTests(unittest.TestCase):
             self.assertIn(tool, edit_matcher,
                           f"{tool} not covered by matcher {edit_matcher!r}")
 
+    def test_hooks_json_registers_pretooluse_read_tools(self):
+        # Q29: native read/search tools get the outside-workspace check too.
+        data = self._load_json("hooks/hooks.json")
+        pre = data.get("hooks", {}).get("PreToolUse")
+        self.assertIsInstance(pre, list)
+        matchers = [e.get("matcher") for e in pre]
+        read_matcher = next(
+            (m for m in matchers if m and "Read" in m and "Grep" in m), None)
+        self.assertIsNotNone(
+            read_matcher, "no PreToolUse entry matches the Read/Grep/Glob tools")
+        for tool in ("Read", "Grep", "Glob"):
+            self.assertIn(tool, read_matcher,
+                          f"{tool} not covered by matcher {read_matcher!r}")
+
     def test_hooks_json_command_path_exists(self):
         data = self._load_json("hooks/hooks.json")
         entry = next(
@@ -3856,6 +3874,152 @@ class PluginWiringTests(unittest.TestCase):
             "workspace-guard", names,
             "marketplace.json does not list the workspace-guard plugin",
         )
+
+
+class NativeToolTests(unittest.TestCase):
+    """Q29: the native Read/Grep/Glob (read) and Edit/Write (write) tools get the
+    same outside-workspace verdict as the equivalent bash command, routed through
+    the shared classify_outside/decide core.
+
+    The workspace lives under $HOME so an outside path is NOT classified as
+    host-temp — that keeps the plain outside `ask` cleanly separated from the
+    /tmp `deny`. No real sensitive paths are used as targets (repo rule)."""
+
+    def setUp(self):
+        home = os.environ.get("HOME")
+        if not home or not os.path.isdir(home):
+            self.skipTest("HOME not set")
+        self._tmp = tempfile.TemporaryDirectory(dir=home)
+        self.base = os.path.realpath(self._tmp.name)
+        self.workspace = os.path.join(self.base, "proj")
+        os.mkdir(self.workspace)
+        with open(os.path.join(self.workspace, "in.txt"), "w") as f:
+            f.write("hi\n")
+        self.outside_dir = os.path.join(self.base, "outside")
+        os.makedirs(self.outside_dir, exist_ok=True)
+        self.outside = os.path.join(self.outside_dir, "secret.txt")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run(self, tool, tool_input, env_extra=None, permission_mode=None,
+             session_id=None, cwd=None):
+        env = os.environ.copy()
+        env["CLAUDE_PROJECT_DIR"] = self.workspace
+        for k, v in (env_extra or {}).items():
+            if v is None:
+                env.pop(k, None)
+            else:
+                env[k] = v
+        data = {"tool_name": tool, "tool_input": tool_input,
+                "cwd": cwd or self.workspace}
+        if permission_mode is not None:
+            data["permission_mode"] = permission_mode
+        if session_id is not None:
+            data["session_id"] = session_id
+        r = subprocess.run([sys.executable, str(SCRIPT)], input=json.dumps(data),
+                           capture_output=True, text=True, env=env, timeout=10)
+        self.assertEqual(r.returncode, 0, f"hook errored: {r.stderr!r}")
+        out = r.stdout.strip()
+        return json.loads(out) if out else None
+
+    def _decision(self, out):
+        self.assertIsNotNone(out, "expected a decision, got defer")
+        return out["hookSpecificOutput"]["permissionDecision"]
+
+    # --- reads: Read / Grep / Glob ------------------------------------------
+
+    def test_read_outside_asks(self):
+        out = self._run("Read", {"file_path": self.outside})
+        self.assertEqual(self._decision(out), "ask")
+
+    def test_read_inside_defers(self):
+        out = self._run("Read",
+                        {"file_path": os.path.join(self.workspace, "in.txt")})
+        self.assertIsNone(out, f"expected defer, got {out!r}")
+
+    def test_grep_outside_path_asks(self):
+        out = self._run("Grep", {"pattern": "x", "path": self.outside_dir})
+        self.assertEqual(self._decision(out), "ask")
+
+    def test_glob_outside_path_asks(self):
+        out = self._run("Glob",
+                        {"pattern": "**/*.txt", "path": self.outside_dir})
+        self.assertEqual(self._decision(out), "ask")
+
+    def test_read_host_temp_denies(self):
+        # Mirrors bash `cat /tmp/…`: host-temp is a steered deny, reads included.
+        out = self._run("Read", {"file_path": "/tmp/q29-fake-target"})
+        self.assertEqual(self._decision(out), "deny")
+
+    def test_read_read_prefix_exempt_defers(self):
+        # WORKSPACE_GUARD_READ_ALLOW_PREFIXES exempts READS under the prefix.
+        allow = os.path.join(self.base, "allowed")
+        os.makedirs(allow, exist_ok=True)
+        out = self._run("Read", {"file_path": os.path.join(allow, "x.txt")},
+                        env_extra={"WORKSPACE_GUARD_READ_ALLOW_PREFIXES": allow})
+        self.assertIsNone(out, f"expected defer, got {out!r}")
+
+    def test_read_own_session_output_defers(self):
+        # The agent reading back its own background-task output is exempt, same
+        # as a bash `tail` of it (see SiblingSessionScratchE2ETests).
+        root = guard.claude_tmp_root()
+        slug = "-guardtest-native-%d" % os.getpid()
+        session = "aaaaaaaa-1111-2222-3333-555555555555"
+        d = os.path.join(root, slug, session, "tasks")
+        os.makedirs(d, exist_ok=True)
+        self.addCleanup(shutil.rmtree, os.path.join(root, slug), True)
+        out = self._run("Read", {"file_path": os.path.join(d, "out.output")},
+                        session_id=session)
+        self.assertIsNone(out, f"expected defer, got {out!r}")
+
+    def test_read_unresolved_expansion_defers(self):
+        # Native tools don't shell-expand; a `$` path is unresolvable -> defer.
+        out = self._run("Read", {"file_path": "$HOME/x.txt"})
+        self.assertIsNone(out, f"expected defer, got {out!r}")
+
+    def test_grep_missing_path_defers(self):
+        # No path -> Grep searches cwd (in workspace) -> nothing to flag.
+        out = self._run("Grep", {"pattern": "x"})
+        self.assertIsNone(out, f"expected defer, got {out!r}")
+
+    def test_read_outside_bypass_denies(self):
+        # bypassPermissions has no human to answer an ask -> deny for feedback.
+        out = self._run("Read", {"file_path": self.outside},
+                        permission_mode="bypassPermissions")
+        self.assertEqual(self._decision(out), "deny")
+
+    # --- writes: Edit / Write / NotebookEdit --------------------------------
+
+    def test_write_outside_asks(self):
+        out = self._run("Write", {"file_path": self.outside})
+        self.assertEqual(self._decision(out), "ask")
+
+    def test_edit_outside_asks(self):
+        out = self._run("Edit", {"file_path": self.outside})
+        self.assertEqual(self._decision(out), "ask")
+
+    def test_write_host_temp_denies(self):
+        out = self._run("Write", {"file_path": "/tmp/q29-fake-target"})
+        self.assertEqual(self._decision(out), "deny")
+
+    def test_write_inside_defers(self):
+        out = self._run("Edit",
+                        {"file_path": os.path.join(self.workspace, "in.txt")})
+        self.assertIsNone(out, f"expected defer, got {out!r}")
+
+    def test_write_read_prefix_not_exempt_asks(self):
+        # The read-prefix exemption is READ-only: a WRITE under it still asks.
+        allow = os.path.join(self.base, "allowed")
+        os.makedirs(allow, exist_ok=True)
+        out = self._run("Write", {"file_path": os.path.join(allow, "x.txt")},
+                        env_extra={"WORKSPACE_GUARD_READ_ALLOW_PREFIXES": allow})
+        self.assertEqual(self._decision(out), "ask")
+
+    def test_notebook_edit_outside_asks(self):
+        out = self._run("NotebookEdit",
+                        {"notebook_path": os.path.join(self.outside_dir, "n.ipynb")})
+        self.assertEqual(self._decision(out), "ask")
 
 
 if __name__ == "__main__":

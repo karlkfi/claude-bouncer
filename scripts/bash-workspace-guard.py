@@ -4,7 +4,7 @@ outside the workspace; allow when it only touches workspace files or pipes.
 
 Reads the hook JSON on stdin, emits a PreToolUse decision on stdout.
 """
-import sys, os, json, re, shlex, fnmatch
+import sys, os, json, re, shlex, fnmatch, collections
 
 # POSIX command-prefix assignment: NAME starts with letter/underscore,
 # followed by letters/digits/underscores, then `=`. Anything after the `=`
@@ -1255,34 +1255,143 @@ def emit(decision, reason):
         "permissionDecisionReason": reason}}))
 
 
-def handle_bash(data):
-    cmd = (data.get('tool_input') or {}).get('command', '') or ''
+# --- Shared decision core ----------------------------------------------------
+# The per-invocation config and the resolved-path classification live here, at
+# module level, so every tool handler (Bash, the Read/Grep/Glob readers, and the
+# Edit/Write writers) reaches an identical verdict for the same path. The Bash
+# handler additionally owns the shell-specific machinery (tokenizer, cd/var
+# tracking, ln-staging, the 'expand'/'untracked' categories); the native-tool
+# handlers get a concrete path straight from `tool_input` and skip all of it.
+
+# Bundle of everything a path check depends on, resolved once per invocation.
+Ctx = collections.namedtuple('Ctx', [
+    'proj', 'cwd', 'session_id', 'session_tmp_root', 'session_proj_dir',
+    'tmp_roots', 'tmp_allow', 'tmp_action', 'read_prefixes', 'session_wt',
+    'sib_override'])
+
+
+def build_context(data):
+    """Resolve the shared per-invocation context from the hook payload.
+
+    Fields (all resolved once so the handlers can't drift):
+      * ``proj`` / ``cwd`` — project root and the tool's working directory.
+      * ``session_id`` — this session's UUID; scopes the Claude-managed-temp
+        allow to THIS session's own task output (empty on older CLIs -> allow off).
+      * ``session_tmp_root`` — ``/tmp/claude-<uid>`` realpath.
+      * ``session_proj_dir`` — ``<tmp_root>/<slug>`` holding this session, for the
+        sibling-session read exemption (#61); None when not locatable.
+      * ``tmp_roots`` / ``tmp_allow`` / ``tmp_action`` — host-temp config.
+      * ``read_prefixes`` — prefixes always allowed for READS (never writes).
+      * ``session_wt`` — the session's own checkout, for the sibling-checkout
+        deny; a no-op unless the session is itself a linked worktree.
+      * ``sib_override`` — WORKSPACE_GUARD_OVERRIDE reason, or None.
+    """
     cwd = data.get('cwd') or os.getcwd()
     proj = os.path.realpath(os.environ.get('CLAUDE_PROJECT_DIR') or cwd)
-    # Session's own checkout, for the sibling-checkout (worktree) deny. A no-op
-    # unless the session is itself a linked worktree (see resolve_session_worktree
-    # / sibling_checkout_for). Resolved once per invocation.
-    session_wt = resolve_session_worktree(proj)
-    sib_override = sibling_override()
-    # Current session id (a UUID). Used to scope the Claude-managed-temp allow
-    # to THIS session's own task output. Absent for older CLIs -> allow stays
-    # off (every temp path keeps prompting, the secure-by-default direction).
     session_id = data.get('session_id') or ''
     session_tmp_root = claude_tmp_root()
-    # This session's Claude-managed project scratch dir (<tmp_root>/<slug>).
-    # Read-only guarded commands on sibling sessions' scratch under the SAME
-    # project dir are exempt (see check_file) — the dispatcher/worker tail case
-    # from #61. None when it can't be located; the exemption then stays off.
-    session_proj_dir = claude_session_project_dir(session_id, session_tmp_root)
-    # Host-temp config (resolved once per invocation). A guarded file arg that
-    # resolves under one of these roots — but NOT under the Claude-managed temp
-    # root, which keeps its own ask-on-cross-session behavior — is denied
-    # (default) and steered to a repo-local scratch dir. See host_temp_* above.
-    tmp_roots = host_temp_roots()
-    tmp_allow = host_temp_allowlist()
-    tmp_action = host_temp_action()
-    # Prefixes always allowed for read-only commands (never for write commands).
-    read_prefixes = allowed_read_prefixes()
+    return Ctx(
+        proj=proj, cwd=cwd, session_id=session_id,
+        session_tmp_root=session_tmp_root,
+        session_proj_dir=claude_session_project_dir(session_id, session_tmp_root),
+        tmp_roots=host_temp_roots(),
+        tmp_allow=host_temp_allowlist(),
+        tmp_action=host_temp_action(),
+        read_prefixes=allowed_read_prefixes(),
+        session_wt=resolve_session_worktree(proj),
+        sib_override=sibling_override())
+
+
+def path_is_outside(rp, proj):
+    """True when resolved path ``rp`` is neither ``proj`` nor below it. Uses the
+    os.sep boundary so `/projfoo` is NOT considered under `/proj`."""
+    return rp != proj and not rp.startswith(proj + os.sep)
+
+
+def classify_outside(rp, ctx, is_read):
+    """Classify a RESOLVED realpath ``rp`` against the workspace boundary.
+
+    Returns ``(category, detail)`` — category one of 'sibling' (carrying a detail
+    dict of ``{root, branch, corrected}``), 'hosttemp', or 'outside' — or ``None``
+    when the path is in-workspace or covered by an exemption. This is the shared
+    core: ``handle_bash`` (after its ln-staging / expand tracking),
+    ``handle_edit``, and ``handle_read_tool`` all route resolved paths through
+    here, so a native ``Read`` and ``cat`` reach the identical verdict. The
+    ordering mirrors the original in-``check_file`` logic exactly.
+    """
+    # Claude Code's own per-session task-output/scratch — the agent reading back
+    # its own background output, not the boundary we guard. (Q21)
+    if is_session_tmp_path(rp, ctx.session_id, ctx.session_tmp_root):
+        return None
+    if not path_is_outside(rp, ctx.proj):
+        return None
+    # Read-only: well-known Claude-owned paths (~/.claude/projects/ + configured
+    # extras). Write access is never exempt here.
+    if is_read and any(path_at_or_under(rp, p) for p in ctx.read_prefixes):
+        return None
+    # Read-only: a sibling session of the SAME project sharing the scratch parent
+    # (dispatcher tails workers). (#61)
+    if is_read and ctx.session_proj_dir \
+            and path_at_or_under(rp, ctx.session_proj_dir):
+        return None
+    # Write into a sibling checkout of the same repo -> wrong-branch deny.
+    if not is_read:
+        sib = sibling_checkout_for(rp, ctx.session_wt)
+        if sib is not None:
+            root, branch = sib
+            corrected = os.path.join(
+                ctx.session_wt['root'], os.path.relpath(rp, root))
+            return ('sibling', {'root': root, 'branch': branch,
+                                'corrected': corrected})
+    # Host-wide temp (/tmp, /var/tmp, $TMPDIR) -> steered deny — unless under the
+    # Claude-managed temp root (keeps cross-session ask) or explicitly allowed.
+    if is_host_temp(rp, ctx.tmp_roots) \
+            and not path_at_or_under(rp, ctx.session_tmp_root):
+        if matches_allowlist(rp, ctx.tmp_allow):
+            return None
+        return ('hosttemp', None)
+    return ('outside', None)
+
+
+def decide(offenders, ctx, bypass):
+    """Map a non-empty ``offenders`` list to a ``(decision, reason)`` pair.
+
+    Shared final step for every handler. ``deny`` when running under
+    ``bypassPermissions`` (no human to answer an ask), when a host-temp path is
+    hit and the configured action is ``deny``, or when a sibling-checkout write
+    is hit without an override; otherwise ``ask``. Both decisions block equally —
+    this is a recoverability/steering choice, not a weakening of the boundary."""
+    host_temp_hit = any(cat == 'hosttemp' for _, cat, _ in offenders)
+    sibling_hit = any(cat == 'sibling' for _, cat, _ in offenders)
+    sibling_deny = sibling_hit and ctx.sib_override is None
+    deny_now = bypass or (host_temp_hit and ctx.tmp_action == 'deny') \
+        or sibling_deny
+    decision = "deny" if deny_now else "ask"
+    reason = build_reason(offenders,
+                          build_scratch_hint(ctx.proj, scratch_dir_name()),
+                          override=ctx.sib_override)
+    return decision, reason
+
+
+def resolve_native_path(raw, cwd):
+    """Resolve a native tool's path field to a realpath, or None to defer.
+
+    Native tools pass literal paths (no shell expansion), so beyond the
+    deterministic ``~``/``~/…`` that ``expand_tilde`` handles, a leftover ``~``
+    or any ``$`` is treated as unresolvable and the caller defers to builtin
+    permissions — the posture the edit handler has used since the sibling deny."""
+    if not raw or not isinstance(raw, str):
+        return None
+    p = expand_tilde(raw)
+    if p.startswith('~') or '$' in p:
+        return None
+    return os.path.realpath(p if os.path.isabs(p) else os.path.join(cwd, p))
+
+
+def handle_bash(data):
+    cmd = (data.get('tool_input') or {}).get('command', '') or ''
+    ctx = build_context(data)
+    proj, cwd = ctx.proj, ctx.cwd
     if not cmd.strip():
         return
 
@@ -1362,7 +1471,7 @@ def handle_bash(data):
         groups.append((cur, cur_redir, depth == 0 and prev_sep != '|'))
 
     def is_outside(rp):
-        return rp != proj and not rp.startswith(proj + os.sep)
+        return path_is_outside(rp, proj)
 
     def resolve_token(f, group_cwd, group_cwd_unknown):
         """Resolve a file token. Returns one of:
@@ -1431,56 +1540,14 @@ def handle_bash(data):
         # be bypassed by pointing a link inside the allowed scratch dir.
         if rp in staged_outside_paths:
             return (f, 'outside', None)
-        # Claude Code's own per-session task-output/scratch is the agent reading
-        # back its own background-command output — not the boundary we guard.
-        # Allowed only for the current session (see is_session_tmp_path). (Q21)
-        if is_session_tmp_path(rp, session_id, session_tmp_root):
-            return None
-        if is_outside(rp):
-            # Read-only commands are exempt for well-known Claude-owned paths
-            # (~/.claude/projects/ and any WORKSPACE_GUARD_READ_ALLOW_PREFIXES
-            # additions). Write commands (cp, mv, tee, rm) are never exempt.
-            if is_read and any(path_at_or_under(rp, p) for p in read_prefixes):
-                return None
-            # Sibling Claude sessions of the SAME project share a scratch parent
-            # at <tmp_root>/<project-slug>/ (a dispatcher plus its parallel
-            # workers). Reading another session's task output back is not the
-            # boundary we guard — the same data is persisted into
-            # ~/.claude/projects/ transcripts, which are already read-exempt
-            # (#56). Read-only and same-project-scoped (see
-            # claude_session_project_dir); write commands and redirect targets
-            # pass is_read=False and stay guarded. Checked AFTER the ln-staging
-            # defense (above) so a link planted here can't launder an outside
-            # target. (#61)
-            if is_read and session_proj_dir \
-                    and path_at_or_under(rp, session_proj_dir):
-                return None
-            # Sibling checkout of the same repo: a WRITE landing in the primary
-            # checkout or another worktree silently targets the wrong branch.
-            # Only writes (is_read False — redirect targets, cp/mv/tee/rm, dd)
-            # upgrade to this deny; reads keep today's behavior (staleness risk,
-            # not damage). Checked before host-temp so a worktree that happens to
-            # live under /tmp still gets the more specific sibling message.
-            if not is_read:
-                sib = sibling_checkout_for(rp, session_wt)
-                if sib is not None:
-                    root, branch = sib
-                    corrected = os.path.join(
-                        session_wt['root'], os.path.relpath(rp, root))
-                    return (f, 'sibling', {'root': root, 'branch': branch,
-                                           'corrected': corrected})
-            # Host-wide temp (/tmp, /var/tmp, $TMPDIR) gets a stronger, steered
-            # decision than a generic outside path — UNLESS it's under the
-            # Claude-managed temp root (another session's task output), which
-            # keeps its existing cross-session `ask`, or it's explicitly
-            # allowlisted (opt-in escape hatch -> fall through to allow).
-            if is_host_temp(rp, tmp_roots) \
-                    and not path_at_or_under(rp, session_tmp_root):
-                if matches_allowlist(rp, tmp_allow):
-                    return None
-                return (f, 'hosttemp', None)
-            return (f, 'outside', None)
-        return None
+        # Everything past resolution — the session-tmp allow, read-prefix and
+        # sibling-session exemptions, sibling-checkout / host-temp / outside
+        # tiers — is the shared core (classify_outside), so a `cat` and a native
+        # `Read` of the same path can't diverge. The ln-staging defense above
+        # runs FIRST so a link planted inside an allowed scratch dir can't
+        # launder an outside target.
+        res = classify_outside(rp, ctx, is_read)
+        return (f, res[0], res[1]) if res is not None else None
 
     def stage_ln(target, link, group_cwd, group_cwd_unknown):
         """If `ln TARGET LINK` (symbolic or hard) points outside, record
@@ -1613,50 +1680,56 @@ def handle_bash(data):
         # agent round trip — unless WORKSPACE_GUARD_OVERRIDE is set, which
         # downgrades it to `ask` for deliberate cross-checkout work.
         bypass = data.get("permission_mode") == "bypassPermissions"
-        host_temp_hit = any(cat == 'hosttemp' for _, cat, _ in outside)
-        sibling_hit = any(cat == 'sibling' for _, cat, _ in outside)
-        sibling_deny = sibling_hit and sib_override is None
-        deny_now = bypass or (host_temp_hit and tmp_action == 'deny') \
-            or sibling_deny
-        decision = "deny" if deny_now else "ask"
-        reason = build_reason(outside, build_scratch_hint(proj, scratch_dir_name()),
-                              override=sib_override)
+        decision, reason = decide(outside, ctx, bypass)
     else:
         decision, reason = "allow", "Guarded commands target workspace/pipe only"
     emit(decision, reason)
 
 
 def handle_edit(data):
-    """Narrow sibling-checkout deny for the file-editing tools (Edit, Write,
-    MultiEdit, NotebookEdit). Its ONLY active rule is the sibling-checkout deny;
-    everything else defers (emits nothing) so the builtin permission system
-    handles it. Reads keep today's behavior — these tools always write.
+    """Guard the file-writing tools (Edit, Write, MultiEdit, NotebookEdit).
+
+    These tools always WRITE, so the file arg is checked with is_read=False: it
+    gets the full outside/host-temp/sibling-checkout treatment, identical to a
+    bash write of the same path. An in-workspace target, an unresolvable
+    ``~``/``$`` path, or a path covered by an exemption defers (emits nothing) so
+    builtin permissions apply.
     """
     ti = data.get('tool_input') or {}
     raw = ti.get('file_path') or ti.get('notebook_path') or ''
-    if not raw or not isinstance(raw, str):
-        return
-    cwd = data.get('cwd') or os.getcwd()
-    proj = os.path.realpath(os.environ.get('CLAUDE_PROJECT_DIR') or cwd)
-    session_wt = resolve_session_worktree(proj)
-    if not session_wt or not session_wt.get('in_worktree'):
-        return                                    # not in a worktree -> defer
-    path = expand_tilde(raw)
-    if path.startswith('~') or '$' in path:
-        return                                    # unresolved expansion -> defer
-    rp = os.path.realpath(path if os.path.isabs(path)
-                          else os.path.join(cwd, path))
-    if rp == proj or rp.startswith(proj + os.sep):
-        return                                    # inside session workspace
-    sib = sibling_checkout_for(rp, session_wt)
-    if sib is None:
-        return                                    # not a sibling -> defer
-    root, branch = sib
-    corrected = os.path.join(session_wt['root'], os.path.relpath(rp, root))
-    override = sibling_override()
-    detail = {'root': root, 'branch': branch, 'corrected': corrected}
-    reason = build_reason([(raw, 'sibling', detail)], override=override)
-    emit('ask' if override else 'deny', reason)
+    rp = resolve_native_path(raw, data.get('cwd') or os.getcwd())
+    if rp is None:
+        return                                    # unresolved / absent -> defer
+    ctx = build_context(data)
+    res = classify_outside(rp, ctx, is_read=False)
+    if res is None:
+        return                                    # in-workspace / exempt -> defer
+    bypass = data.get("permission_mode") == "bypassPermissions"
+    decision, reason = decide([(raw, res[0], res[1])], ctx, bypass)
+    emit(decision, reason)
+
+
+def handle_read_tool(data):
+    """Guard the native read/search tools (Read, Grep, Glob).
+
+    These only READ, so the target is checked with is_read=True: an outside path
+    prompts (`ask`), but the read-prefix (~/.claude/projects/) and
+    session-tmp / sibling-session-scratch exemptions apply — so the agent reading
+    back its own or a sibling worker's output is not prompted, exactly as for a
+    bash `cat`/`grep`. Read's path is `file_path`; Grep/Glob use `path`.
+    """
+    ti = data.get('tool_input') or {}
+    raw = ti.get('file_path') or ti.get('path') or ''
+    rp = resolve_native_path(raw, data.get('cwd') or os.getcwd())
+    if rp is None:
+        return                                    # unresolved / absent -> defer
+    ctx = build_context(data)
+    res = classify_outside(rp, ctx, is_read=True)
+    if res is None:
+        return                                    # in-workspace / exempt -> defer
+    bypass = data.get("permission_mode") == "bypassPermissions"
+    decision, reason = decide([(raw, res[0], res[1])], ctx, bypass)
+    emit(decision, reason)
 
 
 def main():
@@ -1666,6 +1739,8 @@ def main():
     # preserving the original behavior.
     if tool in ('Edit', 'Write', 'MultiEdit', 'NotebookEdit'):
         handle_edit(data)
+    elif tool in ('Read', 'Grep', 'Glob'):
+        handle_read_tool(data)
     else:
         handle_bash(data)
 

@@ -20,6 +20,16 @@
             "timeout": 10000
           }
         ]
+      },
+      {
+        "matcher": "Read|Grep|Glob",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/bash-workspace-guard.py\"",
+            "timeout": 10000
+          }
+        ]
       }
     ]
   }

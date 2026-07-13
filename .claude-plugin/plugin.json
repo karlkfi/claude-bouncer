@@ -9,5 +9,5 @@
   "homepage": "https://github.com/karlkfi/claude-workspace-guard",
   "repository": "https://github.com/karlkfi/claude-workspace-guard",
   "license": "MIT",
-  "keywords": ["claude-code", "hooks", "sandbox", "security", "guardrail", "permissions", "workspace", "worktree", "bash", "tmp", "scratch", "skill", "command"]
+  "keywords": ["claude-code", "hooks", "sandbox", "security", "guardrail", "permissions", "workspace", "worktree", "bash", "read", "tools", "tmp", "scratch", "skill", "command"]
 }
