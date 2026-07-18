@@ -1426,6 +1426,26 @@ class HookEndToEndTests(unittest.TestCase):
         # the absolute path. Q7 doesn't change that — verify it still asks.
         self._decision("cd /etc && cat /etc/passwd", "ask")
 
+    def test_cd_outside_literal_keeps_tracking_names_absolute_path(self):
+        # Issue 85: a literal cd OUTSIDE the workspace keeps cwd tracked, so
+        # the later relative read prompts as a resolved outside-workspace
+        # path — naming where it actually lands — not as an untracked-cd
+        # unknown.
+        out = self._decision("cd /q85-fake-outside && cat notes.txt", "ask")
+        reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("Outside-workspace path(s)", reason)
+        self.assertIn("notes.txt -> /q85-fake-outside/notes.txt", reason)
+        self.assertNotIn("untracked", reason)
+
+    def test_cd_outside_literal_redirect_names_absolute_path(self):
+        # Same tracking for a redirect target after the outside cd (Q16 +
+        # issue 85): the reason shows the resolved absolute landing path.
+        out = self._decision(
+            "cd /q85-fake-outside && cat in.txt > out.log", "ask")
+        reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("out.log -> /q85-fake-outside/out.log", reason)
+        self.assertNotIn("untracked", reason)
+
     def test_cd_only_command_defers(self):
         # `cd /etc` alone has no guarded command — must defer.
         self._defer("cd /etc")
@@ -3383,6 +3403,20 @@ class Issue83HeredocEndToEndTests(unittest.TestCase):
     def test_multiple_heredocs_then_outside_read_ask(self):
         self._decision(
             "cat <<A <<B\naaa\nA\nbbb\nB\ncat /etc/q83-fake", "ask")
+
+
+class OffenderDisplayTests(unittest.TestCase):
+    """Relative offender tokens are shown with their resolved landing path."""
+
+    def test_relative_token_shows_resolved_path(self):
+        self.assertEqual(
+            guard.offender_display("notes.txt", "/outside/notes.txt"),
+            "notes.txt -> /outside/notes.txt")
+
+    def test_absolute_token_unchanged(self):
+        self.assertEqual(
+            guard.offender_display("/outside/notes.txt", "/outside/notes.txt"),
+            "/outside/notes.txt")
 
 
 class BuildReasonTests(unittest.TestCase):

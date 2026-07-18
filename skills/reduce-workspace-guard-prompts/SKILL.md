@@ -49,10 +49,13 @@ one-to-one with these:
    `expand`. The hook can't expand these, so it treats them as outside the root
    and prompts — even when they'd resolve in-root. Reason starts with
    "Runtime-expanded arg(s)".
-2. **A `cd` outside the root, or bare `cd` / `cd -` / `cd $HOME`** — category
-   `untracked`. These lose the hook's working-directory tracking, so every later
-   relative path in the same command prompts. Reason starts with "Relative
-   path(s) after an untracked cd".
+2. **A bare `cd` / `cd -` / `cd $HOME`, a `popd`, or an unrecognized
+   `$(...)` `cd` target** — category `untracked`. These lose the hook's
+   working-directory tracking, so every later relative path in the same
+   command prompts. Reason starts with "Relative path(s) after an untracked
+   cd". (A *literal* `cd` target — even one outside the root — keeps
+   tracking; relative paths after it land in category `outside` instead,
+   with the resolved absolute path named in the reason.)
 3. **A path that genuinely resolves outside the root** (including `../`
    traversal, or temp files written to `/tmp`) — category `outside`. Reason
    starts with "Outside-workspace path(s)".
@@ -72,11 +75,14 @@ Tell the user the cause(s) you found, then apply the habits that prevent them:
   variable assigned a literal earlier in the same command, and a `for f in a b c`
   loop over a literal list with its body on its own line after `do`, are both
   resolved and don't prompt.)
-- **Stay in the project root** — don't `cd` outside it; avoid bare `cd`, `cd -`,
-  and `cd $HOME`. `cd` into a subdirectory with a literal path if you must.
+- **Give `cd` a literal target, and stay in the project root** — avoid bare
+  `cd`, `cd -`, `cd $HOME`, and `popd`; `cd` into a subdirectory with a
+  literal path if you must.
   (`cd "$(git rev-parse --show-toplevel)"` and `cd "$(pwd)"` are fine — the
   hook resolves these two substitutions itself; other `$(...)` targets still
-  drop tracking.)
+  drop tracking.) A literal `cd` outside the root keeps tracking, but every
+  relative path after it is then genuinely outside the workspace and prompts
+  deliberately.
 - **Write temp files inside the root** (`./.tmp/out.txt`), not `/tmp`. Redirects
   to `/dev/null`, `/dev/stdout`, `/dev/stderr`, and `/dev/fd/N` are exempt.
 

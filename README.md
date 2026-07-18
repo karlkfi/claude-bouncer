@@ -581,13 +581,17 @@ flowing, avoid triggering it:
   is resolved too, so `cp x "$(git rev-parse --show-toplevel)/backup/"` is fine.)
   Otherwise write the literal in-root path (e.g. `cat ./config/app.json`, not
   `cat "$HOME/proj/config/app.json"`).
-- **Don't `cd` outside the project root**, and avoid bare `cd`, `cd -`, and
-  `cd $HOME` — they lose the hook's working-directory tracking, so every later
-  relative path in the same command prompts. Stay in the root, or `cd` into a
-  subdirectory of it with a literal path.
+- **Give `cd` a literal target** — bare `cd`, `cd -`, `cd $HOME`/`cd $VAR`,
+  `popd`, and any unrecognized `$(...)` target lose the hook's
+  working-directory tracking, so every later relative path in the same
+  command prompts as unresolvable.
   (`cd "$(git rev-parse --show-toplevel)"` and `cd "$(pwd)"` are fine — the
-  hook resolves these two substitutions itself and tracking survives; any
-  other `$(...)` target still drops it.)
+  hook resolves these two substitutions itself and tracking survives.)
+  A literal `cd` keeps tracking even when it leaves the root: later relative
+  paths then resolve against the new directory and prompt as
+  outside-workspace, naming the absolute path they land on — deliberate
+  prompts, not lost tracking. Stay inside the root unless you mean to work
+  outside it.
 - **Write temp files inside the project root, not `/tmp`.** Host-wide temp
   (`/tmp`, `/var/tmp`, `$TMPDIR`) is **denied** by default — not just prompted —
   because it's shared across sessions and worktrees and lives outside the root.

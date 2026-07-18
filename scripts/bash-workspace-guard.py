@@ -1731,6 +1731,19 @@ def build_sibling_hint(siblings, override=None):
     return lead + body + tail
 
 
+def offender_display(tok, rp):
+    """Display form of an offending file token for the decision reason.
+
+    A relative token is suffixed with the absolute path it resolved to
+    (``notes.txt -> /outside/dir/notes.txt``) so a prompt issued after an
+    in-chain ``cd`` names where the path actually lands (issue 85). An
+    absolute token already says so and is shown as-is.
+    """
+    if os.path.isabs(tok) or rp is None:
+        return tok
+    return '%s -> %s' % (tok, rp)
+
+
 def build_reason(offenders, scratch_hint='', override=None):
     """Build the permissionDecisionReason for a blocked command.
 
@@ -1790,8 +1803,9 @@ def build_reason(offenders, scratch_hint='', override=None):
         hints.append(
             "Relative path(s) after an untracked cd: "
             + ", ".join(sorted(set(buckets['untracked'])))
-            + ". Fix: avoid cd outside the root and bare cd / cd - / cd $HOME; "
-            "pass an in-root path or use the Read/Grep tools.")
+            + ". Fix: give cd a literal target — bare cd, cd -, cd $HOME, and "
+            "unrecognized $(...) targets drop tracking; pass an absolute path "
+            "or use the Read/Grep tools.")
     return " ".join(hints)
 
 
@@ -2118,7 +2132,7 @@ def analyze_command(cmd, ctx, base_cwd, depth=0):
             # (Q8/Q17) can't be bypassed by pointing a link inside the allowed
             # scratch dir.
             if rp in staged_outside_paths:
-                return (cand, 'outside', None)
+                return (offender_display(cand, rp), 'outside', None)
             # Everything past resolution — the session-tmp allow, read-prefix
             # and sibling-session exemptions, sibling-checkout / host-temp /
             # outside tiers — is the shared core (classify_outside), so a `cat`
@@ -2127,7 +2141,7 @@ def analyze_command(cmd, ctx, base_cwd, depth=0):
             # scratch dir can't launder an outside target.
             res = classify_outside(rp, ctx, is_read)
             if res is not None:
-                return (cand, res[0], res[1])
+                return (offender_display(cand, rp), res[0], res[1])
         return None
 
     def stage_ln(target, link, group_cwd, group_cwd_unknown):
