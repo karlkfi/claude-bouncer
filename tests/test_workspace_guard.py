@@ -1887,6 +1887,80 @@ class HookEndToEndTests(unittest.TestCase):
         self.assertIsNone(guard.classify_dd(["cat", "if=foo"]))
         self.assertIsNone(guard.classify_dd([]))
 
+    # --- classify_mktemp helper (Q26) ---------------------------------------
+    # The default-location cases resolve to `default_temp_dir()`; asserting that
+    # value directly keeps the tests independent of the developer's $TMPDIR.
+
+    def test_classify_mktemp_not_mktemp(self):
+        self.assertIsNone(guard.classify_mktemp(["cat", "-p", "/tmp"]))
+        self.assertIsNone(guard.classify_mktemp([]))
+
+    def test_classify_mktemp_bare_is_default_location(self):
+        self.assertEqual(guard.classify_mktemp(["mktemp"]),
+                         [guard.default_temp_dir()])
+
+    def test_classify_mktemp_directory_flag_still_default(self):
+        self.assertEqual(guard.classify_mktemp(["mktemp", "-d"]),
+                         [guard.default_temp_dir()])
+
+    def test_classify_mktemp_bare_name_template_is_default(self):
+        self.assertEqual(guard.classify_mktemp(["mktemp", "foo.XXXXXX"]),
+                         [guard.default_temp_dir()])
+
+    def test_classify_mktemp_slashed_template_names_its_dir(self):
+        self.assertEqual(guard.classify_mktemp(["mktemp", "/tmp/foo.XXXXXX"]),
+                         ["/tmp/foo.XXXXXX"])
+
+    def test_classify_mktemp_workspace_template(self):
+        self.assertEqual(guard.classify_mktemp(["mktemp", "./foo.XXXXXX"]),
+                         ["./foo.XXXXXX"])
+
+    def test_classify_mktemp_dash_p_dir(self):
+        self.assertEqual(
+            guard.classify_mktemp(["mktemp", "-p", "/tmp", "foo.XXXXXX"]),
+            ["/tmp"])
+
+    def test_classify_mktemp_dash_p_glued_dir(self):
+        self.assertEqual(guard.classify_mktemp(["mktemp", "-p/tmp", "foo.XX"]),
+                         ["/tmp"])
+
+    def test_classify_mktemp_tmpdir_inline(self):
+        self.assertEqual(
+            guard.classify_mktemp(["mktemp", "--tmpdir=/tmp", "foo.XX"]),
+            ["/tmp"])
+
+    def test_classify_mktemp_tmpdir_bare_is_default(self):
+        # GNU `--tmpdir` takes an optional arg only when glued with `=`; bare it
+        # uses the default location and the next token stays a template.
+        self.assertEqual(guard.classify_mktemp(["mktemp", "--tmpdir", "foo.XX"]),
+                         [guard.default_temp_dir()])
+
+    def test_classify_mktemp_dash_t_is_default(self):
+        # -t: GNU (no arg) and BSD (`-t prefix`) both land in default host temp.
+        self.assertEqual(guard.classify_mktemp(["mktemp", "-t", "prefix"]),
+                         [guard.default_temp_dir()])
+
+    def test_classify_mktemp_workspace_target_dir(self):
+        self.assertEqual(
+            guard.classify_mktemp(["mktemp", "-p", "./scratch", "foo.XX"]),
+            ["./scratch"])
+
+    def test_classify_mktemp_mixed_templates(self):
+        # A slashed template names its own dir; a bare-name one adds the default.
+        self.assertEqual(
+            guard.classify_mktemp(["mktemp", "/tmp/a.XXX", "b.XXX"]),
+            ["/tmp/a.XXX", guard.default_temp_dir()])
+
+    def test_classify_mktemp_version_is_informational(self):
+        self.assertIsNone(guard.classify_mktemp(["mktemp", "--version"]))
+        self.assertIsNone(guard.classify_mktemp(["mktemp", "-V"]))
+
+    def test_classify_mktemp_end_of_options(self):
+        # After `--`, a slashed token is a template even if it looks flag-ish.
+        self.assertEqual(
+            guard.classify_mktemp(["mktemp", "--", "/tmp/x.XXX"]),
+            ["/tmp/x.XXX"])
+
     # --- inline env-var prefix (Q6) -----------------------------------------
 
     def test_env_prefix_outside_ask(self):
@@ -2474,12 +2548,20 @@ class HookEndToEndTests(unittest.TestCase):
         # shlex raises -> hook defers silently.
         self._defer('cat "unclosed')
 
-    def test_only_redirect_no_guarded_command_defers(self):
-        # `ls > /tmp/out` is not a guarded command, so the hook defers
-        # even though the redirect target is outside-workspace. The redirect
-        # collector only consults `outside` once at least one guarded simple
-        # command is present.
-        self._defer("ls > /etc/out.txt")
+    def test_unguarded_command_redirect_outside_ask(self):
+        # A redirect is a shell-level write the hook resolves regardless of the
+        # command word, so `ls > /etc/out.txt` — an unguarded command — is
+        # honored on its redirect target and asks for the outside path (Q26).
+        out = self._decision("ls > /etc/out.txt", "ask")
+        self.assertIn(
+            "/etc/out.txt",
+            out["hookSpecificOutput"]["permissionDecisionReason"],
+        )
+
+    def test_unguarded_command_positional_outside_still_defers(self):
+        # Only redirect *targets* are checked for unguarded commands, not their
+        # positionals: `ls /etc` has no SPEC row and no redirect, so it defers.
+        self._defer("ls /etc")
 
 
 class SplitOperatorRunsTests(unittest.TestCase):
@@ -3199,8 +3281,60 @@ class HostTempDenyTests(unittest.TestCase):
         out = self._run("ls /tmp/whatever")
         self.assertIsNone(out, f"expected defer, got {out!r}")
 
-    def test_bare_redirect_from_unguarded_to_tmp_defers(self):
-        out = self._run("echo hi > /tmp/whatever")
+    def test_bare_redirect_from_unguarded_to_tmp_deny(self):
+        # Q26: a redirect target is a shell-level write the hook resolves even
+        # when the command word is unguarded, so `echo hi > /tmp/x` now denies
+        # (host temp) instead of deferring.
+        out = self._expect("echo hi > /tmp/whatever", "deny")
+        self.assertIn("/tmp/whatever",
+                      out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_printf_redirect_from_unguarded_to_tmp_deny(self):
+        self._expect("printf hi > /tmp/q26-hosttemp-log", "deny")
+
+    def test_cd_tmp_then_unguarded_redirect_deny(self):
+        # cd into host temp + an unguarded command's relative redirect: the
+        # target resolves to /tmp/out.txt via cwd tracking (Q26).
+        out = self._expect("cd /tmp && echo x > out.txt", "deny")
+        self.assertIn("out.txt",
+                      out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    # --- mktemp (Q26) -------------------------------------------------------
+    # mktemp's default location is host temp, so a bare/`-d`/`-t`/`-p /tmp`
+    # invocation denies; an explicit in-workspace target allows.
+
+    def test_mktemp_bare_default_deny(self):
+        # Clear $TMPDIR so the default resolves to /tmp deterministically.
+        out = self._expect("mktemp", "deny", env_extra={"TMPDIR": None})
+        self.assertIn("/tmp",
+                      out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_mktemp_directory_flag_default_deny(self):
+        self._expect("mktemp -d", "deny", env_extra={"TMPDIR": None})
+
+    def test_mktemp_dash_t_prefix_deny(self):
+        # -t resolves to the default host-temp location on both GNU and BSD.
+        self._expect("mktemp -t q26-prefix", "deny", env_extra={"TMPDIR": None})
+
+    def test_mktemp_dash_p_tmp_deny(self):
+        self._expect("mktemp -p /tmp q26.XXXXXX", "deny")
+
+    def test_mktemp_tmpdir_inline_tmp_deny(self):
+        self._expect("mktemp --tmpdir=/tmp q26.XXXXXX", "deny")
+
+    def test_mktemp_slashed_template_under_tmp_deny(self):
+        self._expect("mktemp /tmp/q26.XXXXXX", "deny")
+
+    def test_mktemp_workspace_target_dir_allow(self):
+        # -p into a repo-local dir is the steered-to pattern -> allow.
+        self._expect("mktemp -p ./scratch q26.XXXXXX", "allow")
+
+    def test_mktemp_workspace_slashed_template_allow(self):
+        self._expect("mktemp ./q26.XXXXXX", "allow")
+
+    def test_mktemp_version_defers(self):
+        # Informational invocation creates nothing -> defer to normal perms.
+        out = self._run("mktemp --version")
         self.assertIsNone(out, f"expected defer, got {out!r}")
 
 

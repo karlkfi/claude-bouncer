@@ -55,10 +55,12 @@ Guarded commands: `grep` (and `egrep`, `fgrep`), `rg`, `sed`, `awk` (and
 `gawk`, `mawk`), `jq`, `yq`, `cat`, `head`, `tail`, `sort`, `wc`, `diff`,
 `file`, `hexdump`, plus the cat-shape readers `less`, `more`, `tac`, `rev`,
 `nl`, `uniq`, `xxd`, `od`, `strings`, `cmp`, and `zcat`/`gzcat`/`bzcat`/`xzcat`.
-On the write side: `cp`, `mv`, `tee`, `rm`, `dd`. These are the file-reading
-and file-writing commands Claude reaches for most often; tools like `ls`,
-`find`, and `xargs` aren't covered yet (see
-[`docs/STATUS.md`](docs/STATUS.md)).
+On the write side: `cp`, `mv`, `tee`, `rm`, `dd`, and `mktemp` (whose default
+location is host temp — see below). These are the file-reading and file-writing
+commands Claude reaches for most often; tools like `ls`, `find`, and `xargs`
+aren't covered yet (see [`docs/STATUS.md`](docs/STATUS.md)). A **redirect**
+target (`> file`) is checked on *any* command, guarded or not — it's a write the
+shell performs regardless of the command word.
 
 The same outside-workspace check also runs on Claude's **native file tools**, so
 the guard can't be sidestepped by switching from a bash command to the
@@ -136,11 +138,17 @@ different project's scratch still asks entirely.
 | `rm -rf /tmp/foo`                    | **deny** |
 | `dd if=./in of=/tmp/out`             | **deny** |
 | `cd /tmp && cat in.txt > evil`       | **deny** |
+| `echo secret > /tmp/out` (unguarded redirect) | **deny** |
+| `cd /tmp && echo x > out.txt`        | **deny** |
+| `mktemp` · `mktemp -d` · `mktemp -p /tmp x.XXXX` | **deny** |
+| `mktemp /tmp/x.XXXX`                 | **deny** |
 | `cat ./tmp/out` (repo-local scratch) | allow    |
 | `grep '/tmp' data.txt` (`/tmp` is the pattern) | allow |
+| `mktemp -p ./scratch x.XXXX` (repo-local) | allow |
 | `cat /tmpfoo/x` (not under `/tmp`)   | **ask**  |
-| `echo secret > /tmp/out`             | defer    |
-| `ls /etc`                            | defer    |
+| `ls > /etc/out.txt` (unguarded redirect, outside) | **ask** |
+| `ls /etc` (unguarded, no redirect)   | defer    |
+| `mktemp --version` (creates nothing) | defer    |
 
 Note the `jq` row: `.a/.b` is a jq program, not a filesystem path. The hook
 knows the difference because it parses each command against a per-command spec
@@ -150,12 +158,15 @@ program syntax.
 
 The **deny** rows are **host-wide temp** paths — at or under `/tmp`, `/var/tmp`,
 or `$TMPDIR` after symlink resolution. They're classified from the *same*
-resolved file arguments the hook already extracts, so `/tmp` appearing only as
-text (a grep pattern, a commit message, an `echo` string) is never matched. The
-deny is the default and can be softened to `ask` or narrowed with an allowlist —
-see [Configuration](#configuration). It applies only to the commands the hook
-already guards: an unguarded command targeting `/tmp` (e.g. `echo secret > /tmp/out`)
-still defers.
+resolved paths the hook already extracts, so `/tmp` appearing only as text (a
+grep pattern, a commit message, an `echo` string) is never matched. The deny is
+the default and can be softened to `ask` or narrowed with an allowlist — see
+[Configuration](#configuration). Beyond guarded-command file arguments, two more
+shapes reach host temp and are covered: a **redirect** target from *any* command
+(`echo secret > /tmp/out`), and **`mktemp`**, whose default location is host temp
+(a bare `mktemp`, `mktemp -d`, or `mktemp -t`/`-p /tmp` all write there) — an
+explicit in-workspace target (`mktemp -p ./scratch …`) is allowed like any other
+in-root write.
 
 The **ask** rows assume an interactive or `default`-mode session. In full-auto
 `bypassPermissions` mode (`--dangerously-skip-permissions`) those same paths
@@ -355,7 +366,10 @@ After upgrading either way:
    is never parsed as commands or file arguments.
 2. **Split** into simple commands on those operators and collect each redirect
    target (`> file`) into the command group it belongs to, so it's later
-   resolved against that group's cwd (see step 6). The token after `<<`
+   resolved against that group's cwd (see step 6). A redirect target is a write
+   the shell performs regardless of the command word, so it's checked even when
+   the command itself is unguarded — `echo secret > /tmp/out` and `ls >
+   /etc/out.txt` are honored on their targets. The token after `<<`
    (heredoc delimiter) or `<<<` (here-string content) is skipped — it isn't a
    path. An fd number written before a redirect (`2>file`) and an
    fd-duplication or close (`2>&1`, `2>&-`) are recognised so the digit and the
@@ -399,6 +413,11 @@ After upgrading either way:
    program/pattern to skip. `dd` is handled separately because its operands are
    all `KEY=VALUE` pairs — `if=PATH` and `of=PATH` are the file operands; the
    rest (`bs=`, `count=`, `conv=`, `iflag=`, `oflag=`, …) are values, not paths.
+   `mktemp` is handled separately too, because its *default* location is host
+   temp: a bare `mktemp`, `mktemp -d`, or `mktemp -t`/bare `--tmpdir` resolves to
+   `$TMPDIR`/`/tmp`, while `-p DIR`/`--tmpdir=DIR` and a slashed template
+   (`mktemp /tmp/x.XXXX`, `./x.XXXX`) name their own location. The GNU/BSD `-t`
+   arity split is sidestepped — `-t` lands in host temp on both.
 6. **Track** cwd shifts across the chain. A `cd`/`pushd` in an earlier group
    re-roots relative file paths — including relative redirect targets — in
    later guarded groups (so `cd /etc && cat passwd` flags `passwd` as
@@ -680,13 +699,15 @@ final output.
   exact values bash iterates.
 - `realpath` only follows symlinks for files that already exist; nonexistent
   paths are normalized lexically (fine for read-style commands).
-- Redirect targets (`> file`) are only inspected when the command chain also
-  contains a guarded command — the hook keys off guarded commands, so a bare
-  redirect from an unguarded command (`echo secret > /tmp/out`) is not checked
-  and defers to normal permissions. When a guarded command *is* present, the
-  redirect target is resolved against the cwd of the command group it appears
-  in, so a relative target tracks `cd`-shifts the same way file arguments do
-  (`cd /tmp && cat in.txt > evil` flags `/tmp/evil`).
+- Redirect targets (`> file`) are inspected on *every* command, guarded or not —
+  a redirect is a write the shell performs regardless of the command word, so
+  `echo secret > /tmp/out` (host temp → deny) and `ls > /etc/out.txt` (outside →
+  ask) are both honored on their targets. The target is resolved against the cwd
+  of the command group it appears in, so a relative target tracks `cd`-shifts the
+  same way file arguments do (`cd /tmp && cat in.txt > evil`, and equally
+  `cd /tmp && echo x > out.txt`, flag `/tmp/…`). A redirect target that is
+  in-workspace, or a *positional* argument of an unguarded command (`ls /etc`),
+  still defers — only the redirect write itself is added to the check.
 - Multi-source `ln a b destdir/` (3+ positionals, symbolic or hard) is not
   staged. The hook recognises the one- and two-positional forms only.
 - The whitelisted `cd` substitutions are matched after quote stripping, so the
@@ -721,12 +742,15 @@ final output.
   (`bypassPermissions`) the hook emits `deny` rather than `ask` for
   outside-workspace paths: equally blocking, but the agent receives the reason
   and can recover instead of stalling. See [Configuration](#configuration).
-- The host-temp `deny` only upgrades paths the hook already extracts as file
-  arguments — the same paths it would otherwise have prompted on. Command shapes
-  the hook doesn't parse as file args still defer: a standalone `cd /tmp`, a
-  temp-creating tool that isn't in the `SPEC` table (`mktemp -p /tmp`), and a
-  redirect from an *unguarded* command (`go test > /tmp/log`). These are out of
-  scope by design; guarding more of them is a tracked follow-up.
+- The host-temp `deny` covers guarded-command file arguments, redirect targets
+  from any command (`go test > /tmp/log`), a `cd` into host temp followed by a
+  relative write, and `mktemp` (its default location is host temp). A few shapes
+  remain out of scope and still defer: an inline `TMPDIR=/tmp cmd` that only
+  redirects a *tool's own* internal temp location (not a path the hook parses);
+  a command buried inside a command substitution (`cd $(mktemp -d)` — the inner
+  `mktemp` isn't tokenized as its own command); and exotic `mktemp` getopt forms
+  such as combined short flags (`-dp DIR`), which degrade toward the host-temp
+  default (`deny`) rather than a precise decision — never a silent allow.
 - The sibling-checkout `deny` classifies *write-context* file arguments — the
   same set the read-prefix exemption treats as writes: redirect targets, `dd`
   operands, and every operand of `cp`/`mv`/`tee`/`rm`. So a `cp` **source** or a

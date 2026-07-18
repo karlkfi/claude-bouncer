@@ -1162,6 +1162,101 @@ def classify_dd(tokens):
     return files
 
 
+def default_temp_dir():
+    """Directory ``mktemp`` (and bash) fall back to when none is given
+    explicitly: ``$TMPDIR`` if set, else ``/tmp``. Both are among
+    ``host_temp_roots()``, so returning a path here lets the normal host-temp
+    check classify it — and correctly *allow* the rare in-workspace ``$TMPDIR``
+    (``classify_outside`` returns in-workspace before it reaches the host-temp
+    tier)."""
+    return os.environ.get('TMPDIR') or '/tmp'
+
+
+def classify_mktemp(tokens):
+    """For a ``mktemp ...`` command, return the list of path tokens it will
+    create (files or directories) so ``check_file`` can classify them, or None
+    when the command isn't ``mktemp`` (or is a pure informational invocation
+    that creates nothing).
+
+    mktemp's whole hazard is that its *default* location is host temp — a bare
+    ``mktemp``, ``mktemp -d``, ``mktemp foo.XXXX`` (no directory component) all
+    write under ``$TMPDIR``/``/tmp``. We surface that default as a concrete path
+    (``default_temp_dir()``) so the same host-temp ``deny`` / repo-local steering
+    fires as for ``cat /tmp/x``, while an explicit in-workspace directory
+    (``-p ./scratch``) or a slashed template (``mktemp ./x.XXXX``) is allowed
+    like any other in-root write.
+
+    Flag handling is explicit (never inferred at runtime) and spans GNU + BSD:
+      * ``-p DIR`` / ``-pDIR`` / ``--tmpdir=DIR``: DIR is the target directory
+        (GNU ``-p`` requires the value; ``--tmpdir`` takes it only glued with
+        ``=`` — a bare ``--tmpdir`` uses the default location per GNU's
+        optional-argument rule, leaving a following token as a template).
+      * ``-t``: GNU (no argument) and BSD (``-t prefix``, one argument) both
+        resolve to the default host-temp location, so its presence alone marks
+        the target host temp regardless of any following token.
+      * ``-V`` / ``--version`` / ``--help``: informational, create nothing ->
+        return None (defer to normal permissions rather than deny an info call).
+      * ``-d``/``--directory``, ``-u``/``--dry-run``, ``-q``/``--quiet``,
+        ``--suffix=S`` and unknown flags take no path argument. ``-u`` still
+        yields a classified path (its intent is a host-temp path even though no
+        file is written) — the secure-by-default direction.
+      * a template with a ``/`` names its own location; a bare-name template (or
+        none at all) uses the default location.
+
+    Exotic getopt forms (combined short flags like ``-dp DIR``, an inline
+    ``TMPDIR=`` env prefix) aren't decoded precisely; they degrade toward the
+    host-temp default, i.e. ``deny`` — never a silent allow. See README
+    Limitations.
+    """
+    if not tokens or os.path.basename(tokens[0]) != 'mktemp':
+        return None
+    tmpdir = None            # explicit directory from -p / --tmpdir=
+    force_default = False    # -t / bare --tmpdir -> default host-temp location
+    templates = []
+    i, n, end_opts = 1, len(tokens), False
+    while i < n:
+        tok = tokens[i]
+        if not end_opts and tok == '--':
+            end_opts = True; i += 1; continue
+        if not end_opts and tok.startswith('-') and tok != '-':
+            key, inline = split_eq(tok)
+            if key in ('-V', '--version', '--help'):
+                return None                        # informational -> defer
+            if tok.startswith('-p') and not tok.startswith('--'):
+                if len(tok) > 2:                   # glued -pDIR
+                    tmpdir = tok[2:]
+                elif i + 1 < n:                    # -p DIR
+                    tmpdir = tokens[i + 1]; i += 1
+                i += 1; continue
+            if key == '--tmpdir':
+                if inline is not None:
+                    tmpdir = inline
+                else:
+                    force_default = True           # bare --tmpdir (optional arg)
+                i += 1; continue
+            if key == '-t':
+                force_default = True
+                i += 1; continue
+            i += 1; continue                       # other flags: no path argument
+        templates.append(tok); i += 1
+
+    targets = []
+    if tmpdir is not None:
+        targets.append(tmpdir)                     # DIR is the target location;
+                                                   # any template lands inside it
+    else:
+        default_needed = force_default or not templates
+        if not force_default:
+            for t in templates:
+                if '/' in t:
+                    targets.append(t)              # slashed template names its dir
+                else:
+                    default_needed = True          # bare name -> default location
+        if default_needed:
+            targets.append(default_temp_dir())
+    return targets
+
+
 # Closed whitelist of pure, deterministic command substitutions accepted as a
 # cd/pushd target (issue 59). Keys are the canonical whitespace-normalized
 # token after shlex quote-stripping; values name the resolution strategy
@@ -1806,6 +1901,17 @@ def handle_bash(data):
                 if o is not None:
                     outside.append(o)
             continue
+        mk = classify_mktemp(g)
+        if mk is not None:
+            # mktemp creates a file/dir -> write context (is_read default False).
+            # An empty list (e.g. `mktemp -p ./scratch`, all-in-workspace) still
+            # marks the command guarded so a clean invocation emits `allow`.
+            guarded = True
+            for f in mk:
+                o = check_file(f, group_cwd, group_cwd_unknown)
+                if o is not None:
+                    outside.append(o)
+            continue
         fs = files_in_command(g)
         if fs is None: continue
         guarded = True
@@ -1815,8 +1921,16 @@ def handle_bash(data):
             o = check_file(f, group_cwd, group_cwd_unknown, is_read=is_read)
             if o is not None:
                 outside.append(o)
-    if not guarded:
-        return                                    # no guarded command -> defer
+    # Emit only when there's something to say. A real offender (`outside`
+    # non-empty) blocks; a guarded command whose targets are all clean emits an
+    # explicit `allow`; a string with neither — an unguarded command and no
+    # offending redirect — defers so normal permissions apply. `outside` can be
+    # non-empty even when `guarded` is False: a redirect target is a shell-level
+    # write the hook resolves regardless of the command word, so `echo secret >
+    # /tmp/x` (host-temp) and `ls > /outside` are honored here rather than
+    # discarded by an earlier guarded-only gate (Q26).
+    if not outside and not guarded:
+        return
 
     if outside:
         # Two reasons to block with `deny` rather than `ask`:

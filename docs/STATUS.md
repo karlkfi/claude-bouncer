@@ -21,4 +21,3 @@ Specific actionable items in priority order. Pick from the top; skip 🚫 items 
 | ID | Item | Labels | Sz | Trigger to revive |
 |---|---|---|---|---|
 | <a id="Q23"></a>Q23 | Opt-in extra-roots for shared cross-worktree files | `security` | M | **Demand:** a session that legitimately needs cross-worktree shared files (mailbox files, the main checkout) and can't tolerate the prompts. Fix: an opt-in, empty-by-default extra-roots env var. |
-| <a id="Q26"></a>Q26 | Extend host-temp `deny` to currently-unguarded shapes | `security` `parsing` | M | **Event:** a real session leaks host-temp writes through an unguarded shape (`cd /tmp`, `mktemp -p /tmp`, unguarded-command redirects). Needs new `SPEC` rows and standalone-`cd` handling. |
