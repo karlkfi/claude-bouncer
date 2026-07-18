@@ -77,6 +77,89 @@ class SinceTests(unittest.TestCase):
         self.assertEqual(fr.parse_since('2026-06-01').year, 2026)
 
 
+class VersionTupleTests(unittest.TestCase):
+    def test_dotted_release(self):
+        self.assertEqual(fr.version_tuple("1.5.0"), (1, 5, 0))
+
+    def test_prerelease_folds_to_base(self):
+        self.assertEqual(fr.version_tuple("1.5.0-rc1"), (1, 5, 0))
+
+    def test_ordering(self):
+        self.assertLess(fr.version_tuple("1.3.0"), fr.version_tuple("1.5.0"))
+        self.assertLess(fr.version_tuple("1.5.0"), fr.version_tuple("1.5.1"))
+
+    def test_empty_and_nonnumeric(self):
+        self.assertIsNone(fr.version_tuple(""))
+        self.assertIsNone(fr.version_tuple(None))
+        self.assertIsNone(fr.version_tuple("dev"))
+
+
+class StalenessTests(unittest.TestCase):
+    """A synthetic plugins dir standing in for ~/.claude/plugins."""
+
+    def _plugins_dir(self, tmp, installed, available, marketplace="workspace-guard",
+                     plugin="workspace-guard"):
+        root = Path(tmp)
+        (root / "installed_plugins.json").write_text(json.dumps({
+            "version": 2,
+            "plugins": {
+                f"{plugin}@{marketplace}": [
+                    {"scope": "user", "version": installed},
+                ]
+            }}))
+        (root / "known_marketplaces.json").write_text(json.dumps({
+            marketplace: {"installLocation": str(root / "mkt")}}))
+        clone = root / "mkt" / ".claude-plugin"
+        clone.mkdir(parents=True)
+        (clone / "plugin.json").write_text(json.dumps(
+            {"name": plugin, "version": available}))
+        return str(root)
+
+    def test_flags_older_install(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = self._plugins_dir(tmp, installed="1.3.0", available="1.5.0")
+            s = fr.check_staleness(d, "workspace-guard")
+            self.assertEqual(s, {"plugin": "workspace-guard", "installed": "1.3.0",
+                                 "available": "1.5.0", "marketplace": "workspace-guard"})
+
+    def test_current_install_not_flagged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = self._plugins_dir(tmp, installed="1.5.0", available="1.5.0")
+            self.assertIsNone(fr.check_staleness(d, "workspace-guard"))
+
+    def test_newer_install_not_flagged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = self._plugins_dir(tmp, installed="1.6.0", available="1.5.0")
+            self.assertIsNone(fr.check_staleness(d, "workspace-guard"))
+
+    def test_all_plugin_skips_check(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = self._plugins_dir(tmp, installed="1.3.0", available="1.5.0")
+            self.assertIsNone(fr.check_staleness(d, "all"))
+
+    def test_missing_state_degrades_silently(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(fr.check_staleness(tmp, "workspace-guard"))
+
+    def test_falls_back_to_marketplace_manifest_version(self):
+        # plugin.json name mismatches (multi-plugin marketplace); the per-plugin
+        # version in marketplace.json is used instead.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "installed_plugins.json").write_text(json.dumps({
+                "plugins": {"workspace-guard@mp": [{"version": "1.3.0"}]}}))
+            (root / "known_marketplaces.json").write_text(json.dumps({
+                "mp": {"installLocation": str(root / "mkt")}}))
+            clone = root / "mkt" / ".claude-plugin"
+            clone.mkdir(parents=True)
+            (clone / "plugin.json").write_text(json.dumps(
+                {"name": "other-plugin", "version": "9.9.9"}))
+            (clone / "marketplace.json").write_text(json.dumps({
+                "plugins": [{"name": "workspace-guard", "version": "1.5.0"}]}))
+            s = fr.check_staleness(str(root), "workspace-guard")
+            self.assertEqual(s["available"], "1.5.0")
+
+
 class EndToEndTests(unittest.TestCase):
     """Synthetic transcript: one tool_use + one matching hook attachment."""
 

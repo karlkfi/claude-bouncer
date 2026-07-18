@@ -31,7 +31,9 @@ python3 scripts/friction-report.py --json               # machine-readable
 Flags: `--transcripts` (root, default `~/.claude/projects`), `--plugin`
 (`workspace-guard` default, or `all`, or another guard's basename), `--since`
 (`Nd`/`Nh`/`Nm`, a `YYYY-MM-DD` date, or `all`), `--repo` (substring match on
-`cwd`), `--top`, `--raw` (don't collapse volatile path segments), `--json`.
+`cwd`), `--top`, `--raw` (don't collapse volatile path segments), `--json`,
+`--plugins-dir` (Claude Code plugins dir, default `~/.claude/plugins`; used only
+for the stale-install check below).
 
 ## What it reports
 
@@ -44,6 +46,15 @@ Flags: `--transcripts` (root, default `~/.claude/projects`), `--plugin`
   exact tokens.
 - **Top triggering commands** — via the `toolUseID` join, so you see what the
   agent was doing when it got prompted.
+- **Stale-install banner** — when the installed plugin version
+  (`~/.claude/plugins/installed_plugins.json`) is behind the local marketplace
+  clone's `plugin.json`, a line above the rankings reads
+  `installed X, Y available` with the update command. Third-party git
+  marketplaces don't auto-update by default, so friction a newer release already
+  fixes can linger; this instruments that trap. It reads only already-persisted
+  local plugin state (no network) and stays silent when the install is current
+  or the state is unreadable. The `--json` output carries the same signal in a
+  `stale` field (`null` when current).
 
 ## Interpreting the output
 
