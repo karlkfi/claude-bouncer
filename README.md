@@ -622,14 +622,18 @@ The plugin also ships a **`reduce-workspace-guard-prompts`** skill: ask Claude
 grounding itself in your real prompt history via the bundled
 `scripts/friction-report.py` analyzer — and walk through these fixes.
 
-For the "just show me the numbers" case, the **`/friction-report`** slash command
-runs that analyzer directly and prints the ranked report — no diagnosis, no fixes.
-It passes its arguments straight through to the script, so the same flags work:
+For the "just show me the numbers" case, the **`/workspace-guard:friction-report`**
+slash command runs that analyzer directly and prints the ranked report — no
+diagnosis, no fixes. The `workspace-guard:` prefix disambiguates it from the
+identically-named commands shipped by the companion guards (prod-guard,
+foreground-guard); if none of those are installed, the bare `/friction-report`
+also resolves. It passes its arguments straight through to the script, so the
+same flags work:
 
 ```
-/friction-report                                  # last 7 days, this project
-/friction-report --since 24h --repo gateway
-/friction-report --raw --top 20
+/workspace-guard:friction-report                  # last 7 days, this project
+/workspace-guard:friction-report --since 24h --repo gateway
+/workspace-guard:friction-report --raw --top 20
 ```
 
 ## Configuration
