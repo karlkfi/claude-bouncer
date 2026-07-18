@@ -15,7 +15,6 @@ Specific actionable items in priority order. Pick from the top; skip 🚫 items 
 
 | ID | Item | Labels | St | Sz | Notes |
 |---|---|---|---|---|---|
-| <a id="Q33"></a>Q33 | Guard commands inside quoted `"$(…)"` / backtick substitution bodies | `security` `parsing` | 🔲 | L | Quoted `"$(mktemp)"`/backtick bodies aren't parsed, so a host-temp write created inside them isn't flagged (unquoted `$(…)` already is). Low severity. Needs a plan doc. From Q26. |
 
 ## Deferred
 

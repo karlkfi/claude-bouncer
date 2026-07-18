@@ -812,6 +812,162 @@ def glue_dollar_paren(tokens):
     return out
 
 
+# Maximum command-substitution nesting the body scanner descends. Recursion
+# already terminates (each body is a proper substring, strictly shorter), so
+# this is only a backstop against pathological input; beyond it, deeper bodies
+# aren't analyzed — a possible missed offender, never a fabricated one or a
+# silent allow.
+MAX_SUBST_DEPTH = 25
+
+
+def _skip_balanced_parens(text, start):
+    """Step over a run of balanced parens beginning at ``start`` (a ``(``).
+
+    Returns the index just past the matching close, or end-of-string on
+    imbalance. Used to skip ``$((…))`` arithmetic expansion, which contains no
+    command to guard.
+    """
+    i, n, depth = start, len(text), 0
+    while i < n:
+        c = text[i]
+        if c == '(':
+            depth += 1
+        elif c == ')':
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return n
+
+
+def _scan_dollar_paren(text, start):
+    """Scan a ``$(`` body from ``start`` (just past ``$(``) to its matching ``)``.
+
+    Returns ``(body, end)`` — the inner substring and the index just past the
+    close — or ``(None, start)`` if no balanced terminator is found. Paren
+    nesting, single/double quotes, and backslash escapes inside the body are
+    tracked so a ``)`` inside a quoted string or a nested ``(…)``/``$(…)`` does
+    not close early. Quote tracking is flat (it does not recurse into nested
+    substitutions); on the exotic input where that mis-locates the close, the
+    body handed to shlex is unbalanced and analysis defers for it — fail-safe.
+    """
+    i, n, depth = start, len(text), 0
+    in_single = in_double = False
+    while i < n:
+        c = text[i]
+        if in_single:
+            if c == "'":
+                in_single = False
+            i += 1
+            continue
+        if in_double:
+            if c == '\\':
+                i += 2
+                continue
+            if c == '"':
+                in_double = False
+            i += 1
+            continue
+        if c == '\\':
+            i += 2
+            continue
+        if c == "'":
+            in_single = True
+            i += 1
+            continue
+        if c == '"':
+            in_double = True
+            i += 1
+            continue
+        if c == '(':
+            depth += 1
+            i += 1
+            continue
+        if c == ')':
+            if depth == 0:
+                return (text[start:i], i + 1)
+            depth -= 1
+            i += 1
+            continue
+        i += 1
+    return (None, start)
+
+
+def _scan_backticks(text, start):
+    """Scan a backtick body from ``start`` (just past the opening `` ` ``) to the
+    next unescaped `` ` ``. Returns ``(body, end)`` or ``(None, start)`` when the
+    body is unterminated."""
+    i, n = start, len(text)
+    while i < n:
+        c = text[i]
+        if c == '\\':
+            i += 2
+            continue
+        if c == '`':
+            return (text[start:i], i + 1)
+        i += 1
+    return (None, start)
+
+
+def command_substitutions(text):
+    """Extract the command-substitution bodies bash would evaluate in ``text``.
+
+    Returns the inner command string of each ``$(…)`` and backtick ``` `…` ```
+    substitution appearing in an UNQUOTED or DOUBLE-QUOTED context — the two
+    contexts where bash performs command substitution. A substitution inside
+    single quotes is a literal and is skipped, matching bash; ``$((…))``
+    arithmetic (no command inside) is skipped too.
+
+    Scans the RAW command string, never the post-shlex tokens: shlex strips the
+    quotes, losing the single-vs-double distinction that decides whether a
+    ``$(…)`` even substitutes. Only the OUTERMOST substitutions are returned —
+    a nested ``$(… $(…) …)`` is found by re-scanning the returned body (the
+    caller recurses). A substitution with no balanced terminator before
+    end-of-input contributes nothing (fail-safe: a possible missed offender,
+    never a fabricated one).
+    """
+    bodies = []
+    i, n = 0, len(text)
+    in_single = in_double = False
+    while i < n:
+        c = text[i]
+        if in_single:
+            if c == "'":
+                in_single = False
+            i += 1
+            continue
+        if c == '\\':                              # escapes next char (not in '')
+            i += 2
+            continue
+        if c == "'" and not in_double:
+            in_single = True
+            i += 1
+            continue
+        if c == '"':
+            in_double = not in_double
+            i += 1
+            continue
+        if c == '$' and i + 1 < n and text[i + 1] == '(':
+            if i + 2 < n and text[i + 2] == '(':
+                i = _skip_balanced_parens(text, i + 1)   # $((…)) arithmetic
+                continue
+            body, end = _scan_dollar_paren(text, i + 2)
+            if body is None:
+                break                              # unterminated -> stop
+            bodies.append(body)
+            i = end
+            continue
+        if c == '`':
+            body, end = _scan_backticks(text, i + 1)
+            if body is None:
+                break                              # unterminated -> stop
+            bodies.append(body)
+            i = end
+            continue
+        i += 1
+    return bodies
+
+
 def literal_assignment_value(raw):
     """Return the literal an assignment RHS resolves to, or None if bash
     might expand or word-split it into something the hook can't predict.
@@ -1659,12 +1815,23 @@ def resolve_native_path(raw, cwd):
     return os.path.realpath(p if os.path.isabs(p) else os.path.join(cwd, p))
 
 
-def handle_bash(data):
-    cmd = (data.get('tool_input') or {}).get('command', '') or ''
-    ctx = build_context(data)
-    proj, cwd = ctx.proj, ctx.cwd
+def analyze_command(cmd, ctx, base_cwd, depth=0):
+    """Analyze one command string against the workspace boundary.
+
+    Returns ``(offenders, guarded)``: the list of ``check_file`` offender tuples
+    and whether any guarded command was seen (so the caller can emit ``allow``
+    for a guarded-but-clean command). ``base_cwd`` is the cwd file arguments
+    resolve against (the tool's cwd at top level).
+
+    Command-substitution bodies (``"$(…)"`` and backtick ``` `…` ```, plus the
+    bare ``$(…)`` the group loop also splits out) are recursively analyzed and
+    their offenders folded in — but their ``guarded`` flag is DISCARDED, so a
+    clean guarded command inside a substitution never flips a deferring outer
+    command into an ``allow``. Substitution analysis is strictly friction-adding.
+    """
+    proj, cwd = ctx.proj, base_cwd
     if not cmd.strip():
-        return
+        return [], False
 
     try:
         # `\n` is a punctuation char so a newline command boundary surfaces as
@@ -1683,7 +1850,7 @@ def handle_bash(data):
         tokens = glue_dollar_paren(
             strip_heredoc_bodies(split_operator_runs(list(lex))))
     except ValueError:
-        return                                    # unbalanced quotes -> defer
+        return [], False                          # unbalanced quotes -> defer
 
     # Each group is a `(cmd_tokens, redir_targets, persists)` triple: a
     # redirect target is collected into the group it textually appears in, so
@@ -1964,6 +2131,28 @@ def handle_bash(data):
             o = check_file(f, group_cwd, group_cwd_unknown, is_read=is_read)
             if o is not None:
                 outside.append(o)
+
+    # Recurse into command-substitution bodies — `"$(mktemp)"`, backtick
+    # `` `cat /outside` ``, and the bare `$(…)` the group loop also split out
+    # (harmless double-analysis, deduped by the reason builder). A guarded
+    # command hidden in a quoted/backtick substitution isn't tokenized as its
+    # own command by shlex (the metacharacters are inside quotes), so its file
+    # ops would otherwise be invisible. Each body resolves against the same
+    # `base_cwd`; only its OFFENDERS bubble up — its `guarded` is dropped, so a
+    # clean substitution never produces an `allow`. (Q33)
+    if depth < MAX_SUBST_DEPTH:
+        for body in command_substitutions(cmd):
+            sub_off, _ = analyze_command(body, ctx, base_cwd, depth + 1)
+            outside.extend(sub_off)
+    return outside, guarded
+
+
+def handle_bash(data):
+    cmd = (data.get('tool_input') or {}).get('command', '') or ''
+    ctx = build_context(data)
+    if not cmd.strip():
+        return
+    outside, guarded = analyze_command(cmd, ctx, ctx.cwd)
     # Emit only when there's something to say. A real offender (`outside`
     # non-empty) blocks; a guarded command whose targets are all clean emits an
     # explicit `allow`; a string with neither — an unguarded command and no

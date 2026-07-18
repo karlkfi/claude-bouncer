@@ -1664,7 +1664,16 @@ class HookEndToEndTests(unittest.TestCase):
             'cd "$(git rev-parse --show-toplevel)/sub" && cat in.txt', "ask")
 
     def test_cd_non_whitelisted_subst_stays_untracked_ask(self):
-        self._decision('cd "$(mktemp -d)" && cat in.txt', "ask")
+        # A non-whitelisted cd substitution whose body is an UNGUARDED command
+        # (readlink) leaves the cwd untracked, so the relative read asks. Body
+        # has no guarded command, so substitution recursion adds nothing.
+        self._decision('cd "$(readlink foo)" && cat in.txt', "ask")
+
+    def test_cd_mktemp_subst_inner_host_temp_deny(self):
+        # The inner `mktemp -d` genuinely creates a host-temp dir; substitution
+        # recursion now parses it and denies (host-temp steering), on top of the
+        # untracked-cd `ask` for the relative read. (Q33)
+        self._decision('cd "$(mktemp -d)" && cat in.txt', "deny")
 
     def test_cd_git_toplevel_subst_git_dir_env_stays_untracked_ask(self):
         # GIT_DIR in the environment can change git's answer, so the
@@ -2914,6 +2923,146 @@ class GlueDollarParenTests(unittest.TestCase):
         self.assertEqual(
             guard.glue_dollar_paren(["(", "cat", "f", ")"]),
             ["(", "cat", "f", ")"])
+
+
+class CommandSubstitutionsTests(unittest.TestCase):
+    """`command_substitutions` extracts the substitution bodies bash evaluates —
+    `$(…)` and backtick — in unquoted/double-quoted context, skipping
+    single-quoted literals and `$((…))` arithmetic (Q33)."""
+
+    def test_double_quoted_dollar_paren(self):
+        self.assertEqual(
+            guard.command_substitutions('echo "$(mktemp)"'), ["mktemp"])
+
+    def test_bare_dollar_paren(self):
+        self.assertEqual(
+            guard.command_substitutions("cat $(mktemp)"), ["mktemp"])
+
+    def test_backtick(self):
+        self.assertEqual(
+            guard.command_substitutions("x=`mktemp -d`"), ["mktemp -d"])
+
+    def test_single_quoted_skipped(self):
+        # bash performs no substitution inside single quotes.
+        self.assertEqual(
+            guard.command_substitutions("echo '$(mktemp)'"), [])
+
+    def test_backtick_in_single_quotes_skipped(self):
+        self.assertEqual(
+            guard.command_substitutions("echo '`mktemp`'"), [])
+
+    def test_arithmetic_skipped(self):
+        # `$((…))` is arithmetic expansion, not a command.
+        self.assertEqual(
+            guard.command_substitutions('echo "$((1 + 2))"'), [])
+
+    def test_nested_returns_outermost_only(self):
+        # The caller recurses into the returned body to find the inner one.
+        self.assertEqual(
+            guard.command_substitutions('echo "$(echo "$(cat f)")"'),
+            ['echo "$(cat f)"'])
+
+    def test_inner_double_quotes_in_body(self):
+        self.assertEqual(
+            guard.command_substitutions('echo "$(grep "a b" f)"'),
+            ['grep "a b" f'])
+
+    def test_unterminated_dollar_paren_yields_nothing(self):
+        self.assertEqual(
+            guard.command_substitutions('echo "$(cat f'), [])
+
+    def test_unterminated_backtick_yields_nothing(self):
+        self.assertEqual(guard.command_substitutions("echo `cat f"), [])
+
+    def test_escaped_dollar_paren_not_a_substitution(self):
+        # A backslash-escaped `$` is a literal, not a substitution.
+        self.assertEqual(
+            guard.command_substitutions(r'echo \$(mktemp)'), [])
+
+    def test_two_substitutions(self):
+        self.assertEqual(
+            guard.command_substitutions('echo "$(a)" `b`'), ["a", "b"])
+
+    def test_no_substitution(self):
+        self.assertEqual(guard.command_substitutions("cat foo bar"), [])
+
+
+class QuotedSubstBodyEndToEndTests(unittest.TestCase):
+    """A guarded command hidden in a quoted `"$(…)"` or backtick substitution is
+    now parsed and its file ops flagged — closing the gap that the bare `$(…)`
+    subshell split already covered (Q33). Substitution analysis only ever ADDS
+    offenders: a clean body never turns a deferring outer command into `allow`,
+    and a single-quoted literal stays a defer."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = os.path.realpath(self._tmp.name)
+        with open(os.path.join(self.workspace, "in.txt"), "w") as f:
+            f.write("hello\n")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _decision(self, cmd, expected):
+        out = run_hook(cmd, self.workspace, project_dir=self.workspace)
+        self.assertIsNotNone(out, f"expected a decision, got defer for: {cmd!r}")
+        got = out["hookSpecificOutput"]["permissionDecision"]
+        self.assertEqual(
+            got, expected,
+            f"expected {expected!r} for {cmd!r}; got {got!r} "
+            f"(reason: {out['hookSpecificOutput'].get('permissionDecisionReason')!r})",
+        )
+        return out
+
+    def _defer(self, cmd):
+        out = run_hook(cmd, self.workspace, project_dir=self.workspace)
+        self.assertIsNone(out, f"expected defer for {cmd!r}, got {out!r}")
+
+    def test_quoted_mktemp_in_unguarded_echo_denies(self):
+        # echo is unguarded, so pre-fix the inner mktemp host-temp write was
+        # invisible and the whole string deferred.
+        self._decision('echo "$(mktemp -p /tmp q33.XXXX)"', "deny")
+
+    def test_quoted_mktemp_assignment_denies(self):
+        self._decision('x="$(mktemp)"', "deny")
+
+    def test_backtick_mktemp_assignment_denies(self):
+        self._decision("x=`mktemp`", "deny")
+
+    def test_backtick_outside_read_asks(self):
+        out = self._decision("echo `cat /etc/q33-fake-target`", "ask")
+        self.assertIn("/etc/q33-fake-target",
+                      out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_quoted_grep_outside_read_names_inner_path(self):
+        out = self._decision('cat "$(grep foo /etc/q33-fake-target)"', "ask")
+        self.assertIn("/etc/q33-fake-target",
+                      out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_redirect_inside_subst_body_flagged(self):
+        out = self._decision(
+            'echo "$(cat in.txt > /etc/q33-fake-target)"', "ask")
+        self.assertIn("/etc/q33-fake-target",
+                      out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_nested_substitution_outside_read_asks(self):
+        out = self._decision(
+            'echo "$(echo "$(cat /etc/q33-fake-target)")"', "ask")
+        self.assertIn("/etc/q33-fake-target",
+                      out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_single_quoted_literal_defers(self):
+        # bash does NOT substitute inside single quotes — the body is a literal
+        # string, so no command runs and the hook must not fabricate an offender.
+        self._defer("echo '$(mktemp -p /tmp q33.XXXX)'")
+
+    def test_clean_in_workspace_subst_does_not_allow(self):
+        # A clean guarded command inside a substitution must NOT flip the
+        # deferring outer echo into an `allow` (substitution guarded is dropped).
+        self._defer('echo "$(cat in.txt)"')
+
+    def test_arithmetic_expansion_defers(self):
+        self._defer('echo "$((1 + 2))"')
 
 
 class ExpansionRegexTests(unittest.TestCase):

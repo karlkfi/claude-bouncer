@@ -119,7 +119,7 @@ different project's scratch still asks entirely.
 | `cat ~user/notes.md`                 | **ask**  |
 | `cat $HOME/.ssh/id_rsa`              | **ask**  |
 | `cd /etc && cat passwd`              | **ask**  |
-| `cd "$(mktemp -d)" && cat x.txt`     | **ask**  |
+| `echo "$(cat /etc/passwd)"` (quoted subst read) | **ask** |
 | `LC_ALL=C cat /etc/passwd`           | **ask**  |
 | `until grep -q x /etc/passwd; do :; done` | **ask** |
 | `if cat /etc/passwd; then :; fi`     | **ask**  |
@@ -142,6 +142,8 @@ different project's scratch still asks entirely.
 | `cd /tmp && echo x > out.txt`        | **deny** |
 | `mktemp` · `mktemp -d` · `mktemp -p /tmp x.XXXX` | **deny** |
 | `mktemp /tmp/x.XXXX`                 | **deny** |
+| `echo "$(mktemp -p /tmp x.XXXX)"` (quoted subst write) | **deny** |
+| `cd "$(mktemp -d)" && cat x.txt`     | **deny** |
 | `cat ./tmp/out` (repo-local scratch) | allow    |
 | `grep '/tmp' data.txt` (`/tmp` is the pattern) | allow |
 | `mktemp -p ./scratch x.XXXX` (repo-local) | allow |
@@ -151,6 +153,7 @@ different project's scratch still asks entirely.
 | `ls > /etc/out.txt` (unguarded redirect, outside) | **ask** |
 | `ls /etc` (unguarded, no redirect)   | defer    |
 | `mktemp --version` (creates nothing) | defer    |
+| `echo '$(mktemp -d)'` (single-quoted, no subst) | defer |
 
 Note the `jq` row: `.a/.b` is a jq program, not a filesystem path. The hook
 knows the difference because it parses each command against a per-command spec
@@ -515,6 +518,17 @@ After upgrading either way:
    outside `ask`. The same rule is the sole active check on the `Edit`, `Write`,
    `MultiEdit`, and `NotebookEdit` tools. `WORKSPACE_GUARD_OVERRIDE=<reason>`
    downgrades it to `ask`; see [Configuration](#configuration).
+13. **Recurse into command substitutions.** A guarded command hidden in a
+   `"$(…)"` or backtick `` `…` `` substitution — `echo "$(mktemp -p /tmp x)"`,
+   `` x=`grep secret /etc/passwd` `` — isn't tokenized as its own command by the
+   step-1 lexer (the metacharacters are inside quotes), so its file ops would be
+   invisible. The hook scans the *raw* command for substitution bodies in
+   unquoted or double-quoted context (single-quoted `'$(…)'` is a bash literal
+   and is skipped; `$((…))` arithmetic has no command) and runs each body back
+   through steps 1–13. Only *offenders* bubble up: a clean guarded command inside
+   a substitution never turns a deferring outer command into an `allow` — this
+   step can only add friction. (The bare unquoted `$(…)` form was already caught,
+   because its `(`/`)` split the inner command into its own group.)
 
 ## Agent guidance: avoiding prompts
 
@@ -750,17 +764,25 @@ final output.
   and can recover instead of stalling. See [Configuration](#configuration).
 - The host-temp `deny` covers guarded-command file arguments, redirect targets
   from any command (`go test > /tmp/log`), a `cd` into host temp followed by a
-  relative write, and `mktemp` (its default location is host temp). A literal
-  inline `TMPDIR=<dir>` prefix is honored for `mktemp`'s default location
+  relative write, `mktemp` (its default location is host temp), and — as of the
+  substitution recursion (step 13) — guarded commands inside `"$(…)"`/backtick
+  bodies (`echo "$(mktemp -d)"`, `` x=`mktemp` ``). A literal inline
+  `TMPDIR=<dir>` prefix is honored for `mktemp`'s default location
   (`TMPDIR=./scratch mktemp` → allow; a `$`-bearing value can't be trusted and
   degrades to the host-temp default), and combined `mktemp` short flags
-  (`-dp DIR`) are decoded precisely (`-d -p DIR`). A few shapes remain out of
-  scope: an inline `TMPDIR=/tmp cmd` that only redirects a *non-`mktemp` tool's*
-  own internal temp location (not a path the hook parses) still defers; a command
-  buried inside a *quoted* command substitution or backticks (`cd "$(mktemp -d)"`,
-  `` cd `mktemp -d` ``) isn't tokenized as its own command, so a host-temp write
-  created there isn't flagged — the *unquoted* `cd $(mktemp -d)` **is** split into
-  its own subshell segment and caught.
+  (`-dp DIR`) are decoded precisely (`-d -p DIR`). One shape remains out of
+  scope and still defers: an inline `TMPDIR=/tmp cmd` that only redirects a
+  *non-`mktemp` tool's* own internal temp location (not a path the hook parses).
+- Command-substitution recursion (step 13) scans the raw command for
+  quote-context fidelity, so single-quoted `'$(…)'` is correctly skipped. Its
+  edges degrade to *defer* (never a silent allow): a substitution body resolves
+  relative paths against the command's starting cwd, not a cwd set by an earlier
+  in-chain `cd` (`cd /x && echo "$(cat f)"` judges `f` against the start cwd); a
+  body that itself contains a quoted operator character (`echo "$(grep ")" f)"`)
+  can mis-tokenize on re-parse and defer; and backtick nesting via `` \` `` or a
+  no-space `$((…))`-shaped subshell isn't decoded. Process substitution
+  `<(…)`/`>(…)` is only ever unquoted and is already caught by the subshell
+  split.
 - The sibling-checkout `deny` classifies *write-context* file arguments — the
   same set the read-prefix exemption treats as writes: redirect targets, `dd`
   operands, and every operand of `cp`/`mv`/`tee`/`rm`. So a `cp` **source** or a
