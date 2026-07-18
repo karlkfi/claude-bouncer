@@ -1688,6 +1688,117 @@ class HookEndToEndTests(unittest.TestCase):
         self.assertEqual(
             out["hookSpecificOutput"]["permissionDecision"], "ask")
 
+    # --- whitelisted pure substitutions in file operands (issue 84) ----------
+    # The issue-59 cd-target registry (CD_SUBST) also resolves when a
+    # substitution LEADS a guarded file operand or redirect target, so
+    # `cp x "$(git rev-parse --show-toplevel)/backup/"` classifies the real
+    # in-repo path instead of asking. Same closed whitelist, same literal
+    # matching; the value is string-concatenated with the remainder (bash
+    # inserts no separator), so a `$`/`~` left in the remainder still asks.
+
+    def test_resolve_subst_prefix_pwd(self):
+        # `$(pwd)` is the identity on the passed cwd; the remainder is
+        # concatenated verbatim (a leading `/` is preserved).
+        self.assertEqual(
+            guard.resolve_subst_prefix("$(pwd)/backup/", "/ws"),
+            "/ws/backup/",
+        )
+        self.assertEqual(guard.resolve_subst_prefix("$(pwd)", "/ws"), "/ws")
+        # No path separator is inserted — bash concatenates the output verbatim.
+        self.assertEqual(guard.resolve_subst_prefix("$(pwd)x", "/ws"), "/wsx")
+
+    def test_resolve_subst_prefix_git_toplevel(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = os.path.realpath(d)
+            os.mkdir(os.path.join(root, ".git"))
+            nested = os.path.join(root, "a", "b")
+            os.makedirs(nested)
+            self.assertEqual(
+                guard.resolve_subst_prefix(
+                    "$(git rev-parse --show-toplevel)/backup", nested),
+                root + "/backup",
+            )
+
+    def test_resolve_subst_prefix_whitespace_variant(self):
+        self.assertEqual(
+            guard.resolve_subst_prefix("$( pwd )/out", "/ws"),
+            "/ws/out",
+        )
+
+    def test_resolve_subst_prefix_non_whitelisted_unchanged(self):
+        # Not in the registry -> returned verbatim (stays runtime-expanded).
+        self.assertEqual(
+            guard.resolve_subst_prefix("$(whoami)/x", "/ws"),
+            "$(whoami)/x",
+        )
+        # Not a leading substitution -> unchanged.
+        self.assertEqual(
+            guard.resolve_subst_prefix("dir/$(pwd)", "/ws"),
+            "dir/$(pwd)",
+        )
+
+    def test_resolve_subst_prefix_git_no_boundary_unchanged(self):
+        # `$(git rev-parse --show-toplevel)` with no `.git` above cwd can't be
+        # resolved -> returned verbatim (secure default).
+        with tempfile.TemporaryDirectory() as d:
+            root = os.path.realpath(d)
+            self.assertEqual(
+                guard.resolve_subst_prefix(
+                    "$(git rev-parse --show-toplevel)/x", root),
+                "$(git rev-parse --show-toplevel)/x",
+            )
+
+    def test_pwd_subst_file_operand_in_workspace_allow(self):
+        # The motivating case for `$(pwd)`: an in-workspace file operand is
+        # resolved and allowed instead of asking.
+        self._decision('cat "$(pwd)/in.txt"', "allow")
+
+    def test_git_toplevel_subst_file_operand_in_workspace_allow(self):
+        self._make_git_workspace()
+        nested = os.path.join(self.workspace, "a", "b")
+        os.makedirs(nested)
+        self._decision(
+            'cat "$(git rev-parse --show-toplevel)/in.txt"', "allow",
+            cwd=nested, project_dir=self.workspace)
+
+    def test_cp_subst_dest_in_workspace_allow(self):
+        # The issue's headline example: a write destination under the resolved
+        # toplevel is in-workspace, so the cp is allowed.
+        self._make_git_workspace()
+        os.mkdir(os.path.join(self.workspace, "backup"))
+        self._decision(
+            'cp in.txt "$(git rev-parse --show-toplevel)/backup/"', "allow")
+
+    def test_subst_file_operand_outside_still_blocked(self):
+        # Resolving the substitution must not weaken the boundary: a `..` in the
+        # remainder escapes the workspace and is still blocked. Whether that is
+        # `ask` or `deny` depends on where the OS places the tempdir (a parent
+        # under /tmp or /var/folders is host-temp -> deny; elsewhere -> ask);
+        # assert only that it isn't allowed and the target is named.
+        out = run_hook('cat "$(pwd)/../q84-fake-target"', self.workspace)
+        self.assertIsNotNone(out)
+        self.assertIn(
+            out["hookSpecificOutput"]["permissionDecision"], ("ask", "deny"))
+        self.assertIn(
+            "$(pwd)/../q84-fake-target",
+            out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_subst_file_operand_remainder_var_still_ask(self):
+        # A `$VAR` left in the remainder is not resolvable -> still asks, naming
+        # the original token.
+        out = self._decision('cat "$(pwd)/$OTHER"', "ask")
+        self.assertIn(
+            "$(pwd)/$OTHER",
+            out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_non_whitelisted_subst_file_operand_still_ask(self):
+        self._decision('cat "$(whoami)/x"', "ask")
+
+    def test_subst_file_operand_after_untracked_cd_stays_ask(self):
+        # `$(pwd)` after an untracked cd can't be resolved from a known cwd, so
+        # it stays runtime-expanded and asks.
+        self._decision('cd - && cat "$(pwd)/in.txt"', "ask")
+
     # --- ln -s symlink staging (Q8) -----------------------------------------
 
     def test_ln_outside_target_then_cat_link_ask(self):

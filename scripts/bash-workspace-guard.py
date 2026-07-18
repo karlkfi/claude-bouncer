@@ -1539,6 +1539,39 @@ def classify_cd(tokens):
     return ('unknown', None)                      # bare `cd` -> $HOME
 
 
+def resolve_subst_prefix(tok, group_cwd):
+    """Replace a leading whitelisted pure command substitution (CD_SUBST) with
+    the concrete path bash would produce, resolved against ``group_cwd``; return
+    ``tok`` unchanged when it doesn't start with a resolvable whitelisted
+    substitution (issue 84).
+
+    Extends the issue-59 cd-target resolution to file operands and redirect
+    targets: ``cp x "$(git rev-parse --show-toplevel)/backup/"`` — the prefix is
+    the same deterministic value bash computes, so the hook substitutes it and
+    lets the concatenated remainder classify normally. Only a substitution at
+    the START of the token is handled. The resolved value is STRING-concatenated
+    with the remainder (matching bash — no path separator is inserted, so
+    ``$(pwd)x`` becomes ``<pwd>x`` not ``<pwd>/x``), which means any ``$``/``~``
+    or further substitution left in the remainder still trips the caller's
+    ``EXPANSION_RE`` / tilde checks and keeps the runtime-expanded ``ask``. An
+    unresolvable substitution (no ``.git`` boundary, git-discovery env vars set)
+    returns ``tok`` unchanged, keeping the secure default. The caller gates this
+    on a known ``group_cwd`` — ``pwd``/toplevel both depend on it.
+    """
+    if not tok.startswith('$('):
+        return tok
+    body, end = _scan_dollar_paren(tok, 2)
+    if body is None:
+        return tok                                # unterminated -> leave as-is
+    kind = CD_SUBST.get(normalize_subst('$(' + body + ')'))
+    if kind is None:
+        return tok                                # not whitelisted -> leave as-is
+    base = group_cwd if kind == 'pwd' else git_toplevel(group_cwd)
+    if base is None:
+        return tok                                # no .git boundary -> leave as-is
+    return base + tok[end:]
+
+
 def files_in_command(tokens):
     """Return list of file-arg tokens for a simple command, or None if unguarded."""
     name = ALIASES.get(os.path.basename(tokens[0]), os.path.basename(tokens[0]))
@@ -1938,6 +1971,14 @@ def analyze_command(cmd, ctx, base_cwd, depth=0):
         # A `$` bash keeps literal (trailing, or before e.g. `.`/`/` — see
         # EXPANSION_RE) is part of the filename and falls through to realpath.
         f = expand_tilde(f)
+        # A leading whitelisted pure substitution (`$(git rev-parse
+        # --show-toplevel)/…`, `$(pwd)/…`) is the same deterministic value bash
+        # computes, so resolve it against the tracked cwd and let the remainder
+        # classify normally (issue 84). Gated on a known cwd — both kinds depend
+        # on it. Non-whitelisted `$(...)` is returned unchanged and still hits
+        # EXPANSION_RE below.
+        if not group_cwd_unknown:
+            f = resolve_subst_prefix(f, group_cwd)
         if f.startswith('~') or EXPANSION_RE.search(f):
             return ('expand', None)
         if os.path.isabs(f):

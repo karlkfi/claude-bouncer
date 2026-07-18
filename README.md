@@ -106,6 +106,8 @@ different project's scratch still asks entirely.
 | `tail /tmp/claude-501/<this-project>/<sibling-session>/…` (sibling read) | allow |
 | `f=notes.md; cat $f`                 | allow    |
 | `d=sub; cd $d && cat x.txt`          | allow    |
+| `cp x "$(git rev-parse --show-toplevel)/backup/"` | allow |
+| `cat "$(pwd)/notes.md"`              | allow    |
 | `grep secret /etc/passwd`            | **ask**  |
 | `jq '.x' /etc/hosts`                 | **ask**  |
 | `yq -o json /etc/hosts`              | **ask**  |
@@ -455,6 +457,14 @@ After upgrading either way:
    `$HOME`, or a `$` that introduces an expansion (`$VAR`, `${VAR}`, `$(...)`,
    `$1`, `$?`) — short-circuit to
    `ask`, since `realpath` would otherwise lexically place them inside `cwd`.
+   The two whitelisted pure substitutions from step 6
+   (`$(git rev-parse --show-toplevel)`, `$(pwd)`) are the exception: when one
+   *leads* a file operand or redirect target it is resolved against the tracked
+   cwd first — the same value bash computes — and the remainder is concatenated
+   verbatim (bash inserts no separator), so `cp x "$(git rev-parse --show-toplevel)/backup/"`
+   classifies the real in-repo destination instead of asking. Any `$`/`~` left
+   in the remainder, a non-whitelisted substitution, or an untracked cwd keeps
+   the `ask`.
    A `$` bash keeps literal — trailing (`foo$`) or before a non-name char
    (`a$.b`) — is treated as part of the filename and resolved normally.
    Well-known
@@ -560,8 +570,11 @@ flowing, avoid triggering it:
   so home-relative paths inside the root are fine. A variable assigned a plain
   literal path *earlier in the same command string* — `f=./config/app.json; cat $f`
   — is also resolved and doesn't prompt, as is a `for f in a b c` loop over a
-  literal list when its body is on its own line after `do`.) Otherwise write the
-  literal in-root path (e.g. `cat ./config/app.json`, not
+  literal list when its body is on its own line after `do`. A file operand or
+  redirect target that *begins* with `$(git rev-parse --show-toplevel)` or
+  `$(pwd)` — the same two whitelisted substitutions the `cd` tracker resolves —
+  is resolved too, so `cp x "$(git rev-parse --show-toplevel)/backup/"` is fine.)
+  Otherwise write the literal in-root path (e.g. `cat ./config/app.json`, not
   `cat "$HOME/proj/config/app.json"`).
 - **Don't `cd` outside the project root**, and avoid bare `cd`, `cd -`, and
   `cd $HOME` — they lose the hook's working-directory tracking, so every later
