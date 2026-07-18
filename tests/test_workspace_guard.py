@@ -1961,6 +1961,56 @@ class HookEndToEndTests(unittest.TestCase):
             guard.classify_mktemp(["mktemp", "--", "/tmp/x.XXX"]),
             ["/tmp/x.XXX"])
 
+    # --- inline TMPDIR= override (Q34) --------------------------------------
+    # A literal `TMPDIR=<dir>` command prefix relocates mktemp's default
+    # location; `inline_tmpdir` captures it and `classify_mktemp` feeds it to
+    # the default-location branch (bare / -t / bare-name template) only.
+
+    def test_inline_tmpdir_captures_literal(self):
+        self.assertEqual(guard.inline_tmpdir(["TMPDIR=./scratch", "mktemp"]),
+                         "./scratch")
+
+    def test_inline_tmpdir_last_assignment_wins(self):
+        self.assertEqual(
+            guard.inline_tmpdir(["TMPDIR=/a", "TMPDIR=./scratch", "mktemp"]),
+            "./scratch")
+
+    def test_inline_tmpdir_among_other_assignments(self):
+        self.assertEqual(
+            guard.inline_tmpdir(["LC_ALL=C", "TMPDIR=./scratch", "mktemp"]),
+            "./scratch")
+
+    def test_inline_tmpdir_none_when_absent(self):
+        self.assertIsNone(guard.inline_tmpdir(["LC_ALL=C", "mktemp"]))
+        self.assertIsNone(guard.inline_tmpdir(["mktemp", "TMPDIR=./x"]))
+
+    def test_inline_tmpdir_rejects_unexpanded_value(self):
+        # A `$`/backtick value would be expanded by bash; not a trusted literal.
+        self.assertIsNone(guard.inline_tmpdir(["TMPDIR=$FOO", "mktemp"]))
+        self.assertIsNone(guard.inline_tmpdir(["TMPDIR=`pwd`", "mktemp"]))
+        self.assertIsNone(guard.inline_tmpdir(["TMPDIR=", "mktemp"]))
+
+    def test_classify_mktemp_default_dir_override(self):
+        # Override replaces the default location for bare / -t / bare-name cases.
+        self.assertEqual(
+            guard.classify_mktemp(["mktemp"], "./scratch"), ["./scratch"])
+        self.assertEqual(
+            guard.classify_mktemp(["mktemp", "-t", "p"], "./scratch"),
+            ["./scratch"])
+        self.assertEqual(
+            guard.classify_mktemp(["mktemp", "foo.XX"], "./scratch"),
+            ["./scratch"])
+
+    def test_classify_mktemp_explicit_dir_beats_override(self):
+        # An explicit -p / --tmpdir= wins over the TMPDIR= prefix (real mktemp
+        # precedence), and a slashed template names its own dir regardless.
+        self.assertEqual(
+            guard.classify_mktemp(["mktemp", "-p", "/tmp", "foo.XX"], "./scratch"),
+            ["/tmp"])
+        self.assertEqual(
+            guard.classify_mktemp(["mktemp", "/tmp/foo.XX"], "./scratch"),
+            ["/tmp/foo.XX"])
+
     # --- inline env-var prefix (Q6) -----------------------------------------
 
     def test_env_prefix_outside_ask(self):
@@ -3336,6 +3386,31 @@ class HostTempDenyTests(unittest.TestCase):
         # Informational invocation creates nothing -> defer to normal perms.
         out = self._run("mktemp --version")
         self.assertIsNone(out, f"expected defer, got {out!r}")
+
+    # --- inline TMPDIR= relocates the default location (Q34) ----------------
+
+    def test_mktemp_inline_tmpdir_workspace_allow(self):
+        # `TMPDIR=./scratch mktemp` writes into the repo -> allow (pre-Q34 the
+        # prefix was stripped and it false-denied to host temp).
+        self._expect("TMPDIR=./scratch mktemp", "allow")
+
+    def test_mktemp_inline_tmpdir_workspace_dir_flag_allow(self):
+        self._expect("TMPDIR=./scratch mktemp -d", "allow")
+
+    def test_mktemp_inline_tmpdir_workspace_dash_t_allow(self):
+        # -t uses the (now repo-local) default location.
+        self._expect("TMPDIR=./scratch mktemp -t q34-prefix", "allow")
+
+    def test_mktemp_inline_tmpdir_host_temp_deny(self):
+        self._expect("TMPDIR=/tmp/q34-fake mktemp", "deny")
+
+    def test_mktemp_inline_tmpdir_unexpanded_deny(self):
+        # A `$`-bearing value isn't a trusted literal -> host-temp default deny.
+        self._expect("TMPDIR=$SOMEDIR mktemp", "deny", env_extra={"TMPDIR": None})
+
+    def test_mktemp_inline_tmpdir_explicit_p_still_wins(self):
+        # Explicit -p into host temp wins over the workspace TMPDIR= prefix.
+        self._expect("TMPDIR=./scratch mktemp -p /tmp/q34-fake x.XX", "deny")
 
 
 def _have_git():

@@ -1172,7 +1172,32 @@ def default_temp_dir():
     return os.environ.get('TMPDIR') or '/tmp'
 
 
-def classify_mktemp(tokens):
+def inline_tmpdir(tokens):
+    """Return the literal value of a leading ``TMPDIR=`` command-prefix
+    assignment (the last one wins, mirroring bash), or None when there is none
+    — or when the value isn't a trustworthy literal.
+
+    ``TMPDIR=./scratch mktemp`` sets mktemp's default location to ``./scratch``
+    for that one command; :func:`strip_env_prefix` drops the assignment before
+    :func:`classify_mktemp` sees it, so without capturing it the default
+    resolves to the ambient host temp and false-denies an in-workspace target
+    (Q34). A value carrying an unexpanded ``$`` / backtick can't be resolved
+    lexically (bash would expand it), so it degrades to None -> the host-temp
+    default (deny direction), never a trusted allow. `tokens` is the
+    keyword-stripped group (assignments still at the front)."""
+    value = None
+    for tok in tokens:
+        if not ASSIGNMENT_RE.match(tok):
+            break                                  # first real word ends the prefix
+        name, val = tok.split('=', 1)
+        if name == 'TMPDIR':
+            value = val
+    if not value or '$' in value or '`' in value:
+        return None
+    return value
+
+
+def classify_mktemp(tokens, default_dir=None):
     """For a ``mktemp ...`` command, return the list of path tokens it will
     create (files or directories) so ``check_file`` can classify them, or None
     when the command isn't ``mktemp`` (or is a pure informational invocation
@@ -1203,10 +1228,14 @@ def classify_mktemp(tokens):
       * a template with a ``/`` names its own location; a bare-name template (or
         none at all) uses the default location.
 
-    Exotic getopt forms (combined short flags like ``-dp DIR``, an inline
-    ``TMPDIR=`` env prefix) aren't decoded precisely; they degrade toward the
-    host-temp default, i.e. ``deny`` — never a silent allow. See README
-    Limitations.
+    ``default_dir`` overrides the fallback location for the default-location
+    branch (bare / ``-t`` / bare-name template) — it carries a literal inline
+    ``TMPDIR=`` prefix captured by :func:`inline_tmpdir`. An explicit ``-p`` /
+    ``--tmpdir=`` still wins over it, mirroring real mktemp's precedence.
+
+    Exotic getopt forms (combined short flags like ``-dp DIR``) aren't decoded
+    precisely; they degrade toward the host-temp default, i.e. ``deny`` — never
+    a silent allow. See README Limitations.
     """
     if not tokens or os.path.basename(tokens[0]) != 'mktemp':
         return None
@@ -1253,7 +1282,8 @@ def classify_mktemp(tokens):
                 else:
                     default_needed = True          # bare name -> default location
         if default_needed:
-            targets.append(default_temp_dir())
+            targets.append(default_dir if default_dir is not None
+                           else default_temp_dir())
     return targets
 
 
@@ -1867,7 +1897,8 @@ def handle_bash(data):
                 continue                          # for-header: nothing to check
             poison_vars(sub_g, varmap)
             poison_vars(sub_g, loopmap)           # same rules invalidate loops
-        g = strip_env_prefix(strip_sh_keywords(sub_g))
+        kw_g = strip_sh_keywords(sub_g)
+        g = strip_env_prefix(kw_g)
         if not g: continue                        # keyword/env-only or redirect-only group
         kind, arg = classify_cd(g)
         if kind is not None:
@@ -1901,7 +1932,7 @@ def handle_bash(data):
                 if o is not None:
                     outside.append(o)
             continue
-        mk = classify_mktemp(g)
+        mk = classify_mktemp(g, inline_tmpdir(kw_g))
         if mk is not None:
             # mktemp creates a file/dir -> write context (is_read default False).
             # An empty list (e.g. `mktemp -p ./scratch`, all-in-workspace) still

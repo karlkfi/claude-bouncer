@@ -17,7 +17,6 @@ Specific actionable items in priority order. Pick from the top; skip 🚫 items 
 |---|---|---|---|---|---|
 | <a id="Q32"></a>Q32 | Decode `mktemp` combined short flags (`-dp DIR`) | `parsing` | 🔲 | S | `classify_mktemp` treats `-dp` as one unknown flag, so `-p`'s DIR leaks and `mktemp -dp ./scratch x` false-denies. Decode short-flag clusters (`-p`/BSD `-t` take a value). Safe today. From Q26. |
 | <a id="Q33"></a>Q33 | Guard commands inside quoted `"$(…)"` / backtick substitution bodies | `security` `parsing` | 🔲 | L | Quoted `"$(mktemp)"`/backtick bodies aren't parsed, so a host-temp write created inside them isn't flagged (unquoted `$(…)` already is). Low severity. Needs a plan doc. From Q26. |
-| <a id="Q34"></a>Q34 | Honor inline `TMPDIR=<literal> mktemp` in default-location resolution | `parsing` | 🔲 | S | `classify_mktemp` ignores a command-prefix `TMPDIR=`, so `TMPDIR=./scratch mktemp` false-denies. Capture it and feed `default_temp_dir`. Marginal; other-tool case unguardable. From Q26. |
 
 ## Deferred
 
