@@ -743,54 +743,142 @@ def strip_comments(cmd):
     return ''.join(out)
 
 
-def strip_heredoc_bodies(tokens):
-    """Drop heredoc body tokens so body text is never parsed as commands.
+def _consume_heredoc_body(text, i, delim, strip_tabs):
+    """Skip a heredoc body starting at ``i`` (first char after the command
+    line's newline) up to and including the terminator line, or end-of-input.
 
-    Bash slurps everything between the newline after `<<TAG` and a line that
-    is exactly TAG as literal stdin data. shlex has no heredoc concept, so
-    those body lines otherwise tokenize as command groups: HTML like
-    `</div>` becomes a `<` redirect with target `/div` (flagged as an
-    outside-workspace path) and script text becomes phantom file args (Q15).
-
-    On `<<`, the following word token is recorded as a pending delimiter —
-    `<<-EOF` and `<< EOF` both arrive as `<<` + word, so a leading `-` on the
-    word is accepted as the tab-strip modifier when matching the terminator.
-    The rest of the command line is kept (a trailing `> out.txt` redirect
-    still parses); at the next newline the body starts and tokens are dropped
-    until a line consisting of exactly the delimiter. Multiple pending
-    heredocs consume consecutive bodies in order. An unterminated body
-    swallows to end-of-input, matching bash. `<<<` here-strings arrive as a
-    distinct operator token and never match here. A `<<` from unquoted
-    arithmetic (`$((x<<2))`) can arm a bogus delimiter; if a newline follows,
-    later tokens may be skipped and the hook defers — fail-safe, never a
-    silent allow of a checked path.
-    """
-    out, pending = [], []
-    i, n = 0, len(tokens)
+    Body lines are compared RAW — no quote/expansion parsing — so an apostrophe,
+    an unbalanced quote, `</div>`, or `func(` in the body can never affect the
+    scan. A line equals the terminator when it is exactly ``delim`` (for
+    ``<<-``, after stripping leading tabs). Returns the index just past the
+    terminator's newline; on an unterminated body, ``len(text)`` (matching bash,
+    which swallows to end-of-input)."""
+    n = len(text)
     while i < n:
-        t = tokens[i]
-        if t == '<<' and i + 1 < n \
-                and not all(c in PUNCT_CHARS for c in tokens[i+1]):
-            out.append(t); out.append(tokens[i+1])
-            pending.append(tokens[i+1])
-            i += 2
+        j = i
+        while j < n and text[j] != '\n':
+            j += 1
+        line = text[i:j]
+        if (line.lstrip('\t') if strip_tabs else line) == delim:
+            return j + 1 if j < n else n          # drop the terminator line
+        i = j + 1 if j < n else n                 # drop this body line
+    return n
+
+
+def strip_heredoc_bodies(cmd):
+    """Remove heredoc body text from the raw command string, before shlex.
+
+    Bash slurps everything between the newline after a `<<WORD` / `<<-WORD`
+    redirection and a line equal to WORD as literal stdin data. That body can
+    hold anything — apostrophes, `</div>`, `func(`, an odd number of quotes —
+    none of it shell syntax. Left in place, shlex either mis-tokenizes it (body
+    text becomes phantom commands / file arguments) or, on an unbalanced quote,
+    aborts the *entire* parse with ``ValueError`` so a real outside-workspace
+    redirect on the command line goes unchecked (issue 83).
+
+    Stripping the body from the RAW string up front (like ``strip_comments``)
+    keeps shlex's input to shell syntax only. The `<<WORD` operator and its
+    delimiter stay on the command line, so the redirect handling in
+    ``files_in_command``, the `<<`-delimiter skip there, and the
+    ``'<<' not in tokens`` propagation guard are all unchanged; a trailing
+    `<<EOF > out` redirect still parses. The body and its terminator line are
+    dropped.
+
+    Command-line quote state is tracked so a `<<` inside a quoted string is not
+    mistaken for a heredoc; an unquoted `#` comment is skipped for `<<`
+    detection (its text is left for ``strip_comments`` to remove). Arithmetic
+    `$((a<<b))` / `((a<<b))` regions are copied verbatim — their `<<` is a shift,
+    not a redirection, so they never arm a bogus delimiter. `<<<` here-strings
+    are a distinct operator and never match. A `<<` with no delimiter word arms
+    nothing; an unterminated body swallows to end-of-input, both matching bash.
+    """
+    out = []
+    i, n = 0, len(cmd)
+    in_single = in_double = False
+    last = ''                                     # last emitted char (word start)
+    pending = []                                  # (delim, strip_tabs) in order
+    while i < n:
+        c = cmd[i]
+        if in_single:
+            out.append(c); last = c
+            if c == "'":
+                in_single = False
+            i += 1
             continue
-        out.append(t)
-        i += 1
-        if t == '\n' and pending:
+        if in_double:
+            if c == '\\' and i + 1 < n:
+                out.append(c); out.append(cmd[i+1]); last = cmd[i+1]; i += 2
+                continue
+            out.append(c); last = c
+            if c == '"':
+                in_double = False
+            i += 1
+            continue
+        if c == '\\' and i + 1 < n:
+            out.append(c); out.append(cmd[i+1]); last = cmd[i+1]; i += 2
+            continue
+        if c == "'":
+            in_single = True; out.append(c); last = c; i += 1
+            continue
+        if c == '"':
+            in_double = True; out.append(c); last = c; i += 1
+            continue
+        if c == '#' and (last == '' or last in COMMENT_PRECEDERS):
+            while i < n and cmd[i] != '\n':       # comment: no `<<` detection
+                out.append(cmd[i]); i += 1
+            last = ')'                            # arbitrary non-word-start char
+            continue
+        if c == '(' and i + 1 < n and cmd[i+1] == '(':
+            end = _skip_balanced_parens(cmd, i)   # `((…))` / `$((…))` arithmetic
+            out.append(cmd[i:end]); last = ')'; i = end
+            continue
+        if c == '<' and i + 1 < n and cmd[i+1] == '<':
+            if i + 2 < n and cmd[i+2] == '<':     # `<<<` here-string, not heredoc
+                out.append('<<<'); last = '<'; i += 3
+                continue
+            out.append('<<'); i += 2
+            strip_tabs = False
+            if i < n and cmd[i] == '-':
+                out.append('-'); i += 1; strip_tabs = True
+            while i < n and cmd[i] in ' \t':      # optional space before delim
+                out.append(cmd[i]); i += 1
+            delim_chars = []
+            while i < n and cmd[i] not in ' \t\n;|&()<>':
+                d = cmd[i]
+                if d == "'":
+                    out.append(d); i += 1
+                    while i < n and cmd[i] != "'":
+                        delim_chars.append(cmd[i]); out.append(cmd[i]); i += 1
+                    if i < n:
+                        out.append(cmd[i]); i += 1
+                elif d == '"':
+                    out.append(d); i += 1
+                    while i < n and cmd[i] != '"':
+                        if cmd[i] == '\\' and i + 1 < n:
+                            delim_chars.append(cmd[i+1])
+                            out.append(cmd[i]); out.append(cmd[i+1]); i += 2
+                            continue
+                        delim_chars.append(cmd[i]); out.append(cmd[i]); i += 1
+                    if i < n:
+                        out.append(cmd[i]); i += 1
+                elif d == '\\' and i + 1 < n:
+                    delim_chars.append(cmd[i+1])
+                    out.append(d); out.append(cmd[i+1]); i += 2
+                else:
+                    delim_chars.append(d); out.append(d); i += 1
+            delim = ''.join(delim_chars)
+            if delim:
+                pending.append((delim, strip_tabs))
+            last = 'x'
+            continue
+        if c == '\n':
+            out.append('\n'); last = '\n'; i += 1
             while pending and i < n:
-                delim = pending.pop(0)
-                cands = {delim, delim[1:]} if delim.startswith('-') else {delim}
-                line_start = True
-                while i < n:
-                    tok = tokens[i]
-                    if line_start and tok in cands \
-                            and (i + 1 >= n or tokens[i+1] == '\n'):
-                        i += 1                    # drop the terminator line
-                        break
-                    line_start = tok == '\n'
-                    i += 1
-    return out
+                delim, strip_tabs = pending.pop(0)
+                i = _consume_heredoc_body(cmd, i, delim, strip_tabs)
+            continue
+        out.append(c); last = c; i += 1
+    return ''.join(out)
 
 
 def glue_dollar_paren(tokens):
@@ -1872,16 +1960,20 @@ def analyze_command(cmd, ctx, base_cwd, depth=0):
         # either side). Removing it from `whitespace` stops shlex re-swallowing
         # it; quoted newlines stay inside their word token regardless. The runs
         # this produces (`;\n`, `|\n`, ...) are split back apart below.
-        # Comments are stripped up front (see strip_comments) and shlex's own
-        # comment handling is disabled — it would swallow the newline after a
-        # comment and merge the next line into the commented command's group.
-        lex = shlex.shlex(strip_comments(cmd), posix=True,
-                          punctuation_chars=';()<>|&\n')
+        # Heredoc bodies are stripped from the raw string BEFORE shlex (see
+        # strip_heredoc_bodies) so body text — which is arbitrary data, possibly
+        # with unbalanced quotes — never reaches the tokenizer. Comments are then
+        # stripped (see strip_comments) and shlex's own comment handling is
+        # disabled — it would swallow the newline after a comment and merge the
+        # next line into the commented command's group. Heredoc stripping runs
+        # first so an unbalanced quote in a body can't throw off strip_comments'
+        # own quote tracking for the rest of the command.
+        cleaned = strip_comments(strip_heredoc_bodies(cmd))
+        lex = shlex.shlex(cleaned, posix=True, punctuation_chars=';()<>|&\n')
         lex.whitespace_split = True
         lex.whitespace = lex.whitespace.replace('\n', '')
         lex.commenters = ''
-        tokens = glue_dollar_paren(
-            strip_heredoc_bodies(split_operator_runs(list(lex))))
+        tokens = glue_dollar_paren(split_operator_runs(list(lex)))
     except ValueError:
         return [], False                          # unbalanced quotes -> defer
 

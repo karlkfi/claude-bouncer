@@ -2978,41 +2978,85 @@ class GluedOperatorRunEndToEndTests(unittest.TestCase):
 
 
 class StripHeredocBodiesTests(unittest.TestCase):
-    """`strip_heredoc_bodies` drops heredoc body tokens so body text (HTML,
-    scripts, path-like content) is never parsed as commands/file args (Q60)."""
+    """`strip_heredoc_bodies` drops heredoc body text from the raw command
+    string, before shlex, so body content (HTML, scripts, path-like text,
+    unbalanced quotes) is never tokenized as commands/file args (Q60, issue 83).
+    The `<<WORD` operator and delimiter stay on the command line."""
 
     def test_body_dropped_terminator_removed(self):
-        toks = ["cat", "<<", "EOF", "\n", "<", "/div", "\n", "EOF"]
         self.assertEqual(
-            guard.strip_heredoc_bodies(toks), ["cat", "<<", "EOF", "\n"])
+            guard.strip_heredoc_bodies("cat <<EOF\n</div>\nEOF"), "cat <<EOF\n")
 
     def test_redirect_on_heredoc_line_survives(self):
         # `cat <<EOF > out` — the redirect is on the command line, not the body.
-        toks = ["cat", "<<", "EOF", ">", "out", "\n", "body", "\n", "EOF"]
         self.assertEqual(
-            guard.strip_heredoc_bodies(toks),
-            ["cat", "<<", "EOF", ">", "out", "\n"])
+            guard.strip_heredoc_bodies("cat <<EOF > out\nbody\nEOF"),
+            "cat <<EOF > out\n")
+
+    def test_quoted_delimiter_effective_form_matches(self):
+        # `<<'EOF'` terminates on a line `EOF` (quotes removed for the match);
+        # the operator/delimiter chars are preserved verbatim in the output.
+        self.assertEqual(
+            guard.strip_heredoc_bodies("cat <<'EOF'\ndon't\nEOF"),
+            "cat <<'EOF'\n")
 
     def test_tab_strip_dash_delimiter_matches(self):
-        # `<<-EOF` allows the terminator to match `EOF` (tabs stripped).
-        toks = ["cat", "<<", "-EOF", "\n", "x", "\n", "EOF"]
+        # `<<-EOF` lets a tab-indented terminator match `EOF`.
         self.assertEqual(
-            guard.strip_heredoc_bodies(toks), ["cat", "<<", "-EOF", "\n"])
+            guard.strip_heredoc_bodies("cat <<-EOF\n\tx\n\tEOF"), "cat <<-EOF\n")
 
     def test_command_after_heredoc_preserved(self):
-        toks = ["cat", "<<", "EOF", "\n", "b", "\n", "EOF", "\n", "cat", "x"]
         self.assertEqual(
-            guard.strip_heredoc_bodies(toks),
-            ["cat", "<<", "EOF", "\n", "\n", "cat", "x"])
+            guard.strip_heredoc_bodies("cat <<EOF\nb\nEOF\ncat x"),
+            "cat <<EOF\ncat x")
+
+    def test_unbalanced_quote_body_stripped(self):
+        # The body's lone quote would abort shlex; stripping it leaves clean
+        # shell syntax with the command-line redirect intact.
+        self.assertEqual(
+            guard.strip_heredoc_bodies("cat <<'EOF' > out\nit's a test\nEOF"),
+            "cat <<'EOF' > out\n")
+
+    def test_multiple_heredocs_consumed_in_order(self):
+        self.assertEqual(
+            guard.strip_heredoc_bodies("cat <<A <<B\naaa\nA\nbbb\nB"),
+            "cat <<A <<B\n")
+
+    def test_unterminated_body_swallowed_to_end(self):
+        self.assertEqual(
+            guard.strip_heredoc_bodies("cat <<EOF\nbody line\nno terminator"),
+            "cat <<EOF\n")
 
     def test_here_string_not_treated_as_heredoc(self):
-        # `<<<` is a distinct operator token — never arms a delimiter.
-        toks = ["cat", "<<<", "/etc/foo"]
-        self.assertEqual(guard.strip_heredoc_bodies(toks), toks)
+        # `<<<` is a distinct operator — never arms a delimiter.
+        self.assertEqual(
+            guard.strip_heredoc_bodies('cat <<<"/etc/foo"'), 'cat <<<"/etc/foo"')
+
+    def test_quoted_double_less_not_heredoc(self):
+        # A `<<` inside quotes is literal text, not a heredoc operator.
+        self.assertEqual(
+            guard.strip_heredoc_bodies('echo "a<<b"\ncat x'), 'echo "a<<b"\ncat x')
+
+    def test_arithmetic_shift_not_heredoc(self):
+        # `$((1<<2))` is a shift; the following line must NOT be eaten as a body.
+        self.assertEqual(
+            guard.strip_heredoc_bodies("echo $((1<<2))\ncat x"),
+            "echo $((1<<2))\ncat x")
+
+    def test_double_paren_arithmetic_shift_not_heredoc(self):
+        self.assertEqual(
+            guard.strip_heredoc_bodies("((1<<2))\ncat x"), "((1<<2))\ncat x")
+
+    def test_double_less_in_comment_not_heredoc(self):
+        # A `<<EOF` inside a `#` comment must not arm; the next line survives.
+        self.assertEqual(
+            guard.strip_heredoc_bodies("grep foo bar # <<EOF\ncat x"),
+            "grep foo bar # <<EOF\ncat x")
 
     def test_no_heredoc_passthrough(self):
-        toks = ["grep", "PAT", "f.txt", "\n", "cat", "g.txt"]
-        self.assertEqual(guard.strip_heredoc_bodies(toks), toks)
+        self.assertEqual(
+            guard.strip_heredoc_bodies("grep PAT f.txt\ncat g.txt"),
+            "grep PAT f.txt\ncat g.txt")
 
 
 class GlueDollarParenTests(unittest.TestCase):
@@ -3277,6 +3321,68 @@ class Issue60EndToEndTests(unittest.TestCase):
         # A `#` inside quotes is a pattern char, not a comment — the outside
         # file after it must still be checked.
         self._decision("grep '#include' /etc/q60-fake", "ask")
+
+
+class Issue83HeredocEndToEndTests(unittest.TestCase):
+    """Heredoc bodies are stripped from the raw string before shlex, so body
+    content — even an unbalanced quote that would abort the parse — never hides
+    a real outside-workspace redirect on the command line (issue 83)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = os.path.realpath(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _decision(self, cmd, expected):
+        out = run_hook(cmd, self.workspace, project_dir=self.workspace)
+        self.assertIsNotNone(out, f"expected a decision, got defer for: {cmd!r}")
+        got = out["hookSpecificOutput"]["permissionDecision"]
+        self.assertEqual(
+            got, expected,
+            f"expected {expected!r} for {cmd!r}; got {got!r} "
+            f"(reason: {out['hookSpecificOutput'].get('permissionDecisionReason')!r})",
+        )
+        return out
+
+    def test_apostrophe_body_does_not_hide_outside_redirect(self):
+        # The core bug: an apostrophe in the body made shlex abort with
+        # ValueError, so the whole command deferred and the outside redirect
+        # target went unchecked. Now the body is gone before shlex sees it.
+        self._decision(
+            "cat <<'EOF' > /etc/q83-fake\ndon't do this\nEOF", "ask")
+
+    def test_apostrophe_body_safe_target_allow(self):
+        # Same body, but writing to the workspace (stdout here) — allow.
+        self._decision("cat <<'EOF'\ndon't do this\nEOF", "allow")
+
+    def test_unbalanced_paren_body_does_not_hide_outside_redirect(self):
+        self._decision(
+            "cat <<EOF > /etc/q83-fake\nfunc foo( {\nEOF", "ask")
+
+    def test_html_body_workspace_target_allow(self):
+        self._decision(
+            "cat > page.html <<'EOF'\n<div>x</div>\n<a href=\"/x\">\nEOF", "allow")
+
+    def test_arithmetic_shift_no_longer_arms_delimiter(self):
+        # `$((1<<2))` is a shift, not a heredoc — the following outside read must
+        # be checked, not swallowed as a bogus body.
+        self._decision("echo $((1<<2))\ncat /etc/q83-fake", "ask")
+
+    def test_double_paren_arithmetic_shift_checks_following(self):
+        self._decision("((1<<2))\ncat /etc/q83-fake", "ask")
+
+    def test_double_less_in_comment_does_not_arm(self):
+        # `<<EOF` inside a trailing comment must not swallow the next command.
+        self._decision("echo hi # <<EOF\ncat /etc/q83-fake", "ask")
+
+    def test_tab_strip_heredoc_outside_redirect_ask(self):
+        self._decision("cat <<-EOF > /etc/q83-fake\n\thi\n\tEOF", "ask")
+
+    def test_multiple_heredocs_then_outside_read_ask(self):
+        self._decision(
+            "cat <<A <<B\naaa\nA\nbbb\nB\ncat /etc/q83-fake", "ask")
 
 
 class BuildReasonTests(unittest.TestCase):

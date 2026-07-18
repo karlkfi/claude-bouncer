@@ -99,6 +99,7 @@ different project's scratch still asks entirely.
 | `grep foo data.txt 2>/dev/null`      | allow    |
 | `grep foo data.txt 2>&1`             | allow    |
 | `cat <<<"/etc/foo"` (here-string)    | allow    |
+| `cat > page.html <<'EOF'` … `</div>` … `EOF` (heredoc body) | allow |
 | `cat ~/proj/notes.md` (root `~/proj`) | allow   |
 | `cd "$(git rev-parse --show-toplevel)" && cat README.md` | allow |
 | `cd "$(pwd)" && cat README.md`       | allow    |
@@ -141,6 +142,7 @@ different project's scratch still asks entirely.
 | `dd if=./in of=/tmp/out`             | **deny** |
 | `cd /tmp && cat in.txt > evil`       | **deny** |
 | `echo secret > /tmp/out` (unguarded redirect) | **deny** |
+| `cat <<'EOF' > /tmp/out` … `EOF` (heredoc, outside target) | **deny** |
 | `cd /tmp && echo x > out.txt`        | **deny** |
 | `mktemp` · `mktemp -d` · `mktemp -p /tmp x.XXXX` | **deny** |
 | `mktemp /tmp/x.XXXX`                 | **deny** |
@@ -359,18 +361,21 @@ After upgrading either way:
 
 1. **Tokenize** the command with Python's `shlex` (POSIX mode, punctuation
    grouping) so quotes are respected and shell operators (`|`, `&&`, `>`, `;`)
-   become their own tokens. Unquoted `#` comments are stripped first, keeping
-   the newline that ends each one so the next line stays its own command group.
+   become their own tokens. Heredoc body lines (everything between a `<<TAG`
+   redirection and a line matching `TAG`, `<<-` included) are dropped from the
+   raw command string *before* it reaches `shlex`, so body content — HTML like
+   `</div>`, a script, prose with apostrophes, an unbalanced quote — is never
+   tokenized as commands or file arguments and can't abort the parse; the
+   `<<TAG` operator and any trailing `> file` redirect on the command line are
+   kept. Unquoted `#` comments are stripped next, keeping the newline that ends
+   each one so the next line stays its own command group.
    A newline outside quotes is also a command
    separator — like `;` — so a guarded command on a line after another is
    classified on its own rather than merged into its neighbour. `shlex` returns
    a run of adjacent operators as a single token (`(cd x); …` → `);`, `((cat …`
    → `((`); each such run is split by longest match back into its individual
    operators so the command boundary isn't lost and the guarded command inside
-   a subshell or group is still classified. Heredoc body
-   lines (everything between `<<TAG` and a line matching `TAG`, `<<-` included)
-   are dropped so body content — HTML like `</div>`, a script, path-like text —
-   is never parsed as commands or file arguments.
+   a subshell or group is still classified.
 2. **Split** into simple commands on those operators and collect each redirect
    target (`> file`) into the command group it belongs to, so it's later
    resolved against that group's cwd (see step 6). A redirect target is a write
@@ -702,12 +707,17 @@ final output.
   still treated as outside-workspace. A `$` bash keeps literal (trailing, or
   before a non-name char like `.`/`/`) is part of the filename and resolved
   normally, so a `price$` or `a$.b` argument no longer prompts spuriously.
-- Heredoc body lines are dropped before parsing, so path-like body content
-  (`</div>`, `/title`) is never mistaken for a file argument. The `<<TAG`
-  terminator is matched by an exact line; an unterminated body swallows to the
-  end of the command (matching bash). A `<<` produced by unquoted arithmetic
-  (`$((x<<2))`) can arm a spurious delimiter — if a newline follows, later
-  tokens may be skipped and the hook defers (fail-safe, never a silent allow).
+- Heredoc body lines are dropped from the raw command string before parsing, so
+  path-like body content (`</div>`, `/title`), prose, or an unbalanced quote in
+  the body is never mistaken for a file argument and never aborts the parse (a
+  real outside-workspace redirect on the `<<TAG` command line is still checked).
+  The terminator is matched by an exact line (`<<-` allows leading tabs); an
+  unterminated body swallows to the end of the command (matching bash). A `<<`
+  inside quotes, inside a `#` comment, or produced by arithmetic (`$((x<<2))`,
+  `((x<<2))`) is not a heredoc and never arms a delimiter. Command
+  substitutions *inside* a heredoc body are still analyzed even when a quoted
+  delimiter (`<<'EOF'`) would stop bash expanding them — a conservative extra
+  `ask`, never a missed one.
 - Literal variable propagation is deliberately narrow. Only standalone
   `NAME=value` / `export NAME=value` assignments whose value is a plain
   literal after quote removal (non-empty; no `$`, backticks, glob characters,
@@ -717,9 +727,9 @@ final output.
   `read`/`eval`/`declare`/`unset` or assigned inside a subshell,
   pipeline segment, or backgrounded command all keep the runtime-expanded
   `ask`. A heredoc (`<<`) anywhere in the command or an in-command `IFS=`
-  reassignment disables propagation for that command entirely (heredoc bodies
-  tokenize as commands; a changed `IFS` alters word splitting). Uncertainty
-  always falls back to `ask` — propagation only ever adds allows for
+  reassignment disables propagation for that command entirely (conservative —
+  a heredoc adds redirection state, and a changed `IFS` alters word splitting).
+  Uncertainty always falls back to `ask` — propagation only ever adds allows for
   expansions bash performs deterministically.
 - `for VAR in <list>` loop resolution is equally narrow. The candidate set is
   recorded only when *every* list item is a plain literal (same purity test as
