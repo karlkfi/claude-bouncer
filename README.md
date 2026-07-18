@@ -745,12 +745,15 @@ final output.
 - The host-temp `deny` covers guarded-command file arguments, redirect targets
   from any command (`go test > /tmp/log`), a `cd` into host temp followed by a
   relative write, and `mktemp` (its default location is host temp). A few shapes
-  remain out of scope and still defer: an inline `TMPDIR=/tmp cmd` that only
-  redirects a *tool's own* internal temp location (not a path the hook parses);
-  a command buried inside a command substitution (`cd $(mktemp -d)` — the inner
-  `mktemp` isn't tokenized as its own command); and exotic `mktemp` getopt forms
-  such as combined short flags (`-dp DIR`), which degrade toward the host-temp
-  default (`deny`) rather than a precise decision — never a silent allow.
+  remain out of scope: an inline `TMPDIR=/tmp cmd` that only redirects a *tool's
+  own* internal temp location (not a path the hook parses) still defers; a
+  command buried inside a *quoted* command substitution or backticks
+  (`cd "$(mktemp -d)"`, `` cd `mktemp -d` ``) isn't tokenized as its own command,
+  so a host-temp write created there isn't flagged — the *unquoted* `cd $(mktemp
+  -d)` **is** split into its own subshell segment and caught; and exotic `mktemp`
+  getopt forms such as combined short flags (`-dp DIR`) degrade toward the
+  host-temp default (`deny`) rather than a precise decision — never a silent
+  allow.
 - The sibling-checkout `deny` classifies *write-context* file arguments — the
   same set the read-prefix exemption treats as writes: redirect targets, `dd`
   operands, and every operand of `cp`/`mv`/`tee`/`rm`. So a `cp` **source** or a
