@@ -2392,40 +2392,70 @@ class HookEndToEndTests(unittest.TestCase):
         self._defer("ls > /etc/out.txt")
 
 
-class SplitNewlineSeparatorsTests(unittest.TestCase):
-    """`split_newline_separators` peels newlines out of operator-run tokens
-    (Q18) while leaving word tokens — including quoted strings that contain a
-    newline — untouched."""
+class SplitOperatorRunsTests(unittest.TestCase):
+    """`split_operator_runs` decomposes a glued operator-run token into its
+    individual operators (Q27) — including the newline peel it subsumes (Q18) —
+    while leaving word tokens (quoted strings containing an operator char or a
+    newline) untouched."""
+
+    # --- newline peel (formerly split_newline_separators, Q18) ---------------
 
     def test_semicolon_newline_run_split(self):
         self.assertEqual(
-            guard.split_newline_separators([";\n"]), [";", "\n"])
+            guard.split_operator_runs([";\n"]), [";", "\n"])
 
     def test_pipe_newline_run_split(self):
         self.assertEqual(
-            guard.split_newline_separators(["|\n"]), ["|", "\n"])
+            guard.split_operator_runs(["|\n"]), ["|", "\n"])
 
     def test_blank_line_double_newline_split(self):
         self.assertEqual(
-            guard.split_newline_separators(["\n\n"]), ["\n", "\n"])
+            guard.split_operator_runs(["\n\n"]), ["\n", "\n"])
 
     def test_redirect_newline_run_split(self):
         self.assertEqual(
-            guard.split_newline_separators(["&>\n"]), ["&>", "\n"])
+            guard.split_operator_runs(["&>\n"]), ["&>", "\n"])
 
     def test_operator_without_newline_unchanged(self):
-        self.assertEqual(guard.split_newline_separators(["&&"]), ["&&"])
+        self.assertEqual(guard.split_operator_runs(["&&"]), ["&&"])
 
     def test_quoted_word_with_newline_left_intact(self):
         # A filename/string from quotes contains non-punctuation chars, so it
         # is a word token and must NOT be split even though it has a newline.
         self.assertEqual(
-            guard.split_newline_separators(["line1\nline2"]), ["line1\nline2"])
+            guard.split_operator_runs(["line1\nline2"]), ["line1\nline2"])
 
     def test_plain_tokens_pass_through(self):
         self.assertEqual(
-            guard.split_newline_separators(["grep", "PAT", "f.txt"]),
+            guard.split_operator_runs(["grep", "PAT", "f.txt"]),
             ["grep", "PAT", "f.txt"])
+
+    # --- glued operator runs (Q27) -------------------------------------------
+
+    def test_close_paren_semicolon_split(self):
+        self.assertEqual(guard.split_operator_runs([");"]), [")", ";"])
+
+    def test_double_open_paren_split(self):
+        self.assertEqual(guard.split_operator_runs(["(("]), ["(", "("])
+
+    def test_close_paren_paren_semicolon_split(self):
+        self.assertEqual(
+            guard.split_operator_runs(["));"]), [")", ")", ";"])
+
+    def test_close_paren_andand_greedy_longest(self):
+        # `)&&` -> `)` then the 2-char `&&`, not `)` `&` `&`.
+        self.assertEqual(guard.split_operator_runs([")&&"]), [")", "&&"])
+
+    def test_here_string_beats_double_less(self):
+        # Longest-first: `<<<` wins over `<<` + `<`.
+        self.assertEqual(guard.split_operator_runs(["<<<"]), ["<<<"])
+
+    def test_ampersand_append_redirect_greedy(self):
+        # Longest-first: `&>>` wins over `&>` + `>`.
+        self.assertEqual(guard.split_operator_runs(["&>>"]), ["&>>"])
+
+    def test_pipe_open_paren_split(self):
+        self.assertEqual(guard.split_operator_runs(["|("]), ["|", "("])
 
 
 class NewlineSeparatorEndToEndTests(unittest.TestCase):
@@ -2494,9 +2524,60 @@ class NewlineSeparatorEndToEndTests(unittest.TestCase):
         self._decision("cat in.txt;\ngrep PAT in.txt", "allow")
 
 
-class StripCommentsTests(unittest.TestCase):
-    """`strip_comments` removes unquoted `#` comments but keeps the newline
-    that ends each one, so the next line stays its own command group (Q60)."""
+class GluedOperatorRunEndToEndTests(unittest.TestCase):
+    """Glued operator runs split into command boundaries (Q27).
+
+    shlex's `punctuation_chars` returns adjacent operators as one token
+    (`(cd x); …` -> `);`, `((cat …` -> `((`, `… ));`). Pre-fix none matched the
+    separator vocab, so the group merged and the guarded command inside was
+    never isolated — the whole string deferred (a silent pass to builtin
+    permissions). Post-fix each operator is its own token, so the guarded
+    command is checked."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = os.path.realpath(self._tmp.name)
+        with open(os.path.join(self.workspace, "in.txt"), "w") as f:
+            f.write("hello\n")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _decision(self, cmd, expected):
+        out = run_hook(cmd, self.workspace, project_dir=self.workspace)
+        self.assertIsNotNone(out, f"expected a decision, got defer for: {cmd!r}")
+        got = out["hookSpecificOutput"]["permissionDecision"]
+        self.assertEqual(
+            got, expected,
+            f"expected {expected!r} for {cmd!r}; got {got!r} "
+            f"(reason: {out['hookSpecificOutput'].get('permissionDecisionReason')!r})",
+        )
+        return out
+
+    def test_close_paren_semicolon_guards_following_cat(self):
+        # `);` glued: pre-fix the whole string merged into the subshell group
+        # and deferred, so `cat OUTSIDE` escaped the guard.
+        out = self._decision(
+            "(echo hi); cat /etc/q27-fake-target", "ask")
+        self.assertIn(
+            "/etc/q27-fake-target",
+            out["hookSpecificOutput"]["permissionDecisionReason"],
+        )
+
+    def test_double_paren_subshell_guarded(self):
+        # `((` and `))` both glued (nested subshell). The guarded `cat` inside
+        # is still isolated and its outside target flagged.
+        out = self._decision(
+            "((cat /etc/q27-fake-target))", "ask")
+        self.assertIn(
+            "/etc/q27-fake-target",
+            out["hookSpecificOutput"]["permissionDecisionReason"],
+        )
+
+    def test_glued_operators_workspace_only_allow(self):
+        # Same glued shapes but every target is in-workspace -> allow, not a
+        # spurious prompt from the split introducing phantom file args.
+        self._decision("(cat in.txt); grep PAT in.txt", "allow")
 
     def test_trailing_comment_removed_newline_kept(self):
         self.assertEqual(

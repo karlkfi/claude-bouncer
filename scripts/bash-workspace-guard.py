@@ -78,6 +78,12 @@ DUP = {'>&', '<&'}
 # (so a quoted filename containing one of these survives normalization).
 PUNCT_CHARS = frozenset(';()<>|&\n')
 
+# Longest-match vocabulary for splitting glued operator runs (Q27). Built from
+# the SEPARATORS/REDIR/DUP sets — sorted longest-first — so it can never drift
+# from what the group-splitting loop understands. Every single punctuation char
+# is one of these operators, so any pure-punctuation run decomposes completely.
+_OPERATORS = tuple(sorted(SEPARATORS | REDIR | DUP, key=len, reverse=True))
+
 # Characters that may precede an unquoted `#` for it to start a comment: bash
 # only comments at the start of a word (after whitespace, a newline, or an
 # operator). `$#`, `${#x}`, and mid-word `file#1` are not comments.
@@ -1006,29 +1012,46 @@ def poison_vars(g, varmap):
             varmap.pop(t, None)
 
 
-def split_newline_separators(tokens):
-    """Peel newlines out of operator-run tokens so each becomes its own token.
+def split_operator_runs(tokens):
+    """Split a glued operator-run token into its individual operators.
 
-    With `\\n` in shlex's `punctuation_chars` it is emitted (not swallowed as
-    whitespace), but it glues onto adjacent operators: `cmd1;\\ncmd2` tokenizes
-    `;\\n`, `cmd1 |\\ncmd2` tokenizes `|\\n`, a blank line tokenizes `\\n\\n`.
-    None of those match `SEPARATORS`, so a newline-only command boundary would
-    be missed and the two commands would merge into one group — the very bug
-    this guards against (false positives from extra tokens read as file args,
-    and a false negative when a guarded command trails an unguarded one).
+    shlex's `punctuation_chars` returns a run of adjacent operator characters
+    as ONE token: `(cd x); …` tokenizes `);`, `((echo …` tokenizes `((`,
+    `(…));` tokenizes `));`, a newline boundary glues as `;\\n`/`|\\n`/`\\n\\n`.
+    None of those compound runs match the `SEPARATORS`/`REDIR`/`DUP` vocab the
+    group-splitting loop keys on, so the command boundary is missed and the two
+    commands merge into one group — the guarded command is then never isolated
+    and the whole string defers (Q27), or (for newlines, Q18) the next line's
+    tokens are read as file args.
 
     Splitting is applied ONLY to pure operator runs (every char in
-    `PUNCT_CHARS`); a quoted filename that happens to contain a newline is a
-    word token with non-punctuation chars and is left intact. The non-newline
-    chunks are whatever shlex already grouped (`;`, `|`, `&>`, ...), so they
-    stay valid `SEPARATORS`/`REDIR` entries.
+    `PUNCT_CHARS`); a quoted filename that happens to contain an operator char
+    (or a newline) is a word token with non-punctuation chars and is left
+    intact. Each run is consumed greedily longest-first against `_OPERATORS`, so
+    `&>>` wins over `&>` over `&` and `<<<` over `<<`. Every single operator
+    char is itself in `_OPERATORS`, so the run always fully decomposes into
+    valid `SEPARATORS`/`REDIR`/`DUP` tokens with no leftover.
     """
     out = []
     for t in tokens:
-        if t and '\n' in t and all(c in PUNCT_CHARS for c in t):
-            out += [p for p in re.split(r'(\n)', t) if p]
-        else:
+        if not t or not all(c in PUNCT_CHARS for c in t):
             out.append(t)
+            continue
+        i, n = 0, len(t)
+        while i < n:
+            for op in _OPERATORS:                 # longest-first greedy match
+                if t.startswith(op, i):
+                    out.append(op)
+                    i += len(op)
+                    break
+            else:
+                # Unreachable while PUNCT_CHARS == the single-char operators in
+                # _OPERATORS (see the comment there). Kept as a total-function
+                # guard: if that invariant ever drifts, emit the remainder as
+                # one token and stop rather than spin — a merged group defers,
+                # which is fail-safe, never a silent allow.
+                out.append(t[i:])
+                break
     return out
 
 
@@ -1501,7 +1524,7 @@ def handle_bash(data):
         lex.whitespace = lex.whitespace.replace('\n', '')
         lex.commenters = ''
         tokens = glue_dollar_paren(
-            strip_heredoc_bodies(split_newline_separators(list(lex))))
+            strip_heredoc_bodies(split_operator_runs(list(lex))))
     except ValueError:
         return                                    # unbalanced quotes -> defer
 

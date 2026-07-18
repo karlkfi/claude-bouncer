@@ -343,7 +343,11 @@ After upgrading either way:
    the newline that ends each one so the next line stays its own command group.
    A newline outside quotes is also a command
    separator — like `;` — so a guarded command on a line after another is
-   classified on its own rather than merged into its neighbour. Heredoc body
+   classified on its own rather than merged into its neighbour. `shlex` returns
+   a run of adjacent operators as a single token (`(cd x); …` → `);`, `((cat …`
+   → `((`); each such run is split by longest match back into its individual
+   operators so the command boundary isn't lost and the guarded command inside
+   a subshell or group is still classified. Heredoc body
    lines (everything between `<<TAG` and a line matching `TAG`, `<<-` included)
    are dropped so body content — HTML like `</div>`, a script, path-like text —
    is never parsed as commands or file arguments.
