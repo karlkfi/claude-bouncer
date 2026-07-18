@@ -680,6 +680,26 @@ def strip_env_prefix(tokens):
     return tokens[i:]
 
 
+def strip_sh_keywords(tokens):
+    """Drop leading shell reserved words that may prefix the real command.
+
+    `until grep … /outside`, `if cat /outside`, `do tail /outside` (a loop-body
+    group), `! grep …`, `time cat …`, `{ cat …; }`: bash recognises the reserved
+    word in command position and the guarded command follows it. Left in place,
+    the leading keyword becomes ``tokens[0]`` and the SPEC / dd / ln lookups miss,
+    so the whole group defers — a silent gap in the guard (Q28). Mirrors the
+    keyword-skip `poison_vars` already does before its assignment rules.
+
+    Stripped BEFORE strip_env_prefix because bash's order in a simple command is
+    reserved-word(s), then inline env assignments, then the command name
+    (`until LC_ALL=C grep …`).
+    """
+    i = 0
+    while i < len(tokens) and tokens[i] in SH_KEYWORDS:
+        i += 1
+    return tokens[i:]
+
+
 def strip_comments(cmd):
     """Remove unquoted `#` comments, keeping the newline that ends each one.
 
@@ -1752,8 +1772,8 @@ def handle_bash(data):
                 continue                          # for-header: nothing to check
             poison_vars(sub_g, varmap)
             poison_vars(sub_g, loopmap)           # same rules invalidate loops
-        g = strip_env_prefix(sub_g)
-        if not g: continue                        # env-only / redirect-only group
+        g = strip_env_prefix(strip_sh_keywords(sub_g))
+        if not g: continue                        # keyword/env-only or redirect-only group
         kind, arg = classify_cd(g)
         if kind is not None:
             if kind == 'arg':

@@ -15,7 +15,6 @@ Specific actionable items in priority order. Pick from the top; skip 🚫 items 
 
 | ID | Item | Labels | St | Sz | Notes |
 |---|---|---|---|---|---|
-| <a id="Q28"></a>Q28 | Guard commands prefixed by shell keywords (`until grep …`, `if grep …`) | `parsing` | 🔲 | S | A reserved word before a guarded command (`until grep …`) masks the `SPEC` lookup, so the whole group defers. `poison_vars` already skips `SH_KEYWORDS`; do the same before `files_in_command`. |
 
 ## Deferred
 

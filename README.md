@@ -119,6 +119,8 @@ different project's scratch still asks entirely.
 | `cd /etc && cat passwd`              | **ask**  |
 | `cd "$(mktemp -d)" && cat x.txt`     | **ask**  |
 | `LC_ALL=C cat /etc/passwd`           | **ask**  |
+| `until grep -q x /etc/passwd; do :; done` | **ask** |
+| `if cat /etc/passwd; then :; fi`     | **ask**  |
 | `f=/etc/passwd; cat $f`              | **ask**  |
 | `f=$HOME/x; cat $f` (non-literal value) | **ask** |
 | `C=cat; $C /etc/passwd`              | **ask**  |
@@ -359,9 +361,11 @@ After upgrading either way:
    fd-duplication or close (`2>&1`, `2>&-`) are recognised so the digit and the
    dup target don't leak as phantom file arguments; `>&file` (a redirect to a
    file, not a dup) still has its target checked.
-3. **Strip** leading POSIX `NAME=VALUE` command-prefix assignments from each
-   simple command (`LC_ALL=C cat …` → `cat …`) so the assignment doesn't mask
-   the command-name lookup.
+3. **Strip** leading shell reserved words (`until grep …`, `if cat …`, `do
+   tail …`, `! grep …`, `time cat …`) and then POSIX `NAME=VALUE` command-prefix
+   assignments (`LC_ALL=C cat …` → `cat …`) from each simple command, in that
+   order, so neither a keyword nor an inline assignment masks the command-name
+   lookup.
 4. **Resolve** literal in-command variable assignments (one-pass constant
    propagation). A standalone `NAME=value` or `export NAME=value` command
    whose value survives quote removal as a plain literal — non-empty, no `$`,
@@ -671,11 +675,9 @@ final output.
   an assignment RHS — is brace-expanded). A later `$VAR` in a file argument is
   then checked against all candidates; one outside item taints the loop. Lists
   with any non-literal item, the `for VAR; do …` ("$@") form, the `for ((…))`
-  arithmetic form, a loop variable reassigned inside the body, and a `for` whose
-  body shares a line with `do` (`for f in …; do cat $f; done` on one line — the
-  `do` keyword still masks the guarded command; the body must be on its own line
-  for now) all keep today's behavior. As with assignments, this only ever adds
-  allows for the exact values bash iterates.
+  arithmetic form, and a loop variable reassigned inside the body all keep
+  today's behavior. As with assignments, this only ever adds allows for the
+  exact values bash iterates.
 - `realpath` only follows symlinks for files that already exist; nonexistent
   paths are normalized lexically (fine for read-style commands).
 - Redirect targets (`> file`) are only inspected when the command chain also

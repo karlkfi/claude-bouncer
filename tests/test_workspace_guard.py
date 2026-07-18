@@ -797,6 +797,58 @@ class StripEnvPrefixTests(unittest.TestCase):
         )
 
 
+class StripShKeywordsTests(unittest.TestCase):
+    """Leading shell reserved words are dropped before SPEC lookup (Q28)."""
+
+    def test_single_keyword_stripped(self):
+        self.assertEqual(
+            guard.strip_sh_keywords(["until", "grep", "PAT", "x"]),
+            ["grep", "PAT", "x"],
+        )
+
+    def test_if_keyword_stripped(self):
+        self.assertEqual(
+            guard.strip_sh_keywords(["if", "cat", "x"]),
+            ["cat", "x"],
+        )
+
+    def test_loop_body_do_keyword_stripped(self):
+        self.assertEqual(
+            guard.strip_sh_keywords(["do", "tail", "x"]),
+            ["tail", "x"],
+        )
+
+    def test_multiple_keywords_stripped(self):
+        # `if ! grep …` — negation after the conditional keyword.
+        self.assertEqual(
+            guard.strip_sh_keywords(["if", "!", "grep", "PAT", "x"]),
+            ["grep", "PAT", "x"],
+        )
+
+    def test_time_keyword_stripped(self):
+        self.assertEqual(
+            guard.strip_sh_keywords(["time", "cat", "x"]),
+            ["cat", "x"],
+        )
+
+    def test_stops_at_first_non_keyword(self):
+        # A guarded command's own args are never keywords, so stripping stops.
+        self.assertEqual(
+            guard.strip_sh_keywords(["until", "grep", "in", "x"]),
+            ["grep", "in", "x"],
+        )
+
+    def test_keyword_only_returns_empty(self):
+        # `done`/`fi`/`}` alone carry no command.
+        self.assertEqual(guard.strip_sh_keywords(["done"]), [])
+
+    def test_no_keyword_unchanged(self):
+        self.assertEqual(
+            guard.strip_sh_keywords(["cat", "x"]),
+            ["cat", "x"],
+        )
+
+
 class AllowedDeviceTests(unittest.TestCase):
     """Allowlist of well-known device / FD paths."""
 
@@ -1863,6 +1915,44 @@ class HookEndToEndTests(unittest.TestCase):
     def test_env_prefix_in_second_group_outside_ask(self):
         # Prefix on a later group in a chain is still stripped.
         self._decision("cat in.txt && LC_ALL=C cat /etc/passwd", "ask")
+
+    # --- shell-keyword prefix (Q28) -----------------------------------------
+
+    def test_keyword_until_grep_outside_ask(self):
+        # `until grep …` — pre-Q28 the `until` keyword masked the SPEC lookup
+        # and the whole group deferred.
+        out = self._decision("until grep -q PAT /etc/q28-fake-target; do :; done", "ask")
+        self.assertIn(
+            "/etc/q28-fake-target",
+            out["hookSpecificOutput"]["permissionDecisionReason"],
+        )
+
+    def test_keyword_if_cat_outside_ask(self):
+        self._decision("if cat /etc/q28-fake-target; then :; fi", "ask")
+
+    def test_keyword_if_cat_workspace_allow(self):
+        self._decision("if cat in.txt; then :; fi", "allow")
+
+    def test_keyword_prefix_prog_suppression_preserved(self):
+        # prog-suppression must still fire after the keyword is stripped.
+        self._decision("if grep -e PAT /etc/q28-fake-target; then :; fi", "ask")
+
+    def test_keyword_prefix_env_prefix_combined_ask(self):
+        # bash order: reserved word, then inline env assignment, then command.
+        self._decision("until LC_ALL=C grep -q PAT /etc/q28-fake-target; do :; done", "ask")
+
+    def test_loop_body_do_prefix_outside_ask(self):
+        # The `do cat …` body group is its own token group after `;` splitting.
+        self._decision("for f in a; do cat /etc/q28-fake-target; done", "ask")
+
+    def test_oneline_for_do_loopvar_outside_ask(self):
+        # Pre-Q28 the `do` on the same line masked the guarded command and the
+        # one-line `for … do … done` loop deferred; now the loop variable is
+        # resolved and an outside candidate prompts.
+        self._decision("for f in /etc/q28-fake-target; do cat $f; done", "ask")
+
+    def test_oneline_for_do_loopvar_workspace_allow(self):
+        self._decision("for f in in.txt; do cat $f; done", "allow")
 
     # --- heredoc / here-string (Q4) -----------------------------------------
 
