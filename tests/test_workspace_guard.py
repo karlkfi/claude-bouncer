@@ -3593,6 +3593,105 @@ class PoisonVarsTests(unittest.TestCase):
         self.assertEqual(m, {"f": "x"})
 
 
+class LiteralForItemTests(unittest.TestCase):
+    """Purity check for `for VAR in <list>` items (issue 70)."""
+
+    def test_plain_word_literal(self):
+        self.assertEqual(guard.literal_for_item("unit-test"), "unit-test")
+
+    def test_relative_path_literal(self):
+        self.assertEqual(guard.literal_for_item("docs/plan"), "docs/plan")
+
+    def test_dollar_item_impure(self):
+        self.assertIsNone(guard.literal_for_item("$x"))
+
+    def test_glob_item_impure(self):
+        self.assertIsNone(guard.literal_for_item("*.md"))
+
+    def test_brace_item_impure(self):
+        # Unlike an assignment RHS, a for-list item IS brace-expanded by bash,
+        # so `{a,b}` must not be treated as the literal string `{a,b}`.
+        for v in ("{a,b}", "a{1..3}", "x{y"):
+            self.assertIsNone(guard.literal_for_item(v), v)
+
+    def test_tilde_slash_expands(self):
+        home = os.environ.get("HOME")
+        if not home:
+            self.skipTest("HOME not set")
+        self.assertEqual(
+            guard.literal_for_item("~/x"), os.path.join(home, "x"))
+
+
+class ForLoopBindingTests(unittest.TestCase):
+    """Classification of `for NAME in <list>` headers (issue 70)."""
+
+    def test_all_literal_list_binds(self):
+        self.assertEqual(
+            guard.for_loop_binding(["for", "f", "in", "a", "b", "c"]),
+            ("f", ["a", "b", "c"]))
+
+    def test_braced_name_form_returns_poison(self):
+        # `for f in a $x` — a non-literal item poisons the variable.
+        self.assertEqual(
+            guard.for_loop_binding(["for", "f", "in", "a", "$x"]),
+            ("f", None))
+
+    def test_glob_item_poisons(self):
+        self.assertEqual(
+            guard.for_loop_binding(["for", "f", "in", "docs/*.md"]),
+            ("f", None))
+
+    def test_for_name_without_in_poisons(self):
+        # `for f; do …` iterates "$@" — unresolvable.
+        self.assertEqual(guard.for_loop_binding(["for", "f"]), ("f", None))
+
+    def test_empty_list_poisons(self):
+        self.assertEqual(guard.for_loop_binding(["for", "f", "in"]), ("f", None))
+
+    def test_special_name_not_bound(self):
+        self.assertIsNone(guard.for_loop_binding(["for", "IFS", "in", "a"]))
+
+    def test_arithmetic_form_not_a_binding(self):
+        # `for ((i=0;…))` tokenizes with `(` at index 1 — not `for NAME in`.
+        self.assertIsNone(guard.for_loop_binding(["for", "(", "(", "i=0"]))
+
+    def test_non_for_group_ignored(self):
+        self.assertIsNone(guard.for_loop_binding(["grep", "PAT", "x"]))
+
+
+class ExpandLoopCandidatesTests(unittest.TestCase):
+    """Cross-product expansion of loop-variable file tokens (issue 70)."""
+
+    def test_single_var_expands_each_candidate(self):
+        self.assertEqual(
+            guard.expand_loop_candidates("wf/$f.yml", {"f": ["a", "b"]}),
+            ["wf/a.yml", "wf/b.yml"])
+
+    def test_braced_use_expands(self):
+        self.assertEqual(
+            guard.expand_loop_candidates("wf/${f}.yml", {"f": ["a"]}),
+            ["wf/a.yml"])
+
+    def test_no_loop_var_unchanged(self):
+        self.assertEqual(
+            guard.expand_loop_candidates("$other/x", {"f": ["a"]}),
+            ["$other/x"])
+
+    def test_two_vars_cross_product(self):
+        self.assertEqual(
+            guard.expand_loop_candidates("$a/$b", {"a": ["x", "y"],
+                                                   "b": ["p", "q"]}),
+            ["x/p", "x/q", "y/p", "y/q"])
+
+    def test_backtick_token_not_expanded(self):
+        self.assertEqual(
+            guard.expand_loop_candidates("$f`cmd`", {"f": ["a"]}),
+            ["$f`cmd`"])
+
+    def test_empty_map_unchanged(self):
+        self.assertEqual(guard.expand_loop_candidates("$f", {}), ["$f"])
+
+
 class VarPropagationEndToEndTests(unittest.TestCase):
     """Issue 58: `VAR=literal; use $VAR` resolves through the workspace check.
 
@@ -3769,6 +3868,112 @@ class VarPropagationEndToEndTests(unittest.TestCase):
         if out is not None:
             self.assertNotEqual(
                 out["hookSpecificOutput"]["permissionDecision"], "allow")
+
+
+class ForLoopPropagationEndToEndTests(unittest.TestCase):
+    """Issue 70: `for VAR in <literal list>` binds VAR's candidate set instead
+    of poisoning it, so `$VAR` in a file arg is checked against every value.
+
+    As with issue 58, every uncertain shape must keep today's `ask`/defer — a
+    superset of candidates can prompt but never wrongly allow.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = os.path.realpath(self._tmp.name)
+        os.makedirs(os.path.join(self.workspace, "wf"))
+        for n in ("a", "b", "c"):
+            with open(os.path.join(self.workspace, "wf", n + ".yml"), "w") as f:
+                f.write("x\n")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _decision(self, cmd, expected):
+        out = run_hook(cmd, self.workspace)
+        self.assertIsNotNone(out, f"expected a decision, got defer for: {cmd!r}")
+        got = out["hookSpecificOutput"]["permissionDecision"]
+        self.assertEqual(
+            got, expected,
+            f"expected {expected!r} for {cmd!r}; got {got!r} "
+            f"(reason: {out['hookSpecificOutput'].get('permissionDecisionReason')!r})",
+        )
+        return out
+
+    # --- the motivating shape resolves ---------------------------------------
+
+    def test_all_candidates_inside_allow(self):
+        # The issue's motivating example (body on its own line after `do`).
+        self._decision(
+            "for f in a b c\ndo\n  grep -n x wf/$f.yml\ndone", "allow")
+
+    def test_outside_candidate_ask_names_resolved_path(self):
+        out = self._decision(
+            "for f in a /etc/q70-fake-target\ndo\n  cat $f\ndone", "ask")
+        # The resolved candidate (not the $f token) is named in the reason.
+        self.assertIn(
+            "/etc/q70-fake-target",
+            out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_host_temp_candidate_deny(self):
+        self._decision(
+            "for f in a /tmp/q70-fake-target\ndo\n  cat $f\ndone", "deny")
+
+    def test_scalar_var_resolved_into_list_allow(self):
+        # `SP=wf; for f in $SP/a.yml …` — the list items resolve via issue 58
+        # before binding, so the candidate set matches what bash iterates.
+        self._decision(
+            "SP=wf; for f in $SP/a.yml $SP/b.yml\ndo\n  cat $f\ndone", "allow")
+
+    def test_braced_use_of_loop_var_allow(self):
+        self._decision(
+            "for f in a b\ndo\n  cat wf/${f}.yml\ndone", "allow")
+
+    # --- uncertainty keeps today's ask ---------------------------------------
+
+    def test_glob_item_poisons(self):
+        self._decision("for f in wf/*.yml\ndo\n  cat $f\ndone", "ask")
+
+    def test_brace_item_poisons(self):
+        # bash brace-expands a for-list item; treating `{a,b}` literally would
+        # miss the real paths, so the variable is poisoned.
+        self._decision("for f in wf/{a,b}.yml\ndo\n  cat $f\ndone", "ask")
+
+    def test_nonliteral_item_poisons(self):
+        self._decision("for f in a $x\ndo\n  cat wf/$f.yml\ndone", "ask")
+
+    def test_for_name_without_in_poisons(self):
+        self._decision("for f\ndo\n  cat $f\ndone", "ask")
+
+    def test_reassigned_loop_var_poisons(self):
+        self._decision(
+            "for f in a b\ndo\n  f=/etc/q70-fake\n  cat $f\ndone", "ask")
+
+    def test_read_in_body_poisons_loop_var(self):
+        self._decision(
+            "for f in a b\ndo\n  read f\n  cat $f\ndone", "ask")
+
+    def test_eval_in_body_poisons_loop_var(self):
+        self._decision(
+            "for f in a b\ndo\n  eval echo hi\n  cat $f\ndone", "ask")
+
+    def test_arithmetic_for_form_poisons(self):
+        # `for ((i=0;i<3;i++))` isn't a `for NAME in` list — the loop var keeps
+        # today's poison behavior.
+        self._decision(
+            "for ((i=0;i<3;i++))\ndo\n  cat $i\ndone", "ask")
+
+    def test_heredoc_disables_loop_propagation(self):
+        # Heredoc turns off the whole propagation feature (varmap AND loopmap).
+        self._decision(
+            "for f in a b\ndo\n  cat $f <<EOF\nx\nEOF\ndone", "ask")
+
+    def test_one_outside_candidate_taints_whole_loop(self):
+        # bash visits every value, so a single outside candidate must prompt
+        # even when the rest are in-workspace.
+        self._decision(
+            "for f in a b c ../../../etc/q70-fake\ndo\n  cat wf/$f.yml\ndone",
+            "ask")
 
 
 class PluginWiringTests(unittest.TestCase):

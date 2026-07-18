@@ -369,11 +369,22 @@ After upgrading either way:
    exactly the expansion bash will perform, using only text already inside
    the command; the substituted path still goes through every step below.
    Anything uncertain — a value built from another expansion, a variable
-   later touched by `read`/`eval`/`declare`/`unset`/a `for` loop, an
-   assignment inside a subshell, pipeline segment, or backgrounded command —
-   drops the variable and keeps today's runtime-expanded `ask`. As a side
-   effect, a guarded command reached *through* a variable (`C=cat; $C file`)
-   is now recognised and guarded too.
+   later touched by `read`/`eval`/`declare`/`unset`, an assignment inside a
+   subshell, pipeline segment, or backgrounded command — drops the variable
+   and keeps today's runtime-expanded `ask`. As a side effect, a guarded
+   command reached *through* a variable (`C=cat; $C file`) is now recognised
+   and guarded too.
+
+   A `for VAR in <list>` loop is resolved the same way when every item in the
+   list is a plain literal: instead of poisoning `VAR`, the hook records its
+   candidate value set, and a later `$VAR` in a file argument is expanded to
+   *every* candidate and checked. All candidates in-root → allow; any candidate
+   outside (or host-temp) → prompt, naming the offending resolved path. Since
+   bash visits every value, one outside item taints the whole loop — which is
+   exactly the decision the hook reaches. Lists with a non-literal item (a `$`,
+   command substitution, glob, or brace like `{a,b}`), the `for VAR; do …`
+   ("$@") form, the `for ((…))` arithmetic form, and a loop variable
+   reassigned in the body all keep today's poison behavior.
 5. **Classify** each token using a per-command spec table that knows which flags
    take values (`grep -e PAT`), which flag-values are themselves files
    (`grep -f`, `jq --slurpfile`), and how many leading positionals are the
@@ -501,8 +512,10 @@ flowing, avoid triggering it:
   even when they'd resolve in-root. (A bare `~`/`~/…` *is* expanded to `$HOME`,
   so home-relative paths inside the root are fine. A variable assigned a plain
   literal path *earlier in the same command string* — `f=./config/app.json; cat $f`
-  — is also resolved and doesn't prompt.) Otherwise write the literal in-root
-  path (e.g. `cat ./config/app.json`, not `cat "$HOME/proj/config/app.json"`).
+  — is also resolved and doesn't prompt, as is a `for f in a b c` loop over a
+  literal list when its body is on its own line after `do`.) Otherwise write the
+  literal in-root path (e.g. `cat ./config/app.json`, not
+  `cat "$HOME/proj/config/app.json"`).
 - **Don't `cd` outside the project root**, and avoid bare `cd`, `cd -`, and
   `cd $HOME` — they lose the hook's working-directory tracking, so every later
   relative path in the same command prompts. Stay in the root, or `cd` into a
@@ -641,13 +654,24 @@ final output.
   whitespace, or `:`) are propagated, and only into plain `$NAME`/`${NAME}`
   uses. Parameter-expansion operators (`${f:-x}`, `${f%.*}`), arrays, values
   built from other expansions, and variables later touched by
-  `read`/`eval`/`declare`/`unset`/`for` or assigned inside a subshell,
+  `read`/`eval`/`declare`/`unset` or assigned inside a subshell,
   pipeline segment, or backgrounded command all keep the runtime-expanded
   `ask`. A heredoc (`<<`) anywhere in the command or an in-command `IFS=`
   reassignment disables propagation for that command entirely (heredoc bodies
   tokenize as commands; a changed `IFS` alters word splitting). Uncertainty
   always falls back to `ask` — propagation only ever adds allows for
   expansions bash performs deterministically.
+- `for VAR in <list>` loop resolution is equally narrow. The candidate set is
+  recorded only when *every* list item is a plain literal (same purity test as
+  assignments, plus a brace `{a,b}` is rejected because a for-list item — unlike
+  an assignment RHS — is brace-expanded). A later `$VAR` in a file argument is
+  then checked against all candidates; one outside item taints the loop. Lists
+  with any non-literal item, the `for VAR; do …` ("$@") form, the `for ((…))`
+  arithmetic form, a loop variable reassigned inside the body, and a `for` whose
+  body shares a line with `do` (`for f in …; do cat $f; done` on one line — the
+  `do` keyword still masks the guarded command; the body must be on its own line
+  for now) all keep today's behavior. As with assignments, this only ever adds
+  allows for the exact values bash iterates.
 - `realpath` only follows symlinks for files that already exist; nonexistent
   paths are normalized lexically (fine for read-style commands).
 - Redirect targets (`> file`) are only inspected when the command chain also

@@ -807,6 +807,97 @@ def literal_assignment_value(raw):
     return raw
 
 
+def literal_for_item(raw):
+    """Return the literal a `for VAR in <list>` item resolves to, or None when
+    bash would expand it into paths the hook can't predict (issue 70).
+
+    Reuses the assignment-RHS purity test (``literal_assignment_value``) — same
+    tilde handling, same rejection of ``$``/backtick/glob/whitespace — then
+    ADDITIONALLY rejects brace items (``{a,b}``, ``a{1..3}``): unlike an
+    assignment RHS, a for-list item IS brace-expanded by bash, so treating
+    ``{a,b}`` as the literal string would miss the real ``a``/``b`` paths. A
+    rejected item poisons the loop variable (today's runtime-expanded ``ask``).
+    """
+    val = literal_assignment_value(raw)
+    if val is None:
+        return None
+    if '{' in val or '}' in val:
+        return None
+    return val
+
+
+def for_loop_binding(g):
+    """Classify a command group as a `for NAME in <list>; …` loop header.
+
+    Returns:
+      * ``(name, [values])`` — a fully-literal list: record the candidate set so
+        ``$NAME`` in a later file arg is validated against every value (issue 70).
+      * ``(name, None)`` — a `for NAME in` whose list has any non-literal/glob/
+        brace item, an empty list, or a `for NAME` with no `in` (iterates
+        ``"$@"``): the caller drops NAME from the maps, keeping today's poison.
+      * ``None`` — not a `for NAME in` header at all (the `for ((…))` arithmetic
+        form tokenizes with ``(`` at ``g[1]``), so the caller's existing
+        ``poison_vars`` path runs unchanged.
+
+    Must be called on the post-substitution tokens: a list item like ``$SP/a``
+    with ``SP`` a known literal has already been resolved, so the bound value
+    matches what bash iterates.
+    """
+    if len(g) < 2 or os.path.basename(g[0]) != 'for':
+        return None
+    name = g[1]
+    if not IDENT_RE.fullmatch(name) or name in NEVER_PROPAGATE:
+        return None
+    if len(g) < 3 or g[2] != 'in':
+        return (name, None)                       # `for NAME` over "$@"
+    items = g[3:]
+    if not items:
+        return (name, None)                       # empty list -> body never runs
+    values = []
+    for it in items:
+        val = literal_for_item(it)
+        if val is None:
+            return (name, None)                   # non-literal item -> poison
+        values.append(val)
+    return (name, values)
+
+
+def expand_loop_candidates(tok, loopmap):
+    """Expand every `$NAME`/`${NAME}` whose NAME is a for-loop variable into the
+    full set of concrete tokens bash iterates over (issue 70).
+
+    ``loopmap`` maps a loop variable to its literal candidate list (recorded by
+    ``for_loop_binding`` from a fully-literal ``for NAME in …``). A token using
+    such a variable stands for one path per candidate — and bash visits ALL of
+    them — so the caller checks every expansion and prompts if ANY lands outside
+    the workspace. Since the candidate set is exactly bash's iteration list, an
+    outside path can never slip past; a stale/over-broad set only ever adds
+    candidates, which can prompt but never wrongly allow.
+
+    Returns ``[tok]`` unchanged when the token uses no loop variable (or holds a
+    backtick the hook won't evaluate). Several distinct loop variables in one
+    token expand as the cross product; order is deterministic (variable order,
+    then candidate order) so reasons and tests stay stable.
+    """
+    if not loopmap or '$' not in tok or '`' in tok:
+        return [tok]
+    names = []
+    for m in VAR_USE_RE.finditer(tok):
+        nm = m.group(1) or m.group(2)
+        if nm in loopmap and nm not in names:
+            names.append(nm)
+    if not names:
+        return [tok]
+    results = [tok]
+    for nm in names:
+        expanded = []
+        for r in results:
+            for val in loopmap[nm]:
+                expanded.append(substitute_vars(r, {nm: val}))
+        results = expanded
+    return results
+
+
 def substitute_vars(tok, varmap):
     """Replace plain `$NAME`/`${NAME}` uses whose literal value is known.
 
@@ -1528,26 +1619,36 @@ def handle_bash(data):
 
         `is_read=True` enables the ALLOWED_READ_PREFIXES exemption for
         commands that only read files (see WRITE_COMMANDS). Redirect
-        targets and write commands pass is_read=False."""
-        kind, rp = resolve_token(f, group_cwd, group_cwd_unknown)
-        if kind == 'skip':
-            return None
-        if kind in ('expand', 'untracked'):
-            return (f, kind, None)
-        # A path staged outside by an earlier `ln` (symbolic or hard) is flagged
-        # even when it physically lives under the session temp dir — checked
-        # BEFORE the session-tmp allow so the ln-staging defense (Q8/Q17) can't
-        # be bypassed by pointing a link inside the allowed scratch dir.
-        if rp in staged_outside_paths:
-            return (f, 'outside', None)
-        # Everything past resolution — the session-tmp allow, read-prefix and
-        # sibling-session exemptions, sibling-checkout / host-temp / outside
-        # tiers — is the shared core (classify_outside), so a `cat` and a native
-        # `Read` of the same path can't diverge. The ln-staging defense above
-        # runs FIRST so a link planted inside an allowed scratch dir can't
-        # launder an outside target.
-        res = classify_outside(rp, ctx, is_read)
-        return (f, res[0], res[1]) if res is not None else None
+        targets and write commands pass is_read=False.
+
+        A `$VAR` bound to a `for VAR in <literal list>` loop expands to one
+        concrete path per candidate (issue 70); every candidate is checked and
+        the first that lands outside is returned (naming that resolved
+        candidate, not the `$VAR` token). Tokens with no loop variable are a
+        single candidate — the original single-path check."""
+        for cand in expand_loop_candidates(f, loopmap):
+            kind, rp = resolve_token(cand, group_cwd, group_cwd_unknown)
+            if kind == 'skip':
+                continue
+            if kind in ('expand', 'untracked'):
+                return (cand, kind, None)
+            # A path staged outside by an earlier `ln` (symbolic or hard) is
+            # flagged even when it physically lives under the session temp dir —
+            # checked BEFORE the session-tmp allow so the ln-staging defense
+            # (Q8/Q17) can't be bypassed by pointing a link inside the allowed
+            # scratch dir.
+            if rp in staged_outside_paths:
+                return (cand, 'outside', None)
+            # Everything past resolution — the session-tmp allow, read-prefix
+            # and sibling-session exemptions, sibling-checkout / host-temp /
+            # outside tiers — is the shared core (classify_outside), so a `cat`
+            # and a native `Read` of the same path can't diverge. The ln-staging
+            # defense above runs FIRST so a link planted inside an allowed
+            # scratch dir can't launder an outside target.
+            res = classify_outside(rp, ctx, is_read)
+            if res is not None:
+                return (cand, res[0], res[1])
+        return None
 
     def stage_ln(target, link, group_cwd, group_cwd_unknown):
         """If `ln TARGET LINK` (symbolic or hard) points outside, record
@@ -1580,6 +1681,11 @@ def handle_bash(data):
     # shaped like an assignment could otherwise pollute the map with values
     # bash never assigns.
     varmap, propagate = {}, '<<' not in tokens
+    # Loop-variable propagation (issue 70): a `for NAME in <all-literal list>`
+    # records NAME's candidate value set here instead of poisoning it, so a
+    # later `$NAME` in a file arg is checked against every value bash iterates.
+    # Poisoned by the same reassignment/`read`/`eval` rules as varmap (below).
+    loopmap = {}
     for g, g_redir, persists in groups:
         # Substitute known literals for path checking. The pre-substitution
         # tokens are kept for assignment parsing below — bash decides what is
@@ -1602,13 +1708,27 @@ def handle_bash(data):
         if propagate:
             assigned = apply_assignment_group(g, varmap, persists)
             if assigned is not None:
+                # A name set as a scalar literal is no longer a loop variable.
+                for nm in assigned:
+                    loopmap.pop(nm, None)
                 if 'IFS' in assigned:
                     # A changed IFS alters how bash word-splits every later
                     # expansion — stop propagating for the rest of the string.
                     varmap.clear()
+                    loopmap.clear()
                     propagate = False
                 continue                          # assignment-only group
+            forbind = for_loop_binding(sub_g)
+            if forbind is not None:
+                name, values = forbind
+                varmap.pop(name, None)            # a loop var isn't a scalar
+                if values is None:
+                    loopmap.pop(name, None)       # unresolvable list -> poison
+                else:
+                    loopmap[name] = values
+                continue                          # for-header: nothing to check
             poison_vars(sub_g, varmap)
+            poison_vars(sub_g, loopmap)           # same rules invalidate loops
         g = strip_env_prefix(sub_g)
         if not g: continue                        # env-only / redirect-only group
         kind, arg = classify_cd(g)

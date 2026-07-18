@@ -68,7 +68,10 @@ Tell the user the cause(s) you found, then apply the habits that prevent them:
 - **Use the Read, Grep, and Glob tools instead of bash** `cat`/`grep`/`sed`/
   `head`/`tail`/`awk` for inspecting files. They don't go through this hook.
 - **Keep guarded file arguments inside the project root** — write the literal
-  in-root path (`cat ./config/app.json`), not a `$VAR`/`~`/`$(...)` form.
+  in-root path (`cat ./config/app.json`), not a `$VAR`/`~`/`$(...)` form. (A
+  variable assigned a literal earlier in the same command, and a `for f in a b c`
+  loop over a literal list with its body on its own line after `do`, are both
+  resolved and don't prompt.)
 - **Stay in the project root** — don't `cd` outside it; avoid bare `cd`, `cd -`,
   and `cd $HOME`. `cd` into a subdirectory with a literal path if you must.
   (`cd "$(git rev-parse --show-toplevel)"` and `cd "$(pwd)"` are fine — the
