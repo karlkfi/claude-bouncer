@@ -5,7 +5,7 @@ Single source of truth for progress and priorities in workspace-guard. Pick the 
 **Status:** 🔲 ready · 🚫 blocked
 **Size:** S = one session/PR · M = 2–3 sessions · L = needs a plan doc under `docs/plan/`
 **Labels:** `security` `tests` `docs` `infra` `bug` `parsing`
-**Next ID:** Q30
+**Next ID:** Q31
 
 **Maintaining this file:** see [`docs/development/maintaining-backlog.md`](development/maintaining-backlog.md).
 
@@ -24,3 +24,4 @@ Specific actionable items in priority order. Pick from the top; skip 🚫 items 
 |---|---|---|---|---|
 | <a id="Q23"></a>Q23 | Opt-in extra-roots for shared cross-worktree files | `security` | M | **Demand:** a session that legitimately needs cross-worktree shared files (mailbox files, the main checkout) and can't tolerate the prompts. Fix: an opt-in, empty-by-default extra-roots env var. |
 | <a id="Q26"></a>Q26 | Extend host-temp `deny` to currently-unguarded shapes | `security` `parsing` | M | **Event:** a real session leaks host-temp writes through an unguarded shape (`cd /tmp`, `mktemp -p /tmp`, unguarded-command redirects). Needs new `SPEC` rows and standalone-`cd` handling. |
+| <a id="Q30"></a>Q30 | friction-report: flag stale installed version | `infra` `docs` | S | **Demand:** friction a newer release already fixes ([#71](https://github.com/karlkfi/claude-workspace-guard/issues/71)). Compare installed version vs the marketplace clone's `plugin.json`; print "installed X, Y available" by the top friction row. |

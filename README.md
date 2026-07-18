@@ -239,6 +239,24 @@ the same marketplace and plugin.
 3. Find **workspace-guard** in that marketplace, install it, and make sure it's
    enabled.
 
+**Turn on auto-update while you're here (recommended).** This is a third-party
+git marketplace, so Claude Code won't refresh it on its own — an install pins its
+version until you act (see [Upgrade](#upgrade)). Install time is the decision
+point: add the marketplace to `~/.claude/settings.json` with `autoUpdate: true`
+so new releases reach you automatically.
+
+```json
+"extraKnownMarketplaces": {
+  "workspace-guard": {
+    "source": { "source": "git", "url": "https://github.com/karlkfi/claude-workspace-guard.git" },
+    "autoUpdate": true
+  }
+}
+```
+
+Without this you're on the manual update path documented under
+[Upgrade](#upgrade).
+
 After installing with either method:
 
 - Requires `python3` on your PATH.
@@ -255,9 +273,35 @@ file in your repo; it should run without prompting.
 ## Upgrade
 
 workspace-guard installs from a GitHub marketplace, which Claude Code tracks at
-the repository's default branch (`main`). It does **not** auto-update by default,
-so a newer release won't reach you until you refresh the marketplace and
-reinstall the plugin.
+the repository's default branch (`main`). Claude Code auto-updates **official
+Anthropic marketplaces only** — a third-party git marketplace like this one does
+**not** refresh on its own, so an install pins its version until you either turn
+on auto-update or update manually. (Concretely: it's easy to sit on an old
+release for weeks while fixes ship — a friction-cutting parsing fix can be
+invisible to anyone still pinned to the version they first installed.)
+
+### Recommended: turn on auto-update (set-and-forget)
+
+Add the marketplace to `~/.claude/settings.json` with `autoUpdate: true`, then
+restart Claude Code:
+
+```json
+"extraKnownMarketplaces": {
+  "workspace-guard": {
+    "source": { "source": "git", "url": "https://github.com/karlkfi/claude-workspace-guard.git" },
+    "autoUpdate": true
+  }
+}
+```
+
+From then on Claude Code refreshes the marketplace and updates the plugin for
+you — no per-release action. This is the same block shown under
+[Install](#install); set it once at install time and you're done.
+
+### Manual update
+
+If you'd rather update on demand, refresh the marketplace and update the plugin
+yourself.
 
 **Claude Code (CLI or IDE extension)** — run the slash commands:
 
@@ -269,12 +313,19 @@ reinstall the plugin.
 
 The first command re-fetches the marketplace manifest from the repo; the
 reinstall picks up the new version. Refreshing the catalog alone does **not**
-upgrade an already-installed plugin unless you've turned on auto-update for the
-marketplace — hence the explicit reinstall.
+upgrade an already-installed plugin — hence the explicit reinstall.
 
-**Claude Code for Claude Desktop** — in the **Customize** tab's plugins /
-marketplaces section, refresh the `workspace-guard` marketplace, then reinstall
-**workspace-guard** from it.
+**Claude Code for Claude Desktop / headless** — Claude Desktop doesn't expose the
+`/plugin` slash commands, but the `claude` CLI does the same thing and shares
+Desktop's plugin state, so it works there and in any headless run:
+
+```
+claude plugin marketplace update workspace-guard
+claude plugin update workspace-guard@workspace-guard
+```
+
+`claude plugin update` updates in place (no uninstall/reinstall needed); it
+prints "restart required to apply".
 
 After upgrading either way:
 
