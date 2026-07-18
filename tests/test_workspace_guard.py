@@ -1951,6 +1951,28 @@ class HookEndToEndTests(unittest.TestCase):
             guard.classify_mktemp(["mktemp", "/tmp/a.XXX", "b.XXX"]),
             ["/tmp/a.XXX", guard.default_temp_dir()])
 
+    def test_classify_mktemp_cluster_dp_dir(self):
+        # Q32: -dp DIR == -d -p DIR; the -p value must not leak to a template.
+        self.assertEqual(
+            guard.classify_mktemp(["mktemp", "-dp", "./scratch", "x.XXX"]),
+            ["./scratch"])
+
+    def test_classify_mktemp_cluster_dp_glued_dir(self):
+        # -dpDIR == -d -p DIR (value glued to the cluster).
+        self.assertEqual(
+            guard.classify_mktemp(["mktemp", "-dp/tmp/q32-fake", "x.XXX"]),
+            ["/tmp/q32-fake"])
+
+    def test_classify_mktemp_cluster_boolean_only_is_default(self):
+        # -du == -d -u: both boolean, so the target is still the default location.
+        self.assertEqual(guard.classify_mktemp(["mktemp", "-du"]),
+                         [guard.default_temp_dir()])
+
+    def test_classify_mktemp_cluster_dt_is_default(self):
+        # -dt == -d -t: -t forces the default host-temp location.
+        self.assertEqual(guard.classify_mktemp(["mktemp", "-dt", "prefix"]),
+                         [guard.default_temp_dir()])
+
     def test_classify_mktemp_version_is_informational(self):
         self.assertIsNone(guard.classify_mktemp(["mktemp", "--version"]))
         self.assertIsNone(guard.classify_mktemp(["mktemp", "-V"]))
@@ -3381,6 +3403,15 @@ class HostTempDenyTests(unittest.TestCase):
 
     def test_mktemp_workspace_slashed_template_allow(self):
         self._expect("mktemp ./q26.XXXXXX", "allow")
+
+    def test_mktemp_cluster_dp_workspace_allow(self):
+        # Q32: -dp ./scratch is -d -p ./scratch -> repo-local target -> allow
+        # (previously false-denied because -dp was read as one unknown flag).
+        self._expect("mktemp -dp ./scratch q32.XXXXXX", "allow")
+
+    def test_mktemp_cluster_dp_tmp_deny(self):
+        # -dp into host temp is still an explicit host-temp target -> deny.
+        self._expect("mktemp -dp /tmp q32.XXXXXX", "deny")
 
     def test_mktemp_version_defers(self):
         # Informational invocation creates nothing -> defer to normal perms.

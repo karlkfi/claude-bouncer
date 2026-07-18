@@ -146,6 +146,7 @@ different project's scratch still asks entirely.
 | `grep '/tmp' data.txt` (`/tmp` is the pattern) | allow |
 | `mktemp -p ./scratch x.XXXX` (repo-local) | allow |
 | `TMPDIR=./scratch mktemp` (repo-local default) | allow |
+| `mktemp -dp ./scratch x.XXXX` (clustered `-d -p`) | allow |
 | `cat /tmpfoo/x` (not under `/tmp`)   | **ask**  |
 | `ls > /etc/out.txt` (unguarded redirect, outside) | **ask** |
 | `ls /etc` (unguarded, no redirect)   | defer    |
@@ -417,12 +418,12 @@ After upgrading either way:
    `mktemp` is handled separately too, because its *default* location is host
    temp: a bare `mktemp`, `mktemp -d`, or `mktemp -t`/bare `--tmpdir` resolves to
    `$TMPDIR`/`/tmp`, while `-p DIR`/`--tmpdir=DIR` and a slashed template
-   (`mktemp /tmp/x.XXXX`, `./x.XXXX`) name their own location. The GNU/BSD `-t`
-   arity split is sidestepped — `-t` lands in host temp on both. A literal
-   inline `TMPDIR=<dir>` prefix relocates that default location, so
-   `TMPDIR=./scratch mktemp` resolves in-workspace (allow); an explicit
-   `-p`/`--tmpdir=` still wins over it, and a `$`-bearing value degrades to the
-   host-temp default.
+   (`mktemp /tmp/x.XXXX`, `./x.XXXX`) name their own location. Short flags may be
+   clustered — `-dp DIR` is decoded as `-d -p DIR`. The GNU/BSD `-t` arity split
+   is sidestepped — `-t` lands in host temp on both. A literal inline
+   `TMPDIR=<dir>` prefix relocates that default location, so `TMPDIR=./scratch
+   mktemp` resolves in-workspace (allow); an explicit `-p`/`--tmpdir=` still wins
+   over it, and a `$`-bearing value degrades to the host-temp default.
 6. **Track** cwd shifts across the chain. A `cd`/`pushd` in an earlier group
    re-roots relative file paths — including relative redirect targets — in
    later guarded groups (so `cd /etc && cat passwd` flags `passwd` as
@@ -752,15 +753,14 @@ final output.
   relative write, and `mktemp` (its default location is host temp). A literal
   inline `TMPDIR=<dir>` prefix is honored for `mktemp`'s default location
   (`TMPDIR=./scratch mktemp` → allow; a `$`-bearing value can't be trusted and
-  degrades to the host-temp default). A few shapes remain out of scope: an inline
-  `TMPDIR=/tmp cmd` that only redirects a *non-`mktemp` tool's* own internal temp
-  location (not a path the hook parses) still defers; a command buried inside a
-  *quoted* command substitution or backticks (`cd "$(mktemp -d)"`,
+  degrades to the host-temp default), and combined `mktemp` short flags
+  (`-dp DIR`) are decoded precisely (`-d -p DIR`). A few shapes remain out of
+  scope: an inline `TMPDIR=/tmp cmd` that only redirects a *non-`mktemp` tool's*
+  own internal temp location (not a path the hook parses) still defers; a command
+  buried inside a *quoted* command substitution or backticks (`cd "$(mktemp -d)"`,
   `` cd `mktemp -d` ``) isn't tokenized as its own command, so a host-temp write
   created there isn't flagged — the *unquoted* `cd $(mktemp -d)` **is** split into
-  its own subshell segment and caught; and exotic `mktemp` getopt forms such as
-  combined short flags (`-dp DIR`) degrade toward the host-temp default (`deny`)
-  rather than a precise decision — never a silent allow.
+  its own subshell segment and caught.
 - The sibling-checkout `deny` classifies *write-context* file arguments — the
   same set the read-prefix exemption treats as writes: redirect targets, `dd`
   operands, and every operand of `cp`/`mv`/`tee`/`rm`. So a `cp` **source** or a

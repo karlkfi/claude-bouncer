@@ -1211,7 +1211,10 @@ def classify_mktemp(tokens, default_dir=None):
     (``-p ./scratch``) or a slashed template (``mktemp ./x.XXXX``) is allowed
     like any other in-root write.
 
-    Flag handling is explicit (never inferred at runtime) and spans GNU + BSD:
+    Flag handling is explicit (never inferred at runtime) and spans GNU + BSD.
+    Short flags may be clustered (``-dp DIR`` == ``-d -p DIR``): each character
+    is decoded in turn, with ``-p`` taking the rest of the cluster (or the next
+    token) as its directory and terminating the run.
       * ``-p DIR`` / ``-pDIR`` / ``--tmpdir=DIR``: DIR is the target directory
         (GNU ``-p`` requires the value; ``--tmpdir`` takes it only glued with
         ``=`` — a bare ``--tmpdir`` uses the default location per GNU's
@@ -1232,10 +1235,6 @@ def classify_mktemp(tokens, default_dir=None):
     branch (bare / ``-t`` / bare-name template) — it carries a literal inline
     ``TMPDIR=`` prefix captured by :func:`inline_tmpdir`. An explicit ``-p`` /
     ``--tmpdir=`` still wins over it, mirroring real mktemp's precedence.
-
-    Exotic getopt forms (combined short flags like ``-dp DIR``) aren't decoded
-    precisely; they degrade toward the host-temp default, i.e. ``deny`` — never
-    a silent allow. See README Limitations.
     """
     if not tokens or os.path.basename(tokens[0]) != 'mktemp':
         return None
@@ -1251,22 +1250,35 @@ def classify_mktemp(tokens, default_dir=None):
             key, inline = split_eq(tok)
             if key in ('-V', '--version', '--help'):
                 return None                        # informational -> defer
-            if tok.startswith('-p') and not tok.startswith('--'):
-                if len(tok) > 2:                   # glued -pDIR
-                    tmpdir = tok[2:]
-                elif i + 1 < n:                    # -p DIR
-                    tmpdir = tokens[i + 1]; i += 1
-                i += 1; continue
-            if key == '--tmpdir':
-                if inline is not None:
-                    tmpdir = inline
-                else:
-                    force_default = True           # bare --tmpdir (optional arg)
-                i += 1; continue
-            if key == '-t':
-                force_default = True
-                i += 1; continue
-            i += 1; continue                       # other flags: no path argument
+            if tok.startswith('--'):               # long options
+                if key == '--tmpdir':
+                    if inline is not None:
+                        tmpdir = inline
+                    else:
+                        force_default = True       # bare --tmpdir (optional arg)
+                i += 1; continue                   # --directory/--suffix=/unknown
+            # Short-option cluster: decode each character so combined flags like
+            # -dp DIR / -dpDIR / -du behave as -d -p DIR / -d -u. -p takes a
+            # directory value (rest of the cluster if glued, else the next
+            # token) and terminates the cluster; -t marks the default host-temp
+            # location; -d/-u/-q and any other short flag are boolean.
+            j = 1
+            consumed_next = False
+            while j < len(tok):
+                ch = tok[j]
+                if ch == 'p':                      # -p DIR: value-taking, ends cluster
+                    rest = tok[j + 1:]
+                    if rest:                       # glued: -pDIR / -dpDIR
+                        tmpdir = rest
+                    elif i + 1 < n:                # separate: -p DIR / -dp DIR
+                        tmpdir = tokens[i + 1]; consumed_next = True
+                    break
+                if ch == 't':                      # -t -> default host-temp location
+                    force_default = True
+                j += 1                             # -d/-u/-q/other: no value
+            if consumed_next:
+                i += 1
+            i += 1; continue
         templates.append(tok); i += 1
 
     targets = []
