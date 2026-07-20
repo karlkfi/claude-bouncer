@@ -549,9 +549,10 @@ After upgrading either way:
 
 When the hook prompts, its reason now tells the agent how to avoid the prompt
 next time — naming the offending path and the fix (use an in-root path, drop a
-`$VAR`/`~`, or read with the Read/Grep tools). But some habits avoid prompts
-entirely, and the hook can't surface them because it *allows* those paths
-silently — there's no prompt on which to attach advice.
+`$VAR`/`~`, or — for the false-positive categories — switch to the Read/Grep
+tools). But some habits avoid prompts entirely, and the hook can't surface
+them because it *allows* those paths silently — there's no prompt on which to
+attach advice.
 
 Paste the block below into your project's `CLAUDE.md` (or `AGENTS.md`) so the
 agent follows them from the start. They're framed as instructions to the agent:
@@ -565,8 +566,12 @@ command (`grep`, `sed`, `awk`, `jq`, `cat`, `head`, `tail`, `cp`, `mv`, `rm`,
 flowing, avoid triggering it:
 
 - **Prefer the Read, Grep, and Glob tools over bash** `cat`/`grep`/`sed`/`head`/
-  `tail`/`awk` for inspecting files. They're purpose-built, don't go through this
-  hook, and are the right tool for reading and searching code.
+  `tail`/`awk` for inspecting files. They're purpose-built for reading and
+  searching code, and their literal single-path inputs can't trigger the
+  `$VAR`/`$(...)`, `cd`-tracking, or heredoc false positives. They are still
+  guarded: a genuinely outside-workspace read prompts either way — that prompt
+  is the boundary working as intended, so approve it rather than working
+  around it.
 - **Keep guarded file arguments inside the project root.** A path that resolves
   outside the root (including via `../` traversal) prompts every time.
 - **Don't put `$VAR`, `$(...)`, or a `~user` prefix in a guarded file argument.**

@@ -69,7 +69,11 @@ biggest reduction.
 Tell the user the cause(s) you found, then apply the habits that prevent them:
 
 - **Use the Read, Grep, and Glob tools instead of bash** `cat`/`grep`/`sed`/
-  `head`/`tail`/`awk` for inspecting files. They don't go through this hook.
+  `head`/`tail`/`awk` for inspecting files. Their literal single-path inputs
+  can't trigger the `expand`/`untracked`/heredoc false positives. They are
+  still guarded (since 1.5.0): a genuinely outside-workspace read prompts
+  either way — that prompt is the boundary working as intended, so approve
+  it rather than working around it.
 - **Keep guarded file arguments inside the project root** — write the literal
   in-root path (`cat ./config/app.json`), not a `$VAR`/`~`/`$(...)` form. (A
   variable assigned a literal earlier in the same command, and a `for f in a b c`

@@ -1788,9 +1788,10 @@ def build_reason(offenders, scratch_hint='', override=None):
         hints.append(
             "Outside-workspace path(s): "
             + ", ".join(sorted(set(buckets['outside'])))
-            + ". Fix: use a path inside the project root, or read the file "
-            "with the Read/Grep/Glob tools instead of bash. If you genuinely "
-            "need a file outside the root, approve this prompt.")
+            + ". Fix: use a path inside the project root. If you genuinely "
+            "need a file outside the root, approve this prompt — the native "
+            "Read/Grep/Glob tools run the same check, so switching tools "
+            "won't avoid it.")
     if buckets['expand']:
         hints.append(
             "Runtime-expanded arg(s) bash resolves but the hook can't: "

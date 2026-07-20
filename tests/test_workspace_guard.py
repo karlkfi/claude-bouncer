@@ -3423,10 +3423,14 @@ class BuildReasonTests(unittest.TestCase):
     """The decision reason names offenders AND tailors the fix per category."""
 
     def test_outside_category_names_path_and_fix(self):
+        # Issue 90: the fix must NOT suggest switching to the native
+        # Read/Grep/Glob tools as a way to avoid the prompt — those are
+        # guarded too (since 1.5.0), so an outside path prompts either way.
         r = guard.build_reason([("/etc/hosts", "outside")])
         self.assertIn("/etc/hosts", r)
         self.assertIn("inside the project root", r)
-        self.assertIn("Read/Grep", r)
+        self.assertIn("same check", r)
+        self.assertNotIn("instead of bash", r)
 
     def test_expand_category_distinct_advice(self):
         # `~`/`$` tokens get the "write a literal path" advice, not the plain
@@ -3498,15 +3502,15 @@ class ReasonAdviceEndToEndTests(unittest.TestCase):
     def test_outside_path_reason_has_fix(self):
         r = self._reason("cat /etc/hosts")
         self.assertIn("/etc/hosts", r)
-        self.assertIn("Read/Grep", r)
+        self.assertIn("same check", r)
 
     def test_tilde_home_token_reason_uses_outside_advice(self):
         # Q19: `~/…` now expands to $HOME, which is outside this tempdir
         # workspace, so the offender lands in the 'outside' bucket (not
-        # 'expand') and gets the Read/Grep advice.
+        # 'expand') and gets the outside-path advice.
         r = self._reason("cat ~/.ssh/id_rsa")
         self.assertIn("~/.ssh/id_rsa", r)
-        self.assertIn("Read/Grep", r)
+        self.assertIn("same check", r)
 
     def test_tilde_user_token_reason_uses_expand_advice(self):
         # `~user` isn't deterministically resolvable (needs a pwd lookup), so
