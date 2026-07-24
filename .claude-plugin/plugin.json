@@ -1,6 +1,6 @@
 {
   "name": "workspace-guard",
-  "version": "1.7.1",
+  "version": "1.7.2",
   "description": "Path-aware bash permissions for Claude Code.",
   "author": {
     "name": "Karl",
