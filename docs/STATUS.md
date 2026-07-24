@@ -5,7 +5,7 @@ Single source of truth for progress and priorities in workspace-guard. Pick the 
 **Status:** 🔲 ready · 🚫 blocked
 **Size:** S = one session/PR · M = 2–3 sessions · L = needs a plan doc under `docs/plan/`
 **Labels:** `security` `tests` `docs` `infra` `bug` `parsing`
-**Next ID:** Q37
+**Next ID:** Q38
 
 **Maintaining this file:** see [`docs/development/maintaining-backlog.md`](development/maintaining-backlog.md).
 
@@ -15,7 +15,6 @@ Specific actionable items in priority order. Pick from the top; skip 🚫 items 
 
 | ID | Item | Labels | St | Sz | Notes |
 |---|---|---|---|---|---|
-| <a id="Q36"></a>Q36 | Treat in-place mutation flags as writes in read-exempt dirs | `security` `bug` | 🔲 | S | `sed -i` / `awk -i inplace` are not in WRITE_COMMANDS, so the `~/.claude/projects/` read exemption silently allows them to mutate project memory. Make in-place flags disqualify the exemption. |
 
 ## Deferred
 
