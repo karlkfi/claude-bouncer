@@ -56,10 +56,12 @@ CATEGORY_HINT = {
     'ask-switch':   'pin per-command instead of switching shared state',
 }
 
-# A deny downgraded by PROD_GUARD_OVERRIDE keeps its deny-prod signature but is
-# emitted as `ask` with this prefix. Counted separately so an over-used override
-# is visible.
-OVERRIDE_SIG = re.compile(r'override acknowledged')
+# A deny downgraded by PROD_GUARD_OVERRIDE or PROD_GUARD_SESSION_OVERRIDE keeps
+# its deny-prod signature but is emitted as `ask` with this prefix. Counted
+# separately so an over-used override is visible. The 'prod-guard' prefix is
+# load-bearing: sibling guards emit 'foreground-guard override acknowledged' and
+# the like, which under --plugin all would otherwise land in this counter.
+OVERRIDE_SIG = re.compile(r'prod-guard (?:session )?override acknowledged')
 
 # The hook joins up to three finding reasons with ' | '.
 _JOIN = ' | '
@@ -236,7 +238,7 @@ def build_report(decisions):
     }
 
 
-def print_text(r, top):
+def print_text(r, top, plugin='prod-guard'):
     total = r['total']
     if not total:
         print("No prod-guard decisions found for the given filters.")
@@ -249,7 +251,9 @@ def print_text(r, top):
     print(f"  outcomes: {', '.join(parts)}")
     pct = (100 * asks / total) if total else 0
     print(f"  friction (ask+deny): {asks} ({pct:.0f}% of decisions)")
-    if r['overrides']:
+    # Only prod-guard's own downgrades are counted, so the line has no place in
+    # an all-guards header — --plugin prod-guard (the default) reports it.
+    if r['overrides'] and plugin != 'all':
         print(f"  PROD_GUARD_OVERRIDE downgrades: {r['overrides']}")
     print()
 
@@ -321,7 +325,7 @@ def main():
             'top_commands': report['commands'].most_common(args.top),
         }, indent=2))
     else:
-        print_text(report, args.top)
+        print_text(report, args.top, args.plugin)
 
 
 if __name__ == '__main__':

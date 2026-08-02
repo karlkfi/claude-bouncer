@@ -64,6 +64,17 @@ REASON_ASK_SWITCH = (
 REASON_OVERRIDE = (
     "prod-guard override acknowledged (PROD_GUARD_OVERRIDE is set) — downgraded "
     "from deny to a confirmation prompt. " + REASON_DENY_PROD)
+REASON_SESSION_OVERRIDE = (
+    "prod-guard session override acknowledged (PROD_GUARD_SESSION_OVERRIDE is "
+    "set) — downgraded from deny to a confirmation prompt. Approving records a "
+    "session grant for target(s) 'gke_acme_prod-us': further "
+    "PROD_GUARD_SESSION_OVERRIDE-prefixed commands against them in this session "
+    "will not re-prompt (expires after 8 h). " + REASON_DENY_PROD)
+# A sibling guard's downgrade, as seen under --plugin all. Same phrasing, other
+# owner — it must not land in prod-guard's override counter.
+REASON_FOREIGN_OVERRIDE = (
+    "foreground-guard override acknowledged (FOREGROUND_GUARD_OVERRIDE is set) "
+    "— downgraded from deny to a confirmation prompt.")
 
 
 def _decision_record(tooluseid, command, stdout, cwd="/home/u/proj", ts=None,
@@ -157,15 +168,7 @@ class CategoryTests(unittest.TestCase):
     def test_session_override_keeps_deny_prod_category(self):
         # The session-override first-use ask carries the same 'override
         # acknowledged' signature, so it counts as an override downgrade too.
-        reason = (
-            "prod-guard session override acknowledged "
-            "(PROD_GUARD_SESSION_OVERRIDE is set) — downgraded from deny to a "
-            "confirmation prompt. Approving records a session grant for "
-            "target(s) 'gke_acme_prod-us': further "
-            "PROD_GUARD_SESSION_OVERRIDE-prefixed commands against them in "
-            "this session will not re-prompt (expires after 8 h). "
-            + REASON_DENY_PROD)
-        self.assertEqual(fr.category_of(reason), "deny-prod")
+        self.assertEqual(fr.category_of(REASON_SESSION_OVERRIDE), "deny-prod")
 
 
 class TargetExtractionTests(unittest.TestCase):
@@ -222,6 +225,24 @@ class BuildReportTests(unittest.TestCase):
         ])
         self.assertEqual(r["overrides"], 1)
         self.assertEqual(r["decisions"]["ask"], 1)
+
+    def test_session_override_counted(self):
+        r = self._report([
+            {"plugin": "prod-guard", "decision": "ask",
+             "reason": REASON_SESSION_OVERRIDE,
+             "command": "PROD_GUARD_SESSION_OVERRIDE=x kubectl delete ns y"},
+        ])
+        self.assertEqual(r["overrides"], 1)
+
+    def test_foreign_guard_override_not_counted(self):
+        r = self._report([
+            {"plugin": "foreground-guard", "decision": "ask",
+             "reason": REASON_FOREIGN_OVERRIDE,
+             "command": "FOREGROUND_GUARD_OVERRIDE=x sleep 600"},
+            {"plugin": "prod-guard", "decision": "ask", "reason": REASON_OVERRIDE,
+             "command": "PROD_GUARD_OVERRIDE=x kubectl delete ns y"},
+        ])
+        self.assertEqual(r["overrides"], 1)
 
     def test_joined_reason_hits_both_categories(self):
         joined = REASON_DENY_AMBIENT + " | " + REASON_ASK_SWITCH
@@ -312,6 +333,29 @@ class PrintTests(unittest.TestCase):
         self.assertIn("pattern-gap candidates", out)
         self.assertIn("bluefin", out)
 
+    def _print(self, decisions, plugin):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            fr.print_text(fr.build_report(decisions), 15, plugin)
+        return buf.getvalue()
+
+    def test_override_line_shown_for_prod_guard(self):
+        out = self._print([
+            {"plugin": "prod-guard", "decision": "ask", "reason": REASON_OVERRIDE,
+             "command": "PROD_GUARD_OVERRIDE=x kubectl delete ns y"},
+        ], "prod-guard")
+        self.assertIn("PROD_GUARD_OVERRIDE downgrades: 1", out)
+
+    def test_override_line_omitted_under_plugin_all(self):
+        out = self._print([
+            {"plugin": "prod-guard", "decision": "ask", "reason": REASON_OVERRIDE,
+             "command": "PROD_GUARD_OVERRIDE=x kubectl delete ns y"},
+            {"plugin": "foreground-guard", "decision": "ask",
+             "reason": REASON_FOREIGN_OVERRIDE,
+             "command": "FOREGROUND_GUARD_OVERRIDE=x sleep 600"},
+        ], "all")
+        self.assertNotIn("PROD_GUARD_OVERRIDE downgrades", out)
+
 
 class EndToEndTests(unittest.TestCase):
     def _run(self, root, *args):
@@ -340,6 +384,24 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual(data["total"], 1)
         self.assertEqual(data["decisions"]["deny"], 1)
         self.assertEqual(data["categories"]["deny-prod"], 1)
+
+    def test_override_attribution_across_plugin_scopes(self):
+        use1, att1 = _decision_record(
+            "toolu_1", "PROD_GUARD_OVERRIDE=x kubectl delete ns y",
+            _stdout("ask", REASON_OVERRIDE))
+        use2, att2 = _decision_record(
+            "toolu_2", "FOREGROUND_GUARD_OVERRIDE=x sleep 600",
+            _stdout("ask", REASON_FOREIGN_OVERRIDE),
+            hook_cmd='python3 "/x/bash-foreground-guard.py"')
+        root = write_transcript([use1, att1, use2, att2])
+
+        self.assertIn("PROD_GUARD_OVERRIDE downgrades: 1", self._run(root))
+        # The sibling guard's downgrade is neither counted nor attributed.
+        self.assertEqual(
+            json.loads(self._run(root, "--plugin", "foreground-guard",
+                                 "--json"))["overrides"], 0)
+        self.assertNotIn("PROD_GUARD_OVERRIDE downgrades",
+                         self._run(root, "--plugin", "all"))
 
     def test_no_transcripts_errors(self):
         empty = tempfile.mkdtemp(prefix="prod-guard-friction-empty-")
