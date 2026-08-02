@@ -40,10 +40,17 @@ for the stale-install check below).
 - **Outcome mix** — allow / ask / deny / defer counts and the ask+deny share
   (the friction ratio). `defer` is inferred from a silent hook (empty stdout).
 - **By category** — `outside` / `expand` / `untracked`, the buckets
-  `build_reason()` emits in `scripts/bash-workspace-guard.py`.
-- **Top offending paths** — normalized by default so per-session temp paths
-  (e.g. `/private/tmp/claude-NNN/...`) collapse into one row; `--raw` to see
-  exact tokens.
+  `build_reason()` emits in `scripts/bash-workspace-guard.py`, plus `other` for
+  any prompt whose reason matches none of them. Under `--plugin all` that's
+  where the companion guards' prompts land, so the table still sums to the
+  friction count in the header (a reason can match more than one bucket, so the
+  sum can exceed it).
+- **Top offending paths** — only `outside`/`expand`/`untracked` reasons carry
+  path tokens, so this ranking is workspace-guard-only even under
+  `--plugin all`, where its heading says so (`--json` carries the same signal in
+  `paths_scope`). Normalized by default so per-session temp paths (e.g.
+  `/private/tmp/claude-NNN/...`) collapse into one row; `--raw` to see exact
+  tokens.
 - **Top triggering commands** — via the `toolUseID` join, so you see what the
   agent was doing when it got prompted.
 - **Stale-install banner** — when the installed plugin version
@@ -61,6 +68,9 @@ for the stale-install check below).
 A token that surfaces in **top paths** but is not a real file (e.g. a bare `2`
 from `2>/dev/null`) is a tokenizer false positive worth fixing. A high `expand`
 count points at `~`/`$VAR` arguments; a high `untracked` count points at `cd`
-into untracked directories. Cross-check candidate fixes against the
+into untracked directories. A large `other` under `--plugin all` means most of
+your friction comes from a companion guard — read the `plugins:` line to see
+which, then run that guard's own copy of this report to break it down.
+Cross-check candidate fixes against the
 secure-by-default rules before changing the hook — a fix that cuts prompts by
 loosening the boundary is a regression, not a win.

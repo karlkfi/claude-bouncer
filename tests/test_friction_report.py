@@ -6,7 +6,10 @@ Run with: python3 -m unittest discover tests
 Covers the pure parsing/normalization helpers and an end-to-end pass over a
 synthetic transcript so the attachment-parsing and toolUseID join are pinned.
 """
+import collections
+import contextlib
 import datetime as dt
+import io
 import json
 import tempfile
 import unittest
@@ -38,8 +41,13 @@ class CategorizeTests(unittest.TestCase):
         self.assertEqual(set(cats), {'outside', 'expand', 'untracked'})
         self.assertEqual(cats['expand'], ['$f'])
 
-    def test_allow_reason_has_no_buckets(self):
-        self.assertEqual(fr.categorize("Guarded commands target workspace/pipe only"), {})
+    def test_unrecognized_reason_buckets_as_other(self):
+        self.assertEqual(fr.categorize("Guarded commands target workspace/pipe only"),
+                         {'other': []})
+
+    def test_another_guards_reason_buckets_as_other(self):
+        self.assertEqual(fr.categorize("Command runs against the production cluster."),
+                         {'other': []})
 
 
 class NormalizeTests(unittest.TestCase):
@@ -160,6 +168,35 @@ class StalenessTests(unittest.TestCase):
             self.assertEqual(s["available"], "1.5.0")
 
 
+class PrintTextTests(unittest.TestCase):
+    """The path ranking is workspace-guard-scoped; say so under --plugin all."""
+
+    REPORT = {
+        'total': 2,
+        'decisions': collections.Counter({'ask': 2}),
+        'plugins': collections.Counter({'workspace-guard': 1, 'prod-guard': 1}),
+        'categories': collections.Counter({'outside': 1, 'other': 1}),
+        'paths': collections.Counter({'passwd': 1}),
+        'commands': collections.Counter({'grep root passwd': 1}),
+    }
+
+    def _render(self, plugin):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            fr.print_text(self.REPORT, 15, None, plugin)
+        return buf.getvalue()
+
+    def test_all_plugins_labels_path_scope(self):
+        out = self._render('all')
+        self.assertIn("Top offending paths (workspace-guard only, top 15):", out)
+        self.assertIn('"other" =', out)
+
+    def test_single_plugin_stays_unlabeled(self):
+        out = self._render('workspace-guard')
+        self.assertIn("Top offending paths (top 15):", out)
+        self.assertNotIn('"other" =', out)
+
+
 class EndToEndTests(unittest.TestCase):
     """Synthetic transcript: one tool_use + one matching hook attachment."""
 
@@ -202,6 +239,33 @@ class EndToEndTests(unittest.TestCase):
             decs = list(fr.iter_decisions([str(Path(tmp) / "s.jsonl")],
                                           'branch-guard', None, ''))
             self.assertEqual(decs, [])
+
+    def test_all_plugins_categories_sum_to_friction(self):
+        # Under --plugin all another guard's prompt has no recognizable reason;
+        # it must land in 'other' rather than vanish from the table (issue 96).
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._transcript(tmp)
+            other = {
+                "type": "attachment", "cwd": "/home/u/proj",
+                "timestamp": "2026-06-14T12:01:00.000Z",
+                "attachment": {
+                    "type": "hook_success", "hookName": "PreToolUse:Bash",
+                    "toolUseID": "toolu_Y",
+                    "command": 'python3 ".../scripts/bash-foreground-guard.py"',
+                    "stdout": json.dumps({"hookSpecificOutput": {
+                        "permissionDecision": "ask",
+                        "permissionDecisionReason": "Long-running foreground command."}}),
+                }}
+            with path.open("a") as fh:
+                fh.write(json.dumps(other) + "\n")
+
+            decs = list(fr.iter_decisions([str(path)], 'all', None, ''))
+            report = fr.build_report(decs, raw=True)
+            self.assertEqual(report['plugins']['foreground-guard'], 1)
+            self.assertEqual(sum(report['categories'].values()), 2)
+            self.assertEqual(report['categories']['other'], 1)
+            # Paths stay workspace-guard-scoped: the other guard adds no tokens.
+            self.assertEqual(list(report['paths']), ['passwd'])
 
 
 if __name__ == "__main__":

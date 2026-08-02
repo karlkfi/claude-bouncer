@@ -32,6 +32,10 @@ import os
 import re
 import sys
 
+# The guard this script's REASON_PATTERNS describe. Other guards' decisions are
+# counted (--plugin all) but their reasons carry no tokens we can categorize.
+THIS_GUARD = 'workspace-guard'
+
 # The reason strings emitted by build_reason() in bash-workspace-guard.py.
 # Each category prefixes a comma-joined token list and ends before ". Fix:".
 REASON_PATTERNS = {
@@ -273,13 +277,19 @@ def iter_decisions(paths, plugin, cutoff, repo):
 
 
 def categorize(reason):
-    """Return {category: [tokens]} for the buckets present in a reason string."""
+    """Return {category: [tokens]} for the buckets present in a reason string.
+
+    A reason matching none of the patterns — another guard's prompt under
+    --plugin all, or a workspace-guard reason we don't recognize — buckets as
+    'other' with no tokens, so the category table sums to the friction count
+    instead of silently dropping the remainder.
+    """
     out = {}
     for cat, pat in REASON_PATTERNS.items():
         m = pat.search(reason)
         if m:
             out[cat] = [t.strip() for t in m.group(1).split(',') if t.strip()]
-    return out
+    return out or {'other': []}
 
 
 def build_report(decisions, raw):
@@ -306,7 +316,7 @@ def build_report(decisions, raw):
     }
 
 
-def print_text(r, top, stale=None):
+def print_text(r, top, stale=None, plugin=THIS_GUARD):
     total = r['total']
     if not total:
         print("No guard decisions found for the given filters.")
@@ -333,9 +343,13 @@ def print_text(r, top, stale=None):
         print("By category (prompts):")
         for cat, n in r['categories'].most_common():
             print(f"  {n:5}  {cat}")
+        if plugin == 'all' and 'other' in r['categories']:
+            print(f'  ("other" = prompts from guards besides {THIS_GUARD}, plus '
+                  f"any {THIS_GUARD} reason this report doesn't recognize)")
         print()
     if r['paths']:
-        print(f"Top offending paths (top {top}):")
+        scope = f'{THIS_GUARD} only, ' if plugin == 'all' else ''
+        print(f"Top offending paths ({scope}top {top}):")
         for p, n in r['paths'].most_common(top):
             print(f"  {n:5}  {p}")
         print()
@@ -351,8 +365,8 @@ def main():
     ap.add_argument('--transcripts',
                     default=os.path.expanduser('~/.claude/projects'),
                     help='transcript root (default: ~/.claude/projects)')
-    ap.add_argument('--plugin', default='workspace-guard',
-                    help="guard to report on, or 'all' (default: workspace-guard)")
+    ap.add_argument('--plugin', default=THIS_GUARD,
+                    help=f"guard to report on, or 'all' (default: {THIS_GUARD})")
     ap.add_argument('--since', default='7d',
                     help="time window: Nd/Nh/Nm or YYYY-MM-DD (default: 7d; "
                          "use 'all' for no limit)")
@@ -384,11 +398,12 @@ def main():
             'plugins': dict(report['plugins']),
             'categories': dict(report['categories']),
             'top_paths': report['paths'].most_common(args.top),
+            'paths_scope': THIS_GUARD,
             'top_commands': report['commands'].most_common(args.top),
             'stale': stale,
         }, indent=2))
     else:
-        print_text(report, args.top, stale)
+        print_text(report, args.top, stale, args.plugin)
 
 
 if __name__ == '__main__':
