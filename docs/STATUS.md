@@ -5,7 +5,7 @@ Single source of truth for progress and priorities in workspace-guard. Pick the 
 **Status:** 🔲 ready · 🚫 blocked
 **Size:** S = one session/PR · M = 2–3 sessions · L = needs a plan doc under `docs/plan/`
 **Labels:** `security` `tests` `docs` `infra` `bug` `parsing`
-**Next ID:** Q39
+**Next ID:** Q40
 
 **Maintaining this file:** see [`docs/development/maintaining-backlog.md`](development/maintaining-backlog.md).
 
@@ -15,7 +15,7 @@ Specific actionable items in priority order. Pick from the top; skip 🚫 items 
 
 | ID | Item | Labels | St | Sz | Notes |
 |---|---|---|---|---|---|
-| <a id="Q38"></a>Q38 | Stop `os.getuid()` crashing the hook on Windows | `bug` | 🔲 | S | `claude_tmp_root()` calls `os.getuid()`, absent on Windows, so the hook raises AttributeError once an interpreter starts. Pick the fallback after confirming where Claude Code puts that dir there. |
+| <a id="Q39"></a>Q39 | Make the remaining Windows test failures pass | `tests` `bug` | 🔲 | M | 78 failures left after the `os.getuid()` fix, one distinct root cause: fixtures assume POSIX path semantics. `/outside/x` is drive-relative on Windows so it resolves *inside* the workspace's drive, `:` is not the PATH separator (`_split_pathlist` splits `/a:/b`), and a few assertions compare POSIX-shaped strings. Needs a Windows box to verify; decide per case whether the fixture or the parser is wrong — some are real parser bugs, not just fixture noise. |
 
 ## Deferred
 

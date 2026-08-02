@@ -495,6 +495,9 @@ After upgrading either way:
      undocumented slug encoding (which differs between a worktree and the main
      checkout); if it can't be located, the read simply keeps prompting.
 
+   `/tmp/claude-<uid>` is the POSIX root; on Windows there is no per-UID suffix
+   because the temp dir is already per-user, so the root is `%LOCALAPPDATA%\Temp\claude`.
+
    Writing into another session's scratch, and any access to a *different
    project's* scratch, still prompt. Because these allows match on the resolved
    `realpath` — and run *after* the `ln`-staging check — a symlink planted in
@@ -797,7 +800,8 @@ final output.
   (`/tmp/claude-<uid>/<encoded-project>/`), located by scanning the temp root
   for the slug directory that holds the current `session_id` — the
   dispatcher-tails-workers pattern. The `/tmp/claude-<uid>/` prefix is an
-  undocumented Claude Code convention inferred from the UID; if Claude Code
+  undocumented Claude Code convention inferred from the UID (on Windows, from
+  the per-user temp dir instead — there is no UID); if Claude Code
   relocates the dir, these paths simply revert to `ask` (fail-safe — the allow
   never widens the boundary). A session with no `session_id` (older CLIs)
   disables both allows entirely.

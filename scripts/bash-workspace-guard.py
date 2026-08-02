@@ -4,7 +4,7 @@ outside the workspace; allow when it only touches workspace files or pipes.
 
 Reads the hook JSON on stdin, emits a PreToolUse decision on stdout.
 """
-import sys, os, json, re, shlex, fnmatch, collections
+import sys, os, json, re, shlex, fnmatch, collections, tempfile
 
 # POSIX command-prefix assignment: NAME starts with letter/underscore,
 # followed by letters/digits/underscores, then `=`. Anything after the `=`
@@ -204,16 +204,28 @@ def allowed_read_prefixes():
 
 
 def claude_tmp_root():
-    """Realpath of Claude Code's per-user temp root, ``/tmp/claude-<uid>``.
+    """Realpath of Claude Code's per-user temp root.
 
     Claude Code stores each session's background-task output under
-    ``<root>/<encoded-project>/<session-uuid>/tasks/<id>.output`` (mode 0700,
-    per-UID). This layout is an undocumented internal convention — there is no
-    hook field that names it — so we infer it from ``os.getuid()``. If Claude
-    Code ever relocates the dir, paths simply stop matching the allow below and
-    revert to ``ask`` (fail-safe), so inferring it never weakens the boundary.
+    ``<root>/<encoded-project>/<session-uuid>/tasks/<id>.output``. This layout
+    is an undocumented internal convention — there is no hook field that names
+    it — so we infer the root. If Claude Code ever relocates the dir, paths
+    simply stop matching the allow below and revert to ``ask`` (fail-safe), so
+    inferring it never weakens the boundary.
+
+    On POSIX the root is ``/tmp/claude-<uid>`` (mode 0700, per-UID). Windows
+    has no ``os.getuid()`` and no per-UID suffix: the root is ``claude`` inside
+    the per-user temp dir (``%LOCALAPPDATA%\\Temp\\claude``, verified against a
+    live install). ``hasattr`` is the discriminator rather than ``os.name``
+    because the missing call is the actual condition. The Windows root is
+    partly environment-derived (``tempfile.gettempdir()`` honours ``TMP`` /
+    ``TEMP``), which does not widen the boundary: a tampered value makes paths
+    fail to match and fall back to ``ask``, and the allow below additionally
+    requires the *running* session's own uuid as a path segment.
     """
-    return os.path.realpath('/tmp/claude-%d' % os.getuid())
+    if hasattr(os, 'getuid'):
+        return os.path.realpath('/tmp/claude-%d' % os.getuid())
+    return os.path.realpath(os.path.join(tempfile.gettempdir(), 'claude'))
 
 
 def is_session_tmp_path(rp, session_id, tmp_root):

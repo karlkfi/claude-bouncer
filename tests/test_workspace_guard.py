@@ -929,16 +929,23 @@ class SessionTmpPathTests(unittest.TestCase):
     """Per-session allow for Claude Code's own task-output scratch (Q21)."""
 
     def setUp(self):
-        self.uid = os.getuid()
         self.root = guard.claude_tmp_root()
         self.sess = "11111111-2222-3333-4444-555555555555"
         # A realistic per-session task-output path under the temp root.
         self.path = os.path.join(
             self.root, "-Users-me-proj", self.sess, "tasks", "abc.output")
 
+    @unittest.skipUnless(hasattr(os, "getuid"), "POSIX-only layout")
     def test_claude_tmp_root_is_realpath_of_uid_dir(self):
         self.assertEqual(
-            self.root, os.path.realpath("/tmp/claude-%d" % self.uid))
+            self.root, os.path.realpath("/tmp/claude-%d" % os.getuid()))
+
+    @unittest.skipIf(hasattr(os, "getuid"), "Windows-only layout")
+    def test_claude_tmp_root_is_realpath_of_temp_claude_dir(self):
+        # No per-UID suffix on Windows: the per-user temp dir already scopes it.
+        self.assertEqual(
+            self.root,
+            os.path.realpath(os.path.join(tempfile.gettempdir(), "claude")))
 
     def test_current_session_path_allowed(self):
         self.assertTrue(
@@ -2370,7 +2377,8 @@ class HookEndToEndTests(unittest.TestCase):
     # /tmp/claude-<uid>/<encoded-project>/<session-uuid>/tasks/<id>.output and
     # the agent reads it back. That is the agent's own scratch, not the boundary
     # this hook guards, so it's allowed — but ONLY for the current session.
-    # Paths use os.getuid() so they match what the script computes; the dirs
+    # Paths come from guard.claude_tmp_root() so they match what the script
+    # computes on this platform (the Windows root has no uid suffix); the dirs
     # need not exist (the script resolves lexically and the subprocess never
     # execs the command). Synthetic project/uuid segments, per the repo rule on
     # never using real outside paths in fixtures.
