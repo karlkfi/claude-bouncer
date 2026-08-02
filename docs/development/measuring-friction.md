@@ -18,6 +18,34 @@ The report only **reads** that already-persisted local data. It adds no logging
 and no telemetry — keep it that way (hook-side logging would be a privacy
 regression for no added signal).
 
+## What the report cannot see
+
+Claude Code records an attachment **only when the hook writes to stdout**. A
+hook run that stays silent leaves no record at all — not an empty one. Measured
+on one workstation: of 20,708 `PreToolUse:Bash` attachments, 37 had empty
+stdout, and all 37 came from a shell hook the report skips anyway.
+
+So the scan cannot see:
+
+- **Silent defers.** workspace-guard defers on every command it doesn't guard,
+  which is most of them. Those runs are absent, not counted as `defer`.
+- **Unreached code paths.** A guard that returns before analysis on some class
+  of payload records nothing for that class. foreground-guard returns early when
+  the payload carries `run_in_background: true`, so backgrounded polls are
+  invisible ([foreground-guard
+  #15](https://github.com/karlkfi/claude-foreground-guard/issues/15)).
+- **A guard that never ran** — misconfigured, crashed, or not installed.
+
+Every total is therefore a **floor**, and the three cases above are
+indistinguishable from a guard that saw the traffic and stayed quiet. The report
+prints a `coverage:` line under the header saying so, and `--json` carries the
+same sentences in a `coverage` field.
+
+The consequence worth remembering: because each guard emits on its own terms —
+some emit an explicit `allow` for traffic they've cleared, others emit only when
+they need to prompt — the per-guard totals on the `plugins:` line are **not
+comparable to each other**. Only ask/deny counts are, and only as floors.
+
 ## Usage
 
 ```
@@ -54,6 +82,10 @@ No guard decisions found for the given filters.
   Guards found: workspace-guard (16563), branch-guard (3045), pr-sentinel-guard (535), ...
 ```
 
+A label can be missing for a second reason the message also names: the guard is
+installed but emitted nothing in the scanned transcripts, which leaves no record
+to derive a label from.
+
 The filters are checked in order — `--plugin`, then `--repo`, then `--since` —
 and the first one that drops everything is the one reported; the `--since` case
 dates the most recent matching decision so you know how far to widen. `--json`
@@ -67,8 +99,11 @@ no recorded decisions at all: those are real answers of zero.
 
 ## What it reports
 
-- **Outcome mix** — allow / ask / deny / defer counts and the ask+deny share
-  (the friction ratio). `defer` is inferred from a silent hook (empty stdout).
+- **Outcome mix** — allow / ask / deny counts and the ask+deny share (the
+  friction ratio), over the decisions a hook actually emitted (see [What the
+  report cannot see](#what-the-report-cannot-see)). A `defer` bucket exists for
+  an attachment with empty stdout, but silent runs aren't recorded at all, so in
+  practice it stays at zero.
 - **By category** — `outside` / `expand` / `untracked`, the buckets
   `build_reason()` emits in `scripts/bash-workspace-guard.py`, plus `other` for
   any prompt whose reason matches none of them. Under `--plugin all` that's

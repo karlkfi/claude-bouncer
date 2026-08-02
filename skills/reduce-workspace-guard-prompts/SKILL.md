@@ -27,7 +27,10 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/friction-report.py" --repo "$(basename "$
 
 This reports the friction ratio (ask+deny share), a **By category** breakdown,
 the **top offending paths**, and the **top triggering commands** for the current
-project over the last 7 days. Useful adjustments:
+project over the last 7 days. The ratio's denominator counts only decisions the
+hook emitted — a silent defer on an unguarded command leaves no record — so it
+is a share of the hook's own decisions, not of every Bash call. Useful
+adjustments:
 
 - `--since 24h` / `--since 2026-06-01` / `--since all` — widen or narrow the
   window (default `7d`).

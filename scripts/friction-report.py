@@ -31,6 +31,7 @@ import json
 import os
 import re
 import sys
+import textwrap
 
 # The guard this script's REASON_PATTERNS describe. Other guards' decisions are
 # counted (--plugin all) but their reasons carry no tokens we can categorize.
@@ -314,7 +315,10 @@ def explain_empty(survey, plugin, since, repo):
                 "  A label comes from the hook script's filename, so it can "
                 "differ from the plugin name",
                 "  (pr-sentinel's hook is pr-sentinel-guard.py, so its label is "
-                "pr-sentinel-guard)."]
+                "pr-sentinel-guard).",
+                "  An installed guard is also absent here if it emitted nothing: "
+                "a hook run that",
+                "  produces no stdout leaves no transcript record to read."]
     if not survey['repo_hits']:
         scope = "all guards'" if plugin == 'all' else f"{plugin}'s"
         return [f"--repo {repo!r} matched no cwd among {scope} "
@@ -324,6 +328,24 @@ def explain_empty(survey, plugin, since, repo):
             f"decisions.",
             f"  The most recent is {survey['latest']:%Y-%m-%d}; use "
             "--since all for no limit."]
+
+
+def coverage_note(plugin):
+    """Sentences naming what the scan structurally cannot see.
+
+    Claude Code records a hook attachment only when the hook writes to stdout,
+    so a silent run — a defer, or an early return on a payload the guard skips
+    before it analyzes anything — leaves nothing to count. Every total is
+    therefore a floor, and a guard whose unreached path hides traffic reads the
+    same as a guard that saw that traffic and stayed quiet (issue 96).
+    """
+    note = ["Emitted decisions only — a silent hook run (a defer, or an early "
+            "return on a payload the guard skips before analyzing it) leaves "
+            "no transcript record, so these totals are floors."]
+    if plugin == 'all':
+        note.append("Guards emit on different terms, so the plugins: counts "
+                    "are not a like-for-like ranking.")
+    return note
 
 
 def categorize(reason):
@@ -380,7 +402,12 @@ def print_text(r, top, stale=None, plugin=THIS_GUARD, notes=()):
     parts = [f"{k} {v}" for k, v in r['decisions'].most_common()]
     print(f"  outcomes: {', '.join(parts)}")
     pct = (100 * asks / total) if total else 0
-    print(f"  friction (ask+deny): {asks} ({pct:.0f}% of decisions)\n")
+    print(f"  friction (ask+deny): {asks} ({pct:.0f}% of decisions)")
+    for line in textwrap.wrap(' '.join(coverage_note(plugin)), 78,
+                              initial_indent='  coverage: ',
+                              subsequent_indent='    '):
+        print(line)
+    print()
 
     if stale:
         print(f"⚠  {stale['plugin']} {stale['installed']} installed, "
@@ -458,6 +485,7 @@ def main():
             'paths_scope': THIS_GUARD,
             'top_commands': report['commands'].most_common(args.top),
             'stale': stale,
+            'coverage': coverage_note(args.plugin),
             'empty_because': notes or None,
         }, indent=2))
     else:

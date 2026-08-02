@@ -198,6 +198,19 @@ class PrintTextTests(unittest.TestCase):
         self.assertIn("Top offending paths (top 15):", out)
         self.assertNotIn('"other" =', out)
 
+    def test_header_says_counts_are_floors(self):
+        # A hook that returns early emits nothing and so is invisible here; the
+        # header has to say so or a hidden path reads as a quiet guard (96).
+        out = " ".join(self._render('workspace-guard').split())
+        self.assertIn("coverage: Emitted decisions only", out)
+        self.assertIn("these totals are floors", out)
+
+    def test_all_plugins_disclaims_the_cross_guard_ranking(self):
+        out = " ".join(self._render('all').split())
+        self.assertIn("not a like-for-like ranking", out)
+        self.assertNotIn("like-for-like",
+                         " ".join(self._render('workspace-guard').split()))
+
 
 def write_transcript(tmp):
     """Synthetic transcript: one tool_use + one matching hook attachment."""
@@ -287,6 +300,9 @@ class EmptyResultTests(unittest.TestCase):
             notes = "\n".join(fr.explain_empty(s, 'pr-sentinel', 'all', ''))
             self.assertIn("--plugin 'pr-sentinel' matched no guard", notes)
             self.assertIn("workspace-guard (1)", notes)
+            # A label mismatch is not the only cause: a guard that emitted
+            # nothing is equally absent from the labels we saw.
+            self.assertIn("emitted nothing", notes)
 
     def test_unknown_repo_blames_the_repo_filter(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -349,6 +365,15 @@ class ExitCodeTests(unittest.TestCase):
             self.assertEqual(out['total'], 0)
             self.assertEqual(out['guards_seen'], {'workspace-guard': 1})
             self.assertTrue(out['empty_because'])
+
+    def test_json_carries_the_coverage_caveat(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_transcript(tmp)
+            p = self._run(tmp, "--since", "all", "--plugin", "all", "--json")
+            self.assertEqual(p.returncode, 0)
+            out = json.loads(p.stdout)
+            self.assertEqual(len(out['coverage']), 2)
+            self.assertIn("floors", out['coverage'][0])
 
 
 if __name__ == "__main__":
