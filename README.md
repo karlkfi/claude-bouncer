@@ -57,8 +57,10 @@ The hook produces one of three outcomes per Bash call:
   that teaches the three fixes: take ONE non-blocking snapshot (`gh pr
   checks <n>` without `--watch`, `tail -n 100` instead of `tail -f`), re-run
   the same call with `run_in_background: true`, or bound the wait explicitly
-  with `timeout N ...`. Class B asks name the exact minimum: "set
-  `timeout: 600000` on this Bash call, or run it in the background."
+  with `timeout N ...`. On a call that is already backgrounded the Class A
+  reason drops that middle fix and names the other two. Class B asks name the
+  exact minimum: "set `timeout: 600000` on this Bash call, or run it in the
+  background."
 - **deny** — only when config escalates a class to `deny` (or in
   `bypassPermissions` mode, where there is no one to answer an ask — the
   deny feeds the fix back so the agent self-corrects instead of stalling).
@@ -72,7 +74,7 @@ The hook produces one of three outcomes per Bash call:
 | `gh pr checks 123` | defer |
 | `gh pr checks 123 --watch` | **ask** |
 | `gh run watch 456` | **ask** |
-| `gh run watch 456` with `run_in_background: true` | defer |
+| `gh run watch 456` with `run_in_background: true` | **ask** (still a poll — see [Exemptions](#exemptions)) |
 | `gh run watch 456 &` | defer (detached) |
 | `timeout 30 gh run watch 456` | defer (explicitly bounded) |
 | `kubectl logs -f pod/api` | **ask** |
@@ -215,8 +217,16 @@ may escalate to `deny`) and names the exact fix.
 
 These pass untouched, by design:
 
-- **`run_in_background: true`** on the Bash call — backgrounding is exactly
-  what the guard wants; both classes pass.
+- **`run_in_background: true`** on the Bash call — **Class B only.**
+  Backgrounding is the fix Class B teaches, so a registered slow command
+  passes. It does not fix a poll: a detached `gh run watch` or `sleep`-loop
+  moves the wait off the main thread without removing it — it holds a task
+  slot for the whole run and hands back output whose freshness the agent
+  can't judge. Class A still prompts on a backgrounded call, with reasons
+  worded for a detached wait (they teach the snapshot and the `timeout N`
+  bound, not the `run_in_background` the call already used). A repo that
+  wants a specific watch form quiet in every mode can list it in
+  `poll.exempt_watch_patterns`.
 - **A trailing `&`** that detaches the blocking command (including a
   backgrounded subshell or loop). A mid-command `& ` exempts just that
   segment: `sleep 30 & make build` passes.
@@ -296,10 +306,10 @@ Prompts are grouped into a stable category taxonomy, each mapping to one fix:
 
 | Category | Class | Fix it teaches |
 | --- | --- | --- |
-| `watch` | A | one non-blocking snapshot, or `run_in_background: true` |
-| `loop-sleep` | A | one status check now; background the wait or check next turn |
-| `sandwich` | A | one status check now; background the wait or check next turn |
-| `bare-sleep` | A | skip or background the wait; do the follow-up check now |
+| `watch` | A | one non-blocking snapshot instead of streaming |
+| `loop-sleep` | A | one status check now; check again next turn |
+| `sandwich` | A | one status check now; check again next turn |
+| `bare-sleep` | A | skip the wait; do the follow-up check now |
 | `slow-timeout` | B | set an adequate `timeout:` on the call, or background it |
 
 The script runs standalone too:

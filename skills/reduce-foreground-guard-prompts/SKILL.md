@@ -14,14 +14,18 @@ classes and defers silently on everything else:
   `kubectl logs -f`, `kubectl get -w`, `tail -f`, `journalctl -f`,
   `docker logs -f`, `watch ...`), a `while`/`until`/`for` loop that polls with
   `sleep`, a chained repeat-with-sleep (`cmd; sleep N; cmd`), or a bare `sleep N`
-  at/above the floor (default 10s).
+  at/above the floor (default 10s). `run_in_background: true` does **not** exempt
+  Class A: a detached poll still holds a task slot for the whole wait and hands
+  back output whose freshness the agent can't judge, so it still prompts.
 - **Class B — slow command with an inadequate timeout**: a command the repo
   registered as slow that is about to run in the foreground with the Bash call's
   `timeout` below the registered minimum — it would be killed mid-run.
+  `run_in_background: true` **is** the fix here, and exempts it.
 
-So a flood of prompts almost always means the agent keeps waiting in the
-foreground instead of backgrounding, or keeps under-timing a known-slow command —
-both fixable habits — not that the work genuinely needs to block.
+So a flood of prompts almost always means the agent keeps waiting on a poll
+instead of snapshotting and re-checking next turn, or keeps under-timing a
+known-slow command — both fixable habits — not that the work genuinely needs to
+block.
 
 ## Diagnose
 
@@ -65,28 +69,29 @@ user which categories dominate their report, then apply the matching fix:
 1. **`watch`** (Class A) — a live watch/follow mode. **Reason:** "…runs in
    watch/follow mode…". Fix the behavior: take **one** non-blocking snapshot
    (`gh pr checks <pr>` without `--watch`, `gh run view <id>`, `tail -n 100`,
-   `kubectl logs --tail=100`, `kubectl get` once) instead of streaming, or re-run
-   the *same* call with `run_in_background: true` and read the task result on a
-   later turn. If the flagged command is a **false positive** — a form you
-   genuinely want to run live and don't want prompted — add a
+   `kubectl logs --tail=100`, `kubectl get` once) instead of streaming, and
+   re-check next turn. Re-running the same call with `run_in_background: true`
+   does not quiet this category — the watch still occupies a task slot and the
+   guard still prompts. If the flagged command is a **false positive** — a form
+   you genuinely want to run live and don't want prompted — add a
    `poll.exempt_watch_patterns` regex (exemptions win over matches; this quiets
    just that form without disabling all of Class A). Conversely, if a real watch
    reached through an uncovered alias (`k logs -f …`) is *not* being caught but
    should be, that's a coverage gap → `poll.extra_watch_patterns`.
 2. **`loop-sleep`** (Class A) — a `while`/`until`/`for` loop that polls with
    `sleep`. **Reason:** "…loop with `sleep` polls…". Fix the behavior: take one
-   status check now, then background the wait (`run_in_background: true`) or check
-   again next turn — don't spin a poll loop on the main thread.
+   status check now and check again next turn — don't spin a poll loop, on the
+   main thread or in the background (a backgrounded loop still prompts).
 3. **`sandwich`** (Class A) — a chained repeat-with-sleep (`cmd; sleep N; cmd`).
    **Reason:** "…repeat-with-sleep chain…". Same fix as `loop-sleep`: one check
-   now; background or defer the recheck.
+   now; defer the recheck to the next turn.
 4. **`bare-sleep`** (Class A) — a long bare `sleep N` at/above the floor.
-   **Reason:** "…parks the main thread for…". Skip or background the wait and do
-   the follow-up check now (`sleep 300 && curl …` → background it, or just run the
-   `curl` next turn). If the flagged sleeps are legitimately *short* startup-grace
-   waits that sit just above the floor, raise `poll.sleep_floor_seconds` so they
-   fall below it — but keep the floor low enough that real long waits still
-   prompt.
+   **Reason:** "…parks the main thread for…" (backgrounded: "…parks a background
+   task for…"). Skip the wait and do the follow-up check now (`sleep 300 && curl
+   …` → just run the `curl` next turn). If the flagged sleeps are legitimately
+   *short* startup-grace waits that sit just above the floor, raise
+   `poll.sleep_floor_seconds` so they fall below it — but keep the floor low
+   enough that real long waits still prompt.
 5. **`slow-timeout`** (Class B) — a registered slow command about to be killed by
    an inadequate timeout. **Reason:** "…matches the slow-command pattern…". Set an
    adequate `timeout:` on the Bash call (the reason names the minimum in ms), or
@@ -103,9 +108,9 @@ than a per-run override.
 
 Tell the user the cause(s) you found, then apply the habits that prevent them:
 
-- **Background long waits instead of watching them.** Re-run the same Bash call
-  with `run_in_background: true` and read the task result on a later turn. This is
-  exactly what the guard wants — both classes pass.
+- **Don't wait on a poll at all — snapshot and re-check next turn.**
+  Backgrounding a poll is not the fix: `run_in_background: true` only exempts
+  Class B (a registered slow command), where it is exactly what the guard wants.
 - **Take one snapshot, not a live stream.** `gh pr checks <pr>` (no `--watch`),
   `gh run view <id>`, `tail -n 100`, `kubectl logs --tail=100`, `kubectl get`
   once. Re-check on the next turn if you need fresher state.
@@ -151,19 +156,19 @@ This repo uses foreground-guard, a hook that guards the session's main-thread
 time. It prompts before a Bash call parks the main thread on a foreground wait or
 runs a known-slow command that its timeout would kill. To keep work flowing:
 
-- **Background long waits — don't watch them.** Re-run the same Bash call with
-  `run_in_background: true` and read the task result on a later turn, instead of
-  streaming `gh run watch`, `gh pr checks --watch`, `kubectl logs -f`,
-  `kubectl get -w`, `tail -f`, `journalctl -f`, `docker logs -f`, or `watch …`.
+- **Don't watch — snapshot.** Instead of streaming `gh run watch`, `gh pr checks
+  --watch`, `kubectl logs -f`, `kubectl get -w`, `tail -f`, `journalctl -f`,
+  `docker logs -f`, or `watch …`, take one non-blocking reading and check again
+  next turn. `run_in_background: true` does not make a poll acceptable — it
+  parks the same wait in a task slot and returns output you can't date.
 - **Take one snapshot, not a live stream.** Prefer `gh pr checks <pr>` (no
   `--watch`), `gh run view <id>`, `tail -n 100`, `kubectl logs --tail=100`, and a
   single `kubectl get`. Re-check next turn if you need fresher state.
-- **Don't poll on the main thread with `sleep`.** Avoid `while true; do …; sleep
-  N; done` loops and `cmd; sleep N; cmd` repeat-with-sleep chains. Take one status
-  check now and background or defer the recheck.
-- **Don't block on a bare `sleep N`.** Background the wait or just do the
-  follow-up check on the next turn. A short startup-grace `sleep` below the floor
-  (default 10s) is fine.
+- **Don't poll with `sleep`.** Avoid `while true; do …; sleep N; done` loops and
+  `cmd; sleep N; cmd` repeat-with-sleep chains. Take one status check now and
+  defer the recheck to the next turn.
+- **Don't block on a bare `sleep N`.** Do the follow-up check on the next turn
+  instead. A short startup-grace `sleep` below the floor (default 10s) is fine.
 - **Bound a deliberate wait with `timeout N …`.** An explicit bound is exempt —
   and the Bash tool's own timeout still backstops it.
 - **Set an adequate `timeout:` on known-slow Bash calls** (test suites, e2e runs,
