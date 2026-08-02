@@ -283,7 +283,11 @@ Without this you're on the manual update path documented under
 
 After installing with either method:
 
-- Requires `python3` on your PATH.
+- Requires Python 3 on your PATH. The hook is launched through
+  `scripts/run-python-hook.cmd`, which resolves an interpreter by trying `py -3`,
+  `python`, then `python3` (on Windows) or `python3`, then `python` (elsewhere),
+  so a working Python under any of those names is enough. If none of them runs,
+  the guard reports the problem on stderr rather than failing silently.
 - Restart Claude Code so the hook is registered.
 - **Won't fire where plugin `PreToolUse` hooks don't run.** Claude Cowork and
   Claude Desktop's *native* assistant don't run them yet, so the guard never

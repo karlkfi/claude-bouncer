@@ -5071,6 +5071,60 @@ class PluginWiringTests(unittest.TestCase):
             "the guard script is not registered as a hook command",
         )
 
+    # --- scripts/run-python-hook.cmd -----------------------------------------
+
+    def test_hook_shim_is_executable(self):
+        # The hook command execs the shim directly, so a missing execute bit
+        # means exit 126. Claude Code treats that as a non-blocking hook error,
+        # which leaves the guard enforcing nothing with no visible symptom.
+        if os.name == "nt":
+            self.skipTest("POSIX permission bits")
+        shim = REPO / "scripts" / "run-python-hook.cmd"
+        self.assertTrue(shim.is_file(), "missing scripts/run-python-hook.cmd")
+        self.assertTrue(os.access(shim, os.X_OK),
+                        "run-python-hook.cmd is not executable")
+
+    def test_hook_shim_has_lf_line_endings(self):
+        # CRLF makes the POSIX half of the polyglot a syntax error.
+        shim = REPO / "scripts" / "run-python-hook.cmd"
+        self.assertNotIn(b"\r", shim.read_bytes(),
+                         "run-python-hook.cmd must stay LF-only")
+
+    def test_gitattributes_pins_cmd_line_endings(self):
+        # Without the pin, a clone under core.autocrlf=true rewrites the shim.
+        path = REPO / ".gitattributes"
+        self.assertTrue(path.is_file(), "missing .gitattributes")
+        self.assertIn("*.cmd text eol=lf", path.read_text())
+
+    def test_hook_shim_emits_the_same_decision_as_a_direct_run(self):
+        if os.name == "nt":
+            self.skipTest("the shim runs through cmd.exe on Windows")
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = os.path.realpath(tmp)
+            payload = json.dumps({
+                "tool_name": "Bash",
+                "cwd": workspace,
+                "tool_input": {"command": "cat ../q94-fake-target"},
+            })
+            env = os.environ.copy()
+            env["CLAUDE_PROJECT_DIR"] = workspace
+            shim = REPO / "scripts" / "run-python-hook.cmd"
+            # Claude Code runs hook commands through a shell, and the shim has
+            # no shebang -- it relies on the shell retrying an ENOEXEC exec as
+            # /bin/sh. Launching it any other way doesn't exercise that.
+            outputs = []
+            for argv in ([sys.executable, str(SCRIPT)],
+                         ["/bin/sh", "-c", f'"{shim}" bash-workspace-guard.py']):
+                r = subprocess.run(argv, input=payload, capture_output=True,
+                                   text=True, env=env, timeout=10)
+                self.assertEqual(r.returncode, 0,
+                                 f"{argv[0]} exited {r.returncode}: "
+                                 f"{r.stderr!r}")
+                outputs.append(r.stdout)
+            # Two silent defers would compare equal, so pin the decision too.
+            self.assertIn("permissionDecision", outputs[1])
+            self.assertEqual(outputs[0], outputs[1])
+
     # --- .claude-plugin/*.json -----------------------------------------------
 
     def test_plugin_json_valid_and_named(self):
