@@ -2163,6 +2163,64 @@ class SpecialCaseTests(unittest.TestCase):
         self.assertIsNone(decision)
 
 
+class HelpFlagTests(unittest.TestCase):
+    """A help flag prints usage and exits, so a mutating verb's help page is
+    not a mutating command — with the two exceptions where the flag isn't
+    help at all (issue #28)."""
+
+    def test_mutating_verb_help_defers(self):
+        for cmd in ("helm upgrade --help",
+                    "kubectl delete --help",
+                    "kubectl delete -h",
+                    "terraform destroy -help",
+                    "gcloud compute instances delete --help",
+                    "aws s3 rm --help",
+                    "gh workflow run -h"):
+            with self.subTest(cmd=cmd):
+                decision, _ = run_hook(cmd, home=make_home(
+                    kubeconfig=KUBECONFIG_PROD, gcloud_project="acme-prod-us"))
+                self.assertIsNone(decision)
+
+    def test_help_subcommand_defers(self):
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        for cmd in ("gcloud help compute instances delete",
+                    "kubectl help delete"):
+            with self.subTest(cmd=cmd):
+                decision, _ = run_hook(cmd, home=home)
+                self.assertIsNone(decision)
+
+    def test_docker_short_h_is_hostname_not_help(self):
+        # `-h` on docker/podman is --hostname; the run still mutates.
+        home = make_home(docker_context="prod-swarm")
+        for cmd in ("docker run -h box nginx", "podman run -h box nginx"):
+            with self.subTest(cmd=cmd):
+                decision, _ = run_hook(cmd, home=home)
+                self.assertEqual(decision, "deny")
+        # The long form is still help.
+        decision, _ = run_hook("docker run --help", home=home)
+        self.assertIsNone(decision)
+
+    def test_ssh_long_help_is_a_remote_command(self):
+        # OpenSSH has no long options: `--help` is the command run on the
+        # remote, so the connection to prod still happens.
+        decision, _ = run_hook("ssh deploy@prod-web-1 --help")
+        self.assertEqual(decision, "deny")
+
+    def test_help_does_not_leak_across_segments(self):
+        # The flag exempts only its own simple command.
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        decision, _ = run_hook(
+            "kubectl delete --help && kubectl delete ns payments", home=home)
+        self.assertEqual(decision, "deny")
+
+    def test_help_flag_as_a_value_is_not_help(self):
+        # `--help` only counts as its own token, never as part of a value.
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        decision, _ = run_hook(
+            "kubectl create configmap c --from-literal=note=--help", home=home)
+        self.assertEqual(decision, "deny")
+
+
 class AliasToolTests(unittest.TestCase):
     """Q1: oc shares kubectl's evaluator; podman/nerdctl/docker-compose share
     docker's. The alias must inherit the full decision matrix, plus the few

@@ -2199,6 +2199,31 @@ COVERED_TOOLS = frozenset(EVALUATORS)
 # Segment evaluation and main
 # ---------------------------------------------------------------------------
 
+# A help flag makes the CLI print usage and exit — no config is read, no target
+# is contacted, nothing mutates — so a mutating verb's help page is not a
+# mutating command. Terraform spells its long form `-help`.
+HELP_LONG_FLAGS = frozenset({'--help', '-help'})
+# Tools where `--help` is NOT a help flag. OpenSSH has no long options: `ssh
+# host --help` runs `--help` on the remote, so the connection to the target
+# still happens and must still be judged.
+NO_HELP_FLAG = frozenset({'ssh'})
+# Tools where `-h` is not help: on docker/podman/nerdctl it is `--hostname`,
+# so `docker run -h box image` is an ordinary mutating run.
+NO_SHORT_HELP = frozenset({'docker', 'podman', 'nerdctl', 'docker-compose'})
+
+
+def is_help_invocation(tool, argv):
+    """True when this segment only asks the CLI for its usage text."""
+    if tool in NO_HELP_FLAG:
+        return False
+    args = argv[1:]
+    if HELP_LONG_FLAGS.intersection(args):
+        return True
+    if tool not in NO_SHORT_HELP and '-h' in args:
+        return True
+    return args[0] == 'help'
+
+
 def evaluate_command_string(raw, ctx, depth=0, exported=None):
     """Findings for a full command string: tokenize, split into simple
     commands, evaluate each. Recurses (bounded) into `sh -c '...'` and
@@ -2284,6 +2309,8 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None):
             continue  # uncovered tool: defer
         if len(argv) == 1:
             continue  # bare tool name prints help; nothing to guard
+        if is_help_invocation(tool, argv):
+            continue
         findings += evaluator(argv, seg_inline, ctx)
     return findings, override, session_reason
 

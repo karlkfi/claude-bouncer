@@ -88,9 +88,10 @@ across `&&`/`|`/`;`/`$( )` chains):
   per-command pin alternative (`gcloud auth login`, `oc login`,
   `aws configure`, `kubens`, kubeconfig edits, …).
 - **defer** — the hook stays silent; your normal permission settings apply.
-  This is the outcome for read-only verbs, non-production targets, and
-  uncovered tools. prod-guard never emits `allow`, so it composes with other
-  guards instead of overriding them.
+  This is the outcome for read-only verbs, non-production targets, uncovered
+  tools, and any segment that only asks a CLI for its usage text (`--help`,
+  `-h`, or `help` as the first word). prod-guard never emits `allow`, so it
+  composes with other guards instead of overriding them.
 
 | Command | Decision |
 | --- | --- |
@@ -109,6 +110,9 @@ across `&&`/`|`/`;`/`$( )` chains):
 | `docker push registry.prod.acme.io/app:1` | **deny** |
 | `ssh deploy@prod-web-1 uptime` | **deny** |
 | `ssh dev-box uptime` | defer |
+| `helm upgrade --help` | defer |
+| `docker run -h box nginx` (`-h` is `--hostname`, not help) | judged as a run |
+| `ssh prod-web-1 --help` (OpenSSH runs it on the remote) | **deny** |
 | `pulumi up --stack acme/prod` | **deny** |
 | `pulumi up` (no stack; selected stack is `acme/prod`) | **deny** |
 | `pulumi up` (no stack pinned, selection unresolved) | **deny** (pin `--stack`) |
