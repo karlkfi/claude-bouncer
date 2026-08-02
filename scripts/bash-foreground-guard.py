@@ -35,9 +35,13 @@ Bash tool's own timeout still backstops it (allow-through, by design).
 
 Decision semantics: the hook ONLY returns `ask`/`deny` or passes through
 silently (defer). It NEVER emits `permissionDecision: "allow"` — an allow
-would bypass the user's permission settings and the sibling guards. A
-`FOREGROUND_GUARD_OVERRIDE=<reason>` prefix downgrades a config-escalated
-`deny` to a confirmation prompt (mirroring prod-guard's override semantics).
+would bypass the user's permission settings and the sibling guards. In an
+unattended permission mode (`auto`, `dontAsk`, `bypassPermissions`) an `ask`
+is emitted as `deny` instead: equally blocking, but the reason reaches the
+agent so it self-corrects rather than parking on a prompt nobody is there to
+answer. A `FOREGROUND_GUARD_OVERRIDE=<reason>` prefix downgrades a `deny`
+back to a confirmation prompt (mirroring prod-guard's override semantics),
+wherever a prompt can still be answered.
 
 Fail modes: fail OPEN on infrastructure errors (unparseable input, bad
 config, unexpected exception — the hook stays silent and never breaks the
@@ -529,6 +533,38 @@ ASK, DENY = 1, 2
 CONFIG_HINT = ('Config: .claude/foreground-guard.json '
                '(see the foreground-guard README).')
 
+ISSUES_URL = 'https://github.com/karlkfi/claude-foreground-guard/issues'
+
+# Permission modes in which nobody is expected to be watching the prompt
+# stream, so an `ask` buys friction and no answer. Matches branch-guard's
+# NON_INTERACTIVE_MODES.
+UNATTENDED_MODES = frozenset({'auto', 'dontAsk', 'bypassPermissions'})
+
+# The subset where an `ask` reaches no human at all: Claude Code converts it
+# to its own generic deny (`dontAsk`) or leaves the run stalled on a prompt
+# with no one to answer it (`bypassPermissions`). An override cannot buy a
+# confirmation there, so it must not claim to.
+NO_PROMPT_MODES = frozenset({'dontAsk', 'bypassPermissions'})
+
+
+def deny_tail(mode):
+    """The tail appended once to a deny: how to get through it when the
+    foreground wait is genuinely wanted, and where to report a wrong verdict.
+    Built at the emit site rather than per finding — up to three findings are
+    joined into one reason, and the escape hatch belongs to the decision."""
+    if mode in NO_PROMPT_MODES:
+        hatch = ('A FOREGROUND_GUARD_OVERRIDE=<reason> prefix cannot '
+                 'downgrade this in %s mode — there is no prompt for anyone '
+                 'to answer, so take one of the fixes above instead.' % mode)
+    else:
+        hatch = ('If the wait is genuinely required, re-run the same command '
+                 'with a FOREGROUND_GUARD_OVERRIDE=<reason> prefix to '
+                 'downgrade this block to one confirmation prompt.')
+    return ('%s If this verdict looks wrong, say so to the user rather than '
+            'working around it: `/foreground-guard:friction-report` shows '
+            'how often the pattern lands, and it can be filed at %s.'
+            % (hatch, ISSUES_URL))
+
 
 # cfg['backgrounded'] is runtime state, not config — main() sets it from the
 # payload. Class A findings word themselves around it: telling a call that is
@@ -556,10 +592,6 @@ def finding_a(cfg, what, alt):
            % (what, cost, _fixups(cfg, alt)))
     if cfg['hint']:
         msg += ' This repo: %s' % cfg['hint']
-    if sev == DENY:
-        msg += (' If a foreground wait is genuinely required, prefix the '
-                'command with FOREGROUND_GUARD_OVERRIDE=<reason> to '
-                'downgrade this block to a confirmation prompt.')
     msg += ' ' + CONFIG_HINT
     return (sev, msg)
 
@@ -608,10 +640,6 @@ def finding_slow(cfg, pattern, min_ms, timeout_ms, timeout_was_set):
            'finishes and the whole run is wasted. Fix: set `timeout: %d` on '
            'this Bash call, or run it with run_in_background: true.'
            % (pattern, min_ms, cur, min_ms))
-    if sev == DENY:
-        msg += (' If running with this timeout is genuinely intended, prefix '
-                'the command with FOREGROUND_GUARD_OVERRIDE=<reason> to '
-                'downgrade this block to a confirmation prompt.')
     msg += ' ' + CONFIG_HINT
     return (sev, msg)
 
@@ -794,21 +822,30 @@ def main():
             reasons.append(reason)
     reason = ' | '.join(reasons[:3])
 
-    if severity == DENY and override is not None:
-        severity = ASK
+    mode = data.get('permission_mode') or ''
+    decision = 'deny' if severity == DENY else 'ask'
+    # Unattended modes: an ask costs the user a prompt and returns nothing.
+    # In `auto` they are deliberately not babysitting the run, and rejecting
+    # the prompt drops the guard's fix on the floor — they end up pasting it
+    # back to the agent by hand. In `dontAsk` Claude Code turns the ask into
+    # its own generic deny, losing the reason entirely; in bypassPermissions
+    # no one can answer it. Deny instead: equally blocking, and the reason is
+    # fed back so the agent self-corrects (snapshot / background / timeout).
+    if decision == 'ask' and mode in UNATTENDED_MODES:
+        decision = 'deny'
+    # The override is a deliberate request for that one prompt, so it
+    # downgrades any deny — config-escalated or mode-escalated — wherever a
+    # prompt can still be answered.
+    if decision == 'deny' and override is not None \
+            and mode not in NO_PROMPT_MODES:
+        decision = 'ask'
         shown = override.strip()
         note = ' (%s)' % shown if shown else ''
         reason = ('foreground-guard override acknowledged '
                   '(FOREGROUND_GUARD_OVERRIDE is set%s) — downgraded from deny '
                   'to a confirmation prompt. ' % note + reason)
-
-    decision = 'deny' if severity == DENY else 'ask'
-    # In bypassPermissions / full-auto mode there is no one to answer an ask;
-    # deny blocks identically but feeds the reason back so the agent can
-    # self-correct (snapshot / background / timeout) instead of stalling on
-    # an unanswerable prompt.
-    if decision == 'ask' and data.get('permission_mode') == 'bypassPermissions':
-        decision = 'deny'
+    if decision == 'deny':
+        reason += ' ' + deny_tail(mode)
     print(json.dumps({'hookSpecificOutput': {
         'hookEventName': 'PreToolUse',
         'permissionDecision': decision,
