@@ -562,6 +562,67 @@ class SlowCommandTests(unittest.TestCase):
         self.assertEqual(d, "ask")
 
 
+# A bare script path is the registration a repo writes on the first try, so
+# the mention-vs-execution split is tested against exactly that (#16).
+GATE_CFG = {"slow": {"commands": {r"scripts/gate\.sh": 3600000}}}
+
+
+class SlowCommandPositionTests(unittest.TestCase):
+    def assert_runs(self, command, **kw):
+        d, _ = run_hook(command, config=GATE_CFG, **kw)
+        self.assertEqual(d, "ask", "expected ask for %r" % command)
+
+    def assert_mention(self, command, **kw):
+        d, r = run_hook(command, config=GATE_CFG, **kw)
+        self.assertIsNone(d, "expected defer for %r, got %s" % (command, r))
+
+    def test_invocation_forms_still_match(self):
+        self.assert_runs("scripts/gate.sh")
+        self.assert_runs("./scripts/gate.sh --all")
+        self.assert_runs("CI=1 nohup scripts/gate.sh")
+        self.assert_runs("bash scripts/gate.sh")
+        self.assert_runs("bash -x scripts/gate.sh")
+        self.assert_runs("git fetch && scripts/gate.sh")
+        self.assert_runs("bash -c 'scripts/gate.sh --all'")
+        self.assert_runs("/repo/scripts/gate.sh")
+        self.assert_runs("timeout 600 scripts/gate.sh")
+
+    def test_mentions_do_not_match(self):
+        self.assert_mention('grep -n "read -p" scripts/gate.sh')
+        self.assert_mention("wc -l scripts/gate.sh")
+        self.assert_mention("cat scripts/gate.sh")
+        self.assert_mention('git commit -m "run scripts/gate.sh before release"')
+        self.assert_mention("ls -l scripts/gate.sh")
+
+    def test_heredoc_body_mention_does_not_match(self):
+        self.assert_mention("cat <<'EOF' > notes.md\nrun scripts/gate.sh\nEOF")
+
+    def test_dot_star_prefix_opts_back_into_argument_matching(self):
+        # The escape hatch for patterns that name an argument rather than a
+        # command: `.*` puts the leftmost match at the command position.
+        cfg = {"slow": {"commands": {r".*-race\b": 600000}}}
+        d, _ = run_hook("go test -race ./...", config=cfg)
+        self.assertEqual(d, "ask")
+
+    def test_argument_pattern_without_prefix_does_not_match(self):
+        cfg = {"slow": {"commands": {r"-race\b": 600000}}}
+        d, _ = run_hook("go test -race ./...", config=cfg)
+        self.assertIsNone(d)
+
+    def test_anchored_pattern_still_matches(self):
+        # The workaround repos wrote against the old whole-string search has
+        # to keep working: it anchors at a position segmentation also finds.
+        cfg = {"slow": {"commands": {r"(^|[;&|]\s*)scripts/gate\.sh": 3600000}}}
+        d, _ = run_hook("git fetch && scripts/gate.sh", config=cfg)
+        self.assertEqual(d, "ask")
+
+    def test_unparseable_command_defers(self):
+        # Unbalanced quotes: the segmentation can't run, so the guard defers
+        # rather than fall back to guessing from the raw string.
+        d, _ = run_hook("scripts/gate.sh 'unclosed", config=GATE_CFG)
+        self.assertIsNone(d)
+
+
 SLOW_DENY_CFG = {"slow": {"action": "deny",
                           "commands": {r"make test-race\b": 600000}}}
 
