@@ -44,12 +44,14 @@ adjustments:
   window (default `7d`).
 - `--repo ''` — drop the project filter to see friction across every repo.
 - `--plugin all` — include the sibling guards' decisions too (prod-guard,
-  workspace-guard, branch-guard), if the user wants the whole picture.
+  workspace-guard, branch-guard), if the user wants the whole picture. The
+  override-downgrade count is foreground-guard's own, so it is omitted in this
+  mode; read it from the default single-guard report instead.
 - `--json` — machine-readable, if you'd rather parse it than read the table.
 
 **Fall back gracefully.** If the script can't be found (`$CLAUDE_PLUGIN_ROOT`
 unset — try the in-repo path `scripts/friction-report.py`), exits with "No
-transcripts …", or prints "No foreground-guard decisions found" (a fresh setup
+transcripts …", or prints "No … decisions found" (a fresh setup
 with no recorded prompts yet), skip the data step and diagnose from the **most
 recent foreground-guard prompts in this session** instead — each prompt's reason
 text names the offending command and the fix. With neither, walk the user through
