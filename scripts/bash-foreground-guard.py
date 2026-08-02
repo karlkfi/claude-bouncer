@@ -11,7 +11,8 @@ Two classes of time-wasters, kept distinct in the code:
    the one the user is talking to — sits blocked the whole time. The guard
    prompts (`ask` by default; config may escalate to `deny`) and teaches the
    three fixes: one non-blocking snapshot, `run_in_background: true`, or an
-   explicit `timeout N` bound.
+   explicit `timeout N` bound. A call that is already backgrounded still
+   prompts, with the middle fix dropped (see Exemptions).
 
 2. **Class B — slow command with an inadequate timeout.** A command the repo
    *knows* takes longer than the Bash tool's default 2-minute timeout
@@ -23,8 +24,11 @@ Two classes of time-wasters, kept distinct in the code:
    `run_in_background: true`. The default registry is EMPTY — slow-command
    knowledge is per-repo and lives in `.claude/foreground-guard.json`.
 
-Exemptions (pass untouched, both classes): `run_in_background: true`; a
-trailing `&` that detaches the blocking command (per-segment `&` exempts just
+Exemptions: `run_in_background: true` exempts Class B only — it is the fix
+that class teaches. It is not a fix for a poll: a detached `gh run watch` or
+`sleep`-loop holds a task slot for the whole wait and hands back output the
+agent cannot date, so Class A still prompts (with the backgrounded wording).
+A trailing `&` detaches the blocking command (per-segment `&` exempts just
 that segment); a `timeout N ...` wrap exempts the wrapped segment from
 Class A — an explicit bound is exactly the fix the guard teaches, and the
 Bash tool's own timeout still backstops it (allow-through, by design).
@@ -526,7 +530,17 @@ CONFIG_HINT = ('Config: .claude/foreground-guard.json '
                '(see the foreground-guard README).')
 
 
-def _fixups(alt):
+# cfg['backgrounded'] is runtime state, not config — main() sets it from the
+# payload. Class A findings word themselves around it: telling a call that is
+# already backgrounded to re-run with run_in_background is a fix it can't apply.
+def _where(cfg):
+    return 'in the background' if cfg.get('backgrounded') else 'in the foreground'
+
+
+def _fixups(cfg, alt):
+    if cfg.get('backgrounded'):
+        return ('Instead: (1) %s; or (2) bound the wait explicitly with '
+                '`timeout <seconds> ...`.' % alt)
     return ('Instead: (1) %s; (2) re-run this same call with '
             'run_in_background: true and check the task result later; or '
             '(3) bound the wait explicitly with `timeout <seconds> ...`.'
@@ -535,8 +549,11 @@ def _fixups(alt):
 
 def finding_a(cfg, what, alt):
     sev = DENY if cfg['poll_action'] == 'deny' else ASK
-    msg = ('foreground-guard: %s — this blocks the session\'s main thread '
-           'for the whole wait. %s' % (what, _fixups(alt)))
+    cost = ('holds a task slot for the whole wait and hands back output that '
+            'cannot be dated' if cfg.get('backgrounded')
+            else 'blocks the session\'s main thread for the whole wait')
+    msg = ('foreground-guard: %s — this %s. %s'
+           % (what, cost, _fixups(cfg, alt)))
     if cfg['hint']:
         msg += ' This repo: %s' % cfg['hint']
     if sev == DENY:
@@ -555,25 +572,29 @@ def finding_watch(cfg, seg_str, label, alt):
 
 def finding_loop(cfg):
     return finding_a(
-        cfg, 'a `while`/`until`/`for` loop with `sleep` polls in the '
-             'foreground',
+        cfg, 'a `while`/`until`/`for` loop with `sleep` polls %s' % _where(cfg),
         'take ONE non-blocking status check now and check again next turn')
 
 
 def finding_sandwich(cfg):
     return finding_a(
-        cfg, 'a repeat-with-sleep chain (`cmd; sleep N; cmd; ...`) polls in '
-             'the foreground',
+        cfg, 'a repeat-with-sleep chain (`cmd; sleep N; cmd; ...`) polls %s'
+             % _where(cfg),
         'take ONE non-blocking status check now and check again next turn')
 
 
 def finding_sleep(cfg, secs):
     desc = ('an unresolvable duration (treated as long)' if secs is None
             else '~%g s' % secs)
+    if cfg.get('backgrounded'):
+        parked, retry = 'a background task', 'come back next turn'
+    else:
+        parked = 'the main thread'
+        retry = 'background the wait or come back next turn'
     return finding_a(
-        cfg, '`sleep` parks the main thread for %s' % desc,
+        cfg, '`sleep` parks %s for %s' % (parked, desc),
         'skip the wait — do the follow-up check now, and if the thing is '
-        'not ready, background the wait or come back next turn')
+        'not ready, %s' % retry)
 
 
 def finding_slow(cfg, pattern, min_ms, timeout_ms, timeout_was_set):
@@ -732,10 +753,11 @@ def main():
         return
     if os.environ.get('FOREGROUND_GUARD_DISABLE') == '1':
         return
-    if tool_input.get('run_in_background') is True:
-        return  # already backgrounded: exactly what the guard wants
 
     cfg = load_config()
+    # Backgrounding answers Class B and only Class B (see below); Class A
+    # findings read it to word themselves for a detached wait.
+    cfg['backgrounded'] = tool_input.get('run_in_background') is True
     # Class A analysis always runs: it is also the only place the
     # FOREGROUND_GUARD_OVERRIDE=<reason> prefix is parsed, and the override
     # must still downgrade a Class B deny when poll is disabled.
@@ -743,7 +765,11 @@ def main():
     if not cfg['poll_enabled']:
         findings = []
 
-    if cfg['slow_enabled'] and cfg['slow_commands']:
+    # `run_in_background: true` is the fix Class B teaches, so a backgrounded
+    # slow command passes untouched. A backgrounded poll does NOT pass: the
+    # wait moves off the main thread but still holds a task slot, and the
+    # agent still returns to a read whose freshness it cannot judge.
+    if cfg['slow_enabled'] and cfg['slow_commands'] and not cfg['backgrounded']:
         timeout_ms = tool_input.get('timeout')
         timeout_was_set = isinstance(timeout_ms, (int, float)) \
             and not isinstance(timeout_ms, bool)

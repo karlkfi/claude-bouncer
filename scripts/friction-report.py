@@ -7,8 +7,8 @@ triggering command, cwd, and timestamp — in the session transcripts under
 ``~/.claude/projects/**/*.jsonl``. This tool re-reads those records and ranks
 foreground-guard's decisions so you can see, in one command, which prompts
 dominate and — most usefully — which *category* of main-thread waste keeps
-prompting, because each category maps to one concrete fix (background the wait,
-take a snapshot, set an adequate timeout). The category taxonomy is stable and
+prompting, because each category maps to one concrete fix (take a snapshot,
+defer the recheck, set an adequate timeout). The category taxonomy is stable and
 documented below so the ``reduce-foreground-guard-prompts`` skill can consume it.
 
 Nothing here changes the hook or adds telemetry: it parses data Claude Code
@@ -51,17 +51,20 @@ CATEGORY_PATTERNS = {
     'watch':        re.compile(r'runs in watch/follow mode'),
     'loop-sleep':   re.compile(r'loop with `sleep` polls'),
     'sandwich':     re.compile(r'repeat-with-sleep chain'),
-    'bare-sleep':   re.compile(r'parks the main thread for'),
+    # "parks a background task" is the backgrounded wording of the same finding.
+    'bare-sleep':   re.compile(r'`sleep` parks (?:the main thread|a background '
+                               r'task) for'),
     'slow-timeout': re.compile(r'matches the slow-command pattern'),
 }
 
 # One-line fix per category: what stops the prompt. Class A fixes are agent
-# behavior (background / snapshot); slow-timeout is a per-call timeout.
+# behavior (snapshot / defer the recheck — backgrounding a poll does not quiet
+# it); slow-timeout is a per-call timeout.
 CATEGORY_HINT = {
-    'watch':        'take one non-blocking snapshot, or re-run with run_in_background: true',
-    'loop-sleep':   'take one status check now; background the wait or check again next turn',
-    'sandwich':     'take one status check now; background the wait or check again next turn',
-    'bare-sleep':   'skip or background the wait; do the follow-up check now',
+    'watch':        'take one non-blocking snapshot instead of streaming',
+    'loop-sleep':   'take one status check now; check again next turn',
+    'sandwich':     'take one status check now; check again next turn',
+    'bare-sleep':   'skip the wait; do the follow-up check now',
     'slow-timeout': 'set an adequate `timeout:` on the Bash call, or run it in the background',
 }
 

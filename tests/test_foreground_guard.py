@@ -348,9 +348,28 @@ class LoopAndSleepTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class ExemptionTests(unittest.TestCase):
-    def test_run_in_background_passes_everything(self):
+    def test_run_in_background_does_not_exempt_class_a(self):
+        # Backgrounding answers Class B, not Class A: a detached poll still
+        # holds a task slot and returns output the agent cannot date.
         for cmd in ("gh run watch 123", "tail -f x.log", "sleep 600",
-                    "while true; do sleep 5; done"):
+                    "while true; do sleep 5; done",
+                    "gh pr checks 1; sleep 5; gh pr checks 1"):
+            d, r = run_hook(cmd, run_in_background=True)
+            self.assertEqual(d, "ask", "expected ask for backgrounded %r" % cmd)
+            # The fix it teaches must not be the one the call already applied.
+            self.assertNotIn("run_in_background", r)
+
+    def test_backgrounded_reasons_use_the_detached_wording(self):
+        d, r = run_hook("sleep 600", run_in_background=True)
+        self.assertEqual(d, "ask")
+        self.assertIn("parks a background task", r)
+        self.assertIn("holds a task slot", r)
+        d, r = run_hook("while true; do sleep 5; done", run_in_background=True)
+        self.assertIn("polls in the background", r)
+
+    def test_class_a_exemptions_still_apply_when_backgrounded(self):
+        for cmd in ("timeout 30 gh run watch 123", "sleep 5", "make build",
+                    "tail -n 50 app.log"):
             d, _ = run_hook(cmd, run_in_background=True)
             self.assertIsNone(d, "expected defer for backgrounded %r" % cmd)
 
@@ -518,6 +537,14 @@ class SlowCommandTests(unittest.TestCase):
         d, _ = run_hook("make test-race", config=SLOW_CFG,
                         run_in_background=True)
         self.assertIsNone(d)
+
+    def test_backgrounded_slow_command_that_polls_keeps_the_class_a_ask(self):
+        # Backgrounding drops the Class B finding only; the poll still prompts.
+        cfg = {"slow": {"commands": {r"gh run watch\b": 600000}}}
+        d, r = run_hook("gh run watch 456", config=cfg, run_in_background=True)
+        self.assertEqual(d, "ask")
+        self.assertIn("watch/follow mode", r)
+        self.assertNotIn("slow-command pattern", r)
 
     def test_slow_class_disabled_defers(self):
         cfg = {"slow": {"enabled": False,

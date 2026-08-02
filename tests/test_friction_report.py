@@ -54,6 +54,15 @@ REASON_SANDWICH = guard.finding_sandwich(_CFG)[1]
 REASON_SLEEP = guard.finding_sleep(_CFG, 300)[1]
 REASON_SLOW = guard.finding_slow(_CFG, r"make test-race\b", 600000, 120000,
                                 False)[1]
+# The same Class A findings for a `run_in_background: true` call: different
+# wording, same categories.
+_BG_CFG = dict(_CFG, backgrounded=True)
+REASON_BG_WATCH = guard.finding_watch(
+    _BG_CFG, "gh run watch 456", "gh run watch",
+    "check once with `gh run view <run-id>`")[1]
+REASON_BG_LOOP = guard.finding_loop(_BG_CFG)[1]
+REASON_BG_SANDWICH = guard.finding_sandwich(_BG_CFG)[1]
+REASON_BG_SLEEP = guard.finding_sleep(_BG_CFG, 300)[1]
 # The deny->ask override prefix the hook prepends (see bash-foreground-guard.py
 # main()); the underlying category must survive it.
 REASON_OVERRIDE = ('foreground-guard override acknowledged '
@@ -149,10 +158,19 @@ class CategoryTests(unittest.TestCase):
         self.assertEqual(fr.category_of(REASON_SLEEP), "bare-sleep")
         self.assertEqual(fr.category_of(REASON_SLOW), "slow-timeout")
 
+    def test_backgrounded_class_a_keeps_its_category(self):
+        # A poll run with run_in_background: true still prompts (issue #15),
+        # with reworded reasons that must bucket the same way.
+        self.assertEqual(fr.category_of(REASON_BG_WATCH), "watch")
+        self.assertEqual(fr.category_of(REASON_BG_LOOP), "loop-sleep")
+        self.assertEqual(fr.category_of(REASON_BG_SANDWICH), "sandwich")
+        self.assertEqual(fr.category_of(REASON_BG_SLEEP), "bare-sleep")
+
     def test_signatures_mutually_exclusive(self):
         # No fixture reason matches more than one category signature.
         reasons = [REASON_WATCH, REASON_LOOP, REASON_SANDWICH, REASON_SLEEP,
-                   REASON_SLOW]
+                   REASON_SLOW, REASON_BG_WATCH, REASON_BG_LOOP,
+                   REASON_BG_SANDWICH, REASON_BG_SLEEP]
         for reason in reasons:
             hits = [c for c, rx in fr.CATEGORY_PATTERNS.items()
                     if rx.search(reason)]
