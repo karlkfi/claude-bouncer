@@ -5,7 +5,7 @@ Single source of truth for progress and priorities in workspace-guard. Pick the 
 **Status:** 🔲 ready · 🚫 blocked
 **Size:** S = one session/PR · M = 2–3 sessions · L = needs a plan doc under `docs/plan/`
 **Labels:** `security` `tests` `docs` `infra` `bug` `parsing`
-**Next ID:** Q40
+**Next ID:** Q41
 
 **Maintaining this file:** see [`docs/development/maintaining-backlog.md`](development/maintaining-backlog.md).
 
@@ -15,6 +15,7 @@ Specific actionable items in priority order. Pick from the top; skip 🚫 items 
 
 | ID | Item | Labels | St | Sz | Notes |
 |---|---|---|---|---|---|
+| <a id="Q40"></a>Q40 | Resolve the home directory on Windows, not just `$HOME` | `bug` `security` | 🔲 | S | `claude_projects_dir()` reads only `$HOME`, unset on Windows, so the read-allow prefix vanishes and those reads always prompt. A `USERPROFILE` fallback widens the allow set, so it needs sign-off. |
 | <a id="Q39"></a>Q39 | Make the remaining Windows test failures pass | `tests` `bug` | 🔲 | M | 78 failures left after the `os.getuid()` fix, one distinct root cause: fixtures assume POSIX path semantics. `/outside/x` is drive-relative on Windows so it resolves *inside* the workspace's drive, `:` is not the PATH separator (`_split_pathlist` splits `/a:/b`), and a few assertions compare POSIX-shaped strings. Needs a Windows box to verify; decide per case whether the fixture or the parser is wrong — some are real parser bugs, not just fixture noise. |
 
 ## Deferred
