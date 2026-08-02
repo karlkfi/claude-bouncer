@@ -18,3 +18,16 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: python3 -m unittest discover tests
+
+  # Gates on the delta, not the absolute: the suite does not pass on Windows yet
+  # (Q39), so an ordinary job would be red on every pull request and stop being
+  # read. The ratchet fails only when failures or errors exceed the recorded
+  # baseline, which still catches a regression while Q39 is worked.
+  unittest-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python scripts/windows-ratchet.py

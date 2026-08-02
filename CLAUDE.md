@@ -69,6 +69,8 @@ Tests live in `tests/test_workspace_guard.py` (stdlib `unittest`, no third-party
 python3 -m unittest discover tests
 ```
 
+CI also runs the suite on Windows, where it does not yet pass (Q39). That job gates on the delta: it fails only when failures or errors exceed `tests/windows-baseline.json`. If it goes red, you regressed Windows — don't raise the baseline to make it green without saying why.
+
 Two layers:
 - **Unit tests** import `files_in_command` from the script and exercise per-`SPEC`-row parsing, `prog_suppressed_by`, `--opt=val`, end-of-options `--`, and aliases.
 - **End-to-end tests** invoke the script as a subprocess, feed it the hook's stdin JSON, and assert the emitted `permissionDecision` for workspace-vs-outside paths, redirect targets, pipe chains, and defer cases (unguarded command, empty input, unbalanced quotes).

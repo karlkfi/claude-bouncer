@@ -1,0 +1,6 @@
+{
+  "failures": 54,
+  "errors": 3,
+  "measured_on": "main 1936c1e, windows-latest 10.0.26100, python 3.13",
+  "note": "All 3 errors are KeyError: 'HOME' from tilde-expansion tests (Q40). The 54 failures are POSIX-assuming fixtures and parser bugs (Q39). Tighten as those land; never raise to get green."
+}
