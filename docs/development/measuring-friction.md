@@ -35,6 +35,36 @@ Flags: `--transcripts` (root, default `~/.claude/projects`), `--plugin`
 `--plugins-dir` (Claude Code plugins dir, default `~/.claude/plugins`; used only
 for the stale-install check below).
 
+A `--plugin` value is a **guard label**, derived from the hook script's filename
+minus a `bash-` prefix — not the plugin name. They coincide for the guards whose
+hook is `bash-<name>.py`, but not in general: pr-sentinel's hook is
+`pr-sentinel-guard.py`, so its label is `pr-sentinel-guard`. Labels you never
+installed can also appear, since any `PreToolUse:Bash` hook running a `.py`
+script gets one.
+
+## When nothing matches
+
+An empty result names the filter that emptied it, so a typo can't read like a
+guard with zero friction (issue 97):
+
+```
+$ python3 scripts/friction-report.py --plugin pr-sentinel --since all
+No guard decisions found for the given filters.
+--plugin 'pr-sentinel' matched no guard in the scanned transcripts.
+  Guards found: workspace-guard (16563), branch-guard (3045), pr-sentinel-guard (535), ...
+```
+
+The filters are checked in order — `--plugin`, then `--repo`, then `--since` —
+and the first one that drops everything is the one reported; the `--since` case
+dates the most recent matching decision so you know how far to widen. `--json`
+carries the same signal in `guards_seen` and `empty_because` (`null` when the
+report is non-empty).
+
+**Exit codes.** A `--plugin` or `--repo` value nothing in the transcripts can
+match exits **2** — the question is unanswerable as asked. A filter that does
+match the data but over an empty window exits **0**, as does a fresh setup with
+no recorded decisions at all: those are real answers of zero.
+
 ## What it reports
 
 - **Outcome mix** — allow / ask / deny / defer counts and the ask+deny share

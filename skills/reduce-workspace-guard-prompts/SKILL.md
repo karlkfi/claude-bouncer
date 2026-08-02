@@ -42,6 +42,11 @@ recorded prompts yet), skip the data step and diagnose from the **most recent
 prompts in this session** instead — the hook's reason text names the offending
 path and the fix for each.
 
+An empty report exiting **2** means a filter matched nothing that exists — the
+lines below "No guard decisions found" name which one and, for `--plugin`, list
+the guard labels the transcripts actually contain. Fix the flag and re-run
+rather than treating it as zero friction.
+
 Either way, map what you find to a cause. The report's category names line up
 one-to-one with these:
 

@@ -214,11 +214,13 @@ def guard_name(command):
     return base
 
 
-def iter_decisions(paths, plugin, cutoff, repo):
-    """Yield decision dicts from the given transcript files.
+def iter_decisions(paths):
+    """Yield every guard decision found in the given transcript files.
 
     Builds a per-file toolUseID -> Bash command map (ids are session-scoped)
-    so each decision can name the command that triggered it.
+    so each decision can name the command that triggered it. Filtering is the
+    caller's job (see scan), which keeps the labels this pass saw available
+    for diagnosing an empty result.
     """
     for path in paths:
         cmd_by_id = {}
@@ -250,14 +252,8 @@ def iter_decisions(paths, plugin, cutoff, repo):
             name = guard_name(att.get('command'))
             if name is None:
                 continue
-            if plugin != 'all' and name != plugin:
-                continue
             cwd = rec.get('cwd') or ''
-            if repo and repo not in cwd:
-                continue
             ts = parse_ts(rec)
-            if cutoff and ts and ts < cutoff:
-                continue
 
             stdout = att.get('stdout') or ''
             decision, reason = 'defer', ''   # empty stdout => hook stayed silent
@@ -274,6 +270,60 @@ def iter_decisions(paths, plugin, cutoff, repo):
                 'cwd': cwd, 'ts': ts,
                 'command': cmd_by_id.get(att.get('toolUseID'), ''),
             }
+
+
+def scan(paths, plugin, cutoff, repo):
+    """Return (matched decisions, survey) for the given filters.
+
+    The survey records how far each filter got, so an empty result can name the
+    filter that emptied it instead of reading like a guard with zero friction
+    (issue 97). Filters are applied in order — plugin, then repo, then window —
+    and the first that drops everything is the one worth reporting.
+    """
+    matched = []
+    survey = {'labels': collections.Counter(), 'plugin_hits': 0,
+              'repo_hits': 0, 'latest': None}
+    for d in iter_decisions(paths):
+        survey['labels'][d['plugin']] += 1
+        if plugin != 'all' and d['plugin'] != plugin:
+            continue
+        survey['plugin_hits'] += 1
+        if repo and repo not in d['cwd']:
+            continue
+        survey['repo_hits'] += 1
+        ts = d['ts']
+        if ts and (survey['latest'] is None or ts > survey['latest']):
+            survey['latest'] = ts
+        if cutoff and ts and ts < cutoff:
+            continue
+        matched.append(d)
+    return matched, survey
+
+
+def explain_empty(survey, plugin, since, repo):
+    """Lines explaining an empty result: which filter emptied it, and what the
+    transcripts do contain. Call only when the result is in fact empty."""
+    if not survey['labels']:
+        return ["No guard decisions in the scanned transcripts at all "
+                "(no PreToolUse:Bash hook has run, or the transcript root is "
+                "wrong)."]
+    if not survey['plugin_hits']:
+        found = ", ".join(f"{k} ({v})" for k, v in survey['labels'].most_common())
+        return [f"--plugin {plugin!r} matched no guard in the scanned transcripts.",
+                f"  Guards found: {found}",
+                "  A label comes from the hook script's filename, so it can "
+                "differ from the plugin name",
+                "  (pr-sentinel's hook is pr-sentinel-guard.py, so its label is "
+                "pr-sentinel-guard)."]
+    if not survey['repo_hits']:
+        scope = "all guards'" if plugin == 'all' else f"{plugin}'s"
+        return [f"--repo {repo!r} matched no cwd among {scope} "
+                f"{survey['plugin_hits']} decisions.",
+                "  It is a plain substring match on the recorded cwd."]
+    return [f"--since {since} excluded all {survey['repo_hits']} matching "
+            f"decisions.",
+            f"  The most recent is {survey['latest']:%Y-%m-%d}; use "
+            "--since all for no limit."]
 
 
 def categorize(reason):
@@ -316,10 +366,12 @@ def build_report(decisions, raw):
     }
 
 
-def print_text(r, top, stale=None, plugin=THIS_GUARD):
+def print_text(r, top, stale=None, plugin=THIS_GUARD, notes=()):
     total = r['total']
     if not total:
         print("No guard decisions found for the given filters.")
+        for line in notes:
+            print(line)
         return
     asks = r['decisions'].get('ask', 0) + r['decisions'].get('deny', 0)
     print(f"Guard decisions analyzed: {total}")
@@ -366,7 +418,9 @@ def main():
                     default=os.path.expanduser('~/.claude/projects'),
                     help='transcript root (default: ~/.claude/projects)')
     ap.add_argument('--plugin', default=THIS_GUARD,
-                    help=f"guard to report on, or 'all' (default: {THIS_GUARD})")
+                    help=f"guard to report on, or 'all' (default: {THIS_GUARD}); "
+                         "the label is the hook script's filename minus a "
+                         "'bash-' prefix, which can differ from the plugin name")
     ap.add_argument('--since', default='7d',
                     help="time window: Nd/Nh/Nm or YYYY-MM-DD (default: 7d; "
                          "use 'all' for no limit)")
@@ -387,23 +441,34 @@ def main():
     if not paths:
         sys.exit(f"No transcripts under {args.transcripts}")
 
-    decisions = list(iter_decisions(paths, args.plugin, cutoff, args.repo))
+    decisions, survey = scan(paths, args.plugin, cutoff, args.repo)
     report = build_report(decisions, args.raw)
     stale = check_staleness(args.plugins_dir, args.plugin)
+    notes = [] if decisions else explain_empty(survey, args.plugin,
+                                               args.since, args.repo)
 
     if args.json:
         print(json.dumps({
             'total': report['total'],
             'decisions': dict(report['decisions']),
             'plugins': dict(report['plugins']),
+            'guards_seen': dict(survey['labels']),
             'categories': dict(report['categories']),
             'top_paths': report['paths'].most_common(args.top),
             'paths_scope': THIS_GUARD,
             'top_commands': report['commands'].most_common(args.top),
             'stale': stale,
+            'empty_because': notes or None,
         }, indent=2))
     else:
-        print_text(report, args.top, stale, args.plugin)
+        print_text(report, args.top, stale, args.plugin, notes)
+
+    # A --plugin or --repo value nothing in the transcripts can match is a usage
+    # error, not a guard with zero friction; exit non-zero so it can't be
+    # mistaken for an answer. A satisfiable filter over an empty window is a
+    # real answer, as is a setup with no recorded decisions yet — both exit 0.
+    if survey['labels'] and not survey['repo_hits']:
+        sys.exit(2)
 
 
 if __name__ == '__main__':
