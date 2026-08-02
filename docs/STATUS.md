@@ -5,7 +5,7 @@ Single source of truth for progress and priorities in workspace-guard. Pick the 
 **Status:** 🔲 ready · 🚫 blocked
 **Size:** S = one session/PR · M = 2–3 sessions · L = needs a plan doc under `docs/plan/`
 **Labels:** `security` `tests` `docs` `infra` `bug` `parsing`
-**Next ID:** Q38
+**Next ID:** Q39
 
 **Maintaining this file:** see [`docs/development/maintaining-backlog.md`](development/maintaining-backlog.md).
 
@@ -15,6 +15,7 @@ Specific actionable items in priority order. Pick from the top; skip 🚫 items 
 
 | ID | Item | Labels | St | Sz | Notes |
 |---|---|---|---|---|---|
+| <a id="Q38"></a>Q38 | Stop `os.getuid()` crashing the hook on Windows | `bug` | 🔲 | S | `claude_tmp_root()` calls `os.getuid()`, absent on Windows, so the hook raises AttributeError once an interpreter starts. Pick the fallback after confirming where Claude Code puts that dir there. |
 
 ## Deferred
 
