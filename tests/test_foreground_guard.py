@@ -498,10 +498,6 @@ class PollConfigTests(unittest.TestCase):
         self.assertEqual(d, "ask")
         self.assertIn("pr-sentinel watches PRs here", r)
 
-    def test_bypass_permissions_converts_ask_to_deny(self):
-        d, _ = run_hook("gh run watch 123",
-                        permission_mode="bypassPermissions")
-        self.assertEqual(d, "deny")
 
 
 # ---------------------------------------------------------------------------
@@ -609,6 +605,74 @@ class SlowConfigTests(unittest.TestCase):
         d, _ = run_hook("make test-race", config=SLOW_DENY_CFG,
                         timeout_ms=600000)
         self.assertIsNone(d)
+
+
+# ---------------------------------------------------------------------------
+# Permission modes: unattended runs get a deny, not an unanswerable ask
+# ---------------------------------------------------------------------------
+
+class PermissionModeTests(unittest.TestCase):
+    def test_unattended_modes_convert_ask_to_deny(self):
+        for mode in ("auto", "dontAsk", "bypassPermissions"):
+            d, _ = run_hook("gh run watch 123", permission_mode=mode)
+            self.assertEqual(d, "deny", "expected deny in %s mode" % mode)
+
+    def test_attended_modes_stay_ask(self):
+        for mode in (None, "default", "acceptEdits", "plan"):
+            d, _ = run_hook("gh run watch 123", permission_mode=mode)
+            self.assertEqual(d, "ask", "expected ask in %s mode" % mode)
+
+    def test_unattended_slow_command_converts_ask_to_deny(self):
+        d, _ = run_hook("make test-race", config=SLOW_CFG,
+                        permission_mode="auto")
+        self.assertEqual(d, "deny")
+
+    def test_unattended_backgrounded_poll_converts_ask_to_deny(self):
+        # A backgrounded poll still prompts (Class A is not exempted by
+        # run_in_background), so unattended it still denies — and the deny
+        # cannot advise the fix the call already applied.
+        d, r = run_hook("gh run watch 123", run_in_background=True,
+                        permission_mode="auto")
+        self.assertEqual(d, "deny")
+        self.assertNotIn("run_in_background", r)
+
+    def test_deny_names_the_override_and_the_report(self):
+        d, r = run_hook("gh run watch 123", permission_mode="auto")
+        self.assertEqual(d, "deny")
+        self.assertIn("FOREGROUND_GUARD_OVERRIDE=<reason>", r)
+        self.assertIn("friction-report", r)
+        self.assertIn("github.com/karlkfi/claude-foreground-guard/issues", r)
+        # The fix the guard actually wants still leads the reason.
+        self.assertIn("run_in_background", r)
+
+    def test_ask_carries_no_deny_tail(self):
+        # An answerable prompt needs neither the escape hatch nor the
+        # report link — the human is right there.
+        d, r = run_hook("gh run watch 123")
+        self.assertEqual(d, "ask")
+        self.assertNotIn("FOREGROUND_GUARD_OVERRIDE", r)
+        self.assertNotIn("issues", r)
+
+    def test_override_downgrades_auto_mode_deny(self):
+        # The mode-escalated deny is downgradable exactly like the
+        # config-escalated one: auto mode still shows the prompt.
+        d, r = run_hook("FOREGROUND_GUARD_OVERRIDE=demo-run gh run watch 123",
+                        permission_mode="auto")
+        self.assertEqual(d, "ask")
+        self.assertIn("override acknowledged", r)
+        self.assertIn("demo-run", r)
+
+    def test_override_inert_where_no_prompt_can_be_answered(self):
+        # dontAsk/bypassPermissions: Claude Code never puts the prompt in
+        # front of anyone, so the override must not claim a downgrade it
+        # cannot deliver.
+        for mode in ("dontAsk", "bypassPermissions"):
+            d, r = run_hook(
+                "FOREGROUND_GUARD_OVERRIDE=demo-run gh run watch 123",
+                config={"poll": {"action": "deny"}}, permission_mode=mode)
+            self.assertEqual(d, "deny", "expected deny in %s mode" % mode)
+            self.assertNotIn("override acknowledged", r)
+            self.assertIn("cannot downgrade this in %s mode" % mode, r)
 
 
 # ---------------------------------------------------------------------------

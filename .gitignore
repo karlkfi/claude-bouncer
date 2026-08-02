@@ -2,6 +2,9 @@
 __pycache__/
 *.pyc
 
+# Repo-local scratch (test logs, throwaway fixture homes)
+/tmp/
+
 # Claude Code — local runtime artifacts (keep settings.json / commands / agents / skills / hooks tracked)
 .claude/.credentials.json
 .claude/scheduled_tasks.lock

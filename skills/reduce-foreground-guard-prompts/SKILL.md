@@ -6,8 +6,9 @@ description: Explain why foreground-guard is prompting on Bash commands and how 
 # Reducing foreground-guard prompts
 
 foreground-guard is a `PreToolUse` hook for `Bash` that guards the session's
-**main-thread time**. It prompts (`ask`, or `deny` where config escalates) in two
-classes and defers silently on everything else:
+**main-thread time**. It prompts (`ask`, or `deny` in an unattended permission
+mode — `auto`, `dontAsk`, `bypassPermissions` — and where config escalates) in
+two classes and defers silently on everything else:
 
 - **Class A — foreground poll/watch**: a command that parks the main thread on a
   live view — watch/follow modes (`gh run watch`, `gh pr checks --watch`,
@@ -132,10 +133,12 @@ Config lives in `.claude/foreground-guard.json` (per-repo) or
 | Downgrade a config `deny` back to a prompt | `poll.action: "ask"` |
 | Add repo-specific context to Class A prompts | `hint` (e.g. name your own PR-watcher machinery) |
 
-For a genuinely-intentional one-off foreground wait when config has escalated
-Class A to `deny`, prefix the command with
-`FOREGROUND_GUARD_OVERRIDE=<why> …` — it downgrades **deny → ask** (never a
-silent allow) and echoes the reason for the human reviewing it.
+For a genuinely-intentional one-off foreground wait when the guard denies —
+config escalated the class, or the session is in `auto` mode — prefix the
+command with `FOREGROUND_GUARD_OVERRIDE=<why> …`. It downgrades **deny → ask**
+(never a silent allow) and echoes the reason for the human reviewing it. In
+`dontAsk` and `bypassPermissions` it is inert: no one is there to answer the
+prompt it would buy, so take one of the three fixes instead.
 
 **Don't suggest disabling the guard wholesale** (`poll.enabled: false`,
 `slow.enabled: false`, or `FOREGROUND_GUARD_DISABLE=1`) to silence legitimate

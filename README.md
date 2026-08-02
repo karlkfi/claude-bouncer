@@ -42,6 +42,7 @@ Everything else passes through silently, so your normal permissions apply.
 - [Exemptions](#exemptions)
 - [Configuration](#configuration)
 - [Friction report](#friction-report)
+- [Unattended permission modes](#unattended-permission-modes)
 - [The override escape hatch](#the-override-escape-hatch)
 - [Soundness: never `allow`](#soundness-never-allow)
 - [Limitations](#limitations)
@@ -61,13 +62,17 @@ The hook produces one of three outcomes per Bash call:
   reason drops that middle fix and names the other two. Class B asks name the
   exact minimum: "set `timeout: 600000` on this Bash call, or run it in the
   background."
-- **deny** — only when config escalates a class to `deny` (or in
-  `bypassPermissions` mode, where there is no one to answer an ask — the
-  deny feeds the fix back so the agent self-corrects instead of stalling).
+- **deny** — in an [unattended permission mode](#unattended-permission-modes)
+  (`auto`, `dontAsk`, `bypassPermissions`), or when config escalates a class
+  to `deny`. Blocks identically to an ask, but the reason is fed back to the
+  agent, so it self-corrects instead of handing you a prompt to answer.
   Downgradable to `ask` with a `FOREGROUND_GUARD_OVERRIDE=<reason>` prefix.
 - **defer** — the hook stays silent; your normal permission settings apply.
   foreground-guard never emits `allow` (see
   [Soundness](#soundness-never-allow)).
+
+The table below shows the attended-mode decision; every **ask** in it is a
+**deny** in an unattended mode.
 
 | Command | Decision |
 | --- | --- |
@@ -324,10 +329,34 @@ itself in that same report — maps each category to its fix, and offers a
 `CLAUDE.md` playbook. Ask Claude "why am I getting so many foreground-guard
 prompts?" to trigger it.
 
+## Unattended permission modes
+
+In `auto`, `dontAsk`, and `bypassPermissions`, an `ask` is emitted as a
+`deny` instead. Nothing is blocked that an ask would have let through — the
+difference is where the fix lands:
+
+| Mode | What Claude Code does with a hook `ask` |
+| --- | --- |
+| `default`, `acceptEdits`, `plan` | prompts you; reject it and the guard's fix goes nowhere — you paste it back to the agent by hand |
+| `auto` | prompts you *anyway*, interrupting the run you chose not to babysit |
+| `dontAsk` | converts it to its own generic deny, dropping the guard's reason |
+| `bypassPermissions` | leaves the run stalled on a prompt no one can answer |
+
+A `deny` blocks the same way but returns the reason to the agent, which
+reads the fix and retries with `run_in_background: true`, one snapshot, or a
+`timeout` bound — no human in the loop. Every deny also names the override
+escape hatch and points at the [friction report](#friction-report), so a
+wrong verdict gets reported rather than worked around.
+
+Attended modes keep prompting: there is someone there to answer, and an ask
+is the lighter interruption. This mirrors branch-guard's non-interactive
+fail-safe, so the guards agree on which modes count as unattended.
+
 ## The override escape hatch
 
-When config escalates a class to `deny`, a genuinely-intentional foreground
-wait (or short-timeout run) can be downgraded to a confirmation prompt by
+When the guard denies — because config escalated the class, or because the
+session is in an unattended mode — a genuinely-intentional foreground wait
+(or short-timeout run) can be downgraded to a confirmation prompt by
 prefixing the command:
 
 ```
@@ -338,6 +367,10 @@ Mirroring prod-guard's semantics: the override downgrades **deny → ask** —
 it never silently allows. The reason string is echoed back in the downgrade
 prompt for the human reviewing it (an audit trail, mirroring
 workspace-guard); make it say why the foreground wait is required.
+
+In `dontAsk` and `bypassPermissions` the override is inert and says so: a
+downgrade to `ask` there buys a prompt no one will answer, so the deny
+stands and the agent has to take one of the three fixes.
 
 ## Soundness: never `allow`
 
