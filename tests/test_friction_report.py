@@ -59,6 +59,12 @@ REASON_SLOW = guard.finding_slow(_CFG, r"make test-race\b", 600000, 120000,
 REASON_OVERRIDE = ('foreground-guard override acknowledged '
                    '(FOREGROUND_GUARD_OVERRIDE is set) — downgraded from deny '
                    'to a confirmation prompt. ' + REASON_WATCH)
+# A sibling guard's override prefix: identical phrasing apart from the guard
+# name. In scope under --plugin all, and never a foreground-guard override.
+REASON_SIBLING_OVERRIDE = ('prod-guard override acknowledged '
+                           '(PROD_GUARD_OVERRIDE is set) — downgraded from deny '
+                           'to a confirmation prompt. prod-guard: matches a '
+                           'production pattern')
 
 
 def _decision_record(tooluseid, command, stdout, cwd="/home/u/proj", ts=None,
@@ -231,6 +237,17 @@ class BuildReportTests(unittest.TestCase):
         self.assertEqual(r["decisions"]["ask"], 1)
         self.assertEqual(r["categories"]["watch"], 1)
 
+    def test_sibling_guard_override_not_counted(self):
+        r = self._report([
+            {"plugin": "prod-guard", "decision": "deny",
+             "reason": REASON_SIBLING_OVERRIDE,
+             "command": "PROD_GUARD_OVERRIDE=x kubectl delete ns x"},
+            {"plugin": "foreground-guard", "decision": "ask",
+             "reason": REASON_OVERRIDE,
+             "command": "FOREGROUND_GUARD_OVERRIDE=x gh run watch 456"},
+        ])
+        self.assertEqual(r["overrides"], 1)
+
     def test_joined_reason_hits_both_categories(self):
         joined = REASON_WATCH + " | " + REASON_SLEEP
         r = self._report([
@@ -321,6 +338,26 @@ class PrintTests(unittest.TestCase):
         self.assertIn("watch", out)
         self.assertIn("gh run watch 456", out)
 
+    def test_override_line_shown_for_this_guard(self):
+        r = fr.build_report([
+            {"plugin": "foreground-guard", "decision": "ask",
+             "reason": REASON_OVERRIDE, "command": "gh run watch 456"},
+        ])
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            fr.print_text(r, 15)
+        self.assertIn("FOREGROUND_GUARD_OVERRIDE downgrades: 1", buf.getvalue())
+
+    def test_override_line_omitted_under_plugin_all(self):
+        r = fr.build_report([
+            {"plugin": "foreground-guard", "decision": "ask",
+             "reason": REASON_OVERRIDE, "command": "gh run watch 456"},
+        ])
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            fr.print_text(r, 15, "all")
+        self.assertNotIn("FOREGROUND_GUARD_OVERRIDE", buf.getvalue())
+
 
 class EndToEndTests(unittest.TestCase):
     def _run(self, root, *args):
@@ -350,6 +387,26 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual(data["decisions"]["ask"], 1)
         self.assertEqual(data["categories"]["slow-timeout"], 1)
         self.assertEqual(data["tools"]["make"], 1)
+
+    def test_sibling_override_never_reported_as_ours(self):
+        use1, att1 = _decision_record(
+            "toolu_1", "gh run watch 456", _stdout("ask", REASON_WATCH))
+        use2, att2 = _decision_record(
+            "toolu_2", "kubectl delete ns x",
+            _stdout("ask", REASON_SIBLING_OVERRIDE),
+            hook_cmd='python3 "/x/bash-prod-guard.py"')
+        root = write_transcript([use1, att1, use2, att2])
+
+        # This guard's own report: the sibling's override is not ours.
+        self.assertEqual(json.loads(self._run(root, "--json"))["overrides"], 0)
+
+        # --plugin all: both decisions in scope, no override count at all.
+        data = json.loads(self._run(root, "--plugin", "all", "--json"))
+        self.assertEqual(data["total"], 2)
+        self.assertNotIn("overrides", data)
+        out = self._run(root, "--plugin", "all")
+        self.assertIn("guard decisions analyzed: 2", out)
+        self.assertNotIn("FOREGROUND_GUARD_OVERRIDE", out)
 
     def test_no_transcripts_errors(self):
         empty = tempfile.mkdtemp(prefix="fg-guard-friction-empty-")

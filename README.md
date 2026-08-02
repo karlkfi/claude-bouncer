@@ -304,7 +304,9 @@ Prompts are grouped into a stable category taxonomy, each mapping to one fix:
 
 The script runs standalone too:
 `python3 scripts/friction-report.py --plugin all` reports every sibling guard's
-decisions found in the transcripts.
+decisions found in the transcripts. The `FOREGROUND_GUARD_OVERRIDE downgrades`
+count is this guard's alone, so `--plugin all` omits it (and its `overrides` JSON
+key) rather than show one guard's statistic under an all-guards header.
 
 For the "don't just show me the numbers, help me fix them" case, the
 **`reduce-foreground-guard-prompts`** skill diagnoses the friction — grounding

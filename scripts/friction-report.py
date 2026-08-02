@@ -73,8 +73,10 @@ NAMED_TARGET_CATS = frozenset({'watch', 'slow-timeout'})
 
 # A deny downgraded by FOREGROUND_GUARD_OVERRIDE keeps its underlying category
 # but is emitted as `ask` prefixed with this signature. Counted separately so an
-# over-used override is visible.
-OVERRIDE_SIG = re.compile(r'override acknowledged')
+# over-used override is visible. The guard name is load-bearing: the sibling
+# guards phrase their own override prefix identically apart from it, so an
+# unanchored pattern reports their overrides as this guard's under --plugin all.
+OVERRIDE_SIG = re.compile(r'foreground-guard override acknowledged')
 
 # The hook joins up to three finding reasons with ' | '.
 _JOIN = ' | '
@@ -253,20 +255,24 @@ def build_report(decisions):
     }
 
 
-def print_text(r, top):
+def print_text(r, top, plugin='foreground-guard'):
     total = r['total']
+    label = 'guard' if plugin == 'all' else plugin
     if not total:
-        print("No foreground-guard decisions found for the given filters.")
+        print(f"No {label} decisions found for the given filters.")
         return
     asks = r['decisions'].get('ask', 0) + r['decisions'].get('deny', 0)
-    print(f"foreground-guard decisions analyzed: {total}")
+    print(f"{label} decisions analyzed: {total}")
     by_plugin = ", ".join(f"{k} {v}" for k, v in r['plugins'].most_common())
     print(f"  plugins: {by_plugin}")
     parts = [f"{k} {v}" for k, v in r['decisions'].most_common()]
     print(f"  outcomes: {', '.join(parts)}")
     pct = (100 * asks / total) if total else 0
     print(f"  friction (ask+deny): {asks} ({pct:.0f}% of decisions)")
-    if r['overrides']:
+    # Only foreground-guard's own overrides are counted, so the line has no
+    # place under a header covering every guard — omit it rather than show one
+    # guard's statistic as if it summarized the set.
+    if r['overrides'] and plugin != 'all':
         print(f"  FOREGROUND_GUARD_OVERRIDE downgrades: {r['overrides']}")
     print()
 
@@ -319,18 +325,22 @@ def main():
     report = build_report(decisions)
 
     if args.json:
-        print(json.dumps({
+        out = {
             'total': report['total'],
             'decisions': dict(report['decisions']),
             'plugins': dict(report['plugins']),
             'categories': dict(report['categories']),
             'tools': dict(report['tools']),
-            'overrides': report['overrides'],
             'top_targets': report['targets'].most_common(args.top),
             'top_commands': report['commands'].most_common(args.top),
-        }, indent=2))
+        }
+        # Same reasoning as the text report: a foreground-guard-only count is
+        # absent, not zero, in an all-guards document.
+        if args.plugin != 'all':
+            out['overrides'] = report['overrides']
+        print(json.dumps(out, indent=2))
     else:
-        print_text(report, args.top)
+        print_text(report, args.top, args.plugin)
 
 
 if __name__ == '__main__':
