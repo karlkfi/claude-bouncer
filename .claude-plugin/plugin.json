@@ -1,6 +1,6 @@
 {
   "name": "prod-guard",
-  "version": "2.4.1",
+  "version": "2.5.0",
   "description": "Production-target guard for Claude Code Bash commands.",
   "author": {
     "name": "Karl",
