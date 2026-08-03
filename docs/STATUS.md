@@ -16,7 +16,6 @@ Specific actionable items in priority order. Pick from the top; skip 🚫 items 
 | ID | Item | Labels | St | Sz | Notes |
 |---|---|---|---|---|---|
 | <a id="Q51"></a>Q51 | [Guard the PowerShell tool on Windows](plan/q51-powershell-tool.md) | `security` | 🔲 | M | Without Git for Windows there is no Bash tool: Claude Code runs shell commands through `PowerShell`, which `hooks.json` doesn't match, so nothing is checked. `shlex` is the wrong parser for it. |
-| <a id="Q52"></a>Q52 | Read Git Bash path forms the way Git Bash does | `bug` `parsing` | 🔲 | S | `/c/Users/x` and `/etc/passwd` resolve against the current drive, so prompts name a path the command never touches and MSYS-form config entries match nothing. No silent allow — see [Q44's findings](plan/q44-windows-validation.md). |
 
 ## Deferred
 

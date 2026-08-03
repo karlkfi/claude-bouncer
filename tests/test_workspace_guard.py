@@ -58,7 +58,10 @@ def resolved_from(base, *parts):
 
     A leading-slash path is drive-relative on Windows, so it only equals what
     the hook computes when resolved against the same cwd the command's own
-    arguments resolve against. Mirrors ``resolve_from`` in the script."""
+    arguments resolve against -- and since Q52, only after being read through
+    Git Bash's mount table first, which is what the shell will do with it.
+    Mirrors ``resolve_from`` in the script. A no-op on POSIX both ways."""
+    parts = [guard.msys_to_native(p) for p in parts]
     return os.path.realpath(os.path.join(base, *parts))
 
 # Filename has a dash, so import by path.
@@ -1203,6 +1206,166 @@ class TildeExpansionUnitTests(unittest.TestCase):
             self.assertEqual(guard.expand_tilde("~"), "~")
 
 
+class MsysPathFormTests(unittest.TestCase):
+    """Q52: a leading-slash path is read through Git Bash's mount table.
+
+    The expectations are the table measured on a windows-latest runner (Git
+    2.55, MSYSTEM=MINGW64) via `cygpath -w`, not a reading of the MSYS source.
+    `msys_to_native` is a pure string rewrite, so these run on every platform
+    with the Windows discriminator patched on; the integration is covered by
+    MsysPathFormWindowsTests, which only means anything on Windows.
+    """
+
+    FAKE_ROOT = r"C:\Program Files\Git"
+
+    @contextlib.contextmanager
+    def _on_windows(self, root=FAKE_ROOT, tmp=r"C:\Users\me\AppData\Local\Temp"):
+        with mock.patch.object(guard, "DRIVE_PATHS", True), \
+                mock.patch.object(guard, "msys_root", return_value=root), \
+                mock.patch.object(guard, "msys_tmp", return_value=tmp):
+            yield
+
+    def _expect(self, cases, **kw):
+        with self._on_windows(**kw):
+            for raw, want in cases.items():
+                self.assertEqual(guard.msys_to_native(raw), want, raw)
+
+    def test_drive_forms(self):
+        # `C: on /c` — the cygdrive prefix is `/`, and it applies to any single
+        # letter, including drives that don't exist (`/x/y` -> `X:\y`).
+        self._expect({
+            "/c": "C:/",
+            "/c/": "C:/",
+            "/c/Users/foo": "C:/Users/foo",
+            "/C/Users/foo": "C:/Users/foo",
+            "/d/a/proj": "D:/a/proj",
+            "/x/y": "X:/y",
+        })
+
+    def test_tmp_is_the_usertemp_mount(self):
+        # `<%TMP%> on /tmp type usertemp` — NOT <root>/tmp. This is the mount
+        # that made the host-temp `deny` fire on the right path.
+        self._expect({
+            "/tmp": r"C:\Users\me\AppData\Local\Temp",
+            "/tmp/x": r"C:\Users\me\AppData\Local\Temp/x",
+        })
+
+    def test_bin_is_its_own_mount(self):
+        # `C:/Program Files/Git/usr/bin on /bin` — one level deeper than the
+        # `/` rule would put it.
+        self._expect({
+            "/bin": r"C:\Program Files\Git/usr/bin",
+            "/bin/bash": r"C:\Program Files\Git/usr/bin/bash",
+        })
+
+    def test_everything_else_hangs_off_the_root(self):
+        self._expect({
+            "/etc/passwd": r"C:\Program Files\Git/etc/passwd",
+            "/usr/bin/env": r"C:\Program Files\Git/usr/bin/env",
+            "/var/tmp/x": r"C:\Program Files\Git/var/tmp/x",
+            "/home/me": r"C:\Program Files\Git/home/me",
+            # No WSL or cygdrive mount: these are ordinary directories.
+            "/mnt/c/foo": r"C:\Program Files\Git/mnt/c/foo",
+        })
+
+    def test_untouched_forms(self):
+        # Only a leading slash is ambiguous; a native path, a relative path and
+        # a `~` that expand_tilde already resolved all pass straight through.
+        self._expect({
+            r"C:\ws\in.txt": r"C:\ws\in.txt",
+            "notes.txt": "notes.txt",
+            "../sib/x": "../sib/x",
+            "": "",
+        })
+
+    def test_no_git_bash_leaves_non_drive_paths_alone(self):
+        # Without a locatable root the guard keeps its pre-Q52 drive-relative
+        # reading rather than inventing one: an over-prompt, never an allow.
+        # Drive and /tmp forms need no root and still resolve.
+        self._expect({
+            "/etc/passwd": "/etc/passwd",
+            "/bin/bash": "/bin/bash",
+            "/c/Users/foo": "C:/Users/foo",
+            "/tmp/x": r"C:\Users\me\AppData\Local\Temp/x",
+        }, root=None)
+
+    def test_posix_is_untouched(self):
+        # The discriminator is drive resolution, so on POSIX — where these are
+        # real paths — nothing is rewritten.
+        with mock.patch.object(guard, "DRIVE_PATHS", False):
+            for raw in ("/c/Users/foo", "/tmp/x", "/etc/passwd", "/bin/bash"):
+                self.assertEqual(guard.msys_to_native(raw), raw)
+
+
+class MsysRootDiscoveryTests(unittest.TestCase):
+    """Q52: locating Git Bash's `/` from the hook's own (cmd.exe) environment.
+
+    `where.exe bash` on a stock windows-latest runner returns Git's bash first
+    and `C:\\Windows\\System32\\bash.exe` — the WSL launcher — second. Without
+    Git for Windows only the latter is on PATH, so the marker check is what
+    keeps `/etc/passwd` from being reported under `C:\\Windows`.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.addCleanup(setattr, guard, "_msys_root_cached", ())
+        self.root = os.path.join(self._tmp.name, "Git")
+        os.makedirs(os.path.join(self.root, "usr", "bin"))
+        os.makedirs(os.path.join(self.root, "bin"))
+        os.makedirs(os.path.join(self.root, "cmd"))
+        for p in (("usr", "bin", "bash.exe"), ("bin", "bash.exe"),
+                  ("cmd", "git.exe")):
+            open(os.path.join(self.root, *p), "w").close()
+
+    def _root_from(self, bash=None, git=None, env=None):
+        guard._msys_root_cached = ()
+        with mock.patch.object(guard.shutil, "which",
+                               side_effect=lambda n: {"bash": bash, "git": git}.get(n)), \
+                mock.patch.dict(os.environ,
+                                {"CLAUDE_CODE_GIT_BASH_PATH": env} if env else {},
+                                clear=False):
+            if not env:
+                os.environ.pop("CLAUDE_CODE_GIT_BASH_PATH", None)
+            return guard.msys_root()
+
+    def test_found_from_each_candidate_depth(self):
+        # bin/bash.exe, usr/bin/bash.exe and cmd/git.exe sit at different
+        # depths; the ancestor walk lands on the same root from all three.
+        self.assertEqual(
+            self._root_from(bash=os.path.join(self.root, "bin", "bash.exe")),
+            self.root)
+        self.assertEqual(
+            self._root_from(bash=os.path.join(self.root, "usr", "bin", "bash.exe")),
+            self.root)
+        self.assertEqual(
+            self._root_from(git=os.path.join(self.root, "cmd", "git.exe")),
+            self.root)
+
+    def test_explicit_git_bash_path_wins(self):
+        self.assertEqual(
+            self._root_from(env=os.path.join(self.root, "bin", "bash.exe")),
+            self.root)
+
+    def test_marker_rejects_a_non_msys_bash(self):
+        # The WSL launcher's shape: no usr/bin/bash.exe anywhere above it.
+        wsl = os.path.join(self._tmp.name, "Windows", "System32")
+        os.makedirs(wsl)
+        open(os.path.join(wsl, "bash.exe"), "w").close()
+        self.assertIsNone(self._root_from(bash=os.path.join(wsl, "bash.exe")))
+
+    def test_no_bash_at_all(self):
+        self.assertIsNone(self._root_from())
+
+    def test_result_is_cached(self):
+        first = self._root_from(bash=os.path.join(self.root, "bin", "bash.exe"))
+        self.assertEqual(first, self.root)
+        # A second call must not re-scan PATH: which() raising proves it didn't.
+        with mock.patch.object(guard.shutil, "which",
+                               side_effect=AssertionError("re-scanned PATH")):
+            self.assertEqual(guard.msys_root(), self.root)
+
+
 def run_hook(cmd, cwd, project_dir=None, permission_mode=None, session_id=None,
              env_extra=None):
     """Invoke the hook as a subprocess. Returns parsed JSON or None on defer.
@@ -1653,9 +1816,14 @@ class HookEndToEndTests(unittest.TestCase):
         self.assertNotIn("in.txt", reason)
 
     def test_classify_cd_helper_arg(self):
-        self.assertEqual(guard.classify_cd(["cd", "/etc"]), ("arg", "/etc"))
-        self.assertEqual(guard.classify_cd(["pushd", "/tmp"]), ("arg", "/tmp"))
-        self.assertEqual(guard.classify_cd(["cd", "-L", "/etc"]), ("arg", "/etc"))
+        # The target comes back read the way the shell will read it, so on
+        # Windows `/etc` is already the mount-table path (Q52); elsewhere
+        # msys_to_native is the identity and these are the literals.
+        for tokens, target in ((["cd", "/etc"], "/etc"),
+                               (["pushd", "/tmp"], "/tmp"),
+                               (["cd", "-L", "/etc"], "/etc")):
+            self.assertEqual(guard.classify_cd(tokens),
+                             ("arg", guard.msys_to_native(target)))
 
     def test_classify_cd_helper_unknown(self):
         self.assertEqual(guard.classify_cd(["cd"]), ("unknown", None))
@@ -5687,6 +5855,73 @@ class CIWiringTests(unittest.TestCase):
             workflow, r"skip-ceiling\.py --max-skips \d+\n\s+shell: bash",
             "a Windows job must run the suite under Git Bash (shell: bash)",
         )
+
+
+@unittest.skipUnless(guard.DRIVE_PATHS, "MSYS forms only differ where paths "
+                                        "carry drive letters")
+class MsysPathFormWindowsTests(unittest.TestCase):
+    """Q52 end-to-end: the decision a real command in MSYS form gets on Windows.
+
+    MsysPathFormTests covers the rewrite itself everywhere; these run the whole
+    chain -- tokenizer, cwd tracking, config resolution, decision -- and so only
+    mean anything where a leading slash is genuinely ambiguous.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.workspace = os.path.realpath(self._tmp.name)
+        with open(os.path.join(self.workspace, "in.txt"), "w") as f:
+            f.write("hello\n")
+
+    @staticmethod
+    def _msys(path):
+        """Native path -> the form a command would be written in under Git Bash."""
+        drive, rest = os.path.splitdrive(path)
+        return "/" + drive[0].lower() + rest.replace("\\", "/")
+
+    def _decision(self, cmd, expected, **kw):
+        out = run_hook(cmd, self.workspace, **kw)
+        self.assertIsNotNone(out, f"expected a decision, got defer for: {cmd!r}")
+        hook = out["hookSpecificOutput"]
+        self.assertEqual(hook["permissionDecision"], expected,
+                         f"{cmd!r} -> {hook!r}")
+        return hook.get("permissionDecisionReason", "")
+
+    def test_workspace_file_in_msys_form_is_allowed(self):
+        # The drive mapping's whole point: this names a file inside the root,
+        # and before Q52 it resolved to `<drive>\c\...` and prompted.
+        self._decision("cat %s" % self._msys(
+            os.path.join(self.workspace, "in.txt")), "allow")
+
+    def test_cd_in_msys_form_keeps_tracking(self):
+        self._decision("cd %s && cat in.txt" % self._msys(self.workspace),
+                       "allow")
+
+    def test_outside_prompt_names_the_path_bash_will_open(self):
+        reason = self._decision("cat /c/Users/nobody/q52-fake-target", "ask")
+        self.assertIn(r"C:\Users\nobody\q52-fake-target", reason)
+        self.assertNotIn(r"\c\Users\nobody", reason)
+
+    def test_tmp_deny_names_the_real_temp_dir(self):
+        # `/tmp` is the usertemp mount, not <drive>\tmp. The deny already fired
+        # before Q52 -- on a path the command was never going to write.
+        reason = self._decision("echo hi > /tmp/q52-fake-target", "deny")
+        self.assertIn(
+            os.path.join(os.path.realpath(tempfile.gettempdir()),
+                         "q52-fake-target"),
+            reason)
+
+    def test_read_allow_prefix_in_msys_form_matches(self):
+        # The dead-knob half of Q52: an entry written the way a Git Bash user
+        # writes paths resolved onto another drive and exempted nothing.
+        outside = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, outside, True)
+        target = os.path.join(outside, "shared.txt")
+        with open(target, "w") as f:
+            f.write("x\n")
+        self._decision("cat %s" % sh(target), "allow", env_extra={
+            "WORKSPACE_GUARD_READ_ALLOW_PREFIXES": self._msys(outside)})
 
 
 class MsysEnvironmentTests(unittest.TestCase):

@@ -104,6 +104,7 @@ different project's scratch still asks entirely.
 | `cat > page.html <<'EOF'` … `</div>` … `EOF` (heredoc body) | allow |
 | `cat > doc.md <<'EOF'` … `$(cat /etc/x)` … `EOF` (literal body) | allow |
 | `cat ~/proj/notes.md` (root `~/proj`) | allow   |
+| `cat /c/proj/notes.md` (Git Bash, root `C:\proj`) | allow |
 | `cd "$(git rev-parse --show-toplevel)" && cat README.md` | allow |
 | `cd "$(pwd)" && cat README.md`       | allow    |
 | `tail /tmp/claude-501/…/<this-session>/…` (own task output) | allow |
@@ -505,6 +506,12 @@ After upgrading either way:
    the `ask`.
    A `$` bash keeps literal — trailing (`foo$`) or before a non-name char
    (`a$.b`) — is treated as part of the filename and resolved normally.
+   On Windows a leading-slash path is read through Git Bash's mount table
+   before `realpath`, since that is what the shell will do with it: `/c/…` is
+   the C: drive, `/tmp` is `%TMP%`, `/bin` is `<git>\usr\bin`, and anything
+   else sits under the Git install dir. Without it the guard named a directory
+   on whichever drive happened to be current. The native `Read`/`Edit` tools
+   are *not* the shell and keep the drive-relative reading they themselves use.
    Well-known
    device paths (`/dev/null`, `/dev/stdin`, `/dev/stdout`, `/dev/stderr`,
    `/dev/zero`, `/dev/tty`, `/dev/random`, `/dev/urandom`, `/dev/fd/N`) are
@@ -555,7 +562,8 @@ After upgrading either way:
    host-temp root (`/tmp`, `/var/tmp`, `$TMPDIR`, and the platform's own temp
    dir — `%TMP%` on Windows, which the POSIX names don't cover — all resolved
    first, so macOS's `/tmp → /private/tmp` and a `$TMPDIR` under
-   `/var/folders/…` are caught) is
+   `/var/folders/…` are caught; on Windows a command's own `/tmp/x` resolves to
+   `%TMP%` too, so it lands on the same root) is
    reclassified from `ask` to `deny`, with a message steering to a repo-local
    gitignored scratch dir. Because this runs on the already-resolved file
    arguments, a `/tmp` that appears only as text (a grep pattern, an `echo`
@@ -733,11 +741,12 @@ Each entry is run through `realpath` so platform symlinks resolve correctly.
 Scope entries tightly: anything under a configured prefix is silently allowed
 for read commands without a confirmation prompt.
 
-A relative entry — including a Windows path written `/tmp/x` with no drive
-letter, which names a directory on whichever drive is current — is resolved
-against the tool's working directory, the same base the command's own file
-arguments resolve against. This applies to every configured path: the host-temp
-roots and allowlist above, and these prefixes.
+A relative entry is resolved against the tool's working directory, the same base
+the command's own file arguments resolve against. On Windows an entry with a
+leading slash is first read the way Git Bash reads it, so `/c/Users/me/shared`
+means `C:\Users\me\shared` — as it does in a command — rather than a `c` folder
+on whichever drive is current. Both rules apply to every configured path: the
+host-temp roots and allowlist above, and these prefixes.
 
 ### Sibling-checkout (worktree) deny
 
@@ -932,16 +941,17 @@ final output.
   PowerShell tool instead, which this plugin does not hook, so nothing is
   checked. The native file tools (`Read`, `Grep`, `Glob`, `Edit`, `Write`) are
   still guarded either way. Install Git for Windows to get shell coverage.
-- **Git Bash path forms are read as plain Windows paths.** A command naming
-  `/tmp/x`, `/c/Users/…`, or `/etc/passwd` means one thing to Git Bash's mount
-  table and another to Windows path resolution, where a leading slash is
-  relative to the current drive. The guard uses the latter, so it prompts about
-  `D:\c\Users\…` where the command will actually read `C:\Users\…`. The
-  workspace boundary itself still holds — such a path can only ever resolve to a
-  drive root, never into the project — so the effect is an extra prompt naming
-  the wrong path, not a missed one. Configuration written in the same form
-  (`WORKSPACE_GUARD_READ_ALLOW_PREFIXES=/c/Users/me/shared`) matches nothing;
-  write those entries as `C:\Users\me\shared`.
+- **A custom Git Bash mount is read as an ordinary directory.** On Windows the
+  hook resolves a leading-slash path through the mount table Git for Windows
+  ships (`/c/…` is the C: drive, `/tmp` is `%TMP%`, `/bin` is `<git>\usr\bin`,
+  anything else hangs off the Git install dir). A mount you added in
+  `/etc/fstab`, and MSYS's virtual paths like `/proc`, are not in that table and
+  fall through to the last rule, so the prompt names a path under the Git
+  install dir instead. The same happens for every non-drive path if Git Bash
+  can't be located at all (the hook looks at `CLAUDE_CODE_GIT_BASH_PATH`, then
+  `bash` and `git` on `PATH`) — it keeps the older drive-relative reading
+  rather than guessing. Either way the effect is a prompt naming a path that
+  isn't quite the one being opened, never a missed one.
 
 ## Companion plugin: branch-guard
 

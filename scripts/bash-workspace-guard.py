@@ -4,7 +4,7 @@ outside the workspace; allow when it only touches workspace files or pipes.
 
 Reads the hook JSON on stdin, emits a PreToolUse decision on stdout.
 """
-import sys, os, json, re, shlex, fnmatch, collections, tempfile
+import sys, os, json, re, shlex, shutil, fnmatch, collections, tempfile
 
 # POSIX command-prefix assignment: NAME starts with letter/underscore,
 # followed by letters/digits/underscores, then `=`. Anything after the `=`
@@ -179,6 +179,116 @@ def is_allowed_device(path):
         rest = path[len('/dev/fd/'):]
         return rest.isdigit()
     return False
+
+
+# --- Git Bash (MSYS) path forms ----------------------------------------------
+# On native Windows the Bash tool is Git Bash, which resolves a leading-slash
+# path through the MSYS mount table. The hook is a native Python process, where
+# the same string is drive-relative — so the two disagree, and the guard named
+# `D:\etc\passwd` in a prompt for a command that reads `C:\Program Files\Git\
+# etc\passwd`, while MSYS-form configuration entries matched nothing at all
+# (Q52). These rules are the table Git for Windows ships, read off a
+# windows-latest runner (Git 2.55, MSYSTEM=MINGW64):
+#
+#     C:/Program Files/Git          on /
+#     C:/Program Files/Git/usr/bin  on /bin
+#     <%TMP%>                       on /tmp   (usertemp)
+#     C: on /c, D: on /d, ...                 (cygdrive prefix `/`)
+#
+# The drive rule is generic rather than per-existing-drive: `/x/y` becomes
+# `X:\y` on a machine with no X: drive, which is what Git Bash does too.
+#
+# A user-edited /etc/fstab can add mounts the hook can't see, and MSYS's virtual
+# paths (`/proc`) have no native form. Both fall through to the `/` rule, which
+# leaves the failure direction where it already was — an outside-workspace
+# prompt naming a path that isn't quite right, never a silent allow.
+MSYS_DRIVE_RE = re.compile(r'^/([A-Za-z])(?:/(.*))?$')
+
+# Relative path of the MSYS bash inside its own root, used to confirm a
+# candidate root actually is one. `bin/bash.exe` is a wrapper Git for Windows
+# adds; `usr/bin/bash.exe` is the MSYS bash itself and is what marks the root.
+_MSYS_ROOT_MARKER = os.path.join('usr', 'bin', 'bash.exe')
+
+_msys_root_cached = ()          # () = not yet computed (None is a real answer)
+
+
+def msys_root():
+    """Native path of Git Bash's ``/``, or None when no Git Bash is found.
+
+    Located from the bash Claude Code runs: ``CLAUDE_CODE_GIT_BASH_PATH`` when
+    set (it names that bash exactly), else ``bash``/``git`` on PATH. Each
+    candidate's ancestors are walked until one holds ``usr/bin/bash.exe``, which
+    both finds the root from any depth (``bin/bash.exe``, ``usr/bin/bash.exe``,
+    ``cmd/git.exe`` all land on it) and rejects a false positive — on a machine
+    without Git for Windows, ``bash`` on PATH is the WSL launcher in
+    ``C:\\Windows\\System32``, whose ancestors carry no such marker. Returning
+    None there is the point: the guard keeps its old drive-relative reading
+    rather than inventing a root.
+
+    Cached for the life of the process — the PATH scan is a few dozen stats,
+    and it only runs when a command actually names a non-drive MSYS path.
+    """
+    global _msys_root_cached
+    if _msys_root_cached != ():
+        return _msys_root_cached
+    _msys_root_cached = None
+    cands = [os.environ.get('CLAUDE_CODE_GIT_BASH_PATH'),
+             shutil.which('bash'), shutil.which('git')]
+    for exe in cands:
+        if not exe:
+            continue
+        d = os.path.dirname(os.path.abspath(exe))
+        while True:
+            try:
+                if os.path.isfile(os.path.join(d, _MSYS_ROOT_MARKER)):
+                    _msys_root_cached = d
+                    return d
+            except OSError:
+                break
+            parent = os.path.dirname(d)
+            if parent == d:
+                break
+            d = parent
+    return None
+
+
+def msys_tmp():
+    """Native path of Git Bash's ``/tmp`` — the ``usertemp`` mount, ``%TMP%``.
+
+    Realpath'd, because ``%TMP%`` commonly arrives in 8.3 short form
+    (``C:\\Users\\RUNNER~1\\AppData\\Local\\Temp``) while the file argument it
+    has to compare against is realpath'd to the long form. The exact-prefix
+    allowlist branch would survive that (it realpaths too), but the glob branch
+    only normalizes — so a short name there exempted nothing at all.
+    """
+    return os.path.realpath(tempfile.gettempdir())
+
+
+def msys_to_native(raw):
+    """Rewrite a leading-slash Git Bash path into the native path it names.
+
+    Returns ``raw`` unchanged on POSIX (where the string already means what it
+    says), for anything that isn't a leading-slash path, and for a non-drive
+    path when :func:`msys_root` finds no Git Bash.
+
+    The result keeps forward slashes and is deliberately left un-normalized:
+    ntpath reads either separator, and every caller hands the value to
+    ``realpath``, which resolves ``..`` through symlinks rather than lexically.
+    """
+    if not DRIVE_PATHS or not raw.startswith('/'):
+        return raw
+    m = MSYS_DRIVE_RE.match(raw)
+    if m:
+        return m.group(1).upper() + ':/' + (m.group(2) or '')
+    if raw == '/tmp' or raw.startswith('/tmp/'):
+        return msys_tmp().rstrip('/\\') + raw[len('/tmp'):]
+    root = msys_root()
+    if root is None:
+        return raw
+    root = root.rstrip('/\\')
+    if raw == '/bin' or raw.startswith('/bin/'):
+        return root + '/usr/bin' + raw[len('/bin'):]
+    return root + raw
 
 
 def resolved_home():
@@ -371,8 +481,18 @@ def resolve_from(base, raw):
     never matched — a host-temp ``deny`` degraded to a plain ``ask``, and a
     configured allowlist entry stopped matching anything at all.
 
+    A leading-slash entry is first read as Git Bash reads it (see
+    :func:`msys_to_native`), so `/c/Users/me/shared` names the directory the
+    user meant rather than a `c` folder on whichever drive is current.
+
     Returns None when the path can't be resolved (callers skip it: fail-open on
     config, fail-safe on the boundary)."""
+    return _resolve_literal(base, msys_to_native(raw))
+
+
+def _resolve_literal(base, raw):
+    """:func:`resolve_from` without the MSYS reading — the raw string taken at
+    face value. Only ``host_temp_roots`` wants this, to keep both readings."""
     if raw and not os.path.isabs(raw):
         raw = os.path.join(base, raw)
     try:
@@ -392,7 +512,13 @@ def host_temp_roots(base):
     ``$TMPDIR`` under ``/var/folders/...`` is matched after the file argument is
     itself resolved, and a drive-relative Windows root lands on the same drive
     the file arguments do. A root that can't be resolved is skipped
-    (fail-open)."""
+    (fail-open).
+
+    A leading-slash root is added under BOTH readings: what Git Bash makes of it
+    (``/tmp`` -> ``%TMP%``, the reading that matches a command's own arguments)
+    and the drive-relative one it had before Q52 (``<drive>\\tmp``). An extra
+    root only ever widens a ``deny`` tier, so keeping the second costs nothing
+    and can't be a regression for whoever relied on it."""
     raw = list(HOST_TEMP_DEFAULT_ROOTS)
     raw += _split_pathlist(os.environ.get('WORKSPACE_GUARD_TMP_ROOTS', ''))
     tmpdir = os.environ.get('TMPDIR')
@@ -412,9 +538,10 @@ def host_temp_roots(base):
     for r in raw:
         if not r:
             continue
-        rp = resolve_from(base, r)
-        if rp is not None:
-            out.add(rp)
+        for cand in (msys_to_native(r), r):
+            rp = _resolve_literal(base, cand)
+            if rp is not None:
+                out.add(rp)
     return out
 
 
@@ -450,7 +577,8 @@ def matches_allowlist(rp, patterns, base):
     in :func:`resolve_from` — otherwise a Windows entry written ``/tmp/ok``
     resolves on a different drive than the path it is meant to exempt and the
     knob silently does nothing. The glob form is normalized rather than
-    realpath'd so its metacharacters survive.
+    realpath'd so its metacharacters survive, and takes its own
+    :func:`msys_to_native` pass for the same reason ``resolve_from`` does.
 
     Matching is tried against ``rp`` and, on macOS, against ``rp`` with the
     leading ``/private`` stripped — so a user-written glob like ``/tmp/build-*``
@@ -463,7 +591,8 @@ def matches_allowlist(rp, patterns, base):
         if not p:
             continue
         if any(c in p for c in '*?['):
-            pat = p if os.path.isabs(p) else os.path.join(base, p)
+            pat = msys_to_native(p)
+            pat = pat if os.path.isabs(pat) else os.path.join(base, pat)
             if any(fnmatch.fnmatch(c, os.path.normpath(pat)) for c in cands):
                 return True
             continue
@@ -1916,7 +2045,7 @@ def classify_cd(tokens):
         arg = expand_tilde(t)                     # `cd ~/proj` tracks via home
         if arg.startswith('+') or arg.startswith('~') or '$' in arg:
             return ('unknown', None)
-        return ('arg', arg)
+        return ('arg', msys_to_native(arg))       # `cd /c/proj` tracks the drive
     return ('unknown', None)                      # bare `cd` -> $HOME
 
 
@@ -2235,7 +2364,11 @@ def resolve_native_path(raw, cwd):
     Native tools pass literal paths (no shell expansion), so beyond the
     deterministic ``~``/``~/…`` that ``expand_tilde`` handles, a leftover ``~``
     or any ``$`` is treated as unresolvable and the caller defers to builtin
-    permissions — the posture the edit handler has used since the sibling deny."""
+    permissions — the posture the edit handler has used since the sibling deny.
+
+    No :func:`msys_to_native` pass: these tools are not the shell, so on Windows
+    they read a leading slash as drive-relative themselves, and the guard has to
+    agree with the tool whose call it is judging."""
     if not raw or not isinstance(raw, str):
         return None
     p = expand_tilde(raw)
@@ -2382,6 +2515,9 @@ def analyze_command(cmd, ctx, base_cwd, depth=0):
             f = resolve_subst_prefix(f, group_cwd)
         if f.startswith('~') or EXPANSION_RE.search(f):
             return ('expand', None)
+        # Last, so a `$VAR` is never rewritten before it's recognised as one:
+        # read a leading-slash path the way Git Bash will (a no-op elsewhere).
+        f = msys_to_native(f)
         if os.path.isabs(f):
             return ('path', os.path.realpath(f))
         if group_cwd_unknown:
