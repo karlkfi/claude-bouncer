@@ -346,6 +346,26 @@ class PrintTests(unittest.TestCase):
         ], "prod-guard")
         self.assertIn("PROD_GUARD_OVERRIDE downgrades: 1", out)
 
+    def test_header_names_scope_under_plugin_all(self):
+        out = self._print([
+            {"plugin": "prod-guard", "decision": "ask", "reason": REASON_ASK_UNKNOWN,
+             "command": "aws s3 rm s3://b"},
+            {"plugin": "foreground-guard", "decision": "ask",
+             "reason": REASON_FOREIGN_OVERRIDE, "command": "sleep 600"},
+        ], "all")
+        self.assertIn("all-guard decisions analyzed: 2", out)
+        self.assertNotIn("prod-guard decisions analyzed", out)
+
+    def test_header_names_sibling_guard_scope(self):
+        out = self._print([
+            {"plugin": "foreground-guard", "decision": "ask",
+             "reason": REASON_FOREIGN_OVERRIDE, "command": "sleep 600"},
+        ], "foreground-guard")
+        self.assertIn("foreground-guard decisions analyzed: 1", out)
+
+    def test_empty_header_names_scope(self):
+        self.assertIn("No all-guard decisions", self._print([], "all"))
+
     def test_override_line_omitted_under_plugin_all(self):
         out = self._print([
             {"plugin": "prod-guard", "decision": "ask", "reason": REASON_OVERRIDE,
@@ -402,6 +422,18 @@ class EndToEndTests(unittest.TestCase):
                                  "--json"))["overrides"], 0)
         self.assertNotIn("PROD_GUARD_OVERRIDE downgrades",
                          self._run(root, "--plugin", "all"))
+
+    def test_plugin_all_header_counts_every_guard(self):
+        use1, att1 = _decision_record(
+            "toolu_1", "aws s3 rm s3://b", _stdout("ask", REASON_ASK_UNKNOWN))
+        use2, att2 = _decision_record(
+            "toolu_2", "sleep 600", _stdout("ask", REASON_FOREIGN_OVERRIDE),
+            hook_cmd='python3 "/x/bash-foreground-guard.py"')
+        root = write_transcript([use1, att1, use2, att2])
+
+        out = self._run(root, "--plugin", "all")
+        self.assertIn("all-guard decisions analyzed: 2", out)
+        self.assertIn("prod-guard decisions analyzed: 1", self._run(root))
 
     def test_no_transcripts_errors(self):
         empty = tempfile.mkdtemp(prefix="prod-guard-friction-empty-")
