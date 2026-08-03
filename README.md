@@ -421,10 +421,17 @@ After upgrading either way:
    *every* candidate and checked. All candidates in-root → allow; any candidate
    outside (or host-temp) → prompt, naming the offending resolved path. Since
    bash visits every value, one outside item taints the whole loop — which is
-   exactly the decision the hook reaches. Lists with a non-literal item (a `$`,
-   command substitution, glob, or brace like `{a,b}`), the `for VAR; do …`
-   ("$@") form, the `for ((…))` arithmetic form, and a loop variable
-   reassigned in the body all keep today's poison behavior.
+   exactly the decision the hook reaches. A glob item (`for f in docs/*.md`) is
+   recorded as the pattern itself: `*`, `?` and `[…]` never match `/`, so every
+   path bash expands the pattern into resolves against the same directory as
+   the pattern does — which is already how a glob written straight into a file
+   argument is treated, so `cat docs/*.md` and the loop over it now agree. A
+   pattern that escapes (`../*.md`, `/etc/*.conf`) resolves outside and prompts
+   like any other outside path. Lists with a non-literal item (a `$`, command
+   substitution, or brace like `{a,b}` — brace-expanded by bash, so the literal
+   string isn't a stand-in for the real paths), the `for VAR; do …` ("$@")
+   form, the `for ((…))` arithmetic form, and a loop variable reassigned in the
+   body all keep today's poison behavior.
 5. **Classify** each token using a per-command spec table that knows which flags
    take values (`grep -e PAT`), which flag-values are themselves files
    (`grep -f`, `jq --slurpfile`), and how many leading positionals are the
@@ -594,7 +601,8 @@ flowing, avoid triggering it:
   so home-relative paths inside the root are fine. A variable assigned a plain
   literal path *earlier in the same command string* — `f=./config/app.json; cat $f`
   — is also resolved and doesn't prompt, as is a `for f in a b c` loop over a
-  literal list when its body is on its own line after `do`. A file operand or
+  literal list, or a `for f in docs/*.md` loop over an in-root glob, when its
+  body is on its own line after `do`. A file operand or
   redirect target that *begins* with `$(git rev-parse --show-toplevel)` or
   `$(pwd)` — the same two whitelisted substitutions the `cd` tracker resolves —
   is resolved too, so `cp x "$(git rev-parse --show-toplevel)/backup/"` is fine.)
@@ -761,14 +769,25 @@ final output.
   Uncertainty always falls back to `ask` — propagation only ever adds allows for
   expansions bash performs deterministically.
 - `for VAR in <list>` loop resolution is equally narrow. The candidate set is
-  recorded only when *every* list item is a plain literal (same purity test as
-  assignments, plus a brace `{a,b}` is rejected because a for-list item — unlike
-  an assignment RHS — is brace-expanded). A later `$VAR` in a file argument is
-  then checked against all candidates; one outside item taints the loop. Lists
-  with any non-literal item, the `for VAR; do …` ("$@") form, the `for ((…))`
-  arithmetic form, and a loop variable reassigned inside the body all keep
-  today's behavior. As with assignments, this only ever adds allows for the
-  exact values bash iterates.
+  recorded only when *every* list item is a plain literal or a glob (the
+  assignment purity test minus the glob metacharacters, plus a brace `{a,b}` is
+  rejected because a for-list item — unlike an assignment RHS — is
+  brace-expanded). A later `$VAR` in a file argument is then checked against all
+  candidates; one outside item taints the loop. Lists with any non-literal item,
+  the `for VAR; do …` ("$@") form, the `for ((…))` arithmetic form, and a loop
+  variable reassigned inside the body all keep today's behavior. As with
+  assignments, this only ever adds allows for the exact values bash iterates.
+- A glob item stands for its whole expansion rather than being enumerated, so a
+  loop over one is exactly as strong as the same glob written into a file
+  argument directly — no more and no less. In particular, `realpath` can't see
+  through a *matched* name that is itself a symlink out of the workspace, since
+  the pattern is resolved instead of the files: `for f in docs/*.md; do cat
+  "$f"; done` treats a `docs/link.md` → `/etc/passwd` symlink the same way
+  `cat docs/*.md` already does. `shopt -s globstar` makes `**` match extra path
+  segments the pattern doesn't show, which can only make a trailing `../` in the
+  loop body climb higher than bash will — an extra prompt, never a missed one.
+  A *nested* loop over a glob built from an outer loop variable (`for f in
+  "$d"/*.md`) still holds a `$`, so it keeps today's poison.
 - `realpath` only follows symlinks for files that already exist; nonexistent
   paths are normalized lexically (fine for read-style commands).
 - Redirect targets (`> file`) are inspected on *every* command, guarded or not —

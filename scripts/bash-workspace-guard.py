@@ -39,6 +39,11 @@ ASSIGNISH_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)(\+?=|\[|\+\+|--)')
 # split by an exotic inherited IFS into pieces the single-token check misses).
 IMPURE_VALUE_CHARS = frozenset(' \t\n$`*?[:')
 
+# The same test minus the glob metachars, for `for VAR in <list>` items only: a
+# pattern there is its own proxy for the paths it expands to (see
+# `literal_for_item`).
+IMPURE_ITEM_CHARS = IMPURE_VALUE_CHARS - frozenset('*?[')
+
 # Names bash treats specially — assigning them does not make `$NAME` expand
 # to the assigned literal (dynamic values, readonly, or reset by the shell).
 NEVER_PROPAGATE = frozenset({
@@ -1133,7 +1138,7 @@ def command_substitutions(text):
     return bodies
 
 
-def literal_assignment_value(raw):
+def literal_assignment_value(raw, allow_glob=False):
     """Return the literal an assignment RHS resolves to, or None if bash
     might expand or word-split it into something the hook can't predict.
 
@@ -1142,6 +1147,10 @@ def literal_assignment_value(raw):
     stay unresolvable. An empty value is rejected because ``f=(a b)``
     tokenizes as ``f=`` + a paren run — treating it as the scalar empty
     string would miss the array's real ``$f`` (its first element).
+
+    ``allow_glob`` keeps ``*?[`` instead of rejecting them; only
+    ``literal_for_item`` passes it, and only it carries the argument for why a
+    pattern is safe to keep.
     """
     if not raw:
         return None
@@ -1149,7 +1158,8 @@ def literal_assignment_value(raw):
         raw = expand_tilde(raw)
     if raw.startswith('~'):
         return None
-    if any(c in IMPURE_VALUE_CHARS for c in raw):
+    impure = IMPURE_ITEM_CHARS if allow_glob else IMPURE_VALUE_CHARS
+    if any(c in impure for c in raw):
         return None
     return raw
 
@@ -1159,13 +1169,27 @@ def literal_for_item(raw):
     bash would expand it into paths the hook can't predict (issue 70).
 
     Reuses the assignment-RHS purity test (``literal_assignment_value``) — same
-    tilde handling, same rejection of ``$``/backtick/glob/whitespace — then
+    tilde handling, same rejection of ``$``/backtick/whitespace — then
     ADDITIONALLY rejects brace items (``{a,b}``, ``a{1..3}``): unlike an
     assignment RHS, a for-list item IS brace-expanded by bash, so treating
     ``{a,b}`` as the literal string would miss the real ``a``/``b`` paths. A
     rejected item poisons the loop variable (today's runtime-expanded ``ask``).
+
+    A glob item is kept, as the pattern itself (issue 99). ``*``, ``?`` and
+    ``[…]`` never match ``/``, so every path bash expands the pattern into has
+    the pattern's own segment structure and resolves against the same
+    directory: realpath the pattern and the answer holds for the whole
+    expansion. This is already how a glob written straight into a file argument
+    is treated (``cat docs/*.md`` allows, ``cat /etc/*.conf`` asks), so the
+    loop form now agrees with the direct form — including for a pattern that
+    escapes (``../*.md``), which resolves outside and prompts rather than
+    needing a separate containment rule. Under ``shopt -s globstar`` a ``**``
+    can match extra segments the pattern doesn't show, which only makes a
+    trailing ``../`` in the loop body climb higher than bash will: an extra
+    prompt, never a missed one. Braces are still rejected above, so
+    ``x{,/../..}`` can't smuggle a shorter path past the proxy.
     """
-    val = literal_assignment_value(raw)
+    val = literal_assignment_value(raw, allow_glob=True)
     if val is None:
         return None
     if '{' in val or '}' in val:
@@ -1177,9 +1201,11 @@ def for_loop_binding(g):
     """Classify a command group as a `for NAME in <list>; …` loop header.
 
     Returns:
-      * ``(name, [values])`` — a fully-literal list: record the candidate set so
-        ``$NAME`` in a later file arg is validated against every value (issue 70).
-      * ``(name, None)`` — a `for NAME in` whose list has any non-literal/glob/
+      * ``(name, [values])`` — a list of literals and/or globs: record the
+        candidate set so ``$NAME`` in a later file arg is validated against
+        every value (issue 70), a glob standing for its whole expansion
+        (issue 99).
+      * ``(name, None)`` — a `for NAME in` whose list has any non-literal or
         brace item, an empty list, or a `for NAME` with no `in` (iterates
         ``"$@"``): the caller drops NAME from the maps, keeping today's poison.
       * ``None`` — not a `for NAME in` header at all (the `for ((…))` arithmetic
@@ -1213,13 +1239,15 @@ def expand_loop_candidates(tok, loopmap):
     """Expand every `$NAME`/`${NAME}` whose NAME is a for-loop variable into the
     full set of concrete tokens bash iterates over (issue 70).
 
-    ``loopmap`` maps a loop variable to its literal candidate list (recorded by
-    ``for_loop_binding`` from a fully-literal ``for NAME in …``). A token using
-    such a variable stands for one path per candidate — and bash visits ALL of
-    them — so the caller checks every expansion and prompts if ANY lands outside
-    the workspace. Since the candidate set is exactly bash's iteration list, an
-    outside path can never slip past; a stale/over-broad set only ever adds
-    candidates, which can prompt but never wrongly allow.
+    ``loopmap`` maps a loop variable to its candidate list (recorded by
+    ``for_loop_binding`` from a ``for NAME in …`` list of literals and globs). A
+    token using such a variable stands for one path per candidate — and bash
+    visits ALL of them — so the caller checks every expansion and prompts if ANY
+    lands outside the workspace. The candidate set is bash's iteration list,
+    with a glob candidate resolving where its whole expansion resolves
+    (``literal_for_item``), so an outside path can never slip past; a
+    stale/over-broad set only ever adds candidates, which can prompt but never
+    wrongly allow.
 
     Returns ``[tok]`` unchanged when the token uses no loop variable (or holds a
     backtick the hook won't evaluate). Several distinct loop variables in one
