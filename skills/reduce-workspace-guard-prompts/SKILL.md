@@ -84,9 +84,12 @@ Tell the user the cause(s) you found, then apply the habits that prevent them:
   it rather than working around it.
 - **Keep guarded file arguments inside the project root** — write the literal
   in-root path (`cat ./config/app.json`), not a `$VAR`/`~`/`$(...)` form. (A
-  variable assigned a literal earlier in the same command, and a `for f in a b c`
-  loop over a literal list with its body on its own line after `do`, are both
-  resolved and don't prompt.)
+  variable assigned a literal earlier in the same command is resolved, as is a
+  `for` loop over a literal list, over an in-root glob (`for f in docs/*.md`),
+  or over a nested list built from the outer variable (`for d in docs/*; do
+  for f in "$d"/*.md`). Where the body sits — on the same line as `do` or the
+  next — makes no difference. A `$(...)` list such as `for f in $(ls docs)`
+  is not resolved and does prompt.)
 - **Give `cd` a literal target, and stay in the project root** — avoid bare
   `cd`, `cd -`, `cd $HOME`, and `popd`; `cd` into a subdirectory with a
   literal path if you must.

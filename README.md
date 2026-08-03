@@ -730,7 +730,9 @@ flowing, avoid triggering it:
   `~/.cache/pip`, cargo's `~/.cargo/registry`) are outside the project root, so
   every guarded read of them prompts. Vendor the source into the tree instead
   (e.g. `go mod vendor` → `vendor/`, npm's `node_modules/`) and read from there,
-  or use the Read/Grep tools, which skip the hook entirely.
+  or use the Read/Grep tools, whose literal single-path inputs avoid the
+  `$VAR`/`$(...)` false positives — they are still guarded, so a read that
+  genuinely lands outside the root still prompts.
 - **In a git worktree, edit only via this session's checkout — never another
   checkout's path.** A write (bash or `Edit`/`Write`) into the primary checkout
   or another worktree of the same repo is **denied**: it would land your change
