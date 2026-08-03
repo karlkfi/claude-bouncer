@@ -230,7 +230,10 @@ else
     "${EDITOR:-vi}" "$NOTES_PATH"
   fi
 fi
-cleanup() { [[ -n "$NOTES_TMP" ]] && rm -f "$NOTES_TMP"; }
+# An EXIT trap's status becomes the script's, so this must not end on a false
+# test: with --notes-file there is no tempfile, and `[[ -n "" ]] && rm` would
+# report a fully successful release as exit 1.
+cleanup() { if [[ -n "$NOTES_TMP" ]]; then rm -f "$NOTES_TMP"; fi; }
 trap cleanup EXIT
 
 # --- plan --------------------------------------------------------------------
