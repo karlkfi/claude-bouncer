@@ -41,9 +41,12 @@ ships as a single Python script that uses only the standard library.
 prod-guard ships an optional `/prod-guard:friction-report` command (and the
 `scripts/friction-report.py` script behind it). It is a **read-only** analyzer:
 it re-reads the hook decisions Claude Code already recorded in your local session
-transcripts under `~/.claude/projects/**/*.jsonl` and prints a summary. It adds
-no telemetry, makes no network connections, writes nothing to disk, and never
-runs any guarded tool. Nothing leaves your machine.
+transcripts under `~/.claude/projects/**/*.jsonl` and prints a summary. To flag
+a stale install it also reads two plugin-manifest files Claude Code maintains —
+`~/.claude/plugins/installed_plugins.json` and `known_marketplaces.json` — plus
+the marketplace clone's `plugin.json`, taking only version strings and the clone
+path. It adds no telemetry, makes no network connections, writes nothing to
+disk, and never runs any guarded tool. Nothing leaves your machine.
 
 ## Third parties
 

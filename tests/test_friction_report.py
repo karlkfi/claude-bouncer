@@ -118,6 +118,25 @@ def write_transcript(lines):
     return root
 
 
+def write_plugins_dir(root, installed, available, plugin="prod-guard",
+                      marketplace="prod-guard"):
+    """A synthetic ~/.claude/plugins: one install record plus a marketplace
+    clone advertising `available`. Returns the dir as a string."""
+    root = Path(root)
+    (root / "installed_plugins.json").write_text(json.dumps({
+        "version": 2,
+        "plugins": {
+            f"{plugin}@{marketplace}": [{"scope": "user", "version": installed}],
+        }}))
+    (root / "known_marketplaces.json").write_text(json.dumps({
+        marketplace: {"installLocation": str(root / "mkt")}}))
+    clone = root / "mkt" / ".claude-plugin"
+    clone.mkdir(parents=True)
+    (clone / "plugin.json").write_text(json.dumps(
+        {"name": plugin, "version": available}))
+    return str(root)
+
+
 class ParseSinceTests(unittest.TestCase):
     def test_relative_units(self):
         now = dt.datetime.now(dt.timezone.utc)
@@ -313,6 +332,96 @@ class IterDecisionsTests(unittest.TestCase):
         self.assertEqual(len(list(fr.iter_decisions(paths, "prod-guard", None, ""))), 1)
 
 
+class VersionTupleTests(unittest.TestCase):
+    def test_dotted_release(self):
+        self.assertEqual(fr.version_tuple("2.4.0"), (2, 4, 0))
+
+    def test_prerelease_folds_to_base(self):
+        self.assertEqual(fr.version_tuple("2.4.0-rc1"), (2, 4, 0))
+
+    def test_ordering(self):
+        self.assertLess(fr.version_tuple("1.1.0"), fr.version_tuple("2.0.0"))
+        self.assertLess(fr.version_tuple("2.4.0"), fr.version_tuple("2.4.1"))
+
+    def test_empty_and_nonnumeric(self):
+        self.assertIsNone(fr.version_tuple(""))
+        self.assertIsNone(fr.version_tuple(None))
+        self.assertIsNone(fr.version_tuple("dev"))
+
+
+class StalenessTests(unittest.TestCase):
+    def test_flags_older_install(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = write_plugins_dir(tmp, installed="1.1.0", available="2.4.0")
+            self.assertEqual(
+                fr.check_staleness(d, "prod-guard"),
+                {"plugin": "prod-guard", "installed": "1.1.0",
+                 "available": "2.4.0", "marketplace": "prod-guard"})
+
+    def test_current_install_not_flagged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = write_plugins_dir(tmp, installed="2.4.0", available="2.4.0")
+            self.assertIsNone(fr.check_staleness(d, "prod-guard"))
+
+    def test_newer_install_not_flagged(self):
+        # A local dev install ahead of the clone is not staleness.
+        with tempfile.TemporaryDirectory() as tmp:
+            d = write_plugins_dir(tmp, installed="2.5.0", available="2.4.0")
+            self.assertIsNone(fr.check_staleness(d, "prod-guard"))
+
+    def test_all_plugin_skips_check(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = write_plugins_dir(tmp, installed="1.1.0", available="2.4.0")
+            self.assertIsNone(fr.check_staleness(d, "all"))
+
+    def test_highest_version_across_scopes_wins(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_plugins_dir(tmp, installed="1.1.0", available="2.4.0")
+            (root / "installed_plugins.json").write_text(json.dumps({
+                "plugins": {"prod-guard@prod-guard": [
+                    {"scope": "project", "version": "1.1.0"},
+                    {"scope": "user", "version": "2.4.0"},
+                ]}}))
+            self.assertIsNone(fr.check_staleness(str(root), "prod-guard"))
+
+    def test_missing_state_degrades_silently(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(fr.check_staleness(tmp, "prod-guard"))
+
+    def test_unparseable_state_degrades_silently(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "installed_plugins.json").write_text("{not json")
+            self.assertIsNone(fr.check_staleness(tmp, "prod-guard"))
+
+    def test_falls_back_to_marketplace_manifest_version(self):
+        # plugin.json names another plugin (multi-plugin marketplace); the
+        # per-plugin version in marketplace.json is used instead.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_plugins_dir(tmp, installed="1.1.0", available="9.9.9",
+                              plugin="prod-guard", marketplace="guards")
+            clone = root / "mkt" / ".claude-plugin"
+            (clone / "plugin.json").write_text(json.dumps(
+                {"name": "other-guard", "version": "9.9.9"}))
+            (clone / "marketplace.json").write_text(json.dumps({
+                "plugins": [{"name": "prod-guard", "version": "2.4.0"}]}))
+            s = fr.check_staleness(str(root), "prod-guard")
+            self.assertEqual(s["available"], "2.4.0")
+
+    def test_conventional_clone_path_without_known_marketplaces(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "installed_plugins.json").write_text(json.dumps({
+                "plugins": {"prod-guard@prod-guard": [{"version": "1.1.0"}]}}))
+            clone = root / "marketplaces" / "prod-guard" / ".claude-plugin"
+            clone.mkdir(parents=True)
+            (clone / "plugin.json").write_text(json.dumps(
+                {"name": "prod-guard", "version": "2.4.0"}))
+            s = fr.check_staleness(str(root), "prod-guard")
+            self.assertEqual(s["available"], "2.4.0")
+
+
 class PrintTests(unittest.TestCase):
     def test_empty(self):
         buf = io.StringIO()
@@ -366,6 +475,36 @@ class PrintTests(unittest.TestCase):
     def test_empty_header_names_scope(self):
         self.assertIn("No all-guard decisions", self._print([], "all"))
 
+    def test_stale_warning_shown(self):
+        stale = {"plugin": "prod-guard", "installed": "1.1.0",
+                 "available": "2.4.0", "marketplace": "prod-guard"}
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            fr.print_text(fr.build_report([
+                {"plugin": "prod-guard", "decision": "ask",
+                 "reason": REASON_ASK_UNKNOWN, "command": "aws s3 rm s3://b"},
+            ]), 15, "prod-guard", stale)
+        out = buf.getvalue()
+        self.assertIn("prod-guard 1.1.0 installed, 2.4.0 available", out)
+        self.assertIn("claude plugin update prod-guard@prod-guard", out)
+
+    def test_stale_warning_shown_when_no_decisions(self):
+        stale = {"plugin": "prod-guard", "installed": "1.1.0",
+                 "available": "2.4.0", "marketplace": "prod-guard"}
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            fr.print_text(fr.build_report([]), 15, "prod-guard", stale)
+        out = buf.getvalue()
+        self.assertIn("No prod-guard decisions", out)
+        self.assertIn("1.1.0 installed, 2.4.0 available", out)
+
+    def test_no_warning_when_current(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            fr.print_text(fr.build_report([]), 15, "prod-guard")
+        self.assertNotIn("available in the local marketplace clone",
+                         buf.getvalue())
+
     def test_override_line_omitted_under_plugin_all(self):
         out = self._print([
             {"plugin": "prod-guard", "decision": "ask", "reason": REASON_OVERRIDE,
@@ -379,9 +518,13 @@ class PrintTests(unittest.TestCase):
 
 class EndToEndTests(unittest.TestCase):
     def _run(self, root, *args):
+        # An empty plugins dir keeps the run hermetic: without it the script
+        # would read the developer's real ~/.claude/plugins for staleness.
+        plugins = os.path.join(root, "plugins")
+        os.makedirs(plugins, exist_ok=True)
         r = subprocess.run(
             [sys.executable, str(SCRIPT), "--transcripts", root,
-             "--since", "all", *args],
+             "--plugins-dir", plugins, "--since", "all", *args],
             capture_output=True, text=True, timeout=30)
         self.assertEqual(r.returncode, 0, r.stderr)
         return r.stdout
@@ -434,6 +577,26 @@ class EndToEndTests(unittest.TestCase):
         out = self._run(root, "--plugin", "all")
         self.assertIn("all-guard decisions analyzed: 2", out)
         self.assertIn("prod-guard decisions analyzed: 1", self._run(root))
+
+    def test_stale_install_reported(self):
+        use, att = _decision_record(
+            "toolu_1", "aws s3 rm s3://b", _stdout("ask", REASON_ASK_UNKNOWN))
+        root = write_transcript([use, att])
+        plugins = write_plugins_dir(tempfile.mkdtemp(prefix="prod-guard-plugins-"),
+                                    installed="1.1.0", available="2.4.0")
+
+        def run(*args):
+            r = subprocess.run(
+                [sys.executable, str(SCRIPT), "--transcripts", root,
+                 "--plugins-dir", plugins, "--since", "all", *args],
+                capture_output=True, text=True, timeout=30)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            return r.stdout
+
+        self.assertIn("prod-guard 1.1.0 installed, 2.4.0 available", run())
+        self.assertEqual(json.loads(run("--json"))["stale"]["available"], "2.4.0")
+        # --plugin all has no single plugin to check.
+        self.assertNotIn("installed, 2.4.0 available", run("--plugin", "all"))
 
     def test_no_transcripts_errors(self):
         empty = tempfile.mkdtemp(prefix="prod-guard-friction-empty-")
