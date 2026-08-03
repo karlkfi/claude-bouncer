@@ -240,11 +240,14 @@ def build_report(decisions):
 
 def print_text(r, top, plugin='prod-guard'):
     total = r['total']
+    # --plugin widens the scope past prod-guard, so the header names what was
+    # actually counted rather than the guard this script ships with.
+    label = 'all-guard' if plugin == 'all' else plugin
     if not total:
-        print("No prod-guard decisions found for the given filters.")
+        print(f"No {label} decisions found for the given filters.")
         return
     asks = r['decisions'].get('ask', 0) + r['decisions'].get('deny', 0)
-    print(f"prod-guard decisions analyzed: {total}")
+    print(f"{label} decisions analyzed: {total}")
     by_plugin = ", ".join(f"{k} {v}" for k, v in r['plugins'].most_common())
     print(f"  plugins: {by_plugin}")
     parts = [f"{k} {v}" for k, v in r['decisions'].most_common()]
