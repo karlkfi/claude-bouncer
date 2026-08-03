@@ -5379,6 +5379,21 @@ class PluginWiringTests(unittest.TestCase):
         )
 
 
+class CIWiringTests(unittest.TestCase):
+    """Q45: a skipped test reads as OK, so a plain `unittest discover` on
+    Windows can't tell "passes there" from "quietly stopped running there".
+    The job runs through the skip ceiling instead."""
+
+    def test_windows_job_runs_the_suite_through_the_skip_ceiling(self):
+        self.assertTrue((REPO / "scripts" / "skip-ceiling.py").is_file(),
+                        "missing scripts/skip-ceiling.py")
+        workflow = (REPO / ".github" / "workflows" / "tests.yml").read_text()
+        self.assertRegex(
+            workflow, r"skip-ceiling\.py --max-skips \d+",
+            "the Windows job must run the suite through skip-ceiling.py",
+        )
+
+
 class NativeToolTests(unittest.TestCase):
     """Q29: the native Read/Grep/Glob (read) and Edit/Write (write) tools get the
     same outside-workspace verdict as the equivalent bash command, routed through

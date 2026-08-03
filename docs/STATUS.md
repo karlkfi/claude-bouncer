@@ -16,8 +16,7 @@ Specific actionable items in priority order. Pick from the top; skip 🚫 items 
 | ID | Item | Labels | St | Sz | Notes |
 |---|---|---|---|---|---|
 | <a id="Q46"></a>Q46 | Bound the loop-variable cross product so the hook can't hang | `security` `parsing` | 🔲 | S | Three nested `for`s over 256 literals each, then `cat $a/$b/$c`, hangs past 2 min. Predates Q41. A hung hook is non-blocking, so the guard enforces nothing. Over-cap must poison, not truncate. |
-| <a id="Q43"></a>Q43 | Expand a leading `~` from the resolved home, not just `$HOME` | `parsing` `bug` | 🔲 | S | Sibling of Q40. `expand_tilde()` reads only `$HOME`, unset under cmd.exe, so `cat ~/x` keeps its `~` and the hook defers while bash expands it. Fix: reuse Q40's `expanduser`; strictly tightens. |
-| <a id="Q45"></a>Q45 | Assert a skip ceiling in the Windows CI job | `tests` `infra` `retro` | 🔲 | S | Q39 left the Windows job a plain `unittest discover`, so a test that quietly stops running there goes unseen. Some already skip for want of `$HOME` (Q43). Assert a ceiling on the skip count. |
+| <a id="Q43"></a>Q43 | Expand a leading `~` from the resolved home, not just `$HOME` | `parsing` `bug` | 🔲 | S | `expand_tilde()` reads only `$HOME`, unset under cmd.exe, so `cat ~/x` keeps its `~` and the hook defers where bash expands. Fix: Q40's `expanduser`. Unskips 47 Windows tests; drop `--max-skips` to 3. |
 
 ## Deferred
 
