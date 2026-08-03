@@ -4739,6 +4739,38 @@ class PoisonVarsTests(unittest.TestCase):
         self.assertEqual(m, {"f": "x"})
 
 
+class ClobbersIfsTests(unittest.TestCase):
+    """Groups that set IFS outside the plain/`export` assignment forms (Q49)."""
+
+    def test_arg_assigners_naming_ifs(self):
+        for cmd in (["declare", "IFS=x"], ["local", "IFS=x"],
+                    ["typeset", "IFS=x"], ["readonly", "IFS=x"],
+                    ["declare", "-x", "IFS=x"], ["read", "IFS"],
+                    ["printf", "-v", "IFS", "x"], ["for", "IFS", "in", "a"]):
+            self.assertTrue(guard.clobbers_ifs(cmd), cmd)
+
+    def test_eval_and_source_clobber(self):
+        for cmd in ("eval", "source", "."):
+            self.assertTrue(guard.clobbers_ifs([cmd, "lib.sh"]), cmd)
+
+    def test_unnameable_arg_clobbers(self):
+        # `declare $n=x` could name IFS.
+        self.assertTrue(guard.clobbers_ifs(["declare", "$n=x"]))
+
+    def test_keyword_prefix_skipped_before_dispatch(self):
+        self.assertTrue(guard.clobbers_ifs(["while", "read", "IFS"]))
+
+    def test_unset_is_exempt(self):
+        # bash splits on the default IFS while IFS is unset, which is the
+        # behaviour the hook already models.
+        self.assertFalse(guard.clobbers_ifs(["unset", "IFS"]))
+
+    def test_other_names_do_not_clobber(self):
+        for cmd in (["declare", "IFSX=1"], ["read", "-r", "f"],
+                    ["for", "f", "in", "a"], ["grep", "PAT", "y.txt"], []):
+            self.assertFalse(guard.clobbers_ifs(cmd), cmd)
+
+
 class LiteralForItemTests(unittest.TestCase):
     """Purity check for `for VAR in <list>` items (issue 70)."""
 
@@ -5070,6 +5102,25 @@ class VarPropagationEndToEndTests(unittest.TestCase):
 
     def test_ifs_reassignment_disables_propagation(self):
         self._decision("IFS=,; f=in.txt; cat $f", "ask")
+
+    def test_arg_assigner_setting_ifs_disables_propagation(self):
+        # Q49: these reach IFS without going through apply_assignment_group.
+        for setter in ("declare IFS=x", "local IFS=x", "typeset IFS=x",
+                       "readonly IFS=x", "read IFS", "printf -v IFS x",
+                       "for IFS in a b; do :; done", "eval 'IFS=x'"):
+            with self.subTest(setter=setter):
+                self._decision(f"{setter}; f=in.txt; cat $f", "ask")
+
+    def test_ifs_split_reaches_a_second_outside_word(self):
+        # The reason the rule exists: bash splits `docs/x/opt/q49-fake-target`
+        # into `docs/` and `/opt/q49-fake-target` under IFS=x, so a value that
+        # resolves inside the workspace reads a file outside it.
+        self._decision(
+            "declare IFS=x; f=docs/x/opt/q49-fake-target; cat $f", "ask")
+
+    def test_unset_ifs_keeps_propagation(self):
+        # Unsetting IFS restores the default splitting the hook models.
+        self._decision("unset IFS; f=in.txt; cat $f", "allow")
 
     def test_heredoc_disables_propagation(self):
         # Heredoc bodies tokenize as commands; a body line shaped like an

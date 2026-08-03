@@ -1485,10 +1485,7 @@ def poison_vars(g, varmap):
     """
     if not varmap:
         return
-    i = 0
-    while i < len(g) and g[i] in SH_KEYWORDS:
-        i += 1
-    rest = g[i:]
+    rest = strip_sh_keywords(g)
     if rest:
         name0 = os.path.basename(rest[0])
         if name0 in POISON_ALL_CMDS:
@@ -1512,6 +1509,45 @@ def poison_vars(g, varmap):
         elif IDENT_RE.fullmatch(t) and j + 1 < len(g) \
                 and g[j + 1].startswith('='):
             varmap.pop(t, None)
+
+
+def clobbers_ifs(g):
+    """True when group ``g`` may leave IFS holding a value the hook can't see.
+
+    A changed IFS re-splits every later expansion, so a value the hook checks
+    as one word can reach the command as several: under ``IFS=x``,
+    ``f=docs/x/opt/secret`` resolves inside the workspace for the hook but
+    reaches ``cat`` as ``docs/`` and ``/opt/secret`` (Q49).
+
+    ``apply_assignment_group`` catches the plain and ``export NAME=`` forms.
+    This catches the rest — ``eval``/``source``/``.``, which can set it
+    invisibly, and the arg-assigner builtins whose arguments name it
+    (``declare IFS=x``, ``read IFS``, ``printf -v IFS``, and the ``for IFS in
+    …`` header ``for_loop_binding`` refuses to bind). An argument still holding
+    a ``$`` names a variable the hook can't identify, so it counts too.
+
+    Dispatch mirrors ``poison_vars`` so the two can't disagree about what a
+    group assigns. That costs a ``select`` list containing a ``$`` an early end
+    to propagation, which can only cause an `ask`.
+
+    ``unset`` is exempt: bash word-splits on the default IFS while IFS is
+    unset, and the default is what the hook already models.
+    """
+    rest = strip_sh_keywords(g)
+    if not rest:
+        return False
+    name0 = os.path.basename(rest[0])
+    if name0 in POISON_ALL_CMDS:
+        return True
+    if name0 == 'unset' or name0 not in ARG_ASSIGNER_CMDS:
+        return False
+    for t in rest[1:]:
+        if '$' in t:
+            return True
+        m = IDENT_RE.match(t)
+        if m and m.group(0) == 'IFS':
+            return True
+    return False
 
 
 def split_operator_runs(tokens):
@@ -2460,8 +2496,8 @@ def analyze_command(cmd, ctx, base_cwd, depth=0):
                 for nm in assigned:
                     loopmap.pop(nm, None)
                 if 'IFS' in assigned:
-                    # A changed IFS alters how bash word-splits every later
-                    # expansion — stop propagating for the rest of the string.
+                    # See clobbers_ifs: a changed IFS re-splits every later
+                    # expansion, so stop propagating for the rest of the string.
                     varmap.clear()
                     loopmap.clear()
                     propagate = False
@@ -2475,8 +2511,13 @@ def analyze_command(cmd, ctx, base_cwd, depth=0):
                 else:
                     loopmap[name] = values
                 continue                          # for-header: nothing to check
-            poison_vars(sub_g, varmap)
-            poison_vars(sub_g, loopmap)           # same rules invalidate loops
+            if clobbers_ifs(sub_g):
+                varmap.clear()
+                loopmap.clear()
+                propagate = False
+            else:
+                poison_vars(sub_g, varmap)
+                poison_vars(sub_g, loopmap)       # same rules invalidate loops
         g = strip_env_prefix(kw_g)
         if not g: continue                        # keyword/env-only or redirect-only group
         kind, arg = classify_cd(g)

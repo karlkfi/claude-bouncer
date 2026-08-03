@@ -15,7 +15,6 @@ Specific actionable items in priority order. Pick from the top; skip 🚫 items 
 
 | ID | Item | Labels | St | Sz | Notes |
 |---|---|---|---|---|---|
-| <a id="Q49"></a>Q49 | Stop propagating variables when `declare`/`local` sets IFS | `security` `parsing` | 🔲 | S | A plain `IFS=x` or `export IFS=x` disables propagation, but `declare IFS=x` does not — verified `declare IFS=x; f=README.md; cat $f` allows. Fix: apply the IFS rule to the arg-assigner builtins too. |
 
 ## Deferred
 

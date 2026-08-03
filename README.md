@@ -795,9 +795,15 @@ final output.
   built from other expansions, and variables later touched by
   `read`/`eval`/`declare`/`unset` or assigned inside a subshell,
   pipeline segment, or backgrounded command all keep the runtime-expanded
-  `ask`. A heredoc (`<<`) anywhere in the command or an in-command `IFS=`
-  reassignment disables propagation for that command entirely (conservative —
-  a heredoc adds redirection state, and a changed `IFS` alters word splitting).
+  `ask`. A heredoc (`<<`) anywhere in the command, or anything that may set
+  `IFS`, disables propagation for that command entirely (conservative — a
+  heredoc adds redirection state, and a changed `IFS` re-splits every later
+  expansion, so a value checked as one word can reach the command as several).
+  Setting `IFS` counts whether it is a plain `IFS=`/`export IFS=` assignment,
+  an assigning builtin naming it (`declare`, `local`, `typeset`, `readonly`,
+  `read`, `printf -v`, `for IFS in …`), or an `eval`/`source` that could set it
+  out of sight. Only `unset IFS` is exempt: bash falls back to the default
+  splitting the guard already assumes.
   Uncertainty always falls back to `ask` — propagation only ever adds allows for
   expansions bash performs deterministically.
 - `for VAR in <list>` loop resolution is equally narrow. The candidate set is
