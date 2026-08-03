@@ -3,9 +3,9 @@
 
 A skip is invisible in a plain ``unittest discover`` run: the trailer reads
 ``OK``, and a test that quietly stops running on a platform looks exactly like
-one that passes there. Windows already skips a few on purpose -- ``$HOME`` is
-unset under cmd.exe (Q43) -- so the count can't be gated at zero. A ceiling
-keeps the known skips green and turns a new one red.
+one that passes there. Windows still skips a few on purpose -- genuine platform
+splits, such as POSIX permission bits -- so the count can't be gated at zero.
+A ceiling keeps the known skips green and turns a new one red.
 
 The ceiling is a ratchet, not a budget: when the run comes in under it, say so
 loudly, because a ceiling nobody tightens stops ratcheting.

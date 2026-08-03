@@ -165,6 +165,21 @@ def is_allowed_device(path):
     return False
 
 
+def resolved_home():
+    """Absolute path of the current user's home directory, or None.
+
+    Resolved with ``expanduser`` rather than ``$HOME`` because the hook is
+    launched through ``run-python-hook.cmd``, so on Windows it inherits a
+    cmd.exe environment where ``HOME`` is unset (Q40, Q43). ``expanduser``
+    reads ``USERPROFILE`` (then ``HOMEDRIVE``/``HOMEPATH``) there, matching the
+    ``os.homedir()`` that Claude Code uses to pick where to write, and on POSIX
+    falls back to the pwd database when ``HOME`` is unset. It returns ``~``
+    unchanged when nothing resolves, hence the isabs check.
+    """
+    home = os.path.expanduser('~')
+    return home if os.path.isabs(home) else None
+
+
 def claude_projects_dir():
     """Realpath of Claude Code's per-user project-data dir, ``~/.claude/projects/``.
 
@@ -174,17 +189,12 @@ def claude_projects_dir():
     itself, not by external inputs. Returns None if the home directory or the
     path cannot be resolved.
 
-    Resolved with ``expanduser`` rather than ``$HOME`` because the hook is
-    launched through ``run-python-hook.cmd``, so on Windows it inherits a
-    cmd.exe environment where ``HOME`` is unset — the prefix would vanish and
-    every read of Claude's own session data would prompt (Q40). ``expanduser``
-    reads ``USERPROFILE`` (then ``HOMEDRIVE``/``HOMEPATH``) there, matching the
-    ``os.homedir()`` that Claude Code uses to pick where to write, and on POSIX
-    falls back to the pwd database when ``HOME`` is unset. It returns ``~``
-    unchanged when nothing resolves, hence the isabs check.
+    Without a home directory the prefix would vanish and every read of Claude's
+    own session data would prompt (Q40), so it resolves via
+    :func:`resolved_home` rather than ``$HOME``.
     """
-    home = os.path.expanduser('~')
-    if not os.path.isabs(home):
+    home = resolved_home()
+    if home is None:
         return None
     try:
         return os.path.realpath(os.path.join(home, '.claude', 'projects'))
@@ -1208,8 +1218,8 @@ def literal_assignment_value(raw, allow_glob=False):
     might expand or word-split it into something the hook can't predict.
 
     ``raw`` is post-shlex (quotes removed). A leading ``~``/``~/…`` is
-    expanded like bash expands it in assignments; ``~user``/unset-``$HOME``
-    stay unresolvable. An empty value is rejected because ``f=(a b)``
+    expanded like bash expands it in assignments; ``~user`` and an unresolvable
+    home stay unresolvable. An empty value is rejected because ``f=(a b)``
     tokenizes as ``f=`` + a paren run — treating it as the scalar empty
     string would miss the array's real ``$f`` (its first element).
 
@@ -1536,17 +1546,22 @@ def split_eq(tok):
 
 
 def expand_tilde(tok):
-    """Expand a leading `~` or `~/…` to `$HOME` (bash does this deterministically).
+    """Expand a leading `~` or `~/…` to the home directory (bash does this
+    deterministically).
 
     Returns the expanded absolute path, or the token unchanged when it can't be
-    resolved here: a `~user`/`~+`/`~-` prefix (no plain `~` or `~/`) or an unset
-    `$HOME`. Callers still defer on a returned token that begins with `~` or
-    contains an expanding `$` (see EXPANSION_RE), so only the deterministic,
-    fully-resolvable cases are expanded
+    resolved here: a `~user`/`~+`/`~-` prefix (no plain `~` or `~/`) or no
+    resolvable home. Callers still defer on a returned token that begins with
+    `~` or contains an expanding `$` (see EXPANSION_RE), so only the
+    deterministic, fully-resolvable cases are expanded
     — `~user`'s pwd lookup and `~+`/`~-`'s dir-stack state stay out of scope.
+
+    The home comes from :func:`resolved_home`, not `$HOME`: on Windows the hook
+    runs under cmd.exe with `HOME` unset, so reading the variable left `~/x`
+    unexpanded and the hook deferred while bash expanded it anyway (Q43).
     """
     if tok == '~' or tok.startswith('~/'):
-        home = os.environ.get('HOME')
+        home = resolved_home()
         if home:
             return home if tok == '~' else os.path.join(home, tok[2:])
     return tok
@@ -1828,7 +1843,7 @@ def classify_cd(tokens):
         sub = CD_SUBST.get(normalize_subst(t))
         if sub is not None:
             return ('subst', sub)
-        arg = expand_tilde(t)                     # `cd ~/proj` tracks via $HOME
+        arg = expand_tilde(t)                     # `cd ~/proj` tracks via home
         if arg.startswith('+') or arg.startswith('~') or '$' in arg:
             return ('unknown', None)
         return ('arg', arg)
@@ -2280,9 +2295,10 @@ def analyze_command(cmd, ctx, base_cwd, depth=0):
             return ('skip', None)
         if is_allowed_device(f):
             return ('skip', None)
-        # Bash expands `~`/`~/…` to $HOME deterministically — resolve it here so
-        # an in-workspace home path isn't needlessly flagged. `~user`/`~+`/`~-`,
-        # an unset $HOME, and any `$VAR`/`$(...)` stay 'expand' (unresolvable).
+        # Bash expands `~`/`~/…` to the home dir deterministically — resolve it
+        # here so an in-workspace home path isn't needlessly flagged.
+        # `~user`/`~+`/`~-`, an unresolvable home, and any `$VAR`/`$(...)` stay
+        # 'expand' (unresolvable).
         # A `$` bash keeps literal (trailing, or before e.g. `.`/`/` — see
         # EXPANSION_RE) is part of the filename and falls through to realpath.
         f = expand_tilde(f)

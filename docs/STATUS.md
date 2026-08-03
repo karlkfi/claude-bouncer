@@ -5,7 +5,7 @@ Single source of truth for progress and priorities in workspace-guard. Pick the 
 **Status:** 🔲 ready · 🚫 blocked
 **Size:** S = one session/PR · M = 2–3 sessions · L = needs a plan doc under `docs/plan/`
 **Labels:** `security` `tests` `docs` `infra` `bug` `parsing` `retro`
-**Next ID:** Q48
+**Next ID:** Q49
 
 **Maintaining this file:** see [`docs/development/maintaining-backlog.md`](development/maintaining-backlog.md).
 
@@ -15,7 +15,7 @@ Specific actionable items in priority order. Pick from the top; skip 🚫 items 
 
 | ID | Item | Labels | St | Sz | Notes |
 |---|---|---|---|---|---|
-| <a id="Q43"></a>Q43 | Expand a leading `~` from the resolved home, not just `$HOME` | `parsing` `bug` | 🔲 | S | `expand_tilde()` reads only `$HOME`, unset under cmd.exe, so `cat ~/x` keeps its `~` and the hook defers where bash expands. Fix: Q40's `expanduser`. Unskips 47 Windows tests; drop `--max-skips` to 3. |
+| <a id="Q48"></a>Q48 | Let a Windows drive prefix be a pure assignment value | `parsing` `bug` | 🔲 | S | Every Windows abs path has a drive colon, and `:` is impure, so `f=C:\proj\x; cat $f` never resolves — var tracking is dead there. Fails secure. Fix: exempt a drive prefix; needs sign-off. |
 
 ## Deferred
 

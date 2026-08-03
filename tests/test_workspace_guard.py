@@ -11,6 +11,7 @@ Three layers:
   * Wiring tests assert the plugin config (hooks.json, plugin.json,
     marketplace.json) is valid and points the hook at the real script.
 """
+import contextlib
 import json
 import os
 import shlex
@@ -43,6 +44,13 @@ def native(path):
     """POSIX-shaped literal -> this platform's separator, for helper unit tests
     that pass paths straight to a helper instead of through ``realpath``."""
     return path.replace("/", os.sep)
+
+
+def home_rel(path, home):
+    """``path`` relative to ``home``, slash-separated, for interpolating after a
+    `~/` in a command fixture. Windows' native `\\` would read as a shell escape;
+    bash and the hook's ``os.path.join`` both take `/` on either platform."""
+    return os.path.relpath(path, home).replace(os.sep, "/")
 
 
 def resolved_from(base, *parts):
@@ -1148,6 +1156,53 @@ class AllowedReadPrefixesUnitTests(unittest.TestCase):
             self.assertIsNone(guard.claude_projects_dir())
 
 
+class TildeExpansionUnitTests(unittest.TestCase):
+    """Unit tests for resolved_home() and expand_tilde() (Q19, Q43)."""
+
+    @contextlib.contextmanager
+    def _without_home_env(self):
+        old = os.environ.pop("HOME", None)
+        try:
+            yield
+        finally:
+            if old is not None:
+                os.environ["HOME"] = old
+
+    def test_expand_tilde_without_home_env(self):
+        # Q43: on Windows the hook runs under cmd.exe with HOME unset. Reading
+        # the variable left `~/x` unexpanded, so a `~` path into the workspace
+        # asked and a native tool's `~` path deferred entirely.
+        with self._without_home_env():
+            self.assertEqual(guard.resolved_home(), os.path.expanduser("~"))
+            expanded = guard.expand_tilde("~/q43-fake-target")
+            self.assertTrue(os.path.isabs(expanded), expanded)
+            self.assertFalse(expanded.startswith("~"), expanded)
+            self.assertTrue(expanded.endswith("q43-fake-target"), expanded)
+            self.assertTrue(os.path.isabs(guard.expand_tilde("~")))
+
+    def test_native_path_with_tilde_resolves_without_home_env(self):
+        # Same regression on the native-tool side: an unexpanded `~` is treated
+        # as unresolvable and defers to builtin permissions, so the path went
+        # unchecked. It must resolve instead.
+        with self._without_home_env():
+            p = guard.resolve_native_path("~/q43-fake-target", os.getcwd())
+        self.assertIsNotNone(p)
+        self.assertTrue(os.path.isabs(p), p)
+
+    def test_expand_tilde_leaves_out_of_scope_prefixes(self):
+        # `~user` needs a pwd lookup and `~+`/`~-` need dir-stack state; both
+        # stay unexpanded so the caller keeps the runtime-expanded ask.
+        for tok in ("~someuser/x", "~+/x", "~-", "~+", "foo~bak"):
+            self.assertEqual(guard.expand_tilde(tok), tok)
+
+    def test_expand_tilde_unresolvable_home(self):
+        # expanduser hands back a bare `~` when no home resolves at all.
+        with mock.patch.object(os.path, "expanduser", return_value="~"):
+            self.assertIsNone(guard.resolved_home())
+            self.assertEqual(guard.expand_tilde("~/x"), "~/x")
+            self.assertEqual(guard.expand_tilde("~"), "~")
+
+
 def run_hook(cmd, cwd, project_dir=None, permission_mode=None, session_id=None,
              env_extra=None):
     """Invoke the hook as a subprocess. Returns parsed JSON or None on defer.
@@ -1465,29 +1520,28 @@ class HookEndToEndTests(unittest.TestCase):
         self._decision("cat foo~bak", "allow")
 
     def test_tilde_path_into_workspace_allow(self):
-        # Q19: when the project lives under $HOME, `~/<rel>/in.txt` expands to
-        # an in-workspace path and should allow (previously a spurious ask).
-        home = os.environ.get("HOME")
-        if not home:
-            self.skipTest("HOME not set")                 # Windows: see Q43
+        # Q19: when the project lives under the home directory, `~/<rel>/in.txt`
+        # expands to an in-workspace path and should allow (previously a
+        # spurious ask).
+        home = guard.resolved_home()                      # Q43: not $HOME
+        self.assertIsNotNone(home, "no home directory resolves")
         with tempfile.TemporaryDirectory(dir=home) as ws:
             ws = os.path.realpath(ws)
             with open(os.path.join(ws, "in.txt"), "w") as f:
                 f.write("hi\n")
-            rel = os.path.relpath(ws, home)            # e.g. "tmpXXXX"
+            rel = home_rel(ws, home)                       # e.g. "tmpXXXX"
             self._decision(f"cat ~/{rel}/in.txt", "allow", cwd=ws)
 
     def test_cd_tilde_into_workspace_relative_allow(self):
-        # `cd ~/<rel> && cat in.txt` — cd tracks through the expanded $HOME
+        # `cd ~/<rel> && cat in.txt` — cd tracks through the expanded home
         # path, so the subsequent relative read resolves in-workspace.
-        home = os.environ.get("HOME")
-        if not home:
-            self.skipTest("HOME not set")                 # Windows: see Q43
+        home = guard.resolved_home()                      # Q43: not $HOME
+        self.assertIsNotNone(home, "no home directory resolves")
         with tempfile.TemporaryDirectory(dir=home) as ws:
             ws = os.path.realpath(ws)
             with open(os.path.join(ws, "in.txt"), "w") as f:
                 f.write("hi\n")
-            rel = os.path.relpath(ws, home)
+            rel = home_rel(ws, home)
             self._decision(f"cd ~/{rel} && cat in.txt", "allow", cwd=ws)
 
     # --- cd / pushd / popd shift cwd (Q7) -----------------------------------
@@ -1617,11 +1671,10 @@ class HookEndToEndTests(unittest.TestCase):
         self.assertEqual(guard.classify_cd(["popd", "+0"]), ("unknown", None))
 
     def test_classify_cd_helper_expands_tilde(self):
-        # Q19: bare `~` and `~/…` expand to $HOME deterministically, so cd
-        # tracking follows them instead of dropping to ('unknown', None).
-        home = os.environ.get("HOME")
-        if not home:
-            self.skipTest("HOME not set")                 # Windows: see Q43
+        # Q19: bare `~` and `~/…` expand to the home directory deterministically,
+        # so cd tracking follows them instead of dropping to ('unknown', None).
+        home = guard.resolved_home()                      # Q43: not $HOME
+        self.assertIsNotNone(home, "no home directory resolves")
         self.assertEqual(guard.classify_cd(["cd", "~"]), ("arg", home))
         self.assertEqual(
             guard.classify_cd(["cd", "~/foo"]),
@@ -3748,11 +3801,10 @@ class ReasonAdviceEndToEndTests(unittest.TestCase):
         self.assertIn("same check", r)
 
     def test_tilde_home_token_reason_uses_outside_advice(self):
-        # Q19: `~/…` now expands to $HOME, which is outside this tempdir
-        # workspace, so the offender lands in the 'outside' bucket (not
+        # Q19: `~/…` now expands to the home directory, which is outside this
+        # tempdir workspace, so the offender lands in the 'outside' bucket (not
         # 'expand') and gets the outside-path advice.
-        if not os.environ.get("HOME"):
-            self.skipTest("HOME not set")                 # Windows: see Q43
+        self.assertIsNotNone(guard.resolved_home(), "no home directory resolves")
         r = self._reason("cat ~/.ssh/id_rsa")
         self.assertIn("~/.ssh/id_rsa", r)
         self.assertIn("same check", r)
@@ -4141,9 +4193,9 @@ class SiblingCheckoutTests(unittest.TestCase):
                               capture_output=True, text=True, check=True)
 
     def setUp(self):
-        home = os.environ.get("HOME")
-        if not home or not os.path.isdir(home):
-            self.skipTest("HOME not set")
+        home = guard.resolved_home()                      # Q43: not $HOME
+        self.assertTrue(home and os.path.isdir(home),
+                        f"no home directory to build the fixture under: {home!r}")
         self._tmp = tempfile.TemporaryDirectory(dir=home)
         self.base = os.path.realpath(self._tmp.name)
         self.main = os.path.join(self.base, "main")
@@ -4500,11 +4552,18 @@ class LiteralAssignmentValueTests(unittest.TestCase):
         self.assertIsNone(guard.literal_assignment_value("/a:/b"))
 
     def test_leading_tilde_slash_expands_to_home(self):
-        home = os.environ.get("HOME")
-        if not home:
-            self.skipTest("HOME not set")
-        self.assertEqual(
-            guard.literal_assignment_value("~/x"), os.path.join(home, "x"))
+        home = guard.resolved_home()                      # Q43: not $HOME
+        self.assertIsNotNone(home, "no home directory resolves")
+        got = guard.literal_assignment_value("~/x")
+        if ":" in home:
+            # A Windows home carries a drive colon, and `:` is impure so an
+            # exotic inherited IFS can't split a PATH-style value. The tilde
+            # does expand (see TildeExpansionUnitTests) — the result just isn't
+            # usable as a literal, so the var stays poisoned and the read asks.
+            # Pre-dates Q43: a literal `f=C:\proj\x` is None for the same reason.
+            self.assertIsNone(got)
+        else:
+            self.assertEqual(got, os.path.join(home, "x"))
 
     def test_tilde_user_impure(self):
         self.assertIsNone(guard.literal_assignment_value("~someuser/x"))
@@ -4706,11 +4765,13 @@ class LiteralForItemTests(unittest.TestCase):
             self.assertIsNone(guard.literal_for_item(v), v)
 
     def test_tilde_slash_expands(self):
-        home = os.environ.get("HOME")
-        if not home:
-            self.skipTest("HOME not set")
-        self.assertEqual(
-            guard.literal_for_item("~/x"), os.path.join(home, "x"))
+        home = guard.resolved_home()                      # Q43: not $HOME
+        self.assertIsNotNone(home, "no home directory resolves")
+        got = guard.literal_for_item("~/x")
+        if ":" in home:
+            self.assertIsNone(got)     # Windows drive colon is impure — as above
+        else:
+            self.assertEqual(got, os.path.join(home, "x"))
 
 
 class ForLoopBindingTests(unittest.TestCase):
@@ -5472,9 +5533,9 @@ class NativeToolTests(unittest.TestCase):
     /tmp `deny`. No real sensitive paths are used as targets (repo rule)."""
 
     def setUp(self):
-        home = os.environ.get("HOME")
-        if not home or not os.path.isdir(home):
-            self.skipTest("HOME not set")
+        home = guard.resolved_home()                      # Q43: not $HOME
+        self.assertTrue(home and os.path.isdir(home),
+                        f"no home directory to build the fixture under: {home!r}")
         self._tmp = tempfile.TemporaryDirectory(dir=home)
         self.base = os.path.realpath(self._tmp.name)
         self.workspace = os.path.join(self.base, "proj")

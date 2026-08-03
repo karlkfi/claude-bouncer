@@ -486,11 +486,12 @@ After upgrading either way:
 8. **Resolve** every file argument against `$CLAUDE_PROJECT_DIR` with
    `realpath`, collapsing `../` and following symlinks. Anything that resolves
    outside the root yields `ask`; otherwise `allow`. A leading `~` or `~/…` is
-   expanded to `$HOME` first (bash does this deterministically), so a home path
-   inside the root is allowed instead of needlessly prompted. Tokens that bash
-   would still expand unpredictably at runtime — `~user`/`~+`/`~-`, an unset
-   `$HOME`, or a `$` that introduces an expansion (`$VAR`, `${VAR}`, `$(...)`,
-   `$1`, `$?`) — short-circuit to
+   expanded to your home directory first (bash does this deterministically), so
+   a home path inside the root is allowed instead of needlessly prompted. The
+   home comes from the same lookup Claude Code itself uses, not from `$HOME`,
+   which is unset on Windows. Tokens that bash would still expand unpredictably
+   at runtime — `~user`/`~+`/`~-`, or a `$` that introduces an expansion
+   (`$VAR`, `${VAR}`, `$(...)`, `$1`, `$?`) — short-circuit to
    `ask`, since `realpath` would otherwise lexically place them inside `cwd`.
    The two whitelisted pure substitutions from step 6
    (`$(git rev-parse --show-toplevel)`, `$(pwd)`) are the exception: when one
@@ -616,9 +617,9 @@ flowing, avoid triggering it:
   outside the root (including via `../` traversal) prompts every time.
 - **Don't put `$VAR`, `$(...)`, or a `~user` prefix in a guarded file argument.**
   The hook can't expand them, so it treats them as outside the root and prompts —
-  even when they'd resolve in-root. (A bare `~`/`~/…` *is* expanded to `$HOME`,
-  so home-relative paths inside the root are fine. A variable assigned a plain
-  literal path *earlier in the same command string* — `f=./config/app.json; cat $f`
+  even when they'd resolve in-root. (A bare `~`/`~/…` *is* expanded to your home
+  directory, so home-relative paths inside the root are fine. A variable assigned
+  a plain literal path *earlier in the same command string* — `f=./config/app.json; cat $f`
   — is also resolved and doesn't prompt, as is a `for f in a b c` loop over a
   literal list, a `for f in docs/*.md` loop over an in-root glob, and a nested
   loop whose inner list is built from the outer variable
@@ -764,9 +765,9 @@ final output.
 
 ## Limitations
 
-- A leading `~`/`~/…` is expanded to `$HOME` (bash does this deterministically),
-  so a home path inside the root is allowed. Tokens that bash would expand
-  *unpredictably* at runtime — `~user`/`~+`/`~-`, an unset `$HOME`, or a `$`
+- A leading `~`/`~/…` is expanded to your home directory (bash does this
+  deterministically), so a home path inside the root is allowed. Tokens that
+  bash would expand *unpredictably* at runtime — `~user`/`~+`/`~-`, or a `$`
   that introduces an expansion (`$VAR`, `${VAR}`, `$(...)`, `$1`, `$?`) — are
   still treated as outside-workspace. A `$` bash keeps literal (trailing, or
   before a non-name char like `.`/`/`) is part of the filename and resolved
