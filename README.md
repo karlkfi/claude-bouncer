@@ -444,6 +444,14 @@ are exactly the ones to add under `"nonprod"` in `.claude/prod-guard.json` (see
 [Configuration](#configuration)). Vet each before adding — never reclassify a
 real production target as non-prod just to silence a prompt.
 
+The report also warns when your installed prod-guard lags the version in the
+local marketplace clone (`prod-guard 1.1.0 installed, 2.4.1 available`) — some
+of the friction it just ranked may already be fixed upstream. See
+[Keeping it updated](#keeping-it-updated). The comparison is local-only, so no
+warning means "no lag against the clone you have", not "up to date": refresh the
+clone with `claude plugin marketplace update prod-guard` first if it has been a
+while.
+
 You can also run the script directly:
 
 ```

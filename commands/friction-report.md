@@ -14,4 +14,7 @@ and, if it is non-prod, add a `nonprod` pattern to `.claude/prod-guard.json` (se
 the prod-guard README Configuration section). Never reclassify a real production
 target as non-prod to silence a prompt.
 
+If the report warns that the installed plugin is stale, relay the warning and
+its update commands — do not run them yourself.
+
 !`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/friction-report.py" $ARGUMENTS`

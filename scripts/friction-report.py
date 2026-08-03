@@ -9,6 +9,10 @@ prod-guard's decisions so you can see, in one command, which prompts dominate
 and — most usefully — which *unknown* targets prompt repeatedly, because those
 are the pattern gaps a ``.claude/prod-guard.json`` ``nonprod`` entry closes.
 
+It also warns when the installed plugin lags the local marketplace clone, since
+third-party marketplaces never refresh on their own and some of the friction
+being reported may already be fixed upstream.
+
 Nothing here changes the hook or adds telemetry: it parses data Claude Code
 already persisted locally.
 
@@ -68,6 +72,131 @@ _JOIN = ' | '
 # Every reason wraps its target in single quotes; the action leads in backticks.
 _QUOTED = re.compile(r"'([^']*)'")
 _BACKTICKED = re.compile(r'`([^`]+)`')
+
+
+# --- Stale-install detection ------------------------------------------------
+# Claude Code auto-updates official Anthropic marketplaces only; a third-party
+# git marketplace pins its installed version until the user acts, so friction a
+# newer release already fixes can linger silently — and for a guard plugin that
+# means missing false-negative fixes. Compare the installed version
+# (~/.claude/plugins/installed_plugins.json) against the local marketplace
+# clone's plugin.json and flag a lag where the user already looks. Every read is
+# of state Claude Code already persisted locally — no network, no telemetry —
+# and any missing or unparseable file degrades to None so the report itself
+# never breaks.
+DEFAULT_PLUGINS_DIR = os.path.expanduser('~/.claude/plugins')
+
+
+def version_tuple(v):
+    """Comparable tuple of the leading numeric components of a version string.
+
+    '2.4.0' -> (2, 4, 0); stops at the first non-numeric component so a
+    pre-release tag ('2.4.0-rc1' -> (2, 4, 0)) is treated as its base version.
+    Returns None when nothing numeric is present.
+    """
+    if not v:
+        return None
+    out = []
+    for part in re.split(r'[.\-+]', str(v).strip()):
+        if not part.isdigit():
+            break
+        out.append(int(part))
+    return tuple(out) or None
+
+
+def _read_json(path):
+    try:
+        with open(path, encoding='utf-8') as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+def installed_plugin_info(plugins_dir, plugin):
+    """(version, marketplace) for the installed `plugin`, or (None, None).
+
+    installed_plugins.json keys plugins as '<name>@<marketplace>' and maps each
+    to a list of install records (one per scope); we take the highest version.
+    """
+    data = _read_json(os.path.join(plugins_dir, 'installed_plugins.json'))
+    if not isinstance(data, dict):
+        return None, None
+    for key, records in (data.get('plugins') or {}).items():
+        name, _, marketplace = key.partition('@')
+        if name != plugin:
+            continue
+        best, best_t = None, None
+        for rec in records or []:
+            v = rec.get('version') if isinstance(rec, dict) else None
+            t = version_tuple(v)
+            if t is not None and (best_t is None or t > best_t):
+                best, best_t = v, t
+        return best, (marketplace or None)
+    return None, None
+
+
+def marketplace_location(plugins_dir, marketplace):
+    """Filesystem path of the cloned `marketplace`, from known_marketplaces.json
+    when present, else the conventional plugins/marketplaces/<name> path."""
+    known = _read_json(os.path.join(plugins_dir, 'known_marketplaces.json'))
+    if isinstance(known, dict):
+        entry = known.get(marketplace)
+        if isinstance(entry, dict) and entry.get('installLocation'):
+            return entry['installLocation']
+    return os.path.join(plugins_dir, 'marketplaces', marketplace)
+
+
+def available_plugin_version(plugins_dir, plugin, marketplace):
+    """Version the marketplace clone advertises for `plugin`, or None.
+
+    Prefers the clone's `.claude-plugin/plugin.json` (the plugin's self-declared
+    version); falls back to the per-plugin version in the marketplace manifest
+    so a multi-plugin marketplace still resolves.
+    """
+    if not marketplace:
+        return None
+    loc = marketplace_location(plugins_dir, marketplace)
+    manifest = _read_json(os.path.join(loc, '.claude-plugin', 'plugin.json'))
+    if isinstance(manifest, dict) and manifest.get('name') == plugin:
+        if manifest.get('version'):
+            return manifest['version']
+    mkt = _read_json(os.path.join(loc, '.claude-plugin', 'marketplace.json'))
+    if isinstance(mkt, dict):
+        for p in (mkt.get('plugins') or []):
+            if isinstance(p, dict) and p.get('name') == plugin:
+                return p.get('version')
+    return None
+
+
+def check_staleness(plugins_dir, plugin):
+    """Staleness info when the installed `plugin` lags the marketplace clone,
+    else None. Skipped for `plugin == 'all'` (no single plugin to check)."""
+    if plugin == 'all':
+        return None
+    installed, marketplace = installed_plugin_info(plugins_dir, plugin)
+    if not installed:
+        return None
+    available = available_plugin_version(plugins_dir, plugin, marketplace)
+    if not available:
+        return None
+    it, at = version_tuple(installed), version_tuple(available)
+    if it is None or at is None or not it < at:
+        return None
+    return {'plugin': plugin, 'installed': installed,
+            'available': available, 'marketplace': marketplace}
+
+
+def print_staleness(stale):
+    if not stale:
+        return
+    print(f"⚠  {stale['plugin']} {stale['installed']} installed, "
+          f"{stale['available']} available in the local marketplace clone.")
+    print("   A newer release may already fix some of the friction reported "
+          "here. Update with:")
+    print(f"     claude plugin marketplace update {stale['marketplace']}")
+    print(f"     claude plugin update {stale['plugin']}@{stale['marketplace']}")
+    print("   or enable autoUpdate — see \"Keeping it updated\" in the "
+          "prod-guard README.\n")
 
 
 def parse_since(spec):
@@ -238,13 +367,18 @@ def build_report(decisions):
     }
 
 
-def print_text(r, top, plugin='prod-guard'):
+def print_text(r, top, plugin='prod-guard', stale=None):
     total = r['total']
     # --plugin widens the scope past prod-guard, so the header names what was
     # actually counted rather than the guard this script ships with.
     label = 'all-guard' if plugin == 'all' else plugin
     if not total:
         print(f"No {label} decisions found for the given filters.")
+        # A stale install is worth saying even with nothing to rank — an old
+        # classifier is the one thing a quiet report can still be wrong about.
+        if stale:
+            print()
+            print_staleness(stale)
         return
     asks = r['decisions'].get('ask', 0) + r['decisions'].get('deny', 0)
     print(f"{label} decisions analyzed: {total}")
@@ -259,6 +393,8 @@ def print_text(r, top, plugin='prod-guard'):
     if r['overrides'] and plugin != 'all':
         print(f"  PROD_GUARD_OVERRIDE downgrades: {r['overrides']}")
     print()
+
+    print_staleness(stale)
 
     if r['categories']:
         print("By category (prompts):")
@@ -302,6 +438,9 @@ def main():
                          "use 'all' for no limit)")
     ap.add_argument('--repo', default='',
                     help='only decisions whose cwd contains this substring')
+    ap.add_argument('--plugins-dir', default=DEFAULT_PLUGINS_DIR,
+                    help='Claude Code plugins dir (default: ~/.claude/plugins); '
+                         'used to flag a stale installed version')
     ap.add_argument('--top', type=int, default=15, help='rows per ranking')
     ap.add_argument('--json', action='store_true', help='emit JSON')
     args = ap.parse_args()
@@ -314,6 +453,7 @@ def main():
 
     decisions = list(iter_decisions(paths, args.plugin, cutoff, args.repo))
     report = build_report(decisions)
+    stale = check_staleness(args.plugins_dir, args.plugin)
 
     if args.json:
         print(json.dumps({
@@ -326,9 +466,10 @@ def main():
             'top_unknown_targets': report['unknown_targets'].most_common(args.top),
             'top_targets': report['targets'].most_common(args.top),
             'top_commands': report['commands'].most_common(args.top),
+            'stale': stale,
         }, indent=2))
     else:
-        print_text(report, args.top, args.plugin)
+        print_text(report, args.top, args.plugin, stale)
 
 
 if __name__ == '__main__':
