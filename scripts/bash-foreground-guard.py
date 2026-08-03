@@ -748,17 +748,79 @@ def analyze_class_a(raw, cfg, depth=0):
 # Class B analysis
 # ---------------------------------------------------------------------------
 
+def simple_commands(raw, depth=0):
+    """Every simple command in `raw` as an argv, starting at its command word:
+    heredoc bodies stripped, env prefixes and launcher wrappers peeled, `bash
+    -c '...'` / `eval ...` bodies recursed into (bounded), and a plain `bash
+    script.sh` reduced to the script. Returns None when the string does not
+    tokenize — the caller defers rather than guess."""
+    if depth > 3:
+        return []
+    tokens = tokenize(strip_heredoc_bodies(raw))
+    if tokens is None:
+        return None
+    out = []
+    state = {'loop': False, 'override': None}
+    for group, _term in split_segments(tokens):
+        state['timeout_wrapped'] = False
+        argv = strip_head(list(group), state)
+        if not argv:
+            continue
+        if os.path.basename(argv[0]) in SHELL_NAMES:
+            body = None
+            for i, tok in enumerate(argv[1:-1], start=1):
+                if tok == '-c':
+                    body = argv[i + 1]
+                    break
+            if body is not None:
+                sub = simple_commands(body, depth + 1)
+                if sub is None:
+                    return None
+                out += sub
+                continue
+            argv = argv[1:]  # `bash scripts/gate.sh`: the script is the command
+            while argv and argv[0].startswith('-'):
+                argv = argv[1:]
+            if not argv:
+                continue
+        elif os.path.basename(argv[0]) == 'eval':
+            sub = simple_commands(' '.join(argv[1:]), depth + 1)
+            if sub is None:
+                return None
+            out += sub
+            continue
+        out.append(argv)
+    return out
+
+
+def runs_command(rx, argv):
+    """True when `rx` matches at the command position of `argv` — the leftmost
+    match has to begin inside the command word. That is what separates running
+    a registered script from naming it: `scripts/gate.sh --all` matches,
+    `grep -n foo scripts/gate.sh` does not."""
+    m = rx.search(' '.join(argv))
+    return m is not None and m.start() < len(argv[0])
+
+
 def analyze_class_b(raw, cfg, timeout_ms, timeout_was_set):
     """Class B findings: registered slow command about to run with an
-    inadequate foreground timeout. Patterns are regexes searched against the
-    raw command string; the registry ships empty and is populated per-repo."""
+    inadequate foreground timeout. Patterns are regexes matched at the command
+    position of a simple command, so a pattern naming a script fires on the
+    invocation and not on a `grep`/`wc`/commit message that merely mentions the
+    path (#16); prefix a pattern with `.*` to match an argument instead. The
+    registry ships empty and is populated per-repo."""
     findings = []
+    commands = simple_commands(raw)
+    if commands is None:
+        return findings  # unparseable: fail-open, defer
     for pat, min_ms in cfg['slow_commands'].items():
+        if timeout_ms >= min_ms:
+            continue
         try:
             rx = re.compile(pat)
         except re.error:
             continue  # a broken pattern loses itself
-        if rx.search(raw) and timeout_ms < min_ms:
+        if any(runs_command(rx, argv) for argv in commands):
             findings.append(finding_slow(cfg, pat, min_ms, timeout_ms,
                                          timeout_was_set))
     return findings

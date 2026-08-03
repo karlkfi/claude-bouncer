@@ -218,6 +218,19 @@ in the foreground with the Bash call's `timeout` below the minimum (or unset
 — the 2-minute default), the guard prompts (`ask` by default; `slow.action`
 may escalate to `deny`) and names the exact fix.
 
+Patterns match at a **command position**: the command is split into simple
+commands the same way Class A splits it (heredoc bodies stripped, env
+prefixes and `nohup`/`time`/`timeout` wrappers peeled, `bash -c '...'` and
+`eval` bodies recursed into, `bash gate.sh` reduced to the script), and the
+pattern has to match starting inside a segment's command word. So registering
+a bare path — `"scripts/gate\\.sh": 3600000` — fires on `scripts/gate.sh`,
+`./scripts/gate.sh --all`, `CI=1 nohup scripts/gate.sh`, and
+`git fetch && bash scripts/gate.sh`, but not on `grep -n foo scripts/gate.sh`,
+`wc -l scripts/gate.sh`, or a `git commit -m` whose message quotes the path.
+To register an **argument** instead of a command, prefix the pattern with
+`.*` (`".*-race\\b"`) — that opts back into matching anywhere in a segment,
+still not across the whole command line.
+
 ## Exemptions
 
 These pass untouched, by design:
@@ -281,7 +294,7 @@ additively.
 | `poll.sleep_floor_seconds` | `10` | bare `sleep N` prompts at or above this |
 | `slow.enabled` | `true` | Class B on/off |
 | `slow.action` | `"ask"` | `"deny"` escalates Class B to a hard block (override-able) |
-| `slow.commands` | `{}` | regex (searched in the raw command) → minimum timeout ms |
+| `slow.commands` | `{}` | regex matched at a command position (prefix `.*` to match an argument) → minimum timeout ms |
 | `hint` | `""` | repo-specific line appended to Class A prompts, naming your own watcher machinery |
 
 Environment variables: `FOREGROUND_GUARD_DISABLE=1` turns the hook off for a
@@ -395,8 +408,9 @@ failure directions follow from the guard's job:
   seen (same policy as the sibling guards — no file inspection).
 - Watch modes reached through uncovered wrappers or aliases
   (`k logs -f ...`) need an `extra_watch_patterns` entry.
-- Class B matches the raw command text; a slow command constructed at
-  runtime (`make $TARGET`) won't match.
+- Class B matches the command text as written; a slow command constructed at
+  runtime (`make $TARGET`) won't match, and neither will one reached through
+  a wrapper the segmenter doesn't peel.
 - The guard cannot start a background task for you — it can only teach the
   fix and let the agent retry with `run_in_background: true`.
 
