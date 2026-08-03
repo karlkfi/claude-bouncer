@@ -102,6 +102,7 @@ different project's scratch still asks entirely.
 | `grep foo data.txt 2>&1`             | allow    |
 | `cat <<<"/etc/foo"` (here-string)    | allow    |
 | `cat > page.html <<'EOF'` … `</div>` … `EOF` (heredoc body) | allow |
+| `cat > doc.md <<'EOF'` … `$(cat /etc/x)` … `EOF` (literal body) | allow |
 | `cat ~/proj/notes.md` (root `~/proj`) | allow   |
 | `cd "$(git rev-parse --show-toplevel)" && cat README.md` | allow |
 | `cd "$(pwd)" && cat README.md`       | allow    |
@@ -125,6 +126,7 @@ different project's scratch still asks entirely.
 | `cat $HOME/.ssh/id_rsa`              | **ask**  |
 | `cd /etc && cat passwd`              | **ask**  |
 | `echo "$(cat /etc/passwd)"` (quoted subst read) | **ask** |
+| `cat > doc.md <<EOF` … `$(cat /etc/x)` … `EOF` (expanded body) | **ask** |
 | `LC_ALL=C cat /etc/passwd`           | **ask**  |
 | `until grep -q x /etc/passwd; do :; done` | **ask** |
 | `if cat /etc/passwd; then :; fi`     | **ask**  |
@@ -580,7 +582,8 @@ After upgrading either way:
    step-1 lexer (the metacharacters are inside quotes), so its file ops would be
    invisible. The hook scans the *raw* command for substitution bodies in
    unquoted or double-quoted context (single-quoted `'$(…)'` is a bash literal
-   and is skipped; `$((…))` arithmetic has no command) and runs each body back
+   and is skipped; `$((…))` arithmetic has no command; a quoted-delimiter
+   heredoc body is literal too and is dropped first) and runs each body back
    through steps 1–13. Only *offenders* bubble up: a clean guarded command inside
    a substitution never turns a deferring outer command into an `allow` — this
    step can only add friction. (The bare unquoted `$(…)` form was already caught,
@@ -780,9 +783,10 @@ final output.
   unterminated body swallows to the end of the command (matching bash). A `<<`
   inside quotes, inside a `#` comment, or produced by arithmetic (`$((x<<2))`,
   `((x<<2))`) is not a heredoc and never arms a delimiter. Command
-  substitutions *inside* a heredoc body are still analyzed even when a quoted
-  delimiter (`<<'EOF'`) would stop bash expanding them — a conservative extra
-  `ask`, never a missed one.
+  substitutions *inside* a heredoc body follow bash's own rule: a quoted
+  delimiter (`<<'EOF'`, `<<"EOF"`, `<<\EOF`, or any partly quoted word) makes
+  the body literal, so a `$(…)` there is documentation and is ignored; an
+  unquoted `<<EOF` body is expanded by bash and is still analyzed.
 - Literal variable propagation is deliberately narrow. Only standalone
   `NAME=value` / `export NAME=value` assignments whose value is a plain
   literal after quote removal (non-empty; no `$`, backticks, glob characters,
@@ -900,8 +904,10 @@ final output.
   relative paths against the command's starting cwd, not a cwd set by an earlier
   in-chain `cd` (`cd /x && echo "$(cat f)"` judges `f` against the start cwd); a
   body that itself contains a quoted operator character (`echo "$(grep ")" f)"`)
-  can mis-tokenize on re-parse and defer; and backtick nesting via `` \` `` or a
-  no-space `$((…))`-shaped subshell isn't decoded. Process substitution
+  can mis-tokenize on re-parse and defer; an odd quote in an *unquoted* heredoc
+  body — which the scan keeps, because bash expands it — mis-colors the quote
+  state and hides a substitution later in the command; and backtick nesting via
+  `` \` `` or a no-space `$((…))`-shaped subshell isn't decoded. Process substitution
   `<(…)`/`>(…)` is only ever unquoted and is already caught by the subshell
   split.
 - The sibling-checkout `deny` classifies *write-context* file arguments — the

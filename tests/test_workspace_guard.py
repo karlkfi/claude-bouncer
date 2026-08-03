@@ -3372,6 +3372,53 @@ class StripHeredocBodiesTests(unittest.TestCase):
             guard.strip_heredoc_bodies("grep PAT f.txt\ncat g.txt"),
             "grep PAT f.txt\ncat g.txt")
 
+    # --- quoted_only: keep the bodies bash expands (Q35) ---------------------
+
+    def test_quoted_only_drops_single_quoted_delimiter_body(self):
+        self.assertEqual(
+            guard.strip_heredoc_bodies("cat <<'EOF'\n$(id)\nEOF", quoted_only=True),
+            "cat <<'EOF'\n")
+
+    def test_quoted_only_drops_double_quoted_delimiter_body(self):
+        self.assertEqual(
+            guard.strip_heredoc_bodies('cat <<"EOF"\n$(id)\nEOF', quoted_only=True),
+            'cat <<"EOF"\n')
+
+    def test_quoted_only_drops_backslash_delimiter_body(self):
+        # `<<\EOF` is quoting too — bash leaves the body literal.
+        self.assertEqual(
+            guard.strip_heredoc_bodies("cat <<\\EOF\n$(id)\nEOF", quoted_only=True),
+            "cat <<\\EOF\n")
+
+    def test_quoted_only_keeps_unquoted_delimiter_body(self):
+        self.assertEqual(
+            guard.strip_heredoc_bodies("cat <<EOF\n$(id)\nEOF", quoted_only=True),
+            "cat <<EOF\n$(id)\nEOF")
+
+    def test_quoted_only_keeps_partially_quoted_delimiter_body(self):
+        # `<<E'O'F` — any quoting in the word makes the whole delimiter quoted.
+        self.assertEqual(
+            guard.strip_heredoc_bodies("cat <<E'O'F\n$(id)\nEOF", quoted_only=True),
+            "cat <<E'O'F\n")
+
+    def test_quoted_only_mixed_delimiters_keep_only_unquoted(self):
+        self.assertEqual(
+            guard.strip_heredoc_bodies(
+                "cat <<'A' <<B\naaa\nA\nbbb\nB", quoted_only=True),
+            "cat <<'A' <<B\nbbb\nB")
+
+    def test_quoted_only_command_after_kept_body_survives(self):
+        self.assertEqual(
+            guard.strip_heredoc_bodies(
+                "cat <<EOF\nbody\nEOF\ncat x", quoted_only=True),
+            "cat <<EOF\nbody\nEOF\ncat x")
+
+    def test_quoted_only_unterminated_kept_body(self):
+        self.assertEqual(
+            guard.strip_heredoc_bodies(
+                "cat <<EOF\nbody line\nno terminator", quoted_only=True),
+            "cat <<EOF\nbody line\nno terminator")
+
 
 class GlueDollarParenTests(unittest.TestCase):
     """`glue_dollar_paren` re-attaches `(` to a preceding `$` so `$(...)`
@@ -3697,6 +3744,38 @@ class Issue83HeredocEndToEndTests(unittest.TestCase):
     def test_multiple_heredocs_then_outside_read_ask(self):
         self._decision(
             "cat <<A <<B\naaa\nA\nbbb\nB\ncat /etc/q83-fake", "ask")
+
+    # --- `$(…)` in a body: expanded only under an unquoted delimiter (Q35) ---
+
+    def test_substitution_in_quoted_delimiter_body_allow(self):
+        # A quoted delimiter makes the body literal text, so the `$(…)` never
+        # runs — flagging its outside read was a spurious prompt.
+        self._decision(
+            "cat > doc.md <<'EOF'\nrun $(cat /etc/q35-fake) to see\nEOF", "allow")
+
+    def test_substitution_in_backslash_delimiter_body_allow(self):
+        self._decision(
+            "cat > doc.md <<\\EOF\nrun $(cat /etc/q35-fake)\nEOF", "allow")
+
+    def test_substitution_in_unquoted_delimiter_body_ask(self):
+        # No quoting: bash expands the body, so the read is real.
+        out = self._decision(
+            "cat > doc.md <<EOF\nrun $(cat /etc/q35-fake)\nEOF", "ask")
+        self.assertIn("/etc/q35-fake",
+                      out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_backtick_in_quoted_delimiter_body_allow(self):
+        self._decision(
+            "cat > doc.md <<'EOF'\nrun `cat /etc/q35-fake`\nEOF", "allow")
+
+    def test_substitution_on_quoted_heredoc_command_line_still_ask(self):
+        # Only the BODY is literal; the command line around it still expands.
+        self._decision(
+            "cat > \"$(cat /etc/q35-fake)\" <<'EOF'\nplain\nEOF", "ask")
+
+    def test_substitution_after_quoted_heredoc_still_ask(self):
+        self._decision(
+            "cat <<'EOF'\n$(true)\nEOF\necho $(cat /etc/q35-fake)", "ask")
 
 
 class OffenderDisplayTests(unittest.TestCase):

@@ -927,7 +927,7 @@ def _consume_heredoc_body(text, i, delim, strip_tabs):
     return n
 
 
-def strip_heredoc_bodies(cmd):
+def strip_heredoc_bodies(cmd, quoted_only=False):
     """Remove heredoc body text from the raw command string, before shlex.
 
     Bash slurps everything between the newline after a `<<WORD` / `<<-WORD`
@@ -953,6 +953,13 @@ def strip_heredoc_bodies(cmd):
     not a redirection, so they never arm a bogus delimiter. `<<<` here-strings
     are a distinct operator and never match. A `<<` with no delimiter word arms
     nothing; an unterminated body swallows to end-of-input, both matching bash.
+
+    With ``quoted_only``, only bodies whose delimiter carries a quote or a
+    backslash (`` <<'EOF' ``, `<<"EOF"`, `<<\\EOF`) are dropped; the rest are
+    copied verbatim. That is bash's own expansion rule — a quoted delimiter
+    makes the body literal, an unquoted one leaves `$(…)` live — so the
+    command-substitution scan in ``analyze_command`` sees exactly the bodies
+    bash would evaluate (Q35).
     """
     out = []
     i, n = 0, len(cmd)
@@ -1005,15 +1012,18 @@ def strip_heredoc_bodies(cmd):
             while i < n and cmd[i] in ' \t':      # optional space before delim
                 out.append(cmd[i]); i += 1
             delim_chars = []
+            quoted = False                        # any quoting -> literal body
             while i < n and cmd[i] not in ' \t\n;|&()<>':
                 d = cmd[i]
                 if d == "'":
+                    quoted = True
                     out.append(d); i += 1
                     while i < n and cmd[i] != "'":
                         delim_chars.append(cmd[i]); out.append(cmd[i]); i += 1
                     if i < n:
                         out.append(cmd[i]); i += 1
                 elif d == '"':
+                    quoted = True
                     out.append(d); i += 1
                     while i < n and cmd[i] != '"':
                         if cmd[i] == '\\' and i + 1 < n:
@@ -1024,20 +1034,24 @@ def strip_heredoc_bodies(cmd):
                     if i < n:
                         out.append(cmd[i]); i += 1
                 elif d == '\\' and i + 1 < n:
+                    quoted = True
                     delim_chars.append(cmd[i+1])
                     out.append(d); out.append(cmd[i+1]); i += 2
                 else:
                     delim_chars.append(d); out.append(d); i += 1
             delim = ''.join(delim_chars)
             if delim:
-                pending.append((delim, strip_tabs))
+                pending.append((delim, strip_tabs, quoted))
             last = 'x'
             continue
         if c == '\n':
             out.append('\n'); last = '\n'; i += 1
             while pending and i < n:
-                delim, strip_tabs = pending.pop(0)
-                i = _consume_heredoc_body(cmd, i, delim, strip_tabs)
+                delim, strip_tabs, quoted = pending.pop(0)
+                end = _consume_heredoc_body(cmd, i, delim, strip_tabs)
+                if quoted_only and not quoted:
+                    out.append(cmd[i:end]); last = cmd[end-1] if end > i else last
+                i = end
             continue
         out.append(c); last = c; i += 1
     return ''.join(out)
@@ -2589,8 +2603,13 @@ def analyze_command(cmd, ctx, base_cwd, depth=0):
     # ops would otherwise be invisible. Each body resolves against the same
     # `base_cwd`; only its OFFENDERS bubble up — its `guarded` is dropped, so a
     # clean substitution never produces an `allow`. (Q33)
+    #
+    # Quoted-delimiter heredoc bodies come out first: a `cat <<'EOF'` body is
+    # literal data to bash, so a `$(…)` written there never runs. An unquoted
+    # `<<EOF` body stays — bash does expand it. (Q35)
     if depth < MAX_SUBST_DEPTH:
-        for body in command_substitutions(cmd):
+        scan = strip_heredoc_bodies(cmd, quoted_only=True)
+        for body in command_substitutions(scan):
             sub_off, _ = analyze_command(body, ctx, base_cwd, depth + 1)
             outside.extend(sub_off)
     return outside, guarded
