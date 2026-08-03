@@ -4794,6 +4794,17 @@ class ForLoopBindingTests(unittest.TestCase):
             guard.for_loop_binding(["for", "f", "in"] + items, {"d": outer}),
             ("f", None))
 
+    def test_single_over_cap_item_poisons(self):
+        # One item can be over-cap on its own — `$a/$b` over two full outer
+        # loops is 65536 pairs. The answer was always poison; Q46 is what
+        # reaches it without materialising the 65536 first.
+        n = guard.MAX_LOOP_CANDIDATES
+        loopmap = {"a": ["x%d" % i for i in range(n)],
+                   "b": ["y%d" % i for i in range(n)]}
+        self.assertEqual(
+            guard.for_loop_binding(["for", "f", "in", "$a/$b"], loopmap),
+            ("f", None))
+
 
 class ExpandLoopCandidatesTests(unittest.TestCase):
     """Cross-product expansion of loop-variable file tokens (issue 70)."""
@@ -4826,6 +4837,19 @@ class ExpandLoopCandidatesTests(unittest.TestCase):
 
     def test_empty_map_unchanged(self):
         self.assertEqual(guard.expand_loop_candidates("$f", {}), ["$f"])
+
+    def test_at_cap_cross_product_expands(self):
+        n = guard.MAX_LOOP_CANDIDATES
+        loopmap = {"a": ["x%d" % i for i in range(n // 2)], "b": ["p", "q"]}
+        self.assertEqual(len(guard.expand_loop_candidates("$a/$b", loopmap)), n)
+
+    def test_over_cap_cross_product_returns_none(self):
+        # Q46: the product is known from the per-variable candidate counts, so
+        # an over-cap token is rejected without expanding anything. None is a
+        # poison — the caller keeps the runtime-expanded `ask`.
+        n = guard.MAX_LOOP_CANDIDATES
+        loopmap = {"a": ["x%d" % i for i in range(n)], "b": ["p", "q"]}
+        self.assertIsNone(guard.expand_loop_candidates("$a/$b", loopmap))
 
 
 class VarPropagationEndToEndTests(unittest.TestCase):
@@ -5175,6 +5199,50 @@ class ForLoopPropagationEndToEndTests(unittest.TestCase):
         self._decision(
             'for d in wf/*\ndo\n  for d in "$d"/*.yml\n  do\n    cat "$d"\n'
             '  done\ndone', "allow")
+
+    # --- the candidate cross product is bounded (Q46) ------------------------
+
+    def _cap_lists(self, *prefixes):
+        n = guard.MAX_LOOP_CANDIDATES
+        return tuple(" ".join("%s%d" % (p, i) for i in range(n))
+                     for p in prefixes)
+
+    def test_deep_cross_product_asks_without_hanging(self):
+        # Three nested loops over the cap's worth of literals each make
+        # `$a/$b/$c` stand for 16.7M paths. Enumerating them ran past two
+        # minutes, and a hook that never answers is a non-blocking error — the
+        # guard would enforce nothing at all. run_hook's timeout fails this on
+        # a hang rather than wedging the suite.
+        self._decision(
+            "for a in %s; do for b in %s; do for c in %s; do cat $a/$b/$c; "
+            "done; done; done" % self._cap_lists("a", "b", "c"), "ask")
+
+    def test_deep_cross_product_in_inner_list_asks(self):
+        # The same blowup one level up, where the over-cap product is a
+        # for-LIST item: the bound has to apply before the list is built, not
+        # only when a file arg is checked.
+        self._decision(
+            "for a in %s; do for b in %s; do for c in %s; do "
+            "for d in $a/$b/$c; do cat $d; done; done; done; done"
+            % self._cap_lists("a", "b", "c"), "ask")
+
+    def test_at_cap_cross_product_still_resolves_allow(self):
+        # The bound is on the product, not the nesting depth: a cap-sized outer
+        # list times a single inner candidate is exactly at the cap, so it
+        # still expands and an in-workspace read allows as before.
+        outer, = self._cap_lists("a")
+        self._decision(
+            "for a in %s; do for b in wf; do cat $b/$a; done; done" % outer,
+            "allow")
+
+    def test_over_cap_cross_product_poisons_rather_than_truncates(self):
+        # One candidate past the cap and the same in-workspace read prompts.
+        # Over-cap must poison: truncating to the first N candidates would
+        # check a prefix and silently allow whatever the rest resolved to.
+        outer, = self._cap_lists("a")
+        self._decision(
+            "for a in %s; do for b in wf sub; do cat $b/$a; done; done" % outer,
+            "ask")
 
     # --- uncertainty keeps today's ask ---------------------------------------
 

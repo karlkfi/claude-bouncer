@@ -437,9 +437,12 @@ After upgrading either way:
    visits, and each pair keeps the segment structure of every path it expands
    to, so the same reasoning applies at any nesting depth. An outside outer
    candidate carries into every inner candidate built from it and prompts,
-   naming the resolved path. A variable is poisoned rather than bound when its
-   candidate set would exceed 256 values, which bounds the work as depth
-   multiplies.
+   naming the resolved path. Two limits keep the work bounded as depth
+   multiplies: a variable is poisoned rather than bound when its candidate set
+   would exceed 256 values, and a file argument naming several loop variables
+   keeps its runtime-expanded prompt when their cross product would. Both
+   poison rather than truncate — a checked prefix would say nothing about the
+   candidates past it.
 
    Lists with a non-literal item (a `$` the hook can't resolve, command
    substitution, or brace like `{a,b}` — brace-expanded by bash, so the literal
@@ -816,7 +819,13 @@ final output.
 - A nested loop's list may be built from the outer loop's variable
   (`for d in docs/*; do for f in "$d"/*.md`), and the inner variable binds the
   cross product. A candidate set larger than 256 values poisons the variable
-  instead, so a loop over very long literal lists keeps today's prompt.
+  instead, so a loop over very long literal lists keeps today's prompt. The
+  same 256 cap applies to a file argument that names several loop variables at
+  once: under three nested loops of 256 literals, `cat $a/$b/$c` stands for
+  16.7 million paths, so it keeps the runtime-expanded prompt rather than being
+  enumerated. Enumerating it ran the hook past two minutes — and because Claude
+  Code treats a failed `PreToolUse` hook as a non-blocking error, a guard that
+  never answers enforces nothing at all.
 - `realpath` only follows symlinks for files that already exist; nonexistent
   paths are normalized lexically (fine for read-style commands).
 - Redirect targets (`> file`) are inspected on *every* command, guarded or not —

@@ -1043,10 +1043,15 @@ def glue_dollar_paren(tokens):
 # silent allow.
 MAX_SUBST_DEPTH = 25
 
-# Maximum candidate values a single loop variable may be bound to. A nested
-# `for` binds the cross product of its own list with every enclosing loop's
-# candidates, so depth multiplies; this bounds the work at each level. An
-# over-cap list poisons the variable, which is the existing `ask`.
+# Maximum candidates the loop-variable expansion will ever materialise — both
+# the values a single loop variable may be bound to and the cross product a
+# token using several of them stands for. A token naming k loop variables
+# expands to the product of their candidate counts, so three nested `for`s over
+# 256 literals each make `cat $a/$b/$c` 16.7M paths to realpath: the hook ran
+# past two minutes, and a hook that doesn't answer is a non-blocking error, so
+# the guard enforces nothing at all. Over-cap POISONS (the variable drops, the
+# token stays runtime-expanded -> `ask`); it never truncates, which would check
+# a prefix of the candidates and silently allow the rest.
 MAX_LOOP_CANDIDATES = 256
 
 
@@ -1271,8 +1276,9 @@ def for_loop_binding(g, loopmap):
         every value (issue 70), a glob standing for its whole expansion
         (issue 99).
       * ``(name, None)`` — a `for NAME in` whose list has any non-literal or
-        brace item, an empty list, or a `for NAME` with no `in` (iterates
-        ``"$@"``): the caller drops NAME from the maps, keeping today's poison.
+        brace item, an empty list, a list over MAX_LOOP_CANDIDATES values, or a
+        `for NAME` with no `in` (iterates ``"$@"``): the caller drops NAME from
+        the maps, keeping today's poison.
       * ``None`` — not a `for NAME in` header at all (the `for ((…))` arithmetic
         form tokenizes with ``(`` at ``g[1]``), so the caller's existing
         ``poison_vars`` path runs unchanged.
@@ -1290,6 +1296,10 @@ def for_loop_binding(g, loopmap):
     every path it expands to. Expanding before the caller rebinds ``name``
     reads the outer value, which is what bash expands the list with even when
     the inner loop reuses the name.
+
+    The value count is capped incrementally, per item as well as in total, so a
+    list that would blow past MAX_LOOP_CANDIDATES stops being expanded at the
+    cap rather than after materialising the whole cross product (Q46).
     """
     if len(g) < 2 or os.path.basename(g[0]) != 'for':
         return None
@@ -1303,13 +1313,16 @@ def for_loop_binding(g, loopmap):
         return (name, None)                       # empty list -> body never runs
     values = []
     for it in items:
-        for cand in expand_loop_candidates(it, loopmap):
+        cands = expand_loop_candidates(it, loopmap)
+        if cands is None:
+            return (name, None)                   # over-cap item -> poison
+        for cand in cands:
             val = literal_for_item(cand)
             if val is None:
                 return (name, None)               # non-literal item -> poison
             values.append(val)
-    if len(values) > MAX_LOOP_CANDIDATES:
-        return (name, None)
+            if len(values) > MAX_LOOP_CANDIDATES:
+                return (name, None)               # over-cap list -> poison
     return (name, values)
 
 
@@ -1331,6 +1344,13 @@ def expand_loop_candidates(tok, loopmap):
     backtick the hook won't evaluate). Several distinct loop variables in one
     token expand as the cross product; order is deterministic (variable order,
     then candidate order) so reasons and tests stay stable.
+
+    Returns None when that cross product would exceed MAX_LOOP_CANDIDATES — its
+    size is the product of the per-variable candidate counts, so it is known
+    before any expansion happens and the work is never done (Q46). Callers treat
+    None as a poison: the token keeps the runtime-expanded ``ask`` it had before
+    loop propagation existed. It is deliberately not a truncation to the first N
+    candidates, which would check a prefix and silently allow the rest.
     """
     if not loopmap or '$' not in tok or '`' in tok:
         return [tok]
@@ -1341,6 +1361,11 @@ def expand_loop_candidates(tok, loopmap):
             names.append(nm)
     if not names:
         return [tok]
+    total = 1
+    for nm in names:
+        total *= len(loopmap[nm])
+        if total > MAX_LOOP_CANDIDATES:
+            return None
     results = [tok]
     for nm in names:
         expanded = []
@@ -2303,8 +2328,14 @@ def analyze_command(cmd, ctx, base_cwd, depth=0):
         concrete path per candidate (issue 70); every candidate is checked and
         the first that lands outside is returned (naming that resolved
         candidate, not the `$VAR` token). Tokens with no loop variable are a
-        single candidate — the original single-path check."""
-        for cand in expand_loop_candidates(f, loopmap):
+        single candidate — the original single-path check. A token whose
+        candidate set is over the cap is reported as 'expand' — it IS a
+        runtime-expanded token, and enumerating it is what hung the hook (Q46).
+        """
+        cands = expand_loop_candidates(f, loopmap)
+        if cands is None:
+            return (f, 'expand', None)
+        for cand in cands:
             kind, rp = resolve_token(cand, group_cwd, group_cwd_unknown)
             if kind == 'skip':
                 continue
