@@ -5675,6 +5675,55 @@ class CIWiringTests(unittest.TestCase):
             "the Windows job must run the suite through skip-ceiling.py",
         )
 
+    def test_windows_suite_also_runs_under_git_bash(self):
+        # Q44: the hook process and the shell it parses for are different
+        # processes with different environments. run-python-hook.cmd gives the
+        # hook a cmd.exe environment (what the default-shell job covers), while
+        # the commands it reads were written for Git Bash. Dropping the Git Bash
+        # job leaves every environment-reading helper verified in one of the two
+        # Windows environments it has to be right in.
+        workflow = (REPO / ".github" / "workflows" / "tests.yml").read_text()
+        self.assertRegex(
+            workflow, r"skip-ceiling\.py --max-skips \d+\n\s+shell: bash",
+            "a Windows job must run the suite under Git Bash (shell: bash)",
+        )
+
+
+class MsysEnvironmentTests(unittest.TestCase):
+    """Q44: what the guard reads from the environment under Git Bash.
+
+    MSYS rewrites path-shaped variables on the way into a native binary: the
+    shell holds `HOME=/c/Users/x` and `TMP=/tmp`, and the Python it launches
+    sees `C:\\Users\\x` and the real temp directory. Every path the guard
+    derives from the environment rides on that conversion, and a leading-slash
+    path is not absolute under ntpath -- so if it ever stopped, `resolved_home`
+    would return None (no tilde expansion, Q43 undone) and the real temp
+    directory would drop out of the host-temp roots, both silently.
+
+    These assert the conversion, not the guard's parsing, and only mean
+    anything in the environment that performs it.
+    """
+
+    def setUp(self):
+        if os.name != "nt" or not os.environ.get("MSYSTEM"):
+            self.skipTest("not running under MSYS/Git Bash on Windows")
+
+    def test_home_arrives_in_native_form(self):
+        self.assertIsNotNone(
+            guard.resolved_home(),
+            "resolved_home() is None under Git Bash: $HOME reached Python in "
+            "MSYS form, which ntpath does not consider absolute",
+        )
+
+    def test_platform_temp_dir_is_a_host_temp_root(self):
+        # tempfile.gettempdir() reads %TMP%, which is `/tmp` in the shell. In
+        # MSYS form it resolves to <drive>\tmp -- a directory that does not
+        # exist -- and the real temp dir stops being a host-temp root at all,
+        # downgrading its `deny` tier to a plain `ask`.
+        real_temp = os.path.realpath(tempfile.gettempdir())
+        self.assertTrue(os.path.isabs(real_temp))
+        self.assertIn(real_temp, guard.host_temp_roots(os.getcwd()))
+
 
 class NativeToolTests(unittest.TestCase):
     """Q29: the native Read/Grep/Glob (read) and Edit/Write (write) tools get the

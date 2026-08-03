@@ -926,6 +926,22 @@ final output.
   (fail-safe: the deny is never applied on uncertainty, so the boundary is never
   weakened). A main-checkout session is a deliberate no-op even when worktrees
   exist.
+- **On native Windows the guard only sees the Bash tool.** Claude Code provides
+  that tool by way of Git Bash, which comes from Git for Windows — and Git for
+  Windows is optional. Without it, Claude Code runs shell commands through its
+  PowerShell tool instead, which this plugin does not hook, so nothing is
+  checked. The native file tools (`Read`, `Grep`, `Glob`, `Edit`, `Write`) are
+  still guarded either way. Install Git for Windows to get shell coverage.
+- **Git Bash path forms are read as plain Windows paths.** A command naming
+  `/tmp/x`, `/c/Users/…`, or `/etc/passwd` means one thing to Git Bash's mount
+  table and another to Windows path resolution, where a leading slash is
+  relative to the current drive. The guard uses the latter, so it prompts about
+  `D:\c\Users\…` where the command will actually read `C:\Users\…`. The
+  workspace boundary itself still holds — such a path can only ever resolve to a
+  drive root, never into the project — so the effect is an extra prompt naming
+  the wrong path, not a missed one. Configuration written in the same form
+  (`WORKSPACE_GUARD_READ_ALLOW_PREFIXES=/c/Users/me/shared`) matches nothing;
+  write those entries as `C:\Users\me\shared`.
 
 ## Companion plugin: branch-guard
 
