@@ -3540,52 +3540,57 @@ class StripHeredocBodiesTests(unittest.TestCase):
             guard.strip_heredoc_bodies("grep PAT f.txt\ncat g.txt"),
             "grep PAT f.txt\ncat g.txt")
 
-    # --- quoted_only: keep the bodies bash expands (Q35) ---------------------
+    # --- expanded: hand back the bodies bash expands (Q35, Q50) --------------
 
-    def test_quoted_only_drops_single_quoted_delimiter_body(self):
+    def collect(self, cmd):
+        """(stripped command, bodies bash would expand) for `cmd`."""
+        expanded = []
+        return guard.strip_heredoc_bodies(cmd, expanded=expanded), expanded
+
+    def test_expanded_skips_single_quoted_delimiter_body(self):
         self.assertEqual(
-            guard.strip_heredoc_bodies("cat <<'EOF'\n$(id)\nEOF", quoted_only=True),
-            "cat <<'EOF'\n")
+            self.collect("cat <<'EOF'\n$(id)\nEOF"), ("cat <<'EOF'\n", []))
 
-    def test_quoted_only_drops_double_quoted_delimiter_body(self):
+    def test_expanded_skips_double_quoted_delimiter_body(self):
         self.assertEqual(
-            guard.strip_heredoc_bodies('cat <<"EOF"\n$(id)\nEOF', quoted_only=True),
-            'cat <<"EOF"\n')
+            self.collect('cat <<"EOF"\n$(id)\nEOF'), ('cat <<"EOF"\n', []))
 
-    def test_quoted_only_drops_backslash_delimiter_body(self):
+    def test_expanded_skips_backslash_delimiter_body(self):
         # `<<\EOF` is quoting too — bash leaves the body literal.
         self.assertEqual(
-            guard.strip_heredoc_bodies("cat <<\\EOF\n$(id)\nEOF", quoted_only=True),
-            "cat <<\\EOF\n")
+            self.collect("cat <<\\EOF\n$(id)\nEOF"), ("cat <<\\EOF\n", []))
 
-    def test_quoted_only_keeps_unquoted_delimiter_body(self):
+    def test_expanded_collects_unquoted_delimiter_body(self):
         self.assertEqual(
-            guard.strip_heredoc_bodies("cat <<EOF\n$(id)\nEOF", quoted_only=True),
-            "cat <<EOF\n$(id)\nEOF")
+            self.collect("cat <<EOF\n$(id)\nEOF"),
+            ("cat <<EOF\n", ["$(id)\nEOF"]))
 
-    def test_quoted_only_keeps_partially_quoted_delimiter_body(self):
+    def test_expanded_skips_partially_quoted_delimiter_body(self):
         # `<<E'O'F` — any quoting in the word makes the whole delimiter quoted.
         self.assertEqual(
-            guard.strip_heredoc_bodies("cat <<E'O'F\n$(id)\nEOF", quoted_only=True),
-            "cat <<E'O'F\n")
+            self.collect("cat <<E'O'F\n$(id)\nEOF"), ("cat <<E'O'F\n", []))
 
-    def test_quoted_only_mixed_delimiters_keep_only_unquoted(self):
+    def test_expanded_mixed_delimiters_collect_only_unquoted(self):
         self.assertEqual(
-            guard.strip_heredoc_bodies(
-                "cat <<'A' <<B\naaa\nA\nbbb\nB", quoted_only=True),
-            "cat <<'A' <<B\nbbb\nB")
+            self.collect("cat <<'A' <<B\naaa\nA\nbbb\nB"),
+            ("cat <<'A' <<B\n", ["bbb\nB"]))
 
-    def test_quoted_only_command_after_kept_body_survives(self):
+    def test_expanded_command_after_collected_body_survives(self):
         self.assertEqual(
-            guard.strip_heredoc_bodies(
-                "cat <<EOF\nbody\nEOF\ncat x", quoted_only=True),
-            "cat <<EOF\nbody\nEOF\ncat x")
+            self.collect("cat <<EOF\nbody\nEOF\ncat x"),
+            ("cat <<EOF\ncat x", ["body\nEOF\n"]))
 
-    def test_quoted_only_unterminated_kept_body(self):
+    def test_expanded_unterminated_body(self):
         self.assertEqual(
-            guard.strip_heredoc_bodies(
-                "cat <<EOF\nbody line\nno terminator", quoted_only=True),
-            "cat <<EOF\nbody line\nno terminator")
+            self.collect("cat <<EOF\nbody line\nno terminator"),
+            ("cat <<EOF\n", ["body line\nno terminator"]))
+
+    def test_expanded_omitted_still_strips(self):
+        # Q50: the body never stays in the returned string, so an odd quote in
+        # it cannot color the scan of what follows.
+        self.assertEqual(
+            guard.strip_heredoc_bodies("cat <<EOF\ndon't\nEOF\ncat x"),
+            "cat <<EOF\ncat x")
 
 
 class GlueDollarParenTests(unittest.TestCase):
@@ -3669,6 +3674,35 @@ class CommandSubstitutionsTests(unittest.TestCase):
 
     def test_no_substitution(self):
         self.assertEqual(guard.command_substitutions("cat foo bar"), [])
+
+    # --- quotes=False: how bash reads a heredoc body (Q50) -------------------
+
+    def test_quotes_off_apostrophe_does_not_hide_substitution(self):
+        self.assertEqual(
+            guard.command_substitutions("don't $(cat f)", quotes=False),
+            ["cat f"])
+
+    def test_quotes_off_single_quoted_substitution_is_live(self):
+        self.assertEqual(
+            guard.command_substitutions("'$(cat f)'", quotes=False), ["cat f"])
+
+    def test_quotes_off_odd_double_quote_does_not_hide_substitution(self):
+        self.assertEqual(
+            guard.command_substitutions('say "hi $(cat f)', quotes=False),
+            ["cat f"])
+
+    def test_quotes_off_backslash_still_escapes(self):
+        self.assertEqual(
+            guard.command_substitutions(r"don't \$(cat f)", quotes=False), [])
+
+    def test_quotes_off_backtick_still_found(self):
+        self.assertEqual(
+            guard.command_substitutions("don't `cat f`", quotes=False),
+            ["cat f"])
+
+    def test_quotes_off_arithmetic_still_skipped(self):
+        self.assertEqual(
+            guard.command_substitutions("don't $((1 + 2))", quotes=False), [])
 
 
 class QuotedSubstBodyEndToEndTests(unittest.TestCase):
@@ -3944,6 +3978,35 @@ class Issue83HeredocEndToEndTests(unittest.TestCase):
     def test_substitution_after_quoted_heredoc_still_ask(self):
         self._decision(
             "cat <<'EOF'\n$(true)\nEOF\necho $(cat /etc/q35-fake)", "ask")
+
+    # --- an odd quote in an expanded body colors nothing (Q50) --------------
+
+    def test_apostrophe_before_substitution_in_body_ask(self):
+        # A heredoc body carries no quoting, so the `'` in `don't` is text. Read
+        # inline it opened a quoted run that swallowed the live `$(…)` after it.
+        out = self._decision(
+            "cat > doc.md <<EOF\ndon't run $(cat /etc/q50-fake)\nEOF", "ask")
+        self.assertIn("/etc/q50-fake",
+                      out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_apostrophe_in_body_then_substitution_on_later_line_ask(self):
+        # The body's odd quote must not reach the command line that follows it.
+        self._decision(
+            "cat <<EOF\ndon't\nEOF\necho $(cat /etc/q50-fake)", "ask")
+
+    def test_odd_double_quote_before_substitution_in_body_ask(self):
+        self._decision(
+            'cat <<EOF\nsay "hi\n$(cat /etc/q50-fake)\nEOF', "ask")
+
+    def test_apostrophe_before_backtick_in_body_ask(self):
+        self._decision(
+            "cat <<EOF\ndon't\n`cat /etc/q50-fake`\nEOF", "ask")
+
+    def test_escaped_substitution_in_body_after_apostrophe_allow(self):
+        # `\$(` is quoted even in a body — bash writes it literally, so the
+        # quote-inert scan must still honour the backslash.
+        self._decision(
+            "cat > doc.md <<EOF\ndon't run \\$(cat /etc/q50-fake)\nEOF", "allow")
 
 
 class OffenderDisplayTests(unittest.TestCase):

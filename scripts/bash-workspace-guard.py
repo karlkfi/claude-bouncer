@@ -1056,7 +1056,7 @@ def _consume_heredoc_body(text, i, delim, strip_tabs):
     return n
 
 
-def strip_heredoc_bodies(cmd, quoted_only=False):
+def strip_heredoc_bodies(cmd, expanded=None):
     """Remove heredoc body text from the raw command string, before shlex.
 
     Bash slurps everything between the newline after a `<<WORD` / `<<-WORD`
@@ -1083,12 +1083,16 @@ def strip_heredoc_bodies(cmd, quoted_only=False):
     are a distinct operator and never match. A `<<` with no delimiter word arms
     nothing; an unterminated body swallows to end-of-input, both matching bash.
 
-    With ``quoted_only``, only bodies whose delimiter carries a quote or a
-    backslash (`` <<'EOF' ``, `<<"EOF"`, `<<\\EOF`) are dropped; the rest are
-    copied verbatim. That is bash's own expansion rule — a quoted delimiter
-    makes the body literal, an unquoted one leaves `$(…)` live — so the
-    command-substitution scan in ``analyze_command`` sees exactly the bodies
-    bash would evaluate (Q35).
+    Every body is dropped either way; pass a list as ``expanded`` to also
+    collect, in order, the raw text of the ones whose delimiter carries no
+    quote and no backslash (`` <<EOF ``, not `` <<'EOF' ``). That is bash's own
+    expansion rule — a quoted delimiter makes the body literal, an unquoted one
+    leaves `$(…)` live — so the command-substitution scan in ``analyze_command``
+    sees exactly the bodies bash would evaluate (Q35). They come back separately
+    rather than left in the returned string because a body is data, not syntax:
+    inline, the apostrophe in a `don't` would open a quote for the rest of the
+    scan and hide a live `$(…)` after it, in that body or on a later command
+    line (Q50).
     """
     out = []
     i, n = 0, len(cmd)
@@ -1178,8 +1182,8 @@ def strip_heredoc_bodies(cmd, quoted_only=False):
             while pending and i < n:
                 delim, strip_tabs, quoted = pending.pop(0)
                 end = _consume_heredoc_body(cmd, i, delim, strip_tabs)
-                if quoted_only and not quoted:
-                    out.append(cmd[i:end]); last = cmd[end-1] if end > i else last
+                if expanded is not None and not quoted:
+                    expanded.append(cmd[i:end])
                 i = end
             continue
         out.append(c); last = c; i += 1
@@ -1313,7 +1317,7 @@ def _scan_backticks(text, start):
     return (None, start)
 
 
-def command_substitutions(text):
+def command_substitutions(text, quotes=True):
     """Extract the command-substitution bodies bash would evaluate in ``text``.
 
     Returns the inner command string of each ``$(…)`` and backtick ``` `…` ```
@@ -1329,6 +1333,13 @@ def command_substitutions(text):
     caller recurses). A substitution with no balanced terminator before
     end-of-input contributes nothing (fail-safe: a possible missed offender,
     never a fabricated one).
+
+    With ``quotes=False`` a ``'`` or ``"`` is ordinary text and every
+    substitution is live. That is how bash reads an unquoted heredoc body —
+    quoting does not apply inside one — so the apostrophe in a `don't` must not
+    switch the scanner off for the rest of the body (Q50). Backslash still
+    escapes the next character, matching the body's own rule that a backslash
+    quotes a following `$`, backtick, backslash, or newline.
     """
     bodies = []
     i, n = 0, len(text)
@@ -1343,11 +1354,11 @@ def command_substitutions(text):
         if c == '\\':                              # escapes next char (not in '')
             i += 2
             continue
-        if c == "'" and not in_double:
+        if quotes and c == "'" and not in_double:
             in_single = True
             i += 1
             continue
-        if c == '"':
+        if quotes and c == '"':
             in_double = not in_double
             i += 1
             continue
@@ -2740,12 +2751,18 @@ def analyze_command(cmd, ctx, base_cwd, depth=0):
     # `base_cwd`; only its OFFENDERS bubble up — its `guarded` is dropped, so a
     # clean substitution never produces an `allow`. (Q33)
     #
-    # Quoted-delimiter heredoc bodies come out first: a `cat <<'EOF'` body is
-    # literal data to bash, so a `$(…)` written there never runs. An unquoted
-    # `<<EOF` body stays — bash does expand it. (Q35)
+    # Heredoc bodies come out of the command line first: a `cat <<'EOF'` body is
+    # literal data to bash, so a `$(…)` written there never runs, while a
+    # `<<EOF` body is expanded and does need scanning (Q35). The expanded ones
+    # are scanned as their own units, with `quotes=False` — inside a heredoc
+    # body bash applies no quoting, so an apostrophe there is text, not the
+    # start of a quoted run that would swallow a later `$(…)`. (Q50)
     if depth < MAX_SUBST_DEPTH:
-        scan = strip_heredoc_bodies(cmd, quoted_only=True)
-        for body in command_substitutions(scan):
+        heredocs = []
+        subs = command_substitutions(strip_heredoc_bodies(cmd, expanded=heredocs))
+        for hd in heredocs:
+            subs.extend(command_substitutions(hd, quotes=False))
+        for body in subs:
             sub_off, _ = analyze_command(body, ctx, base_cwd, depth + 1)
             outside.extend(sub_off)
     return outside, guarded
