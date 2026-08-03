@@ -289,6 +289,108 @@ class ParsingTests(unittest.TestCase):
                          ["delete", "pod", "x"])
 
 
+class HeredocTests(unittest.TestCase):
+    """A heredoc with a quoted delimiter is literal — the shell expands
+    nothing and runs nothing from the body — so the body must not be scanned
+    for commands (issue #28). Everything else keeps its current treatment."""
+
+    def strip(self, raw):
+        return guard.strip_quoted_heredocs(raw)
+
+    def test_quoted_delimiter_drops_body(self):
+        for opener in ("<<'EOF'", '<<"EOF"', "<<\\EOF"):
+            with self.subTest(opener=opener):
+                self.assertEqual(
+                    self.strip("git commit -F - %s\nkubectl delete ns x\nEOF"
+                               % opener),
+                    "git commit -F - %s\nEOF" % opener)
+
+    def test_unquoted_delimiter_keeps_body(self):
+        # <<EOF genuinely expands, so the body stays under inspection.
+        raw = "cat <<EOF\nkubectl delete ns x\nEOF"
+        self.assertEqual(self.strip(raw), raw)
+
+    def test_tab_stripped_form(self):
+        self.assertEqual(
+            self.strip("cat <<-'EOF'\n\tkubectl delete ns x\n\tEOF"),
+            "cat <<-'EOF'\n\tEOF")
+
+    def test_missing_terminator_keeps_everything(self):
+        # Unterminated: we may have misparsed, so strip nothing.
+        raw = "cat <<'EOF'\nkubectl delete ns x"
+        self.assertEqual(self.strip(raw), raw)
+
+    def test_here_string_is_not_a_heredoc(self):
+        raw = "cat <<< 'text'\nkubectl delete ns x"
+        self.assertEqual(self.strip(raw), raw)
+
+    def test_operator_inside_quotes_is_text(self):
+        # `<<` inside a quoted word is not a redirection.
+        raw = "echo \"see <<'EOF' below\"\nkubectl delete ns x\nEOF"
+        self.assertEqual(self.strip(raw), raw)
+
+    def test_left_shift_is_not_a_heredoc(self):
+        raw = "x=$((1<<2)); kubectl delete ns x"
+        self.assertEqual(self.strip(raw), raw)
+
+    def test_multiple_heredocs_on_one_line(self):
+        # Bodies arrive in opener order; only the quoted one is dropped.
+        self.assertEqual(
+            self.strip("cmd <<'A' <<B\nkubectl delete ns a\nA\n"
+                       "kubectl delete ns b\nB"),
+            "cmd <<'A' <<B\nA\nkubectl delete ns b\nB")
+
+    def test_commands_after_the_body_still_parse(self):
+        tokens = guard.tokenize("cat <<'EOF'\nnoise\nEOF\nkubectl delete ns x")
+        self.assertIn(["kubectl", "delete", "ns", "x"],
+                      guard.split_simple_commands(tokens))
+
+
+class HeredocDecisionTests(unittest.TestCase):
+    """End-to-end: the repros from issue #28."""
+
+    def test_backticked_command_in_commit_message_defers(self):
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        decision, _ = run_hook(
+            "git commit --dry-run -F - <<'EOF'\ntest: probe\n\n"
+            "body mentions `helm uninstall` in backticks\nEOF", home=home)
+        self.assertIsNone(decision)
+
+    def test_command_shaped_line_in_commit_message_defers(self):
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        decision, _ = run_hook(
+            "git commit -F - <<'EOF'\ndocs: pin the chart version\n\n"
+            "    kubectl apply -f https://example.invalid/crd.yaml\nEOF",
+            home=home)
+        self.assertIsNone(decision)
+
+    def test_python_heredoc_body_defers(self):
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        decision, _ = run_hook(
+            "python3 - <<'PY'\nprint('run kubectl delete ns payments')\nPY",
+            home=home)
+        self.assertIsNone(decision)
+
+    def test_unquoted_heredoc_body_still_judged(self):
+        # <<EOF expands, so a command in the body is still evaluated.
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        decision, _ = run_hook(
+            "cat <<EOF\n$(kubectl delete ns payments)\nEOF", home=home)
+        self.assertEqual(decision, "deny")
+
+    def test_command_after_a_heredoc_still_judged(self):
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        decision, _ = run_hook(
+            "cat <<'EOF'\nnoise\nEOF\nkubectl delete ns payments", home=home)
+        self.assertEqual(decision, "deny")
+
+    def test_unterminated_heredoc_still_judged(self):
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        decision, _ = run_hook(
+            "cat <<'EOF'\nkubectl delete ns payments", home=home)
+        self.assertEqual(decision, "deny")
+
+
 class ExpandVarsTests(unittest.TestCase):
     """Unit tests for the conservative $VAR / ${VAR} expander (Q11)."""
 
