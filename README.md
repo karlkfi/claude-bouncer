@@ -497,7 +497,13 @@ python3 scripts/friction-report.py --since 30d --repo gateway --top 20
   to force that choice before the command can run.
 - Command parsing is intentionally conservative: an operator inside a quoted
   string can split a segment and produce a spurious prompt (never a missed
-  one). Heredoc bodies mentioning covered tools may likewise prompt.
+  one). Heredoc bodies are the one exception, and only when the delimiter is
+  **quoted** (`<<'EOF'`, `<<"EOF"`, `<<\EOF`): the shell expands nothing and
+  runs nothing from such a body, so it is skipped — which is what lets a
+  commit message or doc edit quote `helm upgrade` without being blocked. The
+  skip needs the closing delimiter to actually appear; an unterminated
+  heredoc, and any unquoted `<<EOF` (which does expand), keep their bodies
+  under inspection.
 - Variable expansion covers simple `$VAR`/`${VAR}` references only. A target
   assembled with a `${VAR:-default}` operator, command substitution
   (`--context $(kubectl config current-context)`), or an indirection is left

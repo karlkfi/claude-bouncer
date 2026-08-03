@@ -265,6 +265,103 @@ SHELL_NAMES = frozenset({'bash', 'sh', 'zsh', 'dash', 'ksh'})
 PLAIN_WRAPPERS = frozenset({'command', 'nohup', 'time', 'builtin', 'exec'})
 
 
+def heredoc_openers(line):
+    """Heredoc delimiters opened on one line, in the order the bodies follow:
+    a list of (delimiter, quoted, strip_tabs). Only `<<` outside quotes counts
+    — inside quotes it is ordinary text — and `<<<` is a here-string, not a
+    heredoc. `quoted` is true when the delimiter word carried any quoting
+    (`<<'EOF'`, `<<"EOF"`, `<<\\EOF`), which is what makes the body literal."""
+    out = []
+    i, n = 0, len(line)
+    quote = None
+    while i < n:
+        c = line[i]
+        if quote is not None:
+            if c == '\\' and quote == '"' and i + 1 < n:
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c == '\\':
+            i += 2
+            continue
+        if c in '\'"':
+            quote = c
+            i += 1
+            continue
+        if not line.startswith('<<', i) or line.startswith('<<<', i):
+            i += 1
+            continue
+        i += 2
+        strip_tabs = i < n and line[i] == '-'
+        if strip_tabs:
+            i += 1
+        while i < n and line[i] in ' \t':
+            i += 1
+        word, quoted = [], False
+        while i < n:
+            c = line[i]
+            if c == '\\' and i + 1 < n:
+                quoted = True
+                word.append(line[i + 1])
+                i += 2
+            elif c in '\'"':
+                quoted = True
+                q, i = c, i + 1
+                while i < n and line[i] != q:
+                    word.append(line[i])
+                    i += 1
+                i += 1
+            elif c in ' \t<>|&;()':
+                break
+            else:
+                word.append(c)
+                i += 1
+        if word:
+            out.append((''.join(word), quoted, strip_tabs))
+    return out
+
+
+def strip_quoted_heredocs(raw):
+    """Drop the bodies of heredocs whose delimiter is quoted (`<<'EOF'`).
+
+    The shell performs no expansion and runs nothing from such a body — it is
+    literal text handed to the command's stdin — so scanning it for commands
+    only ever produces false positives. Prose that quotes a command (a commit
+    message, a doc edit, a `python3 - <<'PY'` script) is the common case.
+
+    This is the one place that removes segments from inspection, so it stays
+    tight: only a quoted delimiter strips anything, the closing delimiter must
+    actually appear (an unterminated heredoc leaves the text in place), and a
+    body is never scanned for further heredoc openers. Unquoted `<<EOF` does
+    expand and keeps its current treatment."""
+    if '<<' not in raw:
+        return raw
+    lines = raw.split('\n')
+    out = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        out.append(line)
+        i += 1
+        for delim, quoted, strip_tabs in heredoc_openers(line):
+            j = i
+            while j < len(lines):
+                probe = lines[j].lstrip('\t') if strip_tabs else lines[j]
+                if probe == delim:
+                    break
+                j += 1
+            if j == len(lines):
+                break  # no terminator: not a heredoc we understand, keep it all
+            if not quoted:
+                out.extend(lines[i:j])
+            out.append(lines[j])
+            i = j + 1
+    return '\n'.join(out)
+
+
 def tokenize(raw):
     """shlex-tokenize with POSIX quoting and punctuation grouping. Backticks
     and newlines are rewritten to `;` first: a backtick-substituted command
@@ -274,6 +371,7 @@ def tokenize(raw):
     punctuation chars and act as separators). Rewriting inside quotes only
     ever creates extra segments to inspect, never hides one. Returns None on
     unbalanced quotes (caller defers: fail-open on parse errors)."""
+    raw = strip_quoted_heredocs(raw)
     raw = raw.replace('`', ';').replace('\n', ';')
     lex = shlex.shlex(raw, posix=True, punctuation_chars=';()<>|&\n')
     lex.whitespace_split = True

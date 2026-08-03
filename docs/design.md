@@ -186,6 +186,19 @@ The expansion is safe because it can only ever make classification *more specifi
 
 The one subtlety is scope. A bare `P=x` (or same-shell) assignment is a shell variable, not exported; a child process — the body of `bash -c '…'` / `eval` — sees only *exported* variables. So the guard tracks two scopes: same-shell expansion resolves the full set (bare + exported + inline), while a nested `sh -c` body is expanded only against what the invoking segment exports. Getting this wrong in the lenient direction would be a real false negative — a bare var leaking into a child body could turn a genuinely-unpinned mutation into a false defer — which is exactly the failure mode this guard exists to prevent, so the nested body deliberately under-expands. Inline `A=x cmd` assignments *are* exported to that command's own children (bash semantics), so `CTX=x bash -c '… $CTX …'` still resolves, while `CTX=x; bash -c '… $CTX …'` does not.
 
+### Why a quoted heredoc body is the one place segments are removed
+
+Everywhere else the splitter errs toward *more* segments to inspect: a crude split costs a spurious prompt, a missed one costs an outage. Quoted heredocs are the single exception, and only because the shell's own rule is unambiguous — a delimiter carrying any quoting (`<<'EOF'`, `<<"EOF"`, `<<\EOF`) makes the body literal text on the command's stdin, with no expansion and no execution of any kind. There is no shell behavior for the guard to miss, so scanning the body can only produce false positives.
+
+Those false positives were not hypothetical: prose about infrastructure work quotes infrastructure commands. Because the tokenizer rewrites newlines and backticks to `;`, every line of a heredoc body became its own simple command, so a Conventional-Commit message describing a `helm upgrade` procedure — or a `python3 - <<'PY'` script whose *string literals* mention `kubectl apply` — was denied. The workaround was to write the message to a file first, turning every such commit into two steps.
+
+The skip is deliberately narrow, because it is the one lever that could hide a real command:
+
+- **Only a quoted delimiter strips anything.** Unquoted `<<EOF` does expand, including `$(…)`, so its body keeps its current treatment. This also means the shapes that merely *look* like heredocs — `<<<` here-strings, `$((1<<2))` shifts — can never trigger a strip, since none of them carries a quoted delimiter.
+- **Only `<<` outside quotes opens one.** The line is scanned with quote tracking, so a `<<'EOF'` appearing inside a quoted string is text, not a redirection.
+- **The closing delimiter must actually appear.** An unterminated heredoc means the parse is not understood, so nothing is stripped and the text stays under inspection — the fail-open-toward-more-segments default.
+- **A body is never scanned for further openers**, matching the shell, so nested-looking text inside a body cannot chain a strip.
+
 ### Why defer, not allow, for everything else
 
 Same reasoning as the siblings: unparseable commands, uncovered tools, and read-only verbs hand control back to the normal permission flow — the user is no worse off than without the hook. Fail-open applies to *infrastructure* failures only (bad JSON, missing config file, an exception in the hook): a hook bug must never break the session. The *security* decision is where the guard fails closed.
