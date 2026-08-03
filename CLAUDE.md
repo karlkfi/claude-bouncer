@@ -69,7 +69,7 @@ Tests live in `tests/test_workspace_guard.py` (stdlib `unittest`, no third-party
 python3 -m unittest discover tests
 ```
 
-CI also runs the suite on Windows, where it does not yet pass (Q39). That job gates on the delta: it fails only when failures or errors exceed `tests/windows-baseline.json`. If it goes red, you regressed Windows — don't raise the baseline to make it green without saying why.
+CI also runs the suite on Windows, as an ordinary gate. Some tests skip there for want of `$HOME` (Q43); never widen a skip to get green. Windows fixtures must quote interpolated native paths with the `sh()` helper (backslashes are shell escapes) and resolve leading-slash paths against the session cwd (they are drive-relative there).
 
 Two layers:
 - **Unit tests** import `files_in_command` from the script and exercise per-`SPEC`-row parsing, `prog_suppressed_by`, `--opt=val`, end-of-options `--`, and aliases.

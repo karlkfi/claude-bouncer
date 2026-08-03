@@ -43,7 +43,7 @@ The hook produces one of four outcomes:
 - **ask** — Claude Code shows its standard permission prompt for the command
   (as above). You approve or reject.
 - **deny** — the command is blocked with a constructive reason. This is the
-  default for **host-wide temp** paths (`/tmp`, `/var/tmp`, `$TMPDIR`): they're
+  default for **host-wide temp** paths (`/tmp`, `/var/tmp`, `$TMPDIR`, `%TMP%`): they're
   shared across every session and worktree and live outside the project root, so
   instead of prompting, the hook steers you to a repo-local gitignored scratch
   dir (`./tmp/`). It's also the default for **writes into a sibling checkout of
@@ -168,7 +168,8 @@ A naive string match would either miss real file arguments or false-positive on
 program syntax.
 
 The **deny** rows are **host-wide temp** paths — at or under `/tmp`, `/var/tmp`,
-or `$TMPDIR` after symlink resolution. They're classified from the *same*
+`$TMPDIR`, or the platform's own temp dir (`%TMP%` on Windows) after symlink
+resolution. They're classified from the *same*
 resolved paths the hook already extracts, so `/tmp` appearing only as text (a
 grep pattern, a commit message, an `echo` string) is never matched. The deny is
 the default and can be softened to `ask` or narrowed with an allowlist — see
@@ -532,8 +533,10 @@ After upgrading either way:
    [Configuration](#configuration).
 11. **Deny** host-wide temp. After the steps above, any *remaining*
    outside-workspace file argument whose resolved `realpath` is at or under a
-   host-temp root (`/tmp`, `/var/tmp`, `$TMPDIR`, all resolved first — so macOS's
-   `/tmp → /private/tmp` and a `$TMPDIR` under `/var/folders/…` are caught) is
+   host-temp root (`/tmp`, `/var/tmp`, `$TMPDIR`, and the platform's own temp
+   dir — `%TMP%` on Windows, which the POSIX names don't cover — all resolved
+   first, so macOS's `/tmp → /private/tmp` and a `$TMPDIR` under
+   `/var/folders/…` are caught) is
    reclassified from `ask` to `deny`, with a message steering to a repo-local
    gitignored scratch dir. Because this runs on the already-resolved file
    arguments, a `/tmp` that appears only as text (a grep pattern, an `echo`
@@ -620,7 +623,8 @@ flowing, avoid triggering it:
   prompts, not lost tracking. Stay inside the root unless you mean to work
   outside it.
 - **Write temp files inside the project root, not `/tmp`.** Host-wide temp
-  (`/tmp`, `/var/tmp`, `$TMPDIR`) is **denied** by default — not just prompted —
+  (`/tmp`, `/var/tmp`, `$TMPDIR`, and `%TMP%` on Windows) is **denied** by
+  default — not just prompted —
   because it's shared across sessions and worktrees and lives outside the root.
   Use a repo-local gitignored scratch dir like `./tmp/out.txt` instead. (Redirects
   and command output to `/dev/null`, `/dev/stdout`, `/dev/stderr`, and `/dev/fd/N`
@@ -678,8 +682,8 @@ variables tune this — all read at hook time, so no restart is needed:
 | --- | --- | --- |
 | `WORKSPACE_GUARD_TMP_ACTION` | `deny` | `deny` blocks host-temp paths; `ask` softens to a confirmation prompt. Any other value falls back to `deny`. |
 | `WORKSPACE_GUARD_SCRATCH_DIR` | `tmp/` | The repo-local scratch dir named in the deny message. |
-| `WORKSPACE_GUARD_TMP_ROOTS` | (empty) | Extra host-temp roots, `:`- or `,`-separated. **Additive** — it extends the built-in `/tmp`, `/var/tmp`, and `$TMPDIR`; it can't shrink them. |
-| `WORKSPACE_GUARD_TMP_ALLOW` | (empty) | Allowlist of exact-prefix or glob paths (`:`/`,`-separated) that **escape** the deny — for the rare tool that genuinely needs `/tmp`. |
+| `WORKSPACE_GUARD_TMP_ROOTS` | (empty) | Extra host-temp roots, separated by the platform list separator (`:` on POSIX, `;` on Windows) or a comma. **Additive** — it extends the built-in `/tmp`, `/var/tmp`, `$TMPDIR`, and the platform temp dir (`%TMP%` on Windows); it can't shrink them. |
+| `WORKSPACE_GUARD_TMP_ALLOW` | (empty) | Allowlist of exact-prefix or glob paths (same separators) that **escape** the deny — for the rare tool that genuinely needs `/tmp`. |
 
 `WORKSPACE_GUARD_TMP_ALLOW` is the one knob that *loosens* the guard, so it's
 empty by default and opt-in: an allowlisted host-temp path is allowed silently
@@ -702,11 +706,17 @@ sub-agent data). You can extend it with additional prefixes:
 
 | Env var | Default | Effect |
 | --- | --- | --- |
-| `WORKSPACE_GUARD_READ_ALLOW_PREFIXES` | (empty) | Extra read-exempt prefixes, `:`- or `,`-separated. **Additive** — it extends the built-in list. |
+| `WORKSPACE_GUARD_READ_ALLOW_PREFIXES` | (empty) | Extra read-exempt prefixes, separated by the platform list separator (`:` on POSIX, `;` on Windows) or a comma. **Additive** — it extends the built-in list. |
 
 Each entry is run through `realpath` so platform symlinks resolve correctly.
 Scope entries tightly: anything under a configured prefix is silently allowed
 for read commands without a confirmation prompt.
+
+A relative entry — including a Windows path written `/tmp/x` with no drive
+letter, which names a directory on whichever drive is current — is resolved
+against the tool's working directory, the same base the command's own file
+arguments resolve against. This applies to every configured path: the host-temp
+roots and allowlist above, and these prefixes.
 
 ### Sibling-checkout (worktree) deny
 

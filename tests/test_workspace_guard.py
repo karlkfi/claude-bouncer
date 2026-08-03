@@ -26,6 +26,33 @@ from unittest import mock
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "scripts" / "bash-workspace-guard.py"
 
+
+def sh(path):
+    """Quote a native path for interpolation into a command-line fixture.
+
+    Windows paths carry backslashes, which the hook's POSIX tokenizer reads as
+    escapes — exactly as bash does, so an unquoted native path arrives mangled
+    (`C:\\ws\\in.txt` -> `C:wsin.txt`) and lands wherever the mangled name
+    resolves. Single-quoting is how a real command names such a path. A no-op
+    for the plain POSIX paths this returns elsewhere.
+    """
+    return shlex.quote(path)
+
+
+def native(path):
+    """POSIX-shaped literal -> this platform's separator, for helper unit tests
+    that pass paths straight to a helper instead of through ``realpath``."""
+    return path.replace("/", os.sep)
+
+
+def resolved_from(base, *parts):
+    """Resolve a path the way the hook will, from ``base``.
+
+    A leading-slash path is drive-relative on Windows, so it only equals what
+    the hook computes when resolved against the same cwd the command's own
+    arguments resolve against. Mirrors ``resolve_from`` in the script."""
+    return os.path.realpath(os.path.join(base, *parts))
+
 # Filename has a dash, so import by path.
 _spec = util.spec_from_file_location("workspace_guard", SCRIPT)
 guard = util.module_from_spec(_spec)
@@ -1085,7 +1112,7 @@ class AllowedReadPrefixesUnitTests(unittest.TestCase):
         cpd = guard.claude_projects_dir()
         if cpd is None:
             self.skipTest("home directory not resolvable")
-        prefixes = guard.allowed_read_prefixes()
+        prefixes = guard.allowed_read_prefixes(os.getcwd())
         self.assertIn(cpd, prefixes)
 
     def test_allowed_read_prefixes_extras_via_env(self):
@@ -1093,7 +1120,7 @@ class AllowedReadPrefixesUnitTests(unittest.TestCase):
         old = os.environ.get("WORKSPACE_GUARD_READ_ALLOW_PREFIXES")
         try:
             os.environ["WORKSPACE_GUARD_READ_ALLOW_PREFIXES"] = fake
-            prefixes = guard.allowed_read_prefixes()
+            prefixes = guard.allowed_read_prefixes(os.getcwd())
         finally:
             if old is None:
                 os.environ.pop("WORKSPACE_GUARD_READ_ALLOW_PREFIXES", None)
@@ -1311,7 +1338,7 @@ class HookEndToEndTests(unittest.TestCase):
         # resolve against the new cwd and spuriously flag. Reading an absolute
         # in-workspace file should stay allow despite the cd.
         abs_in = os.path.join(self.workspace, "in.txt")
-        self._decision(f"cd /tmp/q20-fake-dir && grep PAT {abs_in} 2>&1", "allow")
+        self._decision(f"cd /tmp/q20-fake-dir && grep PAT {sh(abs_in)} 2>&1", "allow")
 
     def test_fd_prefixed_redirect_to_outside_still_ask(self):
         # Dropping the fd digit must not drop the redirect target itself.
@@ -1360,13 +1387,13 @@ class HookEndToEndTests(unittest.TestCase):
         # only the redirect routing is under test.
         os.mkdir(os.path.join(self.workspace, "sub"))
         abs_in = os.path.join(self.workspace, "in.txt")
-        self._decision(f"cd sub && cat {abs_in} > out.txt", "allow")
+        self._decision(f"cd sub && cat {sh(abs_in)} > out.txt", "allow")
 
     def test_fd_prefixed_redirect_target_tracks_cd_outside_ask(self):
         # fd-prefix popping must route the surviving target into the post-cd
         # group: `2>err.log` after `cd /etc` writes /etc/err.log (outside).
         abs_in = os.path.join(self.workspace, "in.txt")
-        out = self._decision(f"cd /etc && grep PAT {abs_in} 2>err.log", "ask")
+        out = self._decision(f"cd /etc && grep PAT {sh(abs_in)} 2>err.log", "ask")
         self.assertIn(
             "err.log",
             out["hookSpecificOutput"]["permissionDecisionReason"],
@@ -1376,7 +1403,7 @@ class HookEndToEndTests(unittest.TestCase):
         # `>&file` (DUP operator, target is a filename not an fd) routes into
         # the post-cd group too: /etc/dup.out is outside.
         abs_in = os.path.join(self.workspace, "in.txt")
-        out = self._decision(f"cd /etc && grep PAT {abs_in} >&dup.out", "ask")
+        out = self._decision(f"cd /etc && grep PAT {sh(abs_in)} >&dup.out", "ask")
         self.assertIn(
             "dup.out",
             out["hookSpecificOutput"]["permissionDecisionReason"],
@@ -1387,7 +1414,7 @@ class HookEndToEndTests(unittest.TestCase):
         # must stay skipped even after a cd, so a path-like here-string body
         # doesn't spuriously flag. Absolute in-workspace source stays allow.
         abs_in = os.path.join(self.workspace, "in.txt")
-        self._decision(f'cd /tmp && cat {abs_in} <<<"/etc/foo"', "allow")
+        self._decision(f'cd /tmp && cat {sh(abs_in)} <<<"/etc/foo"', "allow")
 
     def test_top_level_redirect_still_outside_ask(self):
         # Regression: a top-level (no-cd) absolute redirect target is still
@@ -1440,7 +1467,9 @@ class HookEndToEndTests(unittest.TestCase):
     def test_tilde_path_into_workspace_allow(self):
         # Q19: when the project lives under $HOME, `~/<rel>/in.txt` expands to
         # an in-workspace path and should allow (previously a spurious ask).
-        home = os.environ["HOME"]
+        home = os.environ.get("HOME")
+        if not home:
+            self.skipTest("HOME not set")                 # Windows: see Q43
         with tempfile.TemporaryDirectory(dir=home) as ws:
             ws = os.path.realpath(ws)
             with open(os.path.join(ws, "in.txt"), "w") as f:
@@ -1451,7 +1480,9 @@ class HookEndToEndTests(unittest.TestCase):
     def test_cd_tilde_into_workspace_relative_allow(self):
         # `cd ~/<rel> && cat in.txt` — cd tracks through the expanded $HOME
         # path, so the subsequent relative read resolves in-workspace.
-        home = os.environ["HOME"]
+        home = os.environ.get("HOME")
+        if not home:
+            self.skipTest("HOME not set")                 # Windows: see Q43
         with tempfile.TemporaryDirectory(dir=home) as ws:
             ws = os.path.realpath(ws)
             with open(os.path.join(ws, "in.txt"), "w") as f:
@@ -1498,7 +1529,7 @@ class HookEndToEndTests(unittest.TestCase):
         os.mkdir(nested)
         with open(os.path.join(nested, "x.txt"), "w") as f:
             f.write("hi\n")
-        self._decision(f"cd {nested} && cat x.txt", "allow")
+        self._decision(f"cd {sh(nested)} && cat x.txt", "allow")
 
     def test_popd_taints_subsequent_relative_outside_ask(self):
         # popd's effect can't be tracked; any subsequent relative path in a
@@ -1540,7 +1571,8 @@ class HookEndToEndTests(unittest.TestCase):
         out = self._decision("cd /q85-fake-outside && cat notes.txt", "ask")
         reason = out["hookSpecificOutput"]["permissionDecisionReason"]
         self.assertIn("Outside-workspace path(s)", reason)
-        self.assertIn("notes.txt -> /q85-fake-outside/notes.txt", reason)
+        landed = resolved_from(self.workspace, "/q85-fake-outside", "notes.txt")
+        self.assertIn("notes.txt -> %s" % landed, reason)
         self.assertNotIn("untracked", reason)
 
     def test_cd_outside_literal_redirect_names_absolute_path(self):
@@ -1549,7 +1581,8 @@ class HookEndToEndTests(unittest.TestCase):
         out = self._decision(
             "cd /q85-fake-outside && cat in.txt > out.log", "ask")
         reason = out["hookSpecificOutput"]["permissionDecisionReason"]
-        self.assertIn("out.log -> /q85-fake-outside/out.log", reason)
+        landed = resolved_from(self.workspace, "/q85-fake-outside", "out.log")
+        self.assertIn("out.log -> %s" % landed, reason)
         self.assertNotIn("untracked", reason)
 
     def test_cd_only_command_defers(self):
@@ -1586,7 +1619,9 @@ class HookEndToEndTests(unittest.TestCase):
     def test_classify_cd_helper_expands_tilde(self):
         # Q19: bare `~` and `~/…` expand to $HOME deterministically, so cd
         # tracking follows them instead of dropping to ('unknown', None).
-        home = os.environ["HOME"]
+        home = os.environ.get("HOME")
+        if not home:
+            self.skipTest("HOME not set")                 # Windows: see Q43
         self.assertEqual(guard.classify_cd(["cd", "~"]), ("arg", home))
         self.assertEqual(
             guard.classify_cd(["cd", "~/foo"]),
@@ -1756,7 +1791,7 @@ class HookEndToEndTests(unittest.TestCase):
             outside = os.path.realpath(d)
             os.mkdir(os.path.join(outside, ".git"))
             out = run_hook(
-                f'cd {outside} && cd "$(git rev-parse --show-toplevel)" '
+                f'cd {sh(outside)} && cd "$(git rev-parse --show-toplevel)" '
                 "&& cat data.txt",
                 self.workspace,
             )
@@ -2399,18 +2434,18 @@ class HookEndToEndTests(unittest.TestCase):
 
     def test_claude_session_tmp_read_allow(self):
         sess = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-        self._decision(f"cat {self._session_tmp(sess)}", "allow",
+        self._decision(f"cat {sh(self._session_tmp(sess))}", "allow",
                        session_id=sess)
 
     def test_claude_session_tmp_tail_allow(self):
         sess = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-        self._decision(f"tail -20 {self._session_tmp(sess)}", "allow",
+        self._decision(f"tail -20 {sh(self._session_tmp(sess))}", "allow",
                        session_id=sess)
 
     def test_claude_session_tmp_redirect_target_allow(self):
         # Writing into the current session's scratch via a redirect is allowed.
         sess = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-        self._decision(f"cat in.txt > {self._session_tmp(sess, 'log')}",
+        self._decision(f"cat in.txt > {sh(self._session_tmp(sess, 'log'))}",
                        "allow", session_id=sess)
 
     def test_claude_other_session_tmp_ask(self):
@@ -2418,7 +2453,7 @@ class HookEndToEndTests(unittest.TestCase):
         # the cross-session leak the per-session scope prevents.
         owner = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
         current = "ffffffff-0000-1111-2222-333333333333"
-        out = self._decision(f"cat {self._session_tmp(owner)}", "ask",
+        out = self._decision(f"cat {sh(self._session_tmp(owner))}", "ask",
                              session_id=current)
         self.assertIn(self._session_tmp(owner),
                       out["hookSpecificOutput"]["permissionDecisionReason"])
@@ -2426,7 +2461,7 @@ class HookEndToEndTests(unittest.TestCase):
     def test_claude_tmp_without_session_id_ask(self):
         # No session_id field (older CLI) -> allow disabled -> still prompts.
         sess = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-        self._decision(f"cat {self._session_tmp(sess)}", "ask")
+        self._decision(f"cat {sh(self._session_tmp(sess))}", "ask")
 
     def test_claude_session_tmp_symlink_escape_still_ask(self):
         # Defense-in-depth: an `ln` staging an OUTSIDE target to a link that
@@ -2435,7 +2470,7 @@ class HookEndToEndTests(unittest.TestCase):
         sess = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
         link = self._session_tmp(sess, "link")
         out = self._decision(
-            f"ln -s /tmp/q21-fake-target {link} && cat {link}", "ask",
+            f"ln -s /tmp/q21-fake-target {sh(link)} && cat {sh(link)}", "ask",
             session_id=sess)
         self.assertIn(link,
                       out["hookSpecificOutput"]["permissionDecisionReason"])
@@ -2447,65 +2482,64 @@ class HookEndToEndTests(unittest.TestCase):
     # exist — the hook resolves lexically). Write commands must still prompt.
 
     def _claude_projects_path(self, *parts):
-        """Return a synthetic path under ~/.claude/projects/, quoted for the shell.
+        """Return a synthetic path under ~/.claude/projects/.
 
-        Every caller interpolates the result into a command string. A Windows
-        path is separated by backslashes, which the hook's shlex pass strips as
-        escapes — the token collapses to a relative path that resolves inside
-        the workspace and flips the decision. shlex.quote is a no-op on a POSIX
-        path, so only the Windows shape changes.
+        Plain, like every other path helper here — callers quote it with ``sh()``
+        at the point of interpolation. Quoting inside the helper too would double
+        it, and the doubled token parses back as a filename that literally
+        contains quote characters.
         """
         cpd = guard.claude_projects_dir()
         if cpd is None:
             self.skipTest("home not resolvable, skipping ~/.claude/projects/ tests")
-        return shlex.quote(os.path.join(cpd, *parts))
+        return os.path.join(cpd, *parts)
 
     def test_cat_claude_projects_allow(self):
         # Reading a workflow journal under ~/.claude/projects/ is allowed.
         target = self._claude_projects_path(
             "-Users-me-proj", "wf_abc123", "journal.jsonl")
-        self._decision(f"cat {target}", "allow")
+        self._decision(f"cat {sh(target)}", "allow")
 
     def test_grep_claude_projects_allow(self):
         target = self._claude_projects_path(
             "-Users-me-proj", "subagents", "data.json")
-        self._decision(f"grep 'key' {target}", "allow")
+        self._decision(f"grep 'key' {sh(target)}", "allow")
 
     def test_head_claude_projects_allow(self):
         target = self._claude_projects_path(
             "-Users-me-proj", "wf_abc123", "journal.jsonl")
-        self._decision(f"head -20 {target}", "allow")
+        self._decision(f"head -20 {sh(target)}", "allow")
 
     def test_tail_claude_projects_allow(self):
         target = self._claude_projects_path(
             "-Users-me-proj", "wf_abc123", "journal.jsonl")
-        self._decision(f"tail -f {target}", "allow")
+        self._decision(f"tail -f {sh(target)}", "allow")
 
     def test_cp_from_claude_projects_ask(self):
         # cp reads source and writes dest — write command; prefix exemption
         # does NOT apply even when the source is under ~/.claude/projects/.
         target = self._claude_projects_path(
             "-Users-me-proj", "wf_abc123", "journal.jsonl")
-        self._decision(f"cp {target} ./local-copy.jsonl", "ask")
+        self._decision(f"cp {sh(target)} ./local-copy.jsonl", "ask")
 
     def test_cp_to_claude_projects_ask(self):
         # Writing into ~/.claude/projects/ is also not exempt.
         target = self._claude_projects_path(
             "-Users-me-proj", "wf_abc123", "out.txt")
-        self._decision(f"cp ./in.txt {target}", "ask")
+        self._decision(f"cp ./in.txt {sh(target)}", "ask")
 
     def test_rm_claude_projects_ask(self):
         # Deletion is a write command; exemption does not apply.
         target = self._claude_projects_path(
             "-Users-me-proj", "wf_abc123", "journal.jsonl")
-        self._decision(f"rm {target}", "ask")
+        self._decision(f"rm {sh(target)}", "ask")
 
     def test_redirect_to_claude_projects_ask(self):
         # A redirect target is conservative (is_read=False) even for
         # allowed prefixes — the hook can't verify the redirect direction.
         target = self._claude_projects_path(
             "-Users-me-proj", "wf_abc123", "out.txt")
-        self._decision(f"cat in.txt > {target}", "ask")
+        self._decision(f"cat in.txt > {sh(target)}", "ask")
 
     def test_sed_inplace_claude_projects_ask(self):
         # Q36: `sed -i` mutates its file operand — write mode; the read
@@ -2513,39 +2547,39 @@ class HookEndToEndTests(unittest.TestCase):
         # context, so a silent in-place write is an injection vector).
         target = self._claude_projects_path(
             "-Users-me-proj", "memory", "MEMORY.md")
-        self._decision(f"sed -i 's/a/b/' {target}", "ask")
+        self._decision(f"sed -i 's/a/b/' {sh(target)}", "ask")
 
     def test_sed_inplace_cluster_claude_projects_ask(self):
         # `-ni` cluster: the `i` inside a short-option run still counts.
         target = self._claude_projects_path(
             "-Users-me-proj", "memory", "MEMORY.md")
-        self._decision(f"sed -ni 's/a/b/p' {target}", "ask")
+        self._decision(f"sed -ni 's/a/b/p' {sh(target)}", "ask")
 
     def test_sed_read_only_claude_projects_allow(self):
         # Plain sed (no -i) stays a read — exemption applies.
         target = self._claude_projects_path(
             "-Users-me-proj", "memory", "MEMORY.md")
-        self._decision(f"sed -n '1,10p' {target}", "allow")
+        self._decision(f"sed -n '1,10p' {sh(target)}", "allow")
 
     def test_awk_inplace_claude_projects_ask(self):
         target = self._claude_projects_path(
             "-Users-me-proj", "memory", "MEMORY.md")
-        self._decision(f"awk -i inplace '{{print}}' {target}", "ask")
+        self._decision(f"awk -i inplace '{{print}}' {sh(target)}", "ask")
 
     def test_yq_inplace_claude_projects_ask(self):
         target = self._claude_projects_path(
             "-Users-me-proj", "wf_abc123", "data.yaml")
-        self._decision(f"yq -i '.a = 1' {target}", "ask")
+        self._decision(f"yq -i '.a = 1' {sh(target)}", "ask")
 
     def test_sort_output_claude_projects_ask(self):
         target = self._claude_projects_path(
             "-Users-me-proj", "wf_abc123", "out.txt")
-        self._decision(f"sort -o {target} ./in.txt", "ask")
+        self._decision(f"sort -o {sh(target)} ./in.txt", "ask")
 
     def test_sort_read_claude_projects_allow(self):
         target = self._claude_projects_path(
             "-Users-me-proj", "wf_abc123", "journal.jsonl")
-        self._decision(f"sort {target}", "allow")
+        self._decision(f"sort {sh(target)}", "allow")
 
     def test_sed_inplace_workspace_allow(self):
         # Write-mode detection only disables the exemption; in-workspace
@@ -2557,44 +2591,44 @@ class HookEndToEndTests(unittest.TestCase):
         # exemption must not apply to the output even under the read prefix.
         target = self._claude_projects_path(
             "-Users-me-proj", "wf_abc123", "out.txt")
-        self._decision(f"uniq ./in.txt {target}", "ask")
+        self._decision(f"uniq ./in.txt {sh(target)}", "ask")
 
     def test_uniq_read_claude_projects_allow(self):
         # Single operand is a pure read — exemption still applies.
         target = self._claude_projects_path(
             "-Users-me-proj", "wf_abc123", "journal.jsonl")
-        self._decision(f"uniq {target}", "allow")
+        self._decision(f"uniq {sh(target)}", "allow")
 
     def test_uniq_exempt_input_workspace_output_allow(self):
         # Per-operand classification: the input keeps the read exemption
         # while the in-workspace output is fine — no prompt.
         target = self._claude_projects_path(
             "-Users-me-proj", "wf_abc123", "journal.jsonl")
-        self._decision(f"uniq {target} ./deduped.txt", "allow")
+        self._decision(f"uniq {sh(target)} ./deduped.txt", "allow")
 
     def test_uniq_flag_value_not_an_output_allow(self):
         # `-f 1` is consumed as a field count; with the old cat alias it
         # became a positional and shifted the operand indices.
         target = self._claude_projects_path(
             "-Users-me-proj", "wf_abc123", "journal.jsonl")
-        self._decision(f"uniq -f 1 {target}", "allow")
+        self._decision(f"uniq -f 1 {sh(target)}", "allow")
 
     def test_xxd_output_claude_projects_ask(self):
         target = self._claude_projects_path(
             "-Users-me-proj", "wf_abc123", "dump.hex")
-        self._decision(f"xxd ./in.bin {target}", "ask")
+        self._decision(f"xxd ./in.bin {sh(target)}", "ask")
 
     def test_xxd_reverse_output_claude_projects_ask(self):
         # `xxd -r IN OUT` also writes the second positional; `-s 0x10` is
         # consumed so the operand indices stay aligned.
         target = self._claude_projects_path(
             "-Users-me-proj", "wf_abc123", "rebuilt.bin")
-        self._decision(f"xxd -r -s 0x10 ./dump.hex {target}", "ask")
+        self._decision(f"xxd -r -s 0x10 ./dump.hex {sh(target)}", "ask")
 
     def test_xxd_read_claude_projects_allow(self):
         target = self._claude_projects_path(
             "-Users-me-proj", "wf_abc123", "journal.jsonl")
-        self._decision(f"xxd -l 64 {target}", "allow")
+        self._decision(f"xxd -l 64 {sh(target)}", "allow")
 
     def test_uniq_output_workspace_allow(self):
         # Both operands in-workspace: unaffected by the write classification.
@@ -2605,7 +2639,7 @@ class HookEndToEndTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             td = os.path.realpath(td)
             target = os.path.join(td, "safe-data.json")
-            out = run_hook(f"cat {target}", self.workspace,
+            out = run_hook(f"cat {sh(target)}", self.workspace,
                            env_extra={"WORKSPACE_GUARD_READ_ALLOW_PREFIXES": td})
             self.assertIsNotNone(out)
             self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "allow")
@@ -2615,7 +2649,7 @@ class HookEndToEndTests(unittest.TestCase):
         # Use a synthetic path outside /tmp to avoid the host-temp deny path.
         fake_prefix = "/var/fake-read-allow-test"
         target = fake_prefix + "/safe-data.json"
-        out = run_hook(f"cp ./in.txt {target}", self.workspace,
+        out = run_hook(f"cp ./in.txt {sh(target)}", self.workspace,
                        env_extra={"WORKSPACE_GUARD_READ_ALLOW_PREFIXES": fake_prefix})
         self.assertIsNotNone(out)
         self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "ask")
@@ -3621,9 +3655,11 @@ class OffenderDisplayTests(unittest.TestCase):
             "notes.txt -> /outside/notes.txt")
 
     def test_absolute_token_unchanged(self):
-        self.assertEqual(
-            guard.offender_display("/outside/notes.txt", "/outside/notes.txt"),
-            "/outside/notes.txt")
+        # A leading slash is drive-relative on Windows, not absolute, so the
+        # token has to be fully qualified for this branch to be the one under
+        # test — resolving it is how the caller gets there anyway.
+        tok = resolved_from(os.getcwd(), "/outside/notes.txt")
+        self.assertEqual(guard.offender_display(tok, tok), tok)
 
 
 class BuildReasonTests(unittest.TestCase):
@@ -3715,6 +3751,8 @@ class ReasonAdviceEndToEndTests(unittest.TestCase):
         # Q19: `~/…` now expands to $HOME, which is outside this tempdir
         # workspace, so the offender lands in the 'outside' bucket (not
         # 'expand') and gets the outside-path advice.
+        if not os.environ.get("HOME"):
+            self.skipTest("HOME not set")                 # Windows: see Q43
         r = self._reason("cat ~/.ssh/id_rsa")
         self.assertIn("~/.ssh/id_rsa", r)
         self.assertIn("same check", r)
@@ -3741,50 +3779,64 @@ class HostTempHelperTests(unittest.TestCase):
     """Unit coverage for the host-temp classification helpers."""
 
     def test_path_at_or_under_boundary(self):
-        self.assertTrue(guard.path_at_or_under("/tmp", "/tmp"))
-        self.assertTrue(guard.path_at_or_under("/tmp/x", "/tmp"))
-        self.assertTrue(guard.path_at_or_under("/tmp/a/b", "/tmp"))
+        # Callers pass realpaths, which carry the platform separator.
+        self.assertTrue(guard.path_at_or_under(native("/tmp"), native("/tmp")))
+        self.assertTrue(guard.path_at_or_under(native("/tmp/x"), native("/tmp")))
+        self.assertTrue(guard.path_at_or_under(native("/tmp/a/b"), native("/tmp")))
         # Sibling lookalikes must NOT match (the os.sep boundary).
-        self.assertFalse(guard.path_at_or_under("/tmpfoo", "/tmp"))
-        self.assertFalse(guard.path_at_or_under("/tmpfs/x", "/tmp"))
-        self.assertFalse(guard.path_at_or_under("/var/tmpx", "/var/tmp"))
+        self.assertFalse(guard.path_at_or_under(native("/tmpfoo"), native("/tmp")))
+        self.assertFalse(guard.path_at_or_under(native("/tmpfs/x"), native("/tmp")))
+        self.assertFalse(
+            guard.path_at_or_under(native("/var/tmpx"), native("/var/tmp")))
 
     def test_is_host_temp_with_explicit_roots(self):
-        roots = {"/tmp", "/var/tmp"}
-        self.assertTrue(guard.is_host_temp("/tmp/out", roots))
-        self.assertTrue(guard.is_host_temp("/var/tmp/x", roots))
-        self.assertFalse(guard.is_host_temp("/etc/passwd", roots))
-        self.assertFalse(guard.is_host_temp("/tmpfoo/x", roots))
+        roots = {native("/tmp"), native("/var/tmp")}
+        self.assertTrue(guard.is_host_temp(native("/tmp/out"), roots))
+        self.assertTrue(guard.is_host_temp(native("/var/tmp/x"), roots))
+        self.assertFalse(guard.is_host_temp(native("/etc/passwd"), roots))
+        self.assertFalse(guard.is_host_temp(native("/tmpfoo/x"), roots))
 
     def test_split_pathlist_colon_and_comma(self):
+        # `:` is the POSIX list separator but part of a Windows drive letter,
+        # so the split is on os.pathsep — `;` there — plus a comma everywhere.
         self.assertEqual(
-            guard._split_pathlist("/a:/b,/c"), ["/a", "/b", "/c"])
+            guard._split_pathlist("/a%s/b,/c" % os.pathsep), ["/a", "/b", "/c"])
         self.assertEqual(guard._split_pathlist(""), [])
         self.assertEqual(guard._split_pathlist("  /a , , /b "), ["/a", "/b"])
 
     def test_matches_allowlist_exact_and_prefix(self):
         # Callers always pass an already-resolved realpath, so mirror that
         # (on macOS /tmp/ok -> /private/tmp/ok); the pattern stays user-written.
-        ok = os.path.realpath("/tmp/ok")
-        self.assertTrue(guard.matches_allowlist(ok, ["/tmp/ok"]))
-        self.assertTrue(guard.matches_allowlist(os.path.join(ok, "x"), ["/tmp/ok"]))
-        self.assertFalse(
-            guard.matches_allowlist(os.path.realpath("/tmp/nope"), ["/tmp/ok"]))
-        self.assertFalse(guard.matches_allowlist(ok, []))
+        base = os.getcwd()
+        ok = resolved_from(base, "/tmp/ok")
+        self.assertTrue(guard.matches_allowlist(ok, ["/tmp/ok"], base))
+        self.assertTrue(
+            guard.matches_allowlist(os.path.join(ok, "x"), ["/tmp/ok"], base))
+        self.assertFalse(guard.matches_allowlist(
+            resolved_from(base, "/tmp/nope"), ["/tmp/ok"], base))
+        self.assertFalse(guard.matches_allowlist(ok, [], base))
 
     def test_matches_allowlist_glob(self):
         # The resolved realpath (possibly /private-prefixed on macOS) still
         # matches a user-written /tmp glob.
+        base = os.getcwd()
         self.assertTrue(guard.matches_allowlist(
-            os.path.realpath("/tmp/build-123"), ["/tmp/build-*"]))
+            resolved_from(base, "/tmp/build-123"), ["/tmp/build-*"], base))
         self.assertFalse(guard.matches_allowlist(
-            os.path.realpath("/tmp/other"), ["/tmp/build-*"]))
+            resolved_from(base, "/tmp/other"), ["/tmp/build-*"], base))
 
     def test_host_temp_roots_includes_defaults(self):
-        roots = guard.host_temp_roots()
+        roots = guard.host_temp_roots(os.getcwd())
         # Defaults are always present (resolved), regardless of env.
         self.assertIn(os.path.realpath("/tmp"), roots)
         self.assertIn(os.path.realpath("/var/tmp"), roots)
+
+    def test_host_temp_roots_includes_platform_temp_dir(self):
+        # The directory this tier exists to catch. On POSIX it is
+        # $TMPDIR-or-/tmp and already among the defaults; on Windows it is
+        # %TMP%, which the POSIX names miss entirely.
+        roots = guard.host_temp_roots(os.getcwd())
+        self.assertIn(os.path.realpath(tempfile.gettempdir()), roots)
 
     def test_build_scratch_hint_present_vs_absent(self):
         with tempfile.TemporaryDirectory() as proj:
@@ -3864,7 +3916,7 @@ class HostTempDenyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir = os.path.realpath(tmpdir)
             target = os.path.join(tmpdir, "session-scratch")
-            self._expect(f"cat {target}", "deny",
+            self._expect(f"cat {sh(target)}", "deny",
                          env_extra={"TMPDIR": tmpdir})
 
     # --- NO-MATCH cases (must NOT deny) -------------------------------------
@@ -3931,7 +3983,7 @@ class HostTempDenyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as extra:
             extra = os.path.realpath(extra)
             target = os.path.join(extra, "x")
-            self._expect(f"cat {target}", "deny",
+            self._expect(f"cat {sh(target)}", "deny",
                          env_extra={"WORKSPACE_GUARD_TMP_ROOTS": extra})
 
     def test_scratch_dir_name_config_in_reason(self):
@@ -3956,7 +4008,7 @@ class HostTempDenyTests(unittest.TestCase):
         current = "ffffffff-0000-1111-2222-333333333333"
         path = os.path.join(guard.claude_tmp_root(), "-Users-me-proj",
                             owner, "tasks", "abc.output")
-        self._expect(f"cat {path}", "ask", session_id=current)
+        self._expect(f"cat {sh(path)}", "ask", session_id=current)
 
     def test_unguarded_command_to_tmp_still_defers(self):
         # The capability only upgrades paths the hook already extracts. An
@@ -4201,7 +4253,7 @@ class SiblingCheckoutTests(unittest.TestCase):
 
     def test_bash_redirect_into_primary_deny(self):
         target = os.path.join(self.main, "root.txt")
-        out = self._bash(f"cat /dev/null > {target}")
+        out = self._bash(f"cat /dev/null > {sh(target)}")
         self.assertEqual(self._decision(out), "deny")
         r = self._reason(out)
         self.assertIn("Sibling-checkout", r)
@@ -4212,34 +4264,34 @@ class SiblingCheckoutTests(unittest.TestCase):
 
     def test_bash_cp_into_other_worktree_deny(self):
         target = os.path.join(self.other, "copy.txt")
-        out = self._bash(f"cp root.txt {target}")
+        out = self._bash(f"cp root.txt {sh(target)}")
         self.assertEqual(self._decision(out), "deny")
         self.assertIn("feat-b", self._reason(out))
 
     def test_bash_tee_into_primary_deny(self):
-        out = self._bash(f"echo hi | tee {os.path.join(self.main, 'log.txt')}")
+        out = self._bash(f"echo hi | tee {sh(os.path.join(self.main, 'log.txt'))}")
         self.assertEqual(self._decision(out), "deny")
 
     def test_bash_rm_in_sibling_deny(self):
-        out = self._bash(f"rm -f {os.path.join(self.main, 'root.txt')}")
+        out = self._bash(f"rm -f {sh(os.path.join(self.main, 'root.txt'))}")
         self.assertEqual(self._decision(out), "deny")
 
     # --- Bash: reads keep today's behavior (ask, not deny) ------------------
 
     def test_bash_read_of_sibling_asks_not_deny(self):
-        out = self._bash(f"cat {os.path.join(self.main, 'root.txt')}")
+        out = self._bash(f"cat {sh(os.path.join(self.main, 'root.txt'))}")
         self.assertEqual(self._decision(out), "ask")
         self.assertNotIn("Sibling-checkout", self._reason(out))
 
     def test_bash_grep_of_sibling_asks(self):
-        out = self._bash(f"grep x {os.path.join(self.other, 'root.txt')}")
+        out = self._bash(f"grep x {sh(os.path.join(self.other, 'root.txt'))}")
         self.assertEqual(self._decision(out), "ask")
 
     # --- Bash: override downgrades to ask -----------------------------------
 
     def test_bash_override_downgrades_deny_to_ask(self):
         target = os.path.join(self.main, "root.txt")
-        out = self._bash(f"cat /dev/null > {target}",
+        out = self._bash(f"cat /dev/null > {sh(target)}",
                          env_extra={"WORKSPACE_GUARD_OVERRIDE": "deliberate sync"})
         self.assertEqual(self._decision(out), "ask")
         r = self._reason(out)
@@ -4252,7 +4304,7 @@ class SiblingCheckoutTests(unittest.TestCase):
         # Session is the main checkout (not a worktree): sibling detection is a
         # no-op, so a write into a linked worktree gets the generic outside ask.
         target = os.path.join(self.other, "x.txt")
-        out = self._bash(f"cat /dev/null > {target}",
+        out = self._bash(f"cat /dev/null > {sh(target)}",
                          proj=self.main, cwd=self.main)
         self.assertEqual(self._decision(out), "ask")
         self.assertNotIn("Sibling-checkout", self._reason(out))
@@ -4361,35 +4413,35 @@ class SiblingSessionScratchE2ETests(unittest.TestCase):
 
     def test_sibling_worker_tail_allow(self):
         # The motivating case: a dispatcher tailing a worker's task output.
-        self._expect(f"tail -20 {self._sibling(self.worker)}", "allow",
+        self._expect(f"tail -20 {sh(self._sibling(self.worker))}", "allow",
                      session_id=self.current)
 
     def test_sibling_worker_grep_allow(self):
-        self._expect(f'grep -q "EXIT=" {self._sibling(self.worker)}', "allow",
+        self._expect(f'grep -q "EXIT=" {sh(self._sibling(self.worker))}', "allow",
                      session_id=self.current)
 
     def test_own_session_read_allow(self):
         # Own-session scratch is allowed here too (via the per-session rule).
-        self._expect(f"cat {self._sibling(self.current)}", "allow",
+        self._expect(f"cat {sh(self._sibling(self.current))}", "allow",
                      session_id=self.current)
 
     def test_sibling_worker_cp_write_still_ask(self):
         # Copying INTO a sibling session's scratch is a write -> not exempt.
-        self._expect(f"cp ./in.txt {self._sibling(self.worker)}", "ask",
+        self._expect(f"cp ./in.txt {sh(self._sibling(self.worker))}", "ask",
                      session_id=self.current)
 
     def test_redirect_into_sibling_worker_still_ask(self):
         # Redirect targets pass is_read=False, so they stay guarded.
-        self._expect(f"cat in.txt > {self._sibling(self.worker)}", "ask",
+        self._expect(f"cat in.txt > {sh(self._sibling(self.worker))}", "ask",
                      session_id=self.current)
 
     def test_rm_sibling_worker_still_ask(self):
-        self._expect(f"rm {self._sibling(self.worker)}", "ask",
+        self._expect(f"rm {sh(self._sibling(self.worker))}", "ask",
                      session_id=self.current)
 
     def test_no_session_id_still_ask(self):
         # Without session_id the scan can't anchor -> exemption off -> ask.
-        self._expect(f"tail -20 {self._sibling(self.worker)}", "ask")
+        self._expect(f"tail -20 {sh(self._sibling(self.worker))}", "ask")
 
     def test_cross_project_sibling_still_ask(self):
         # A different project slug (not holding the current session) is NOT
@@ -4398,7 +4450,7 @@ class SiblingSessionScratchE2ETests(unittest.TestCase):
         other_path = os.path.join(other_proj, self.worker, "tasks", "out.output")
         try:
             os.makedirs(os.path.dirname(other_path), exist_ok=True)
-            self._expect(f"cat {other_path}", "ask", session_id=self.current)
+            self._expect(f"cat {sh(other_path)}", "ask", session_id=self.current)
         finally:
             shutil.rmtree(other_proj, ignore_errors=True)
 
@@ -4407,7 +4459,7 @@ class SiblingSessionScratchE2ETests(unittest.TestCase):
         # inside the sibling scratch pointing outside is still flagged.
         link = self._sibling(self.worker, "link")
         out = self._expect(
-            f"ln -s /tmp/q61-fake-target {link} && cat {link}", "ask",
+            f"ln -s /tmp/q61-fake-target {sh(link)} && cat {sh(link)}", "ask",
             session_id=self.current)
         self.assertIn(link,
                       out["hookSpecificOutput"]["permissionDecisionReason"])

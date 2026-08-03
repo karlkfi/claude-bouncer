@@ -192,16 +192,18 @@ def claude_projects_dir():
         return None
 
 
-def allowed_read_prefixes():
+def allowed_read_prefixes(base):
     """Resolved list of absolute path prefixes exempt from the workspace check
     for **read-only** guarded commands (see WRITE_COMMANDS for exclusions).
 
     Default: Claude Code's per-user project-data dir (~/.claude/projects/).
-    Additive extension via WORKSPACE_GUARD_READ_ALLOW_PREFIXES (colon- or
-    comma-separated). Each entry is run through realpath so platform symlinks
-    (e.g. /tmp -> /private/tmp on macOS) resolve correctly. Entries that
-    cannot be resolved are skipped (fail-open on config, fail-safe on the
-    boundary: a bad entry just loses its exemption).
+    Additive extension via WORKSPACE_GUARD_READ_ALLOW_PREFIXES (split on
+    ``os.pathsep`` or a comma). Each entry goes through :func:`resolve_from`
+    against ``base`` (the tool's cwd) so platform symlinks (e.g. /tmp ->
+    /private/tmp on macOS) resolve correctly and a drive-relative Windows entry
+    lands on the drive its file arguments do. Entries that cannot be resolved
+    are skipped (fail-open on config, fail-safe on the boundary: a bad entry
+    just loses its exemption).
     """
     defaults = []
     cpd = claude_projects_dir()
@@ -210,10 +212,9 @@ def allowed_read_prefixes():
     extras = _split_pathlist(os.environ.get('WORKSPACE_GUARD_READ_ALLOW_PREFIXES', ''))
     out = []
     for p in defaults + extras:
-        try:
-            out.append(os.path.realpath(p))
-        except OSError:
-            continue
+        rp = resolve_from(base, p)
+        if rp is not None:
+            out.append(rp)
     return out
 
 
@@ -310,7 +311,9 @@ def path_at_or_under(rp, root):
 # every session/process and every worktree, colliding between concurrent runs
 # and living outside the project root. Such a path gets a stronger, constructive
 # `deny` (steering to a repo-local gitignored scratch dir) instead of the usual
-# outside-workspace `ask`. The list is extensible; see host_temp_roots().
+# outside-workspace `ask`. These are the POSIX names; the platform's own temp
+# dir is added by host_temp_roots(), which is what covers Windows. The list is
+# extensible; see host_temp_roots().
 HOST_TEMP_DEFAULT_ROOTS = ('/tmp', '/var/tmp')
 
 
@@ -326,28 +329,66 @@ def _split_pathlist(raw):
     return parts
 
 
-def host_temp_roots():
+def resolve_from(base, raw):
+    """Realpath ``raw``, resolving a non-absolute path against ``base``.
+
+    Every configured path — a host-temp root, an allowlist entry, a read-allow
+    prefix — is ultimately compared against a file argument, and file arguments
+    resolve against the tool's cwd. Both sides must therefore be interpreted
+    under the same rule.
+
+    On POSIX ``/tmp`` is absolute, so ``base`` never changes the answer and this
+    is exactly the old ``realpath``. On Windows it is not: a leading slash names
+    a directory on *whichever drive is current*, and ``os.path.isabs`` reports
+    False for it. Resolving such a root from the hook process's own cwd put it
+    on a different drive than the file arguments, so the comparison silently
+    never matched — a host-temp ``deny`` degraded to a plain ``ask``, and a
+    configured allowlist entry stopped matching anything at all.
+
+    Returns None when the path can't be resolved (callers skip it: fail-open on
+    config, fail-safe on the boundary)."""
+    if raw and not os.path.isabs(raw):
+        raw = os.path.join(base, raw)
+    try:
+        return os.path.realpath(raw)
+    except OSError:
+        return None
+
+
+def host_temp_roots(base):
     """Resolved set of host-temp roots: the defaults, any extra roots from
     ``WORKSPACE_GUARD_TMP_ROOTS`` (additive — never replaces the defaults, so the
-    boundary can't be weakened by clearing it), and ``$TMPDIR`` if set.
+    boundary can't be weakened by clearing it), ``$TMPDIR`` if set, and on
+    Windows the platform temp dir the POSIX names don't cover.
 
-    Each root is run through ``realpath`` so a path under macOS's
-    ``/tmp -> /private/tmp`` symlink or a ``$TMPDIR`` under ``/var/folders/...``
-    is matched after the file argument is itself resolved. A root that can't be
-    resolved is skipped (fail-open)."""
+    Each root goes through :func:`resolve_from` against ``base`` (the tool's
+    cwd), so a path under macOS's ``/tmp -> /private/tmp`` symlink or a
+    ``$TMPDIR`` under ``/var/folders/...`` is matched after the file argument is
+    itself resolved, and a drive-relative Windows root lands on the same drive
+    the file arguments do. A root that can't be resolved is skipped
+    (fail-open)."""
     raw = list(HOST_TEMP_DEFAULT_ROOTS)
     raw += _split_pathlist(os.environ.get('WORKSPACE_GUARD_TMP_ROOTS', ''))
     tmpdir = os.environ.get('TMPDIR')
     if tmpdir:
         raw.append(tmpdir)
+    # Windows has no $TMPDIR, and its host-wide temp dir is %TMP%/%TEMP% —
+    # which the POSIX names above miss entirely, so a scratch write to the one
+    # directory this tier exists to catch got a plain `ask` instead of the
+    # steered `deny`. tempfile.gettempdir() is where that lands. Gated on the
+    # same discriminator as claude_tmp_root() (which already pays for the call
+    # there): the missing $TMPDIR is the actual condition, and on POSIX
+    # gettempdir() would only re-derive $TMPDIR-or-/tmp while adding its probe
+    # to every Bash call.
+    if not hasattr(os, 'getuid'):
+        raw.append(tempfile.gettempdir())
     out = set()
     for r in raw:
         if not r:
             continue
-        try:
-            out.add(os.path.realpath(r))
-        except OSError:
-            continue
+        rp = resolve_from(base, r)
+        if rp is not None:
+            out.add(rp)
     return out
 
 
@@ -373,11 +414,17 @@ def host_temp_allowlist():
     return _split_pathlist(os.environ.get('WORKSPACE_GUARD_TMP_ALLOW', ''))
 
 
-def matches_allowlist(rp, patterns):
+def matches_allowlist(rp, patterns, base):
     """True when resolved path ``rp`` matches an allowlist entry. An entry with
     glob metacharacters is matched with ``fnmatch``; otherwise it's an exact or
-    directory-prefix match, resolved with ``realpath`` first so a configured
-    ``/tmp/ok`` matches the realpath ``/private/tmp/ok`` on macOS.
+    directory-prefix match, resolved first so a configured ``/tmp/ok`` matches
+    the realpath ``/private/tmp/ok`` on macOS.
+
+    Both forms are normalized against ``base`` (the tool's cwd) for the reason
+    in :func:`resolve_from` — otherwise a Windows entry written ``/tmp/ok``
+    resolves on a different drive than the path it is meant to exempt and the
+    knob silently does nothing. The glob form is normalized rather than
+    realpath'd so its metacharacters survive.
 
     Matching is tried against ``rp`` and, on macOS, against ``rp`` with the
     leading ``/private`` stripped — so a user-written glob like ``/tmp/build-*``
@@ -390,15 +437,13 @@ def matches_allowlist(rp, patterns):
         if not p:
             continue
         if any(c in p for c in '*?['):
-            if any(fnmatch.fnmatch(c, p) for c in cands):
+            pat = p if os.path.isabs(p) else os.path.join(base, p)
+            if any(fnmatch.fnmatch(c, os.path.normpath(pat)) for c in cands):
                 return True
             continue
-        try:
-            rp_pat = os.path.realpath(p)
-        except OSError:
-            rp_pat = p
-        base = rp_pat.rstrip(os.sep)
-        if any(c == rp_pat or path_at_or_under(c, base) for c in cands):
+        rp_pat = resolve_from(base, p) or p
+        stem = rp_pat.rstrip(os.sep)
+        if any(c == rp_pat or path_at_or_under(c, stem) for c in cands):
             return True
     return False
 
@@ -1971,10 +2016,10 @@ def build_context(data):
         proj=proj, cwd=cwd, session_id=session_id,
         session_tmp_root=session_tmp_root,
         session_proj_dir=claude_session_project_dir(session_id, session_tmp_root),
-        tmp_roots=host_temp_roots(),
+        tmp_roots=host_temp_roots(cwd),
         tmp_allow=host_temp_allowlist(),
         tmp_action=host_temp_action(),
-        read_prefixes=allowed_read_prefixes(),
+        read_prefixes=allowed_read_prefixes(cwd),
         session_wt=resolve_session_worktree(proj),
         sib_override=sibling_override())
 
@@ -2024,7 +2069,7 @@ def classify_outside(rp, ctx, is_read):
     # Claude-managed temp root (keeps cross-session ask) or explicitly allowed.
     if is_host_temp(rp, ctx.tmp_roots) \
             and not path_at_or_under(rp, ctx.session_tmp_root):
-        if matches_allowlist(rp, ctx.tmp_allow):
+        if matches_allowlist(rp, ctx.tmp_allow, ctx.cwd):
             return None
         return ('hosttemp', None)
     return ('outside', None)
