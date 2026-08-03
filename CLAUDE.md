@@ -32,6 +32,7 @@ Before introducing a new pattern or abstraction, check whether the existing `SPE
    - **Changed parsing behavior or `SPEC` table** → update the decision table in `README.md` and the "How it works" / "Limitations" sections.
    - **New configuration or hook surface** → `README.md` and `.claude-plugin/plugin.json` keywords/description.
    - Update `docs/STATUS.md`: remove the completed Queue row.
+   - **Re-read `gh pr list` before reporting Queue state.** Parallel sessions merge work mid-flight, so a listing from session start is stale by the end and "QN is the only item left" comes out wrong.
 5. **Commit when done** — small, focused, Conventional Commits. **Always commit `docs/STATUS.md` changes in their own isolated commit**, separate from code and plan-doc changes (see `docs/development/maintaining-backlog.md`).
 
 ## Code standards
@@ -69,7 +70,7 @@ Tests live in `tests/test_workspace_guard.py` (stdlib `unittest`, no third-party
 python3 -m unittest discover tests
 ```
 
-CI also runs the suite on Windows through `scripts/skip-ceiling.py`, an ordinary gate that additionally caps how many tests may skip (a skip reads as `OK` otherwise). Some skip there for want of `$HOME` (Q43); never widen a skip to get green, and tighten `--max-skips` in `.github/workflows/tests.yml` when the job says `IMPROVED`. Windows fixtures must quote interpolated native paths with the `sh()` helper (backslashes are shell escapes) and resolve leading-slash paths against the session cwd (they are drive-relative there).
+CI also runs the suite on Windows through `scripts/skip-ceiling.py`, an ordinary gate that additionally caps how many tests may skip (a skip reads as `OK` otherwise). Some skip there for want of `$HOME` (Q43); never widen a skip to get green, and tighten `--max-skips` in `.github/workflows/tests.yml` when the job says `IMPROVED`. Windows fixtures must quote interpolated native paths — `sh()` for bash fixtures, `ps()` for PowerShell ones (`sh()` is `shlex.quote`, POSIX quoting) — and resolve leading-slash paths against the session cwd (they are drive-relative there). **A Windows-absolute path is not absolute to `os.path` on a POSIX host**, so a fixture that lets one resolve cwd-relative lands it *inside* the project root and passes while asserting the silent allow it meant to catch.
 
 Two layers:
 - **Unit tests** import `files_in_command` from the script and exercise per-`SPEC`-row parsing, `prog_suppressed_by`, `--opt=val`, end-of-options `--`, and aliases.
