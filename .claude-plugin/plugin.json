@@ -1,7 +1,7 @@
 {
   "name": "workspace-guard",
   "version": "1.7.2",
-  "description": "Path-aware bash permissions for Claude Code.",
+  "description": "Path-aware shell permissions for Claude Code.",
   "author": {
     "name": "Karl",
     "url": "https://github.com/karlkfi"
@@ -9,5 +9,5 @@
   "homepage": "https://github.com/karlkfi/claude-workspace-guard",
   "repository": "https://github.com/karlkfi/claude-workspace-guard",
   "license": "MIT",
-  "keywords": ["claude-code", "hooks", "sandbox", "security", "guardrail", "permissions", "workspace", "worktree", "bash", "read", "tools", "tmp", "scratch", "skill", "command", "mktemp", "redirect"]
+  "keywords": ["claude-code", "hooks", "sandbox", "security", "guardrail", "permissions", "workspace", "worktree", "bash", "powershell", "windows", "read", "tools", "tmp", "scratch", "skill", "command", "mktemp", "redirect"]
 }

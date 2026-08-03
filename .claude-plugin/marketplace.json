@@ -1,7 +1,7 @@
 {
   "name": "workspace-guard",
   "owner": { "name": "karlkfi", "url": "https://github.com/karlkfi" },
-  "description": "Path-aware guard rails for Claude Code Bash commands.",
+  "description": "Path-aware guard rails for Claude Code shell commands.",
   "plugins": [
     {
       "name": "workspace-guard",

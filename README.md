@@ -1,6 +1,6 @@
 # workspace-guard
 
-**Path-aware bash permissions for Claude Code.**
+**Path-aware shell permissions for Claude Code.**
 
 [![release](https://img.shields.io/github/v/release/karlkfi/claude-workspace-guard)](https://github.com/karlkfi/claude-workspace-guard/releases) [![tests](https://img.shields.io/github/actions/workflow/status/karlkfi/claude-workspace-guard/tests.yml?branch=main&label=tests)](https://github.com/karlkfi/claude-workspace-guard/actions/workflows/tests.yml) [![License: MIT](https://img.shields.io/github/license/karlkfi/claude-workspace-guard.svg)](LICENSE) [![Claude Code plugin](https://img.shields.io/badge/Claude_Code-plugin-7e57c2)](#install)
 
@@ -12,11 +12,11 @@ outside your repo into `jq`. The default `Bash(grep:*)` permission rules can't
 tell these apart from the dozens of in-repo greps Claude runs every session —
 they either trust every invocation or prompt on every one.
 
-workspace-guard is a `PreToolUse` hook for `Bash` — and for Claude's native file
-tools (`Read`, `Grep`, `Glob`, `Edit`, `Write`, …) — that parses the command,
-finds its file arguments, and asks for confirmation only when a path resolves
-outside your project root (`$CLAUDE_PROJECT_DIR`). In-repo reads and pure
-pipelines run silently.
+workspace-guard is a `PreToolUse` hook for the shell tools (`Bash` and
+`PowerShell`) — and for Claude's native file tools (`Read`, `Grep`, `Glob`,
+`Edit`, `Write`, …) — that parses the command, finds its file arguments, and
+asks for confirmation only when a path resolves outside your project root
+(`$CLAUDE_PROJECT_DIR`). In-repo reads and pure pipelines run silently.
 
 ![Claude Code's permission prompt when grep targets a file outside the project root](docs/img/ask-prompt.png)
 
@@ -188,11 +188,62 @@ The **ask** rows assume an interactive or `default`-mode session. In full-auto
 return `deny` instead — equally blocking, with recoverable feedback for the
 agent. See [Configuration](#configuration).
 
+### The PowerShell tool
+
+Claude Code ships two shell tools, and a Windows session gets `PowerShell`
+rather than `Bash` whenever Git for Windows isn't installed — as does any
+session with `CLAUDE_CODE_USE_POWERSHELL_TOOL=1`. Both are hooked, but
+PowerShell gets its own parser and its own table. It isn't a POSIX shell: its
+escape character is a backtick, so a native path run through the POSIX tokenizer
+comes out as `C:Usersbobx` — a name that resolves *inside* the project root.
+Reads and writes are cmdlets with their own parameter grammar, and several of
+their aliases (`cat`, `rm`, `cp`, `mv`, `tee`, `sc`) collide with POSIX command
+names that take entirely different flags.
+
+Guarded cmdlets: `Get-Content`, `Select-String`, `Import-Csv`, `Import-Clixml`,
+`Set-Content`, `Add-Content`, `Out-File`, `Tee-Object`, `Export-Csv`,
+`Export-Clixml`, `Copy-Item`, `Move-Item`, `Remove-Item`, `Rename-Item`, and
+their aliases. Output redirects (`>`, `>>`, `2>`) are checked on any command.
+
+| Command                                        | Decision |
+| ---------------------------------------------- | -------- |
+| `Get-Content .\src.txt`                        | allow    |
+| `Select-String foo .\notes.md`                 | allow    |
+| `Set-Content .\out.txt "hi"`                   | allow    |
+| `Set-Location docs; Get-Content note.md`       | allow    |
+| `Set-Content out.txt @'` … `'@` (literal body) | allow    |
+| `Get-Content C:\Users\bob\.aws\credentials`    | **ask**  |
+| `Get-Content -LiteralPath C:\out\x`            | **ask**  |
+| `Set-Content -Encoding UTF8 C:\out\x "hi"`     | **ask**  |
+| `Out-File -FilePath C:\out\x`                  | **ask**  |
+| `Copy-Item .\in.txt C:\out\x`                  | **ask**  |
+| `Get-Content -Path in.txt,C:\out\x` (array)    | **ask**  |
+| `Set-Location C:\out; Get-Content secret.txt`  | **ask**  |
+| `Write-Output hi > C:\out\x` (redirect)        | **ask**  |
+| `Write-Output "$(Get-Content C:\out\x)"`       | **ask**  |
+| `Get-Content $env:USERPROFILE\x`               | **ask**  |
+| `Get-ChildItem C:\out` (not a guarded cmdlet)  | defer    |
+| `Get-Content "unterminated` (unparseable)      | defer    |
+
+Parameters bind the way PowerShell binds them: by name first — including
+unambiguous prefixes (`-Pat` is `-Path`) and the colon form (`-Path:C:\x`) —
+and only then into whatever positional slots are left, so
+`Select-String -Pattern foo C:\x` puts the file in `-Path` however the two are
+ordered. `Set-Location` and `Push-Location` are followed so a later relative
+operand resolves against the right directory; anything the hook can't follow
+(a bare `cd`, a `$var` target, `Pop-Location`) drops tracking and prompts on
+relative operands rather than guessing.
+
+A cmdlet that isn't in the table is **not checked**, and neither is a .NET call
+or a native `.exe`. See [Limitations](#limitations) for why that's the posture
+and what it costs.
+
 ### Beyond Bash: native file tools
 
-The hook is registered for Claude's native file tools as well as `Bash`, and runs
-the *same* path check on them — a native tool receives a structured path
-argument, so there's no command to parse, just a path to resolve and classify.
+The hook is registered for Claude's native file tools as well as the shell
+tools, and runs the *same* path check on them — a native tool receives a
+structured path argument, so there's no command to parse, just a path to resolve
+and classify.
 
 | Tool call                                         | Decision |
 | ------------------------------------------------- | -------- |
@@ -212,10 +263,9 @@ back its own output is never prompted. `Edit`, `Write`, `MultiEdit`, and
 `NotebookEdit` are writes, so they also pick up the sibling-checkout deny below.
 
 A path the hook can't resolve without a shell — one containing `$VAR` or a
-`~user` prefix — **defers** on these tools, since they don't shell-expand.
-`Bash` remains the only surface with full command parsing (pipelines, redirects,
-`cd` tracking, variable propagation); the native handlers are a straight
-path-in, decision-out check.
+`~user` prefix — **defers** on these tools, since they don't shell-expand. Full
+command parsing (pipelines, redirects, location tracking) belongs to the shell
+tools; the native handlers are a straight path-in, decision-out check.
 
 ### Worktree-aware sibling-checkout deny
 
@@ -368,6 +418,13 @@ After upgrading either way:
   [latest release](https://github.com/karlkfi/claude-workspace-guard/releases).
 
 ## How it works
+
+These steps describe the `Bash` frontend. The `PowerShell` tool has its own
+tokenizer, cmdlet table, and path resolution — backslash is a path character
+there, not an escape (see [The PowerShell tool](#the-powershell-tool)) — and
+rejoins this one at the classification steps (9–12), so both reach a decision
+through the same boundary rules and produce the same reasons. Symlink staging
+(step 7) has no PowerShell equivalent yet.
 
 1. **Tokenize** the command with Python's `shlex` (POSIX mode, punctuation
    grouping) so quotes are respected and shell operators (`|`, `&&`, `>`, `;`)
@@ -935,12 +992,24 @@ final output.
   (fail-safe: the deny is never applied on uncertainty, so the boundary is never
   weakened). A main-checkout session is a deliberate no-op even when worktrees
   exist.
-- **On native Windows the guard only sees the Bash tool.** Claude Code provides
-  that tool by way of Git Bash, which comes from Git for Windows — and Git for
-  Windows is optional. Without it, Claude Code runs shell commands through its
-  PowerShell tool instead, which this plugin does not hook, so nothing is
-  checked. The native file tools (`Read`, `Grep`, `Glob`, `Edit`, `Write`) are
-  still guarded either way. Install Git for Windows to get shell coverage.
+- **The PowerShell tool is guarded for a known set of cmdlets, and only those.**
+  Claude Code ships two shell tools. Which one a Windows session gets depends on
+  whether Git for Windows is installed — without it there is no Bash tool and
+  shell commands run through PowerShell, as they also do wherever
+  `CLAUDE_CODE_USE_POWERSHELL_TOOL=1` is set. Both are hooked. PowerShell is not
+  a POSIX shell, though, so it gets its own parser and its own table rather than
+  the bash one — see [The PowerShell tool](#the-powershell-tool): `Get-Content`,
+  `Select-String`, `Import-Csv`, `Import-Clixml`, `Set-Content`, `Add-Content`,
+  `Out-File`, `Tee-Object`, `Export-Csv`, `Export-Clixml`, `Copy-Item`,
+  `Move-Item`, `Remove-Item`, `Rename-Item`, their aliases (`cat`, `type`, `gc`,
+  `sls`, `sc`, `ac`, `cp`, `mv`, `rm`, `del`, …), and output redirects.
+  Everything else — a cmdlet not on that list, a .NET call such as
+  `[IO.File]::ReadAllText(…)`, a native `.exe` — is **not checked**, and the
+  session gets no signal that it wasn't. The alternative was to prompt on
+  everything unparsed, which at this table size would prompt on nearly every
+  command; a guard that noisy gets switched off, and zero coverage is worse than
+  partial. Expect this list to grow. The native file tools (`Read`, `Grep`,
+  `Glob`, `Edit`, `Write`) are guarded in full either way.
 - **A custom Git Bash mount is read as an ordinary directory.** On Windows the
   hook resolves a leading-slash path through the mount table Git for Windows
   ships (`/c/…` is the C: drive, `/tmp` is `%TMP%`, `/bin` is `<git>\usr\bin`,

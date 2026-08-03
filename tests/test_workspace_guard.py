@@ -5689,12 +5689,23 @@ class PluginWiringTests(unittest.TestCase):
 
     # --- hooks/hooks.json ----------------------------------------------------
 
-    def test_hooks_json_registers_pretooluse_bash(self):
-        data = self._load_json("hooks/hooks.json")
+    def _shell_matcher(self, data):
         pre = data.get("hooks", {}).get("PreToolUse")
         self.assertIsInstance(pre, list, "hooks.PreToolUse must be a list")
         matchers = [e.get("matcher") for e in pre]
-        self.assertIn("Bash", matchers, "no PreToolUse entry matches Bash")
+        matcher = next((m for m in matchers if m and "Bash" in m), None)
+        self.assertIsNotNone(matcher, "no PreToolUse entry matches Bash")
+        return matcher
+
+    def test_hooks_json_registers_pretooluse_shell_tools(self):
+        # Q51: PowerShell is the shell tool on a Windows box without Git for
+        # Windows. Unmatched, the plugin loads, reports itself active, and
+        # checks no shell command at all.
+        data = self._load_json("hooks/hooks.json")
+        matcher = self._shell_matcher(data)
+        for tool in ("Bash", "PowerShell"):
+            self.assertIn(tool, matcher,
+                          f"{tool} not covered by matcher {matcher!r}")
 
     def test_hooks_json_registers_pretooluse_edit_tools(self):
         # Issue 62: the sibling-checkout deny also hooks the file-editing tools.
@@ -5726,14 +5737,15 @@ class PluginWiringTests(unittest.TestCase):
 
     def test_hooks_json_command_path_exists(self):
         data = self._load_json("hooks/hooks.json")
+        matcher = self._shell_matcher(data)
         entry = next(
-            e for e in data["hooks"]["PreToolUse"] if e.get("matcher") == "Bash"
+            e for e in data["hooks"]["PreToolUse"] if e.get("matcher") == matcher
         )
         commands = [
             h["command"] for h in entry["hooks"]
             if h.get("type") == "command" and "command" in h
         ]
-        self.assertTrue(commands, "Bash matcher has no command-type hook")
+        self.assertTrue(commands, "shell matcher has no command-type hook")
         # Every referenced "${CLAUDE_PLUGIN_ROOT}/<rel>" path must exist in the
         # repo (the plugin root is the repo root at install time).
         marker = "${CLAUDE_PLUGIN_ROOT}/"
@@ -6104,6 +6116,466 @@ class NativeToolTests(unittest.TestCase):
         out = self._run("NotebookEdit",
                         {"notebook_path": os.path.join(self.outside_dir, "n.ipynb")})
         self.assertEqual(self._decision(out), "ask")
+
+
+# --- Q51: the PowerShell tool ------------------------------------------------
+
+# Lets a fixture pass `tool_input=None` to mean "omit the key entirely", which
+# `None` as a default could not express.
+_UNSET = object()
+
+
+def ps(path):
+    """Quote a native path for a PowerShell fixture — the `sh()` of this
+    frontend, and deliberately not `sh()` itself.
+
+    `shlex.quote` is POSIX quoting: it leaves a backslash bare, which is right
+    for bash and wrong here only in the other direction — what actually breaks a
+    Windows-CI fixture is a space in the interpolated path. Single quotes are
+    literal in PowerShell, so they carry the backslashes through intact and
+    survive a `C:\\Program Files`-shaped home.
+    """
+    return "'" + path.replace("'", "''") + "'"
+
+
+class PowerShellSpecShapeTests(unittest.TestCase):
+    """Invariants the PS_SPEC table has to hold for the binder to be correct."""
+
+    def test_spec_covers_documented_cmdlets(self):
+        self.assertEqual(
+            set(guard.PS_SPEC.keys()),
+            {"get-content", "select-string", "import-csv", "import-clixml",
+             "set-content", "add-content", "out-file", "tee-object",
+             "export-csv", "export-clixml",
+             "copy-item", "move-item", "remove-item", "rename-item"},
+        )
+
+    def test_positional_slots_are_declared_parameter_names(self):
+        # A slot is a parameter name, not a role: binding `-Pattern` by name has
+        # to close slot 0 so the file lands in slot 1. A typo'd slot name would
+        # silently never match a file parameter and never be checked.
+        rows = dict(guard.PS_SPEC, __location__=guard.PS_LOCATION_SPEC)
+        for name, row in rows.items():
+            for slot in row["positional"]:
+                self.assertIn(slot, row["names"],
+                              f"{name}: positional slot {slot!r} is not a "
+                              f"declared parameter")
+
+    def test_file_roles_are_read_or_write(self):
+        for name, row in guard.PS_SPEC.items():
+            for param, role in row["files"].items():
+                self.assertIn(role, ("read", "write"), f"{name}.-{param}")
+
+    def test_file_and_consume_are_disjoint(self):
+        # A parameter declared both ways would have its path swallowed as a
+        # value — the silent-allow direction.
+        for name, row in guard.PS_SPEC.items():
+            self.assertFalse(set(row["files"]) & row["consume"],
+                             f"{name}: parameter is both a file and a value")
+
+    def test_aliases_resolve_to_real_rows(self):
+        known = set(guard.PS_SPEC) | guard.PS_LOCATION_CMDS
+        for alias, target in guard.PS_ALIASES.items():
+            self.assertIn(target, known, f"alias {alias!r} -> unknown {target!r}")
+
+    def test_posix_lookalike_aliases_do_not_reach_the_bash_spec(self):
+        # `cat`, `rm`, `cp`, `mv`, `tee` name cmdlets with entirely different
+        # flag sets here. Routing them to the SPEC row of the same name is the
+        # aliasing mistake Q3 recorded.
+        for alias in ("cat", "rm", "cp", "mv", "tee", "sc", "type"):
+            self.assertIn(alias, guard.PS_ALIASES)
+            self.assertIn(guard.PS_ALIASES[alias], guard.PS_SPEC)
+
+
+class PowerShellTokenizerTests(unittest.TestCase):
+    """The tokenizer is the load-bearing difference from the bash frontend."""
+
+    def words(self, text):
+        toks = guard.ps_tokenize(text)
+        self.assertIsNotNone(toks, f"unexpected defer for {text!r}")
+        return [t[1] for t in toks if t[0] == "word"]
+
+    def test_backslash_is_a_path_character_not_an_escape(self):
+        # The whole reason this is not shlex. In POSIX mode `C:\Users\x`
+        # tokenizes to `C:Usersx`, which resolves INSIDE the project root.
+        self.assertEqual(self.words(r"Get-Content C:\Users\bob\x"),
+                         ["Get-Content", r"C:\Users\bob\x"])
+
+    def test_shlex_would_have_eaten_the_backslashes(self):
+        # Pins the premise above rather than trusting it.
+        self.assertEqual(shlex.split(r"Get-Content C:\Users\bob\x"),
+                         ["Get-Content", "C:Usersbobx"])
+
+    def test_backtick_is_the_escape_character(self):
+        # An escaped space joins the token; an unescaped one still separates.
+        self.assertEqual(self.words("Get-Content a` b"), ["Get-Content", "a b"])
+        self.assertEqual(self.words("Get-Content a b"), ["Get-Content", "a", "b"])
+
+    def test_backtick_before_a_path_letter_is_the_letter(self):
+        self.assertEqual(self.words(r"Get-Content `C:\x"), ["Get-Content", r"C:\x"])
+
+    def test_single_quotes_are_literal(self):
+        self.assertEqual(self.words(r"Get-Content 'C:\a b\$x'"),
+                         ["Get-Content", r"C:\a b\$x"])
+
+    def test_doubled_quote_inside_a_quoted_run(self):
+        self.assertEqual(self.words("Get-Content 'it''s'"), ["Get-Content", "it's"])
+
+    def test_unbalanced_quote_defers(self):
+        self.assertIsNone(guard.ps_tokenize('Get-Content "unterminated'))
+        self.assertIsNone(guard.ps_tokenize("Get-Content 'unterminated"))
+
+    def test_dollar_marks_a_token_expandable(self):
+        toks = guard.ps_tokenize(r'Get-Content $env:USERPROFILE\x')
+        self.assertTrue(toks[1][2], "token with $ should be expandable")
+
+    def test_dollar_inside_single_quotes_is_not_expandable(self):
+        toks = guard.ps_tokenize(r"Get-Content '$env:USERPROFILE'")
+        self.assertFalse(toks[1][2])
+
+    def test_dollar_inside_double_quotes_is_expandable(self):
+        toks = guard.ps_tokenize(r'Get-Content "$env:USERPROFILE"')
+        self.assertTrue(toks[1][2])
+
+    def test_stream_selector_glues_to_the_redirect(self):
+        toks = guard.ps_tokenize(r"Get-Content a 2> C:\x")
+        self.assertIn(("redir", "2>", False, False), toks)
+        self.assertEqual([t[1] for t in toks if t[0] == "word"],
+                         ["Get-Content", "a", r"C:\x"])
+
+    def test_separators_split_segments(self):
+        toks = guard.ps_tokenize("a | b; c && d")
+        self.assertEqual([t[1] for t in toks if t[0] == "op"], ["|", ";", "&&"])
+
+    def test_line_comment_is_dropped(self):
+        self.assertEqual(self.words("Get-Content a # Get-Content C:\\x"),
+                         ["Get-Content", "a"])
+
+    def test_hash_inside_a_token_is_not_a_comment(self):
+        self.assertEqual(self.words("Get-Content 'a#b'"), ["Get-Content", "a#b"])
+
+    def test_block_comment_is_dropped(self):
+        self.assertEqual(self.words("<# note #> Get-Content a"),
+                         ["Get-Content", "a"])
+
+    def test_backtick_newline_continues_the_line(self):
+        self.assertEqual(self.words("Get-Content `\na"), ["Get-Content", "a"])
+
+
+class PowerShellHereStringTests(unittest.TestCase):
+    def test_literal_here_string_body_is_dropped(self):
+        out = guard.ps_strip_here_strings("Set-Content x @'\n$(evil)\n'@\n")
+        self.assertNotIn("evil", out)
+
+    def test_expandable_body_survives_the_literal_only_pass(self):
+        # It has to: PowerShell runs a `$(…)` written in an @"…"@ body, so the
+        # subexpression scan needs to see it.
+        text = 'Set-Content x @"\n$(Get-Content C:\\x)\n"@\n'
+        self.assertIn("Get-Content C:", guard.ps_strip_here_strings(
+            text, literal_only=True))
+        self.assertNotIn("Get-Content C:", guard.ps_strip_here_strings(text))
+
+    def test_unterminated_here_string_defers(self):
+        self.assertIsNone(guard.ps_strip_here_strings('Set-Content x @"\nbody'))
+
+
+class PowerShellSubexpressionTests(unittest.TestCase):
+    def test_body_is_extracted_and_masked(self):
+        masked, bodies = guard.ps_subexpressions(r"Write-Output $(Get-Content C:\x)")
+        self.assertEqual(bodies, [r"Get-Content C:\x"])
+        self.assertEqual(masked, "Write-Output $")
+
+    def test_body_inside_double_quotes_is_extracted(self):
+        _, bodies = guard.ps_subexpressions(r'Write-Output "$(Get-Content C:\x)"')
+        self.assertEqual(bodies, [r"Get-Content C:\x"])
+
+    def test_paren_in_quoted_prose_does_not_close_the_body(self):
+        _, bodies = guard.ps_subexpressions(r'$(Get-Content "a)b" C:\x)')
+        self.assertEqual(bodies, [r'Get-Content "a)b" C:\x'])
+
+    def test_nested_bodies_are_extracted(self):
+        _, bodies = guard.ps_subexpressions(r"$(a $(Get-Content C:\x))")
+        self.assertIn(r"Get-Content C:\x", bodies)
+
+    def test_unbalanced_quote_is_not_closed_for_the_tokenizer(self):
+        # Fabricating the missing quote here would hand the tokenizer a
+        # balanced string and turn a defer into a parse.
+        masked, _ = guard.ps_subexpressions('Get-Content "unterminated')
+        self.assertIsNone(guard.ps_tokenize(masked))
+
+
+class PowerShellBindArgsTests(unittest.TestCase):
+    """Parameter binding — the layer where a shifted operand becomes a silent
+    allow."""
+
+    def bind(self, cmdlet, text):
+        toks = guard.ps_tokenize(text)
+        return [(t, role) for t, _, _, role in
+                guard.ps_bind_args(toks[1:], guard.PS_SPEC[cmdlet])]
+
+    def test_positional_path(self):
+        self.assertEqual(self.bind("get-content", r"Get-Content C:\x"),
+                         [(r"C:\x", "read")])
+
+    def test_named_path(self):
+        self.assertEqual(self.bind("get-content", r"Get-Content -Path C:\x"),
+                         [(r"C:\x", "read")])
+
+    def test_literalpath_is_a_file_parameter(self):
+        self.assertEqual(self.bind("get-content", r"Get-Content -LiteralPath C:\x"),
+                         [(r"C:\x", "read")])
+
+    def test_colon_bound_value(self):
+        self.assertEqual(self.bind("get-content", r"Get-Content -Path:C:\x"),
+                         [(r"C:\x", "read")])
+
+    def test_unambiguous_prefix_resolves(self):
+        self.assertEqual(self.bind("get-content", r"Get-Content -Pat C:\x"),
+                         [(r"C:\x", "read")])
+
+    def test_ambiguous_prefix_falls_back_to_a_switch(self):
+        # `-P` matches Path and PipelineVariable. Unresolved, it reads as a
+        # switch and the value stays a positional — so the file is still
+        # checked, which is the safe way to be wrong.
+        self.assertEqual(self.bind("get-content", r"Get-Content -P C:\x"),
+                         [(r"C:\x", "read")])
+
+    def test_value_taking_parameter_does_not_shift_the_operand(self):
+        # Undeclared, `-Encoding` would leak UTF8 into slot 0 (-Path) and push
+        # the real target into slot 1 (-Value), where it is never checked.
+        self.assertEqual(
+            self.bind("set-content", r"Set-Content -Encoding UTF8 C:\x hi"),
+            [(r"C:\x", "write")])
+
+    def test_named_binding_closes_its_positional_slot(self):
+        # `-Pattern` bound by name means the file takes slot 1 (-Path), whatever
+        # the order. A one-pass binder gives it slot 0 and never checks it.
+        self.assertEqual(
+            self.bind("select-string", r"Select-String -Pattern foo C:\x"),
+            [(r"C:\x", "read")])
+        self.assertEqual(
+            self.bind("select-string", r"Select-String C:\x -Pattern foo"),
+            [(r"C:\x", "read")])
+
+    def test_destination_bound_by_name_frees_the_source_slot(self):
+        self.assertEqual(
+            self.bind("copy-item", r"Copy-Item -Destination C:\d C:\s"),
+            [(r"C:\d", "write"), (r"C:\s", "read")])
+
+    def test_pattern_positional_is_not_a_file(self):
+        self.assertEqual(self.bind("select-string", r"Select-String foo C:\x"),
+                         [(r"C:\x", "read")])
+
+    def test_value_positional_is_not_a_file(self):
+        self.assertEqual(self.bind("set-content", r"Set-Content C:\x C:\y"),
+                         [(r"C:\x", "write")])
+
+    def test_trailing_operands_repeat_the_last_slot(self):
+        self.assertEqual(self.bind("remove-item", r"Remove-Item C:\a C:\b C:\c"),
+                         [(r"C:\a", "write"), (r"C:\b", "write"),
+                          (r"C:\c", "write")])
+
+    def test_switches_do_not_consume_the_operand(self):
+        self.assertEqual(
+            self.bind("remove-item", r"Remove-Item -Recurse -Force C:\x"),
+            [(r"C:\x", "write")])
+
+    def test_stop_parsing_marker_ends_binding(self):
+        self.assertEqual(self.bind("get-content", r"Get-Content --% C:\x"), [])
+
+    def test_negative_number_is_not_a_parameter(self):
+        self.assertEqual(self.bind("get-content", r"Get-Content -Tail -5 C:\x"),
+                         [(r"C:\x", "read")])
+
+
+class PowerShellPathPartsTests(unittest.TestCase):
+    def test_unquoted_array_operand_splits(self):
+        self.assertEqual(guard.ps_path_parts(r"a,C:\x", False), ["a", r"C:\x"])
+
+    def test_quoted_operand_keeps_its_comma(self):
+        self.assertEqual(guard.ps_path_parts(r"a,b.txt", True), [r"a,b.txt"])
+
+
+class PowerShellEndToEndTests(unittest.TestCase):
+    """Decisions the script emits for `tool_name: PowerShell`.
+
+    The workspace lives under $HOME so an outside sibling is a plain `outside`
+    ask rather than a host-temp deny. Windows-native targets are synthetic
+    placeholders (repo rule) — the check is lexical, so nothing needs to exist.
+    """
+
+    OUT = r"C:\q51-fake-target\x"
+
+    def setUp(self):
+        home = guard.resolved_home()                      # Q43: not $HOME
+        self.assertTrue(home and os.path.isdir(home),
+                        f"no home directory to build the fixture under: {home!r}")
+        self._tmp = tempfile.TemporaryDirectory(dir=home)
+        self.base = os.path.realpath(self._tmp.name)
+        self.workspace = os.path.join(self.base, "proj")
+        os.makedirs(os.path.join(self.workspace, "docs"))
+        for rel in ("in.txt", "docs/note.md"):
+            with open(os.path.join(self.workspace, rel), "w") as f:
+                f.write("hi\n")
+        self.outside_dir = os.path.join(self.base, "outside")
+        os.makedirs(self.outside_dir)
+        self.outside = os.path.join(self.outside_dir, "secret.txt")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run(self, command, *, tool="PowerShell", tool_input=_UNSET,
+             permission_mode=None, cwd=None):
+        env = os.environ.copy()
+        env["CLAUDE_PROJECT_DIR"] = self.workspace
+        data = {"tool_name": tool, "cwd": cwd or self.workspace,
+                "tool_input": {"command": command}
+                if tool_input is _UNSET else tool_input}
+        if tool_input is None:
+            data.pop("tool_input")
+        if permission_mode is not None:
+            data["permission_mode"] = permission_mode
+        r = subprocess.run([sys.executable, str(SCRIPT)], input=json.dumps(data),
+                           capture_output=True, text=True, env=env, timeout=10)
+        self.assertEqual(r.returncode, 0, f"hook errored: {r.stderr!r}")
+        out = r.stdout.strip()
+        return json.loads(out) if out else None
+
+    def _decide(self, command, expected, **kw):
+        out = self._run(command, **kw)
+        self.assertIsNotNone(out, f"expected {expected}, got defer for {command!r}")
+        got = out["hookSpecificOutput"]["permissionDecision"]
+        self.assertEqual(
+            got, expected,
+            f"expected {expected!r} for {command!r}; got {got!r} (reason: "
+            f"{out['hookSpecificOutput'].get('permissionDecisionReason')!r})")
+        return out
+
+    def _defer(self, command, **kw):
+        out = self._run(command, **kw)
+        self.assertIsNone(out, f"expected defer for {command!r}, got {out!r}")
+
+    # --- the gap Q51 closes --------------------------------------------------
+
+    def test_native_windows_path_is_not_mangled_into_the_workspace(self):
+        # Routed through the POSIX tokenizer this becomes `C:q51-fake-targetx`,
+        # resolves under the project root, and allows silently.
+        self._decide(r"Get-Content C:\q51-fake-target\x", "ask")
+
+    def test_powershell_never_reaches_the_bash_handler(self):
+        # `cat` is Get-Content here. Under the bash SPEC row the same string
+        # would parse with cat's (empty) flag set — a different grammar.
+        self._decide(r"cat C:\q51-fake-target\x", "ask")
+
+    def test_missing_command_field_asks_rather_than_defers(self):
+        # The field name is read off the installed binary, not documented
+        # schema. Deferring here would be indistinguishable from the wiring bug
+        # it would be hiding: a guard that reports itself active and checks
+        # nothing.
+        out = self._run(None, tool_input={"timeout": 5})
+        self.assertIsNotNone(out, "a PowerShell call with no command must not defer")
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "ask")
+        self.assertIn("tool_input.command",
+                      out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_absent_tool_input_asks(self):
+        out = self._run(None, tool_input=None)
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "ask")
+
+    # --- parity with the bash frontend ---------------------------------------
+
+    def test_read_outside_asks(self):
+        self._decide("Get-Content %s" % ps(self.outside), "ask")
+
+    def test_read_inside_allows(self):
+        self._decide("Get-Content in.txt", "allow")
+
+    def test_write_outside_asks(self):
+        self._decide("Set-Content %s hi" % ps(self.outside), "ask")
+
+    def test_out_file_outside_asks(self):
+        self._decide("Out-File -FilePath %s" % ps(self.outside), "ask")
+
+    def test_select_string_outside_asks(self):
+        self._decide("Select-String -Pattern foo %s" % ps(self.outside), "ask")
+
+    def test_copy_item_outside_destination_asks(self):
+        self._decide("Copy-Item in.txt %s" % ps(self.outside), "ask")
+
+    def test_redirect_target_outside_asks_whatever_the_command(self):
+        # Q26 parity: a redirect is a shell-level write, honored even though
+        # Write-Output is not a guarded cmdlet.
+        self._decide("Write-Output hi > %s" % ps(self.outside), "ask")
+
+    def test_redirect_target_inside_defers(self):
+        self._defer("Write-Output hi > out.txt")
+
+    def test_unguarded_cmdlet_defers(self):
+        self._defer(r"Get-ChildItem C:\q51-fake-target")
+
+    def test_bypass_permissions_denies(self):
+        self._decide("Get-Content %s" % ps(self.outside), "deny",
+                     permission_mode="bypassPermissions")
+
+    # --- location tracking ---------------------------------------------------
+
+    def test_set_location_moves_the_resolution_base(self):
+        self._decide("Set-Location %s; Get-Content secret.txt"
+                     % ps(self.outside_dir), "ask")
+
+    def test_set_location_inside_still_allows(self):
+        self._decide("Set-Location docs; Get-Content note.md", "allow")
+
+    def test_untracked_location_flags_relative_operands(self):
+        out = self._decide("Set-Location $d; Get-Content secret.txt", "ask")
+        self.assertIn("untracked",
+                      out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_bare_cd_drops_tracking(self):
+        self._decide("cd; Get-Content secret.txt", "ask")
+
+    def test_pop_location_drops_tracking(self):
+        self._decide("Push-Location docs; Pop-Location; Get-Content note.md", "ask")
+
+    # --- deferring, and what must not defer ----------------------------------
+
+    def test_empty_command_defers(self):
+        self._defer("   ")
+
+    def test_unbalanced_quote_defers(self):
+        self._defer('Get-Content "unterminated')
+
+    def test_commented_out_command_defers(self):
+        self._defer(r"# Get-Content C:\q51-fake-target\x")
+
+    def test_expandable_operand_asks(self):
+        out = self._decide(r"Get-Content $env:USERPROFILE\x", "ask")
+        self.assertIn("Runtime-expanded",
+                      out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_subexpression_body_is_analyzed(self):
+        self._decide('Write-Output "$(Get-Content %s)"' % ps(self.outside), "ask")
+
+    def test_script_block_body_is_analyzed(self):
+        self._decide("Get-ChildItem | ForEach-Object { Get-Content %s }"
+                     % ps(self.outside), "ask")
+
+    def test_literal_here_string_body_is_inert(self):
+        self._decide("Set-Content in.txt @'\nGet-Content %s\n'@" % ps(self.outside),
+                     "allow")
+
+    def test_expandable_here_string_body_is_analyzed(self):
+        self._decide('Set-Content in.txt @"\n$(Get-Content %s)\n"@'
+                     % ps(self.outside), "ask")
+
+    def test_assignment_head_is_stripped(self):
+        self._decide("$x = Get-Content %s" % ps(self.outside), "ask")
+
+    def test_array_operand_flags_the_outside_element(self):
+        # An unquoted comma-joined operand, so a synthetic Windows-native
+        # target rather than the fixture path: quoting it would suppress the
+        # split this is about, and the check is lexical either way.
+        self._decide("Get-Content -Path in.txt,%s" % self.OUT, "ask")
 
 
 if __name__ == "__main__":

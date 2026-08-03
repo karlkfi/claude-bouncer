@@ -1,7 +1,33 @@
 # Q51 — guard the PowerShell tool on Windows
 
-**Status: not started.** Filed by Q44's validation pass; see
+**Status: done.** Filed by Q44's validation pass; see
 [`q44-windows-validation.md`](q44-windows-validation.md) finding 2.
+
+All acceptance criteria below are met. What shipped, beyond them:
+
+- **`Set-Location` / `Push-Location` tracking.** Not in the criteria, but
+  without it `Set-Location C:\out; Get-Content secrets.txt` resolves the
+  relative operand against the session cwd and allows it silently. Anything the
+  hook can't follow drops tracking and reports relative operands as
+  'untracked', matching the bash `cd` handling.
+- **Two-pass parameter binding.** PowerShell binds by name first and fills the
+  remaining positional slots afterwards. A single left-to-right pass gave
+  `Select-String -Pattern foo <file>` slot 0 (-Pattern) and never checked the
+  file. Positional slots are therefore parameter *names*, not roles, so a
+  name-bound parameter closes its slot.
+- **`consume` enumerated in full per row.** An undeclared value-taking
+  parameter shifts every later operand: `Set-Content -Encoding UTF8 C:\out\x`
+  would bind `UTF8` as the target and the real path as `-Value`.
+
+Known gaps, deliberately left (README's Limitations says so):
+
+- Anything off the cmdlet table — a .NET call such as
+  `[IO.File]::ReadAllText(…)`, a native `.exe` — is unchecked and silent.
+- No symlink staging (`New-Item -ItemType SymbolicLink`); step 7 of the bash
+  pipeline has no PowerShell equivalent.
+- `$_` inside a `ForEach-Object` block reports as 'expand' and prompts, the
+  same as bash's `cat $f`. Consistent, but `$_` is far more load-bearing in
+  PowerShell idiom, so this may prove noisy in practice.
 
 ## Goal
 

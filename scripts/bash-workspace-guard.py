@@ -2845,16 +2845,749 @@ def handle_read_tool(data):
     emit(decision, reason)
 
 
+# --- PowerShell tool --------------------------------------------------------
+# Claude Code ships two shell tools. A Windows session without Git for Windows
+# — or any session with CLAUDE_CODE_USE_POWERSHELL_TOOL=1 — gets `PowerShell`
+# instead of `Bash`, and until Q51 nothing below matched it: the plugin loaded,
+# reported itself active, and checked no shell command at all. The native file
+# tools stayed guarded throughout, which is what made it easy to miss.
+#
+# This is a separate frontend, not a SPEC row. PowerShell is not a POSIX shell
+# and every difference falls in the unsafe direction — most of all the escape
+# character, which is a backtick. `shlex` reads `C:\Users\x` as escapes and
+# yields `C:Usersx`, a path that resolves INSIDE the project root. That is a
+# silent allow on the commonest Windows path form, so the tokenizer, the cmdlet
+# table, and the parameter grammar are all its own. Only `classify_outside` /
+# `decide` are shared, so a PowerShell `Get-Content` and a bash `cat` of the
+# same path can't reach different verdicts.
+#
+# Posture: parse a known subset, defer on the rest. An `ask` on everything
+# unparsed is the stricter reading, but the table covers little enough that
+# nearly every command would prompt, and a guard that noisy gets switched off.
+# The honest cost is in README's Limitations: the unparsed tail is unguarded and
+# the gap is invisible to the user.
+
+# CommonParameters. Present on every cmdlet, so they belong in every row's name
+# space or prefix resolution mis-resolves against an incomplete set.
+_PS_COMMON_CONSUME = frozenset({
+    'erroraction', 'warningaction', 'informationaction', 'progressaction',
+    'errorvariable', 'warningvariable', 'informationvariable',
+    'outvariable', 'outbuffer', 'pipelinevariable'})
+_PS_COMMON_SWITCHES = frozenset({'verbose', 'debug', 'whatif', 'confirm'})
+
+# Every guarded row names its file parameters, its value-taking parameters, and
+# its switches. The asymmetry that matters: failing to declare a value-taking
+# parameter leaks its value into the positional list, which for a row with
+# role-differentiated positionals SHIFTS every later operand — `Set-Content
+# -Encoding UTF8 C:\out\x` would bind `UTF8` as the target and `C:\out\x` as the
+# value, a silent allow. Wrongly declaring one only swallows a token that then
+# resolves cwd-relative, a harmless prompt. So `consume` is enumerated in full
+# from the cmdlet signature; guessing is what breaks it, in the bad direction.
+def _ps_row(files, consume=(), switches=(), positional=()):
+    consume = frozenset(consume) | _PS_COMMON_CONSUME
+    switches = frozenset(switches) | _PS_COMMON_SWITCHES
+    return {'files': files, 'consume': consume,
+            'positional': list(positional),
+            'names': frozenset(files) | consume | switches}
+
+
+# `-Path`/`-LiteralPath` name the operand on nearly every provider cmdlet; the
+# role differs per row, so the dict is spelled out rather than shared.
+PS_SPEC = {
+    # Reads. `positional` gives the role of each positional operand in order;
+    # operands past the end repeat the last entry, which is what makes
+    # `-Path`'s array binding (`Remove-Item a b c`) come out right.
+    'get-content': _ps_row(
+        {'path': 'read', 'literalpath': 'read'},
+        consume=('readcount', 'totalcount', 'head', 'tail', 'filter',
+                 'include', 'exclude', 'credential', 'delimiter', 'encoding',
+                 'stream'),
+        switches=('force', 'wait', 'raw', 'asbytestream'),
+        positional=('path',)),
+    # PowerShell's grep. Position 0 is -Pattern, not a file — binding it as one
+    # would resolve the regex cwd-relative and mask the real operand at 1.
+    'select-string': _ps_row(
+        {'path': 'read', 'literalpath': 'read'},
+        consume=('pattern', 'inputobject', 'include', 'exclude', 'encoding',
+                 'context', 'culture'),
+        switches=('simplematch', 'casesensitive', 'quiet', 'list', 'raw',
+                  'notmatch', 'allmatches', 'noemphasis'),
+        positional=('pattern', 'path')),
+    'import-csv': _ps_row(
+        {'path': 'read', 'literalpath': 'read'},
+        consume=('delimiter', 'header', 'encoding'),
+        switches=('useculture',),
+        positional=('path',)),
+    'import-clixml': _ps_row(
+        {'path': 'read', 'literalpath': 'read'},
+        consume=('skip', 'first'),
+        switches=('includetotalcount',),
+        positional=('path',)),
+    # Writes. Position 1 of Set-Content/Add-Content is -Value, not a path.
+    'set-content': _ps_row(
+        {'path': 'write', 'literalpath': 'write'},
+        consume=('value', 'filter', 'include', 'exclude', 'credential',
+                 'encoding', 'stream'),
+        switches=('passthru', 'force', 'nonewline', 'asbytestream'),
+        positional=('path', 'value')),
+    'add-content': _ps_row(
+        {'path': 'write', 'literalpath': 'write'},
+        consume=('value', 'filter', 'include', 'exclude', 'credential',
+                 'encoding', 'stream'),
+        switches=('passthru', 'force', 'nonewline', 'asbytestream'),
+        positional=('path', 'value')),
+    'out-file': _ps_row(
+        {'filepath': 'write', 'literalpath': 'write'},
+        consume=('encoding', 'width', 'inputobject'),
+        switches=('append', 'force', 'noclobber', 'nonewline'),
+        positional=('filepath',)),
+    'tee-object': _ps_row(
+        {'filepath': 'write', 'literalpath': 'write'},
+        consume=('inputobject', 'variable'),
+        switches=('append',),
+        positional=('filepath',)),
+    'export-csv': _ps_row(
+        {'path': 'write', 'literalpath': 'write'},
+        consume=('inputobject', 'delimiter', 'encoding', 'quotefields',
+                 'usequotes'),
+        switches=('append', 'force', 'noclobber', 'notypeinformation',
+                  'includetypeinformation', 'useculture', 'noheader'),
+        positional=('path',)),
+    'export-clixml': _ps_row(
+        {'path': 'write', 'literalpath': 'write'},
+        consume=('inputobject', 'depth', 'encoding'),
+        switches=('force', 'noclobber'),
+        positional=('path',)),
+    # Mutations. Source and destination are both checked; the boundary doesn't
+    # care which is which, but the read/write split does — a read of the source
+    # keeps the read-prefix exemption, a write of the destination doesn't.
+    'copy-item': _ps_row(
+        {'path': 'read', 'literalpath': 'read', 'destination': 'write'},
+        consume=('filter', 'include', 'exclude', 'credential', 'fromsession',
+                 'tosession'),
+        switches=('container', 'force', 'recurse', 'passthru'),
+        positional=('path', 'destination')),
+    'move-item': _ps_row(
+        {'path': 'read', 'literalpath': 'read', 'destination': 'write'},
+        consume=('filter', 'include', 'exclude', 'credential'),
+        switches=('force', 'passthru'),
+        positional=('path', 'destination')),
+    'remove-item': _ps_row(
+        {'path': 'write', 'literalpath': 'write'},
+        consume=('filter', 'include', 'exclude', 'credential', 'stream'),
+        switches=('recurse', 'force'),
+        positional=('path',)),
+    # -NewName is a name, not a path: it can't carry the operand out of root.
+    'rename-item': _ps_row(
+        {'path': 'write', 'literalpath': 'write'},
+        consume=('newname', 'credential'),
+        switches=('force', 'passthru'),
+        positional=('path', 'newname')),
+}
+
+# Not guarded — `Set-Location` reads no file — but tracked, because without it
+# `Set-Location C:\out; Get-Content secrets.txt` resolves the relative operand
+# against the session cwd and silently allows it. Mirrors the bash cd tracking.
+PS_LOCATION_SPEC = _ps_row(
+    {'path': 'read', 'literalpath': 'read'},
+    consume=('stackname',), switches=('passthru',), positional=('path',))
+PS_LOCATION_CMDS = frozenset({'set-location', 'push-location', 'pop-location'})
+
+# PowerShell resolves aliases before parameters, and several collide with the
+# POSIX names in SPEC while meaning something with a different flag set — `cat`
+# is Get-Content, `sc` is Set-Content, `rm` is Remove-Item. Routing those to the
+# SPEC row of the same name is exactly the aliasing mistake Q3 recorded.
+PS_ALIASES = {
+    'gc': 'get-content', 'cat': 'get-content', 'type': 'get-content',
+    'sls': 'select-string',
+    'ipcsv': 'import-csv', 'epcsv': 'export-csv',
+    'sc': 'set-content', 'set': 'set-content',
+    'ac': 'add-content',
+    'tee': 'tee-object',
+    'cpi': 'copy-item', 'copy': 'copy-item', 'cp': 'copy-item',
+    'mi': 'move-item', 'move': 'move-item', 'mv': 'move-item',
+    'ri': 'remove-item', 'rm': 'remove-item', 'del': 'remove-item',
+    'erase': 'remove-item', 'rd': 'remove-item', 'rmdir': 'remove-item',
+    'rni': 'rename-item', 'ren': 'rename-item',
+    'cd': 'set-location', 'sl': 'set-location', 'chdir': 'set-location',
+    'pushd': 'push-location', 'popd': 'pop-location',
+}
+
+# `@"` / `@'` opens a here-string; the body ends at a line whose first
+# non-blank characters are the closing delimiter.
+PS_HERE_OPEN_RE = re.compile(r"@([\"'])[ \t]*\r?\n")
+
+
+def ps_strip_here_strings(text, literal_only=False):
+    """Replace here-string bodies with an empty literal, or None if one is open.
+
+    Body text is arbitrary data — it may hold unbalanced quotes, `#`, or
+    anything else that would derail the tokenizer — so it never reaches it.
+    `literal_only` keeps the expandable (`@"`) form intact for the subexpression
+    scan, since PowerShell *does* run a `$(…)` written there; the literal (`@'`)
+    form is inert and drops either way. Same split as the bash heredoc handling
+    in Q35.
+    """
+    out, i = [], 0
+    while True:
+        m = PS_HERE_OPEN_RE.search(text, i)
+        if not m:
+            out.append(text[i:])
+            return ''.join(out)
+        close = re.compile(r"\r?\n[ \t]*" + re.escape(m.group(1)) + r"@")
+        e = close.search(text, m.end() - 1)
+        if not e:
+            return None                       # unterminated -> caller defers
+        if literal_only and m.group(1) == '"':
+            out.append(text[i:e.end()])
+        else:
+            out.append(text[i:m.start()])
+            out.append("''")
+        i = e.end()
+
+
+def _ps_scan_paren(text, start):
+    """Index just past the `)` balancing the `(` at `start`, or None.
+
+    Single-quoted runs are opaque. Double-quoted runs are not: PowerShell
+    expands `$(…)` inside them, so a nested subexpression is scanned rather than
+    skipped — otherwise a `)` in ordinary quoted prose would close the wrong
+    paren and truncate the body.
+    """
+    depth, i, n = 0, start, len(text)
+    while i < n:
+        c = text[i]
+        if c == '`':
+            i += 2
+            continue
+        if c == "'":
+            i += 1
+            while i < n and text[i] != "'":
+                i += 1
+            i += 1
+            continue
+        if c == '"':
+            i += 1
+            while i < n and text[i] != '"':
+                if text[i] == '`':
+                    i += 2
+                    continue
+                if text[i] == '$' and i + 1 < n and text[i + 1] == '(':
+                    j = _ps_scan_paren(text, i + 1)
+                    if j is None:
+                        return None
+                    i = j
+                    continue
+                i += 1
+            i += 1
+            continue
+        if c == '(':
+            depth += 1
+        elif c == ')':
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return None
+
+
+def ps_subexpressions(text, depth=0):
+    """Split `$(…)` / `@(…)` out of `text`.
+
+    Returns `(masked, bodies)`. Each subexpression is replaced by a bare `$` so
+    the token that contained it still reads as runtime-expanded, and its body is
+    returned for analysis in its own right — the same strictly-friction-adding
+    treatment bash command substitutions get, and for the same reason: a guarded
+    cmdlet written inside one is invisible to the outer tokenizer.
+    """
+    out, bodies, i, n = [], [], 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == '`':
+            out.append(text[i:i + 2])
+            i += 2
+            continue
+        if c == "'":
+            j = i + 1
+            while j < n and text[j] != "'":
+                j += 1
+            out.append(text[i:j + 1])
+            i = j + 1
+            continue
+        if c in '$@' and i + 1 < n and text[i + 1] == '(':
+            j = _ps_scan_paren(text, i + 1)
+            if j is None:
+                out.append(c)
+                i += 1
+                continue
+            body = text[i + 2:j - 1]
+            bodies.append(body)
+            if depth < MAX_SUBST_DEPTH:
+                bodies.extend(ps_subexpressions(body, depth + 1)[1])
+            out.append('$')
+            i = j
+            continue
+        if c == '"':
+            j, seg, closed = i + 1, ['"'], False
+            while j < n:
+                if text[j] == '"':
+                    closed = True
+                    break
+                if text[j] == '`':
+                    seg.append(text[j:j + 2])
+                    j += 2
+                    continue
+                if text[j] == '$' and j + 1 < n and text[j + 1] == '(':
+                    k = _ps_scan_paren(text, j + 1)
+                    if k is None:
+                        break
+                    body = text[j + 2:k - 1]
+                    bodies.append(body)
+                    if depth < MAX_SUBST_DEPTH:
+                        bodies.extend(ps_subexpressions(body, depth + 1)[1])
+                    seg.append('$')
+                    j = k
+                    continue
+                seg.append(text[j])
+                j += 1
+            # Never close the run that the input left open: fabricating the
+            # quote here would hand the tokenizer a balanced string, and an
+            # unbalanced command has to defer rather than half-parse.
+            if closed:
+                seg.append('"')
+                j += 1
+            out.append(''.join(seg))
+            i = j
+            continue
+        out.append(c)
+        i += 1
+    return ''.join(out), bodies
+
+
+def ps_tokenize(text):
+    """Tokenize a PowerShell command line in argument mode.
+
+    Returns `(kind, value, expandable, quoted)` tuples — kind is 'word', 'op'
+    (a command separator) or 'redir' — or None when a quote is left open, which
+    defers the whole command.
+
+    `expandable` records a `$` seen outside single quotes: the value is decided
+    at runtime, so the caller reports the token rather than resolving it.
+    `quoted` records that some part of the value came from quotes, which is what
+    stops an array operand (`-Path a,b`) from being split inside a quoted name.
+    """
+    toks = []
+    buf, expandable, quoted, started = [], False, False, False
+
+    def flush():
+        if started:
+            toks.append(('word', ''.join(buf), expandable, quoted))
+        del buf[:]
+        return False, False, False
+
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c in ' \t\r':
+            expandable, quoted, started = flush()
+            i += 1
+            continue
+        if c == '\n':
+            expandable, quoted, started = flush()
+            toks.append(('op', '\n', False, False))
+            i += 1
+            continue
+        if c == '#' and not started:                     # line comment
+            while i < n and text[i] != '\n':
+                i += 1
+            continue
+        if not started and text.startswith('<#', i):     # block comment
+            end = text.find('#>', i + 2)
+            i = n if end < 0 else end + 2
+            continue
+        if c == '`':
+            if i + 1 >= n:
+                i += 1
+                continue
+            if text[i + 1] == '\n':                      # line continuation
+                i += 2
+                continue
+            buf.append(text[i + 1])
+            started = True
+            i += 2
+            continue
+        if c == "'":
+            started, quoted = True, True
+            i += 1
+            while True:
+                if i >= n:
+                    return None
+                if text[i] == "'":
+                    if i + 1 < n and text[i + 1] == "'":
+                        buf.append("'")
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                buf.append(text[i])
+                i += 1
+            continue
+        if c == '"':
+            started, quoted = True, True
+            i += 1
+            while True:
+                if i >= n:
+                    return None
+                ch = text[i]
+                if ch == '`' and i + 1 < n:
+                    buf.append(text[i + 1])
+                    i += 2
+                    continue
+                if ch == '"':
+                    if i + 1 < n and text[i + 1] == '"':
+                        buf.append('"')
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                if ch == '$':
+                    expandable = True
+                buf.append(ch)
+                i += 1
+            continue
+        if c == '>':
+            # `2>` / `*>` glue the stream selector onto the operator; without
+            # this the selector flushes as a word and becomes a file operand.
+            pending = ''.join(buf)
+            if started and not quoted and (pending.isdigit() or pending == '*'):
+                op = pending + c
+                del buf[:]
+                expandable, quoted, started = False, False, False
+            else:
+                op = c
+                expandable, quoted, started = flush()
+            i += 1
+            if i < n and text[i] == '>':
+                op += '>'
+                i += 1
+            toks.append(('redir', op, False, False))
+            continue
+        if c in '|&':
+            expandable, quoted, started = flush()
+            op = c
+            if i + 1 < n and text[i + 1] == c:
+                op += c
+                i += 1
+            toks.append(('op', op, False, False))
+            i += 1
+            continue
+        if c in ';(){}':
+            # Script-block braces and grouping parens are separators, so a
+            # `ForEach-Object { Get-Content … }` body is analyzed as its own
+            # command instead of vanishing into the caller's operands.
+            expandable, quoted, started = flush()
+            toks.append(('op', c, False, False))
+            i += 1
+            continue
+        if c == '$':
+            expandable = True
+        buf.append(c)
+        started = True
+        i += 1
+    flush()
+    return toks
+
+
+def ps_expand_tilde(tok):
+    """Expand a leading `~`, `~/` or `~\\` — PowerShell accepts both separators."""
+    if tok == '~' or tok[:2] in ('~/', '~\\'):
+        home = resolved_home()
+        if home:
+            return home if tok == '~' else os.path.join(home, tok[2:])
+    return tok
+
+
+def ps_is_absolute(p):
+    """True for the path forms PowerShell resolves without the current directory:
+    drive-qualified (`C:\\x`), UNC (`\\\\host\\share`), and root-relative."""
+    return bool(DRIVE_PREFIX_RE.match(p)) or p.startswith('\\') \
+        or p.startswith('/')
+
+
+def ps_realpath(p, cwd):
+    """Resolve a PowerShell path token to a comparable absolute path.
+
+    No :func:`msys_to_native` pass, for the reason ``resolve_native_path`` gives:
+    the guard has to agree with the tool whose call it is judging. That mount
+    table is Git Bash's, and PowerShell has never heard of it — a leading slash
+    there is the root of the current drive, not `/c/…` or `%TMP%`.
+    """
+    full = p if ps_is_absolute(p) else os.path.join(cwd, p)
+    if DRIVE_PATHS:
+        return os.path.realpath(full)
+    # The PowerShell tool only exists on Windows, so a non-drive host here means
+    # the test suite. `os.path` does not consider `C:\x` absolute on POSIX, and
+    # handing it to realpath would resolve it against the process directory and
+    # land it INSIDE the project root — the fixture would then assert a silent
+    # allow and call it a pass. Normalize the native forms lexically instead; no
+    # POSIX root can contain a drive-qualified or UNC path. The test runs after
+    # the join, so a relative operand read under a tracked `Set-Location C:\…`
+    # is caught too.
+    if DRIVE_PREFIX_RE.match(full) or full.startswith('\\'):
+        return os.path.normpath(full.replace('\\', '/'))
+    return os.path.realpath(full)
+
+
+def ps_resolve_param(name, spec):
+    """Resolve a parameter name the way PowerShell does — exact match, else an
+    unambiguous prefix. An ambiguous or unknown name falls back to itself, where
+    it reads as a switch: the value behind it stays a positional operand and
+    still gets checked, which is the safe direction to be wrong in."""
+    if name in spec['names']:
+        return name
+    hits = [k for k in spec['names'] if k.startswith(name)]
+    return hits[0] if len(hits) == 1 else name
+
+
+def ps_bind_args(args, spec):
+    """Bind a segment's argument tokens to file roles.
+
+    Returns `(token, expandable, quoted, role)` for each operand that names a
+    file, role being 'read' or 'write'.
+
+    Two passes, because PowerShell binds by name first and only then fills the
+    positional slots that are still free. `Select-String -Pattern foo <file>`
+    puts the file in slot 1 (-Path) however the two are ordered; a single
+    left-to-right pass would hand it slot 0 (-Pattern), classify a real read as
+    a non-file operand, and allow it silently.
+    """
+    named, positionals, bound, i, n = [], [], set(), 0, len(args)
+    while i < n:
+        _, val, exp, quoted = args[i]
+        if val == '--%':
+            break                       # stop-parsing: the rest is verbatim
+        if len(val) > 1 and val[0] == '-' and not exp \
+                and not val[1].isdigit() and val[1] != '.':
+            name, attached = val[1:], None
+            if ':' in name:             # `-Path:C:\x` binds without a space
+                name, attached = name.split(':', 1)
+            key = ps_resolve_param(name.lower(), spec)
+            role = spec['files'].get(key)
+            if role:
+                # -Path and -LiteralPath are alternates for one slot, so
+                # binding either has to close it.
+                bound.update(k for k, v in spec['files'].items() if v == role)
+                if attached is not None:
+                    named.append((attached, exp, quoted, role))
+                elif i + 1 < n:
+                    _, nval, nexp, nquoted = args[i + 1]
+                    named.append((nval, nexp, nquoted, role))
+                    i += 1
+            else:
+                bound.add(key)
+                if key in spec['consume'] and attached is None:
+                    i += 1
+            i += 1
+            continue
+        positionals.append((val, exp, quoted))
+        i += 1
+
+    slots, pos = spec['positional'], 0
+    for val, exp, quoted in positionals:
+        while pos < len(slots) and slots[pos] in bound:
+            pos += 1
+        # Operands past the last slot repeat it — that is what makes -Path's
+        # array binding (`Remove-Item a b c`) come out right.
+        slot = slots[pos] if pos < len(slots) else (slots[-1] if slots else None)
+        pos += 1
+        role = spec['files'].get(slot)
+        if role:
+            named.append((val, exp, quoted, role))
+    return named
+
+
+def ps_path_parts(tok, quoted):
+    """Split an unquoted comma-joined array operand (`-Path a,b`) into paths.
+
+    Left whole when quoted, so a filename that genuinely contains a comma keeps
+    its name. Splitting an unquoted one is the safe direction: `-Path a,C:\\out`
+    checked as a single token would resolve cwd-relative and allow.
+    """
+    if not quoted and ',' in tok:
+        return [p for p in tok.split(',') if p]
+    return [tok]
+
+
+def ps_apply_location(words, cwd, cwd_unknown):
+    """Follow a Set-Location/Push-Location so later relative operands resolve
+    against the right directory. Anything the hook can't follow — a bare `cd`,
+    `cd -`, a `$var` target, `Pop-Location` — drops tracking, which turns later
+    relative operands into 'untracked' offenders rather than silent allows."""
+    name = PS_ALIASES.get(words[0][1].lower(), words[0][1].lower())
+    if name == 'pop-location':
+        return cwd, True
+    targets = [b for b in ps_bind_args(words[1:], PS_LOCATION_SPEC)
+               if b[3] == 'read']
+    if len(targets) != 1:
+        return cwd, True
+    tok, exp, _, _ = targets[0]
+    if exp or tok in ('-', '+'):
+        return cwd, True
+    p = ps_expand_tilde(tok)
+    if p.startswith('~'):
+        return cwd, True
+    if not ps_is_absolute(p) and cwd_unknown:
+        return cwd, True
+    return ps_realpath(p, cwd), False
+
+
+def ps_analyze_segment(tokens, ctx, cwd, cwd_unknown):
+    """Analyze one pipeline segment. Returns `(offenders, guarded, cwd,
+    cwd_unknown)` — the trailing pair carries location tracking to the next
+    segment in the chain."""
+    files, words, i, n = [], [], 0, len(tokens)
+    while i < n:
+        kind = tokens[i][0]
+        if kind == 'redir':
+            # A redirect target is a shell-level write, honored whatever the
+            # command word is — same as the bash side (Q26).
+            if i + 1 < n and tokens[i + 1][0] == 'word':
+                _, val, exp, quoted = tokens[i + 1]
+                files.append((val, exp, quoted, 'write'))
+                i += 2
+                continue
+            i += 1
+            continue
+        words.append(tokens[i])
+        i += 1
+
+    # `$out = Get-Content …` — drop the assignment so the cmdlet is the head.
+    if words and words[0][1].startswith('$'):
+        if len(words) > 1 and words[1][1] == '=':
+            words = words[2:]
+        elif words[0][1].endswith('='):
+            words = words[1:]
+    if words and words[0][1] == '.':        # dot-source operator
+        words = words[1:]
+
+    guarded = False
+    if words:
+        name = PS_ALIASES.get(words[0][1].lower(), words[0][1].lower())
+        if name in PS_LOCATION_CMDS:
+            cwd, cwd_unknown = ps_apply_location(words, cwd, cwd_unknown)
+        else:
+            spec = PS_SPEC.get(name)
+            if spec is not None:
+                guarded = True
+                files.extend(ps_bind_args(words[1:], spec))
+
+    offenders = []
+    for tok, exp, quoted, role in files:
+        if exp:
+            offenders.append((tok, 'expand', None))
+            continue
+        for part in ps_path_parts(tok, quoted):
+            p = ps_expand_tilde(part)
+            if p.startswith('~'):
+                offenders.append((part, 'expand', None))
+                continue
+            if not ps_is_absolute(p) and cwd_unknown:
+                offenders.append((part, 'untracked', None))
+                continue
+            rp = ps_realpath(p, cwd)
+            res = classify_outside(rp, ctx, is_read=(role == 'read'))
+            if res is not None:
+                disp = part if ps_is_absolute(part) \
+                    else offender_display(part, rp)
+                offenders.append((disp, res[0], res[1]))
+    return offenders, guarded, cwd, cwd_unknown
+
+
+def ps_analyze_command(cmd, ctx, base_cwd, depth=0):
+    """Analyze a PowerShell command string. Returns `(offenders, guarded)`,
+    matching `analyze_command`'s contract so the two frontends share the
+    emit logic below."""
+    if not cmd.strip():
+        return [], False
+    expandable_text = ps_strip_here_strings(cmd, literal_only=True)
+    stripped = ps_strip_here_strings(cmd)
+    if expandable_text is None or stripped is None:
+        return [], False                      # open here-string -> defer
+    bodies = ps_subexpressions(expandable_text)[1]
+    toks = ps_tokenize(ps_subexpressions(stripped)[0])
+    if toks is None:
+        return [], False                      # open quote -> defer
+
+    offenders, guarded = [], False
+    cwd, cwd_unknown, seg = base_cwd, False, []
+    for tok in toks + [('op', ';', False, False)]:
+        if tok[0] == 'op':
+            if seg:
+                off, g, cwd, cwd_unknown = ps_analyze_segment(
+                    seg, ctx, cwd, cwd_unknown)
+                offenders.extend(off)
+                guarded = guarded or g
+            seg = []
+        else:
+            seg.append(tok)
+
+    # Subexpression bodies contribute offenders only — a clean guarded cmdlet
+    # inside one never flips a deferring outer command into an `allow`.
+    if depth < MAX_SUBST_DEPTH:
+        for body in bodies:
+            offenders.extend(ps_analyze_command(body, ctx, base_cwd,
+                                                depth + 1)[0])
+    return offenders, guarded
+
+
+def handle_powershell(data):
+    """Guard the PowerShell shell tool.
+
+    A missing command field is NOT treated as ordinary uncertainty. The field
+    name comes from the installed binary rather than from documented schema
+    (see docs/plan/q51-powershell-tool.md), so deferring on its absence would be
+    indistinguishable from the wiring bug it would be hiding — a guard that
+    reports itself active and enforces nothing, the exact failure
+    run-python-hook.cmd exists to prevent. That case asks, and says why.
+    """
+    ti = data.get('tool_input')
+    if not isinstance(ti, dict) or not isinstance(ti.get('command'), str):
+        emit("ask", "workspace-guard could not read the PowerShell tool's "
+                    "command (tool_input.command), so it checked nothing about "
+                    "this command's file access. Approve only if you have read "
+                    "the command yourself, and please report this — the guard "
+                    "is meant to check every shell command.")
+        return
+    cmd = ti['command']
+    if not cmd.strip():
+        return
+    ctx = build_context(data)
+    outside, guarded = ps_analyze_command(cmd, ctx, ctx.cwd)
+    if not outside and not guarded:
+        return
+    if outside:
+        bypass = data.get("permission_mode") == "bypassPermissions"
+        decision, reason = decide(outside, ctx, bypass)
+    else:
+        decision, reason = "allow", "Guarded cmdlets target workspace only"
+    emit(decision, reason)
+
+
 def main():
     data = json.load(sys.stdin)
     tool = data.get('tool_name') or ''
-    # Absent tool_name (older CLIs, or the Bash-only matcher) -> Bash handling,
-    # preserving the original behavior.
-    if tool in ('Edit', 'Write', 'MultiEdit', 'NotebookEdit'):
+    # PowerShell is checked FIRST and never falls through. The default branch is
+    # Bash handling, and routing a PowerShell command into the POSIX tokenizer
+    # is the silent-allow the section above exists to avoid.
+    if tool == 'PowerShell':
+        handle_powershell(data)
+    elif tool in ('Edit', 'Write', 'MultiEdit', 'NotebookEdit'):
         handle_edit(data)
     elif tool in ('Read', 'Grep', 'Glob'):
         handle_read_tool(data)
     else:
+        # Absent tool_name (older CLIs) -> Bash handling, preserving the
+        # original behavior.
         handle_bash(data)
 
 

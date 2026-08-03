@@ -5,7 +5,7 @@ Single source of truth for progress and priorities in workspace-guard. Pick the 
 **Status:** 🔲 ready · 🚫 blocked
 **Size:** S = one session/PR · M = 2–3 sessions · L = needs a plan doc under `docs/plan/`
 **Labels:** `security` `tests` `docs` `infra` `bug` `parsing` `retro`
-**Next ID:** Q53
+**Next ID:** Q55
 
 **Maintaining this file:** see [`docs/development/maintaining-backlog.md`](development/maintaining-backlog.md).
 
@@ -15,7 +15,6 @@ Specific actionable items in priority order. Pick from the top; skip 🚫 items 
 
 | ID | Item | Labels | St | Sz | Notes |
 |---|---|---|---|---|---|
-| <a id="Q51"></a>Q51 | [Guard the PowerShell tool on Windows](plan/q51-powershell-tool.md) | `security` | 🔲 | M | Without Git for Windows there is no Bash tool: Claude Code runs shell commands through `PowerShell`, which `hooks.json` doesn't match, so nothing is checked. `shlex` is the wrong parser for it. |
 
 ## Deferred
 
@@ -25,3 +24,5 @@ Specific actionable items in priority order. Pick from the top; skip 🚫 items 
 | <a id="Q42"></a>Q42 | Catch a glob match that is itself a symlink out of the root | `security` | M | **Demand:** a glob-matched in-root name that points outside gets read silently. A glob resolves as the pattern, so `realpath` never sees the match. Closing it needs match enumeration. |
 | <a id="Q47"></a>Q47 | Catch a `**` glob item that matches fewer segments than the pattern | `security` | M | **Demand:** a session runs `shopt -s globstar`. Verified: `docs/**` expands to `docs/` too, so a loop body's trailing `../` climbs above the root undetected. Issue 99's proxy needs fixed segments. |
 | <a id="Q50"></a>Q50 | Stop an odd quote in an expanded heredoc body hiding a later `$(…)` | `security` `parsing` | S | **Demand:** a real outside read slips through. Verified: `<<EOF` + `don't` + `$(cat /etc/x)` gets `allow` — the apostrophe mis-colors the scan's quote state. Fix: scan a body on its own. |
+| <a id="Q53"></a>Q53 | Grow the PowerShell coverage past the cmdlet table | `security` | M | **Demand:** a real outside read slips through. A .NET call, a native `.exe`, or an unlisted cmdlet is unchecked and silent; prompting on the unparsed tail was rejected as too noisy. See [Q51's known gaps](plan/q51-powershell-tool.md). |
+| <a id="Q54"></a>Q54 | Quiet `$_` in a PowerShell `ForEach-Object` block | `parsing` | S | **Demand:** the friction report shows `$_` prompts accumulating. It reports as 'expand' like bash's `cat $f`, but carries far more of PowerShell's idiom. See [Q51's known gaps](plan/q51-powershell-tool.md). |
