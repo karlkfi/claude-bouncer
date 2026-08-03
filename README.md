@@ -428,7 +428,20 @@ After upgrading either way:
    the pattern does — which is already how a glob written straight into a file
    argument is treated, so `cat docs/*.md` and the loop over it now agree. A
    pattern that escapes (`../*.md`, `/etc/*.conf`) resolves outside and prompts
-   like any other outside path. Lists with a non-literal item (a `$`, command
+   like any other outside path.
+
+   A list item may also be built from an *enclosing* loop's variable, so nested
+   surveys resolve too: in `for d in docs/*; do for f in "$d"/*.md`, the inner
+   variable binds one candidate per (outer candidate, item) pair — here the
+   single pattern `docs/*/*.md`. That cross product is what bash actually
+   visits, and each pair keeps the segment structure of every path it expands
+   to, so the same reasoning applies at any nesting depth. An outside outer
+   candidate carries into every inner candidate built from it and prompts,
+   naming the resolved path. A variable is poisoned rather than bound when its
+   candidate set would exceed 256 values, which bounds the work as depth
+   multiplies.
+
+   Lists with a non-literal item (a `$` the hook can't resolve, command
    substitution, or brace like `{a,b}` — brace-expanded by bash, so the literal
    string isn't a stand-in for the real paths), the `for VAR; do …` ("$@")
    form, the `for ((…))` arithmetic form, and a loop variable reassigned in the
@@ -604,8 +617,9 @@ flowing, avoid triggering it:
   so home-relative paths inside the root are fine. A variable assigned a plain
   literal path *earlier in the same command string* — `f=./config/app.json; cat $f`
   — is also resolved and doesn't prompt, as is a `for f in a b c` loop over a
-  literal list, or a `for f in docs/*.md` loop over an in-root glob, when its
-  body is on its own line after `do`. A file operand or
+  literal list, a `for f in docs/*.md` loop over an in-root glob, and a nested
+  loop whose inner list is built from the outer variable
+  (`for d in docs/*; do for f in "$d"/*.md`). A file operand or
   redirect target that *begins* with `$(git rev-parse --show-toplevel)` or
   `$(pwd)` — the same two whitelisted substitutions the `cd` tracker resolves —
   is resolved too, so `cp x "$(git rev-parse --show-toplevel)/backup/"` is fine.)
@@ -793,11 +807,16 @@ final output.
   through a *matched* name that is itself a symlink out of the workspace, since
   the pattern is resolved instead of the files: `for f in docs/*.md; do cat
   "$f"; done` treats a `docs/link.md` → `/etc/passwd` symlink the same way
-  `cat docs/*.md` already does. `shopt -s globstar` makes `**` match extra path
-  segments the pattern doesn't show, which can only make a trailing `../` in the
-  loop body climb higher than bash will — an extra prompt, never a missed one.
-  A *nested* loop over a glob built from an outer loop variable (`for f in
-  "$d"/*.md`) still holds a `$`, so it keeps today's poison.
+  `cat docs/*.md` already does. Under `shopt -s globstar` a `**` matches a
+  *variable* number of path segments, including zero — `docs/**` expands to
+  `docs/` as well as `docs/sub/b.md` — so a trailing `../` in the loop body can
+  climb one level higher at runtime than the pattern shows, and a read just
+  outside the root can be allowed. Globstar is off by default in bash; with it
+  on, prefer an explicit pattern over `**` in a loop list.
+- A nested loop's list may be built from the outer loop's variable
+  (`for d in docs/*; do for f in "$d"/*.md`), and the inner variable binds the
+  cross product. A candidate set larger than 256 values poisons the variable
+  instead, so a loop over very long literal lists keeps today's prompt.
 - `realpath` only follows symlinks for files that already exist; nonexistent
   paths are normalized lexically (fine for read-style commands).
 - Redirect targets (`> file`) are inspected on *every* command, guarded or not —

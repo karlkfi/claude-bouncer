@@ -1043,6 +1043,12 @@ def glue_dollar_paren(tokens):
 # silent allow.
 MAX_SUBST_DEPTH = 25
 
+# Maximum candidate values a single loop variable may be bound to. A nested
+# `for` binds the cross product of its own list with every enclosing loop's
+# candidates, so depth multiplies; this bounds the work at each level. An
+# over-cap list poisons the variable, which is the existing `ask`.
+MAX_LOOP_CANDIDATES = 256
+
 
 def _skip_balanced_parens(text, start):
     """Step over a run of balanced parens beginning at ``start`` (a ``(``).
@@ -1237,11 +1243,16 @@ def literal_for_item(raw):
     is treated (``cat docs/*.md`` allows, ``cat /etc/*.conf`` asks), so the
     loop form now agrees with the direct form — including for a pattern that
     escapes (``../*.md``), which resolves outside and prompts rather than
-    needing a separate containment rule. Under ``shopt -s globstar`` a ``**``
-    can match extra segments the pattern doesn't show, which only makes a
-    trailing ``../`` in the loop body climb higher than bash will: an extra
-    prompt, never a missed one. Braces are still rejected above, so
+    needing a separate containment rule. Braces are still rejected above, so
     ``x{,/../..}`` can't smuggle a shorter path past the proxy.
+
+    The proxy holds only for patterns whose segment count is fixed. Under
+    ``shopt -s globstar`` a ``**`` matches a variable number of segments,
+    including zero (``docs/**`` expands to ``docs/`` as well as
+    ``docs/sub/b.md``), so a trailing ``../`` in the loop body can climb higher
+    at runtime than the pattern shows — a missed prompt, not an extra one.
+    Globstar is off by default in bash; closing this needs match enumeration
+    (Q47).
     """
     val = literal_assignment_value(raw, allow_glob=True)
     if val is None:
@@ -1251,7 +1262,7 @@ def literal_for_item(raw):
     return val
 
 
-def for_loop_binding(g):
+def for_loop_binding(g, loopmap):
     """Classify a command group as a `for NAME in <list>; …` loop header.
 
     Returns:
@@ -1269,6 +1280,16 @@ def for_loop_binding(g):
     Must be called on the post-substitution tokens: a list item like ``$SP/a``
     with ``SP`` a known literal has already been resolved, so the bound value
     matches what bash iterates.
+
+    A list item may also use an enclosing loop's variable — ``for d in docs/*;
+    do for f in "$d"/*.md`` — so items are first expanded over ``loopmap``, and
+    the inner variable binds one candidate per (outer candidate, item) pair.
+    The cross product is what bash actually visits, and each pair is a
+    pattern-as-proxy in the issue 99 sense: the outer candidate contributes
+    whole segments, so the concatenation still has the segment structure of
+    every path it expands to. Expanding before the caller rebinds ``name``
+    reads the outer value, which is what bash expands the list with even when
+    the inner loop reuses the name.
     """
     if len(g) < 2 or os.path.basename(g[0]) != 'for':
         return None
@@ -1282,10 +1303,13 @@ def for_loop_binding(g):
         return (name, None)                       # empty list -> body never runs
     values = []
     for it in items:
-        val = literal_for_item(it)
-        if val is None:
-            return (name, None)                   # non-literal item -> poison
-        values.append(val)
+        for cand in expand_loop_candidates(it, loopmap):
+            val = literal_for_item(cand)
+            if val is None:
+                return (name, None)               # non-literal item -> poison
+            values.append(val)
+    if len(values) > MAX_LOOP_CANDIDATES:
+        return (name, None)
     return (name, values)
 
 
@@ -2359,6 +2383,9 @@ def analyze_command(cmd, ctx, base_cwd, depth=0):
             o = check_file(f, group_cwd, group_cwd_unknown)
             if o is not None:
                 outside.append(o)
+        # A nested loop's header shares its group with the enclosing `do`, so
+        # the reserved words come off before the for-header check too.
+        kw_g = strip_sh_keywords(sub_g)
         if propagate:
             assigned = apply_assignment_group(g, varmap, persists)
             if assigned is not None:
@@ -2372,7 +2399,7 @@ def analyze_command(cmd, ctx, base_cwd, depth=0):
                     loopmap.clear()
                     propagate = False
                 continue                          # assignment-only group
-            forbind = for_loop_binding(sub_g)
+            forbind = for_loop_binding(kw_g, loopmap)
             if forbind is not None:
                 name, values = forbind
                 varmap.pop(name, None)            # a loop var isn't a scalar
@@ -2383,7 +2410,6 @@ def analyze_command(cmd, ctx, base_cwd, depth=0):
                 continue                          # for-header: nothing to check
             poison_vars(sub_g, varmap)
             poison_vars(sub_g, loopmap)           # same rules invalidate loops
-        kw_g = strip_sh_keywords(sub_g)
         g = strip_env_prefix(kw_g)
         if not g: continue                        # keyword/env-only or redirect-only group
         kind, arg = classify_cd(g)

@@ -4718,41 +4718,81 @@ class ForLoopBindingTests(unittest.TestCase):
 
     def test_all_literal_list_binds(self):
         self.assertEqual(
-            guard.for_loop_binding(["for", "f", "in", "a", "b", "c"]),
+            guard.for_loop_binding(["for", "f", "in", "a", "b", "c"], {}),
             ("f", ["a", "b", "c"]))
 
     def test_braced_name_form_returns_poison(self):
         # `for f in a $x` — a non-literal item poisons the variable.
         self.assertEqual(
-            guard.for_loop_binding(["for", "f", "in", "a", "$x"]),
+            guard.for_loop_binding(["for", "f", "in", "a", "$x"], {}),
             ("f", None))
 
     def test_glob_item_binds_to_pattern(self):
         self.assertEqual(
-            guard.for_loop_binding(["for", "f", "in", "docs/*.md"]),
+            guard.for_loop_binding(["for", "f", "in", "docs/*.md"], {}),
             ("f", ["docs/*.md"]))
 
     def test_mixed_literal_and_glob_list_binds(self):
         self.assertEqual(
-            guard.for_loop_binding(["for", "f", "in", "a", "docs/*.md"]),
+            guard.for_loop_binding(["for", "f", "in", "a", "docs/*.md"], {}),
             ("f", ["a", "docs/*.md"]))
 
     def test_for_name_without_in_poisons(self):
         # `for f; do …` iterates "$@" — unresolvable.
-        self.assertEqual(guard.for_loop_binding(["for", "f"]), ("f", None))
+        self.assertEqual(guard.for_loop_binding(["for", "f"], {}), ("f", None))
 
     def test_empty_list_poisons(self):
-        self.assertEqual(guard.for_loop_binding(["for", "f", "in"]), ("f", None))
+        self.assertEqual(guard.for_loop_binding(["for", "f", "in"], {}), ("f", None))
 
     def test_special_name_not_bound(self):
-        self.assertIsNone(guard.for_loop_binding(["for", "IFS", "in", "a"]))
+        self.assertIsNone(guard.for_loop_binding(["for", "IFS", "in", "a"], {}))
 
     def test_arithmetic_form_not_a_binding(self):
         # `for ((i=0;…))` tokenizes with `(` at index 1 — not `for NAME in`.
-        self.assertIsNone(guard.for_loop_binding(["for", "(", "(", "i=0"]))
+        self.assertIsNone(guard.for_loop_binding(["for", "(", "(", "i=0"], {}))
 
     def test_non_for_group_ignored(self):
-        self.assertIsNone(guard.for_loop_binding(["grep", "PAT", "x"]))
+        self.assertIsNone(guard.for_loop_binding(["grep", "PAT", "x"], {}))
+
+    def test_item_using_outer_loop_var_binds_cross_product(self):
+        # Q41: `for d in a b; do for f in "$d"/*.md` — one candidate per
+        # (outer candidate, item) pair.
+        self.assertEqual(
+            guard.for_loop_binding(["for", "f", "in", "$d/*.md"],
+                                   {"d": ["a", "b"]}),
+            ("f", ["a/*.md", "b/*.md"]))
+
+    def test_item_using_unbound_var_still_poisons(self):
+        self.assertEqual(
+            guard.for_loop_binding(["for", "f", "in", "$d/*.md"],
+                                   {"other": ["a"]}),
+            ("f", None))
+
+    def test_expanded_item_with_brace_poisons(self):
+        # The brace check runs on the expanded item.
+        self.assertEqual(
+            guard.for_loop_binding(["for", "f", "in", "$d/x"],
+                                   {"d": ["a", "{b,c}"]}),
+            ("f", None))
+
+    def test_over_cap_candidate_set_poisons(self):
+        items = ["a%d" % i for i in range(guard.MAX_LOOP_CANDIDATES + 1)]
+        self.assertEqual(
+            guard.for_loop_binding(["for", "f", "in"] + items, {}),
+            ("f", None))
+
+    def test_at_cap_candidate_set_binds(self):
+        items = ["a%d" % i for i in range(guard.MAX_LOOP_CANDIDATES)]
+        name, values = guard.for_loop_binding(["for", "f", "in"] + items, {})
+        self.assertEqual(len(values), guard.MAX_LOOP_CANDIDATES)
+
+    def test_cross_product_over_cap_poisons(self):
+        # Depth multiplies: the cap bounds the nested cross product too.
+        outer = ["d%d" % i for i in range(20)]
+        items = ["$d/x%d" % i for i in range(20)]
+        self.assertEqual(
+            guard.for_loop_binding(["for", "f", "in"] + items, {"d": outer}),
+            ("f", None))
 
 
 class ExpandLoopCandidatesTests(unittest.TestCase):
@@ -5074,6 +5114,67 @@ class ForLoopPropagationEndToEndTests(unittest.TestCase):
         # The pattern is relative, so it tracks the cd like any relative path.
         self._decision(
             "cd /tmp/q99-fake && for f in *.log\ndo\n  cat $f\ndone", "deny")
+
+    # --- a nested loop's list may use the outer variable (Q41) ---------------
+
+    def test_nested_glob_over_glob_allow(self):
+        # Q41's motivating shape: both levels glob, and the inner list is built
+        # from the outer variable. The inner binding is `wf/*/*.yml`.
+        self._decision(
+            'for d in wf/*\ndo\n  for f in "$d"/*.yml\n  do\n    cat "$f"\n'
+            '  done\ndone', "allow")
+
+    def test_nested_loop_one_line_allow(self):
+        # Same shape written on one line — the inner header shares its group
+        # with the enclosing `do`.
+        self._decision(
+            'for d in wf/*; do for f in "$d"/*.yml; do cat "$f"; done; done',
+            "allow")
+
+    def test_nested_literal_outer_binds_cross_product_allow(self):
+        self._decision(
+            'for d in wf sub\ndo\n  for f in "$d"/*.yml\n  do\n    cat "$f"\n'
+            '  done\ndone', "allow")
+
+    def test_nested_three_deep_allow(self):
+        self._decision(
+            'for a in wf\ndo\n  for b in "$a"/*\n  do\n    for c in "$b"/*.yml\n'
+            '    do\n      cat "$c"\n    done\n  done\ndone', "allow")
+
+    def test_nested_outer_candidate_outside_ask(self):
+        # An outside outer candidate carries into every inner binding built
+        # from it, so the inner loop's reads prompt.
+        out = self._decision(
+            'for d in wf /etc/q41-fake\ndo\n  for f in "$d"/*.yml\n  do\n'
+            '    cat "$f"\n  done\ndone', "ask")
+        self.assertIn(
+            "/etc/q41-fake",
+            out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_nested_inner_item_climbs_out_ask(self):
+        # The inner list escapes the root even though the outer one doesn't.
+        self._decision(
+            'for d in wf\ndo\n  for f in "$d"/../../../etc/q41-fake/*\n  do\n'
+            '    cat "$f"\n  done\ndone', "ask")
+
+    def test_nested_poisoned_outer_poisons_inner_ask(self):
+        # `$d` is unresolvable, so `"$d"/*.yml` keeps its `$` and poisons `f`.
+        self._decision(
+            'for d in $x\ndo\n  for f in "$d"/*.yml\n  do\n    cat "$f"\n'
+            '  done\ndone', "ask")
+
+    def test_nested_brace_in_inner_item_poisons_ask(self):
+        # Brace rejection applies to the expanded item, not just a bare one.
+        self._decision(
+            'for d in wf\ndo\n  for f in "$d"/{a,b}.yml\n  do\n    cat "$f"\n'
+            '  done\ndone', "ask")
+
+    def test_nested_inner_reusing_outer_name_allow(self):
+        # `for d in "$d"/*.yml` reads the OUTER d to build the list, then
+        # rebinds it — the expansion must happen before the rebind.
+        self._decision(
+            'for d in wf/*\ndo\n  for d in "$d"/*.yml\n  do\n    cat "$d"\n'
+            '  done\ndone', "allow")
 
     # --- uncertainty keeps today's ask ---------------------------------------
 
