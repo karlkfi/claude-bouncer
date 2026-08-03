@@ -36,13 +36,29 @@ ASSIGNISH_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)(\+?=|\[|\+\+|--)')
 # AFTER shlex quote removal: expansions (`$`, backticks), glob metachars
 # (`*?[` — an unquoted use of the variable would glob), and word-splitting
 # chars (whitespace for the default IFS; `:` so a PATH-style value can't be
-# split by an exotic inherited IFS into pieces the single-token check misses).
+# split by an IFS the hook didn't see into pieces the single-token check misses).
 IMPURE_VALUE_CHARS = frozenset(' \t\n$`*?[:')
 
 # The same test minus the glob metachars, for `for VAR in <list>` items only: a
 # pattern there is its own proxy for the paths it expands to (see
 # `literal_for_item`).
 IMPURE_ITEM_CHARS = IMPURE_VALUE_CHARS - frozenset('*?[')
+
+# The one `:` that isn't a PATH-style separator: a Windows drive prefix (Q48).
+# Without an exemption every Windows absolute path is impure, so propagation is
+# dead on the platform — including the `~/` form, whose expansion carries the
+# drive letter. The separator must follow the colon because bash tilde-expands
+# after a `:` in an assignment RHS (`f=C:~/x` -> `C:/Users/…`), which the
+# leading-`~` rule in literal_assignment_value doesn't model.
+DRIVE_PREFIX_RE = re.compile(r'^[A-Za-z]:[\\/]')
+
+# ...and the exemption applies only where os.path resolves a drive. On POSIX
+# `C:/x` is a relative directory literally named `C:`, so exempting it there
+# would give up the PATH-style protection for nothing. splitdrive is the
+# discriminator rather than os.name for the reason claude_tmp_root() uses
+# hasattr: honouring the drive is the actual condition — it is what realpath and
+# isabs downstream will do with the value.
+DRIVE_PATHS = bool(os.path.splitdrive('C:/x')[0])
 
 # Names bash treats specially — assigning them does not make `$NAME` expand
 # to the assigned literal (dynamic values, readonly, or reset by the shell).
@@ -1226,6 +1242,9 @@ def literal_assignment_value(raw, allow_glob=False):
     ``allow_glob`` keeps ``*?[`` instead of rejecting them; only
     ``literal_for_item`` passes it, and only it carries the argument for why a
     pattern is safe to keep.
+
+    On a drive-resolving platform a leading Windows drive prefix is exempt from
+    the ``:`` rule (Q48); a second colon anywhere in the value still rejects it.
     """
     if not raw:
         return None
@@ -1234,7 +1253,8 @@ def literal_assignment_value(raw, allow_glob=False):
     if raw.startswith('~'):
         return None
     impure = IMPURE_ITEM_CHARS if allow_glob else IMPURE_VALUE_CHARS
-    if any(c in impure for c in raw):
+    rest = raw[2:] if DRIVE_PATHS and DRIVE_PREFIX_RE.match(raw) else raw
+    if any(c in impure for c in rest):
         return None
     return raw
 

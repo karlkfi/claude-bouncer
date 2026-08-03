@@ -4547,23 +4547,36 @@ class LiteralAssignmentValueTests(unittest.TestCase):
             self.assertIsNone(guard.literal_assignment_value(v), repr(v))
 
     def test_colon_impure(self):
-        # PATH-style values are excluded so an exotic inherited IFS can't
+        # PATH-style values are excluded so an IFS the hook didn't see can't
         # split them into pieces the single-token check misses.
         self.assertIsNone(guard.literal_assignment_value("/a:/b"))
+
+    def test_drive_prefix_pure_only_where_drives_resolve(self):
+        # Q48: the drive colon is the one `:` that isn't a list separator. On
+        # POSIX `C:/proj/x` is a directory literally named `C:`, so the rule
+        # above stands there and nothing changes.
+        for v in ("C:/proj/x", r"C:\proj\x", r"c:\proj"):
+            self.assertEqual(guard.literal_assignment_value(v),
+                             v if guard.DRIVE_PATHS else None, v)
+
+    def test_second_colon_impure_even_after_drive_prefix(self):
+        # The exemption covers the prefix, not the rest of the value.
+        self.assertIsNone(guard.literal_assignment_value("C:/proj:/etc"))
+
+    def test_drive_letter_without_separator_impure(self):
+        # Bash tilde-expands after a `:` in an assignment RHS, so `C:~/x` is
+        # really `C:/Users/…` — never the literal. `C:` alone is drive-relative,
+        # which resolves against a cwd the hook doesn't track.
+        for v in ("C:~/x", "C:", "C:proj"):
+            self.assertIsNone(guard.literal_assignment_value(v), v)
 
     def test_leading_tilde_slash_expands_to_home(self):
         home = guard.resolved_home()                      # Q43: not $HOME
         self.assertIsNotNone(home, "no home directory resolves")
-        got = guard.literal_assignment_value("~/x")
-        if ":" in home:
-            # A Windows home carries a drive colon, and `:` is impure so an
-            # exotic inherited IFS can't split a PATH-style value. The tilde
-            # does expand (see TildeExpansionUnitTests) — the result just isn't
-            # usable as a literal, so the var stays poisoned and the read asks.
-            # Pre-dates Q43: a literal `f=C:\proj\x` is None for the same reason.
-            self.assertIsNone(got)
-        else:
-            self.assertEqual(got, os.path.join(home, "x"))
+        # A Windows home carries a drive colon; Q48 exempts that prefix, so the
+        # expansion is usable as a literal on both platforms.
+        self.assertEqual(guard.literal_assignment_value("~/x"),
+                         os.path.join(home, "x"))
 
     def test_tilde_user_impure(self):
         self.assertIsNone(guard.literal_assignment_value("~someuser/x"))
@@ -4767,11 +4780,8 @@ class LiteralForItemTests(unittest.TestCase):
     def test_tilde_slash_expands(self):
         home = guard.resolved_home()                      # Q43: not $HOME
         self.assertIsNotNone(home, "no home directory resolves")
-        got = guard.literal_for_item("~/x")
-        if ":" in home:
-            self.assertIsNone(got)     # Windows drive colon is impure — as above
-        else:
-            self.assertEqual(got, os.path.join(home, "x"))
+        self.assertEqual(guard.literal_for_item("~/x"),
+                         os.path.join(home, "x"))         # drive prefix: Q48
 
 
 class ForLoopBindingTests(unittest.TestCase):
@@ -4959,6 +4969,19 @@ class VarPropagationEndToEndTests(unittest.TestCase):
             "/etc/q58-fake-target",
             out["hookSpecificOutput"]["permissionDecisionReason"],
         )
+
+    def test_absolute_workspace_path_var_allow(self):
+        # The value is the whole workspace path, which on Windows carries a
+        # drive colon — impure before Q48, so propagation was dead there.
+        target = os.path.join(self.workspace, "in.txt")
+        self._decision("f=%s; cat $f" % sh(target), "allow")
+
+    def test_absolute_outside_path_var_ask(self):
+        # Same shape, outside the workspace: Q48 lets the path resolve, it does
+        # not exempt it from the boundary check.
+        drive = os.path.splitdrive(self.workspace)[0]
+        target = os.path.join(drive + os.sep, "q48-fake-target")
+        self._decision("f=%s; cat $f" % sh(target), "ask")
 
     def test_literal_var_host_temp_deny(self):
         # The issue's motivating example: `SP=/tmp/...; tail -5 $SP/x.csv`.

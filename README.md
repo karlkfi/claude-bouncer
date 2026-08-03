@@ -787,7 +787,11 @@ final output.
   `NAME=value` / `export NAME=value` assignments whose value is a plain
   literal after quote removal (non-empty; no `$`, backticks, glob characters,
   whitespace, or `:`) are propagated, and only into plain `$NAME`/`${NAME}`
-  uses. Parameter-expansion operators (`${f:-x}`, `${f%.*}`), arrays, values
+  uses. On Windows a leading drive prefix (`C:\`, `c:/`) is exempt from the `:`
+  rule — otherwise every absolute path there is impure and propagation never
+  fires; a second `:` anywhere in the value still rejects it, and on
+  Linux/macOS `C:/x` is just a directory named `C:` so the rule is unchanged.
+  Parameter-expansion operators (`${f:-x}`, `${f%.*}`), arrays, values
   built from other expansions, and variables later touched by
   `read`/`eval`/`declare`/`unset` or assigned inside a subshell,
   pipeline segment, or backgrounded command all keep the runtime-expanded
