@@ -171,11 +171,20 @@ def claude_projects_dir():
     Claude Code writes session and sub-agent data (workflow journals, task
     output indices, etc.) under this directory. Reading these files back is
     not the boundary this hook guards: the data is written by the harness
-    itself, not by external inputs. Returns None if $HOME is unset or the
+    itself, not by external inputs. Returns None if the home directory or the
     path cannot be resolved.
+
+    Resolved with ``expanduser`` rather than ``$HOME`` because the hook is
+    launched through ``run-python-hook.cmd``, so on Windows it inherits a
+    cmd.exe environment where ``HOME`` is unset — the prefix would vanish and
+    every read of Claude's own session data would prompt (Q40). ``expanduser``
+    reads ``USERPROFILE`` (then ``HOMEDRIVE``/``HOMEPATH``) there, matching the
+    ``os.homedir()`` that Claude Code uses to pick where to write, and on POSIX
+    falls back to the pwd database when ``HOME`` is unset. It returns ``~``
+    unchanged when nothing resolves, hence the isabs check.
     """
-    home = os.environ.get('HOME')
-    if not home:
+    home = os.path.expanduser('~')
+    if not os.path.isabs(home):
         return None
     try:
         return os.path.realpath(os.path.join(home, '.claude', 'projects'))

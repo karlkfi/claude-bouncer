@@ -13,6 +13,7 @@ Three layers:
 """
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -20,6 +21,7 @@ import tempfile
 import unittest
 from importlib import util
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "scripts" / "bash-workspace-guard.py"
@@ -1073,16 +1075,16 @@ class AllowedReadPrefixesUnitTests(unittest.TestCase):
     def test_claude_projects_dir_under_home(self):
         cpd = guard.claude_projects_dir()
         if cpd is None:
-            self.skipTest("HOME not set")
-        home = os.environ.get("HOME")
-        self.assertTrue(cpd.startswith(home.rstrip("/") + "/") or cpd == home,
-                        f"expected {cpd!r} under HOME {home!r}")
+            self.skipTest("home directory not resolvable")
+        home = os.path.realpath(os.path.expanduser("~"))
+        self.assertTrue(cpd.startswith(home.rstrip(os.sep) + os.sep) or cpd == home,
+                        f"expected {cpd!r} under home {home!r}")
         self.assertTrue(cpd.endswith("projects") or "projects" in cpd)
 
     def test_allowed_read_prefixes_includes_projects_dir(self):
         cpd = guard.claude_projects_dir()
         if cpd is None:
-            self.skipTest("HOME not set")
+            self.skipTest("home directory not resolvable")
         prefixes = guard.allowed_read_prefixes()
         self.assertIn(cpd, prefixes)
 
@@ -1100,16 +1102,23 @@ class AllowedReadPrefixesUnitTests(unittest.TestCase):
         # realpath of /fake/read-allow-test on most systems = itself
         self.assertTrue(any(p.endswith("read-allow-test") for p in prefixes))
 
-    def test_allowed_read_prefixes_no_home(self):
+    def test_claude_projects_dir_without_home_env(self):
+        # Q40: the hook runs from cmd.exe on Windows, where HOME is unset. The
+        # prefix must survive that — expanduser reads USERPROFILE there, and the
+        # pwd database on POSIX.
         old_home = os.environ.get("HOME")
         try:
             os.environ.pop("HOME", None)
-            prefixes = guard.allowed_read_prefixes()
+            cpd = guard.claude_projects_dir()
         finally:
             if old_home is not None:
                 os.environ["HOME"] = old_home
-        # Without HOME, claude_projects_dir() returns None; env var still works.
-        self.assertIsInstance(prefixes, list)
+        self.assertIsNotNone(cpd)
+
+    def test_claude_projects_dir_unresolvable_home(self):
+        # expanduser hands back a bare `~` when no home resolves at all.
+        with mock.patch.object(os.path, "expanduser", return_value="~"):
+            self.assertIsNone(guard.claude_projects_dir())
 
 
 def run_hook(cmd, cwd, project_dir=None, permission_mode=None, session_id=None,
@@ -2438,11 +2447,18 @@ class HookEndToEndTests(unittest.TestCase):
     # exist — the hook resolves lexically). Write commands must still prompt.
 
     def _claude_projects_path(self, *parts):
-        """Return a synthetic path under ~/.claude/projects/."""
+        """Return a synthetic path under ~/.claude/projects/, quoted for the shell.
+
+        Every caller interpolates the result into a command string. A Windows
+        path is separated by backslashes, which the hook's shlex pass strips as
+        escapes — the token collapses to a relative path that resolves inside
+        the workspace and flips the decision. shlex.quote is a no-op on a POSIX
+        path, so only the Windows shape changes.
+        """
         cpd = guard.claude_projects_dir()
         if cpd is None:
-            self.skipTest("HOME not set, skipping ~/.claude/projects/ tests")
-        return os.path.join(cpd, *parts)
+            self.skipTest("home not resolvable, skipping ~/.claude/projects/ tests")
+        return shlex.quote(os.path.join(cpd, *parts))
 
     def test_cat_claude_projects_allow(self):
         # Reading a workflow journal under ~/.claude/projects/ is allowed.
