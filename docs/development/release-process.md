@@ -50,6 +50,8 @@ grep -rn '"version"' .claude-plugin/
    git push origin vX.Y.Z
    ```
 
+   **Both pushes need an interactive permission mode.** branch-guard confirms any push whose target isn't the worktree branch, which covers `main` *and* the tag. Under `auto`/`dontAsk` there is nobody to answer, so both are denied outright — retrying won't help. Run the session interactively, or hand the two commands over to be run in a terminal. Create the tag in its own command: chained as `git tag … && git push …`, the deny takes out the `git tag` too and the tag never gets created.
+
 7. **Create the GitHub Release** on that tag, marked latest:
 
    ```

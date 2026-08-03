@@ -5,7 +5,7 @@ Single source of truth for progress and priorities in workspace-guard. Pick the 
 **Status:** 🔲 ready · 🚫 blocked
 **Size:** S = one session/PR · M = 2–3 sessions · L = needs a plan doc under `docs/plan/`
 **Labels:** `security` `tests` `docs` `infra` `bug` `parsing` `retro`
-**Next ID:** Q55
+**Next ID:** Q56
 
 **Maintaining this file:** see [`docs/development/maintaining-backlog.md`](development/maintaining-backlog.md).
 
@@ -15,6 +15,7 @@ Specific actionable items in priority order. Pick from the top; skip 🚫 items 
 
 | ID | Item | Labels | St | Sz | Notes |
 |---|---|---|---|---|---|
+| <a id="Q55"></a>Q55 | Author release notes in `docs/releases/vX.Y.Z.md` | `docs` `retro` | 🔲 | S | Notes are typed straight into the GitHub Release today, so they never appear in a diff. Author each tag's body as a file, publish it with `gh release edit --notes-file`, and point the runbook at it. |
 
 ## Deferred
 
