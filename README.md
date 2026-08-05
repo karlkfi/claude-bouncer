@@ -212,24 +212,39 @@ one with a `poll.exempt_watch_patterns` allowlist entry (exemptions win over
 matches) instead of turning off all of Class A — see
 [Configuration](#configuration).
 
-**Class B — slow-command registry** (config-only, ships empty): regex
-patterns mapped to a minimum timeout in ms. When a matched command would run
-in the foreground with the Bash call's `timeout` below the minimum (or unset
-— the 2-minute default), the guard prompts (`ask` by default; `slow.action`
-may escalate to `deny`) and names the exact fix.
+**Class B — slow-command registry** (config-only, ships empty): entries
+mapped to a minimum timeout in ms. When a matched command would run in the
+foreground with the Bash call's `timeout` below the minimum (or unset — the
+2-minute default), the guard prompts (`ask` by default; `slow.action` may
+escalate to `deny`) and names the exact fix. Two registration forms:
 
-Patterns match at a **command position**: the command is split into simple
-commands the same way Class A splits it (heredoc bodies stripped, env
-prefixes and `nohup`/`time`/`timeout` wrappers peeled, `bash -c '...'` and
-`eval` bodies recursed into, `bash gate.sh` reduced to the script), and the
-pattern has to match starting inside a segment's command word. So registering
-a bare path — `"scripts/gate\\.sh": 3600000` — fires on `scripts/gate.sh`,
+**Target form** — `"<command>": {"<target glob>": ms}` — for the common
+"this command with this argument" case (`make e2e`, `go test -race`), where
+the hook does the anchoring itself: the command word must equal `<command>`
+(compared by basename, so `/usr/bin/make` counts), and the glob must match a
+**whole argument word**. `{"make": {"e2e*": 1800000}}` fires on `make e2e`,
+`make -C sub e2e-test`, and `git pull && make e2e`, but never on
+`make -n help NOTE="a note mentioning e2e"` — a quoted argument is one word,
+and `e2e*` doesn't match it from the start. This is the recommended shape:
+no regex to get wrong.
+
+**Regex form** — `"<regex>": ms` — matches at a **command position**: the
+command is split into simple commands the same way Class A splits it
+(heredoc bodies stripped, env prefixes and `nohup`/`time`/`timeout` wrappers
+peeled, `bash -c '...'` and `eval` bodies recursed into, `bash gate.sh`
+reduced to the script), and the pattern has to match starting inside a
+segment's command word. So registering a bare path —
+`"scripts/gate\\.sh": 3600000` — fires on `scripts/gate.sh`,
 `./scripts/gate.sh --all`, `CI=1 nohup scripts/gate.sh`, and
 `git fetch && bash scripts/gate.sh`, but not on `grep -n foo scripts/gate.sh`,
 `wc -l scripts/gate.sh`, or a `git commit -m` whose message quotes the path.
 To register an **argument** instead of a command, prefix the pattern with
 `.*` (`".*-race\\b"`) — that opts back into matching anywhere in a segment,
-still not across the whole command line.
+still not across the whole command line. **A `.*` in a regex reaches into
+quoted arguments**: `"make .*\\be2e"` fires on any `make` invocation whose
+arguments mention e2e anywhere, including inside a quoted string. When the
+thing being registered is a command plus an argument word, use the target
+form instead.
 
 ## Exemptions
 
@@ -276,8 +291,7 @@ additively.
     "enabled": true,
     "action": "ask",
     "commands": {
-      "make test-race\\b": 600000,
-      "make test-e2e\\b": 1800000,
+      "make": {"test-race": 600000, "e2e*": 1800000},
       "go test ./\\.\\.\\..*-race": 600000
     }
   },
@@ -294,7 +308,7 @@ additively.
 | `poll.sleep_floor_seconds` | `10` | bare `sleep N` prompts at or above this |
 | `slow.enabled` | `true` | Class B on/off |
 | `slow.action` | `"ask"` | `"deny"` escalates Class B to a hard block (override-able) |
-| `slow.commands` | `{}` | regex matched at a command position (prefix `.*` to match an argument) → minimum timeout ms |
+| `slow.commands` | `{}` | target form: command name → `{argument glob: minimum timeout ms}` (whole-word glob per argument — recommended); regex form: regex matched at a command position (prefix `.*` to match an argument) → minimum timeout ms |
 | `hint` | `""` | repo-specific line appended to Class A prompts, naming your own watcher machinery |
 
 Environment variables: `FOREGROUND_GUARD_DISABLE=1` turns the hook off for a

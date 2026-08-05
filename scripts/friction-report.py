@@ -54,7 +54,7 @@ CATEGORY_PATTERNS = {
     # "parks a background task" is the backgrounded wording of the same finding.
     'bare-sleep':   re.compile(r'`sleep` parks (?:the main thread|a background '
                                r'task) for'),
-    'slow-timeout': re.compile(r'matches the slow-command pattern'),
+    'slow-timeout': re.compile(r'matches the slow-command (?:pattern|target)'),
 }
 
 # One-line fix per category: what stops the prompt. Class A fixes are agent

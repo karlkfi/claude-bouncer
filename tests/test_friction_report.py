@@ -52,8 +52,11 @@ REASON_WATCH = guard.finding_watch(
 REASON_LOOP = guard.finding_loop(_CFG)[1]
 REASON_SANDWICH = guard.finding_sandwich(_CFG)[1]
 REASON_SLEEP = guard.finding_sleep(_CFG, 300)[1]
-REASON_SLOW = guard.finding_slow(_CFG, r"make test-race\b", 600000, 120000,
-                                False)[1]
+REASON_SLOW = guard.finding_slow(
+    _CFG, 'the slow-command pattern `make test-race\\b`', 600000, 120000,
+    False)[1]
+REASON_SLOW_TARGET = guard.finding_slow(
+    _CFG, 'the slow-command target `make e2e*`', 1800000, 120000, False)[1]
 # The same Class A findings for a `run_in_background: true` call: different
 # wording, same categories.
 _BG_CFG = dict(_CFG, backgrounded=True)
@@ -157,6 +160,7 @@ class CategoryTests(unittest.TestCase):
         self.assertEqual(fr.category_of(REASON_SANDWICH), "sandwich")
         self.assertEqual(fr.category_of(REASON_SLEEP), "bare-sleep")
         self.assertEqual(fr.category_of(REASON_SLOW), "slow-timeout")
+        self.assertEqual(fr.category_of(REASON_SLOW_TARGET), "slow-timeout")
 
     def test_backgrounded_class_a_keeps_its_category(self):
         # A poll run with run_in_background: true still prompts (issue #15),
@@ -169,8 +173,8 @@ class CategoryTests(unittest.TestCase):
     def test_signatures_mutually_exclusive(self):
         # No fixture reason matches more than one category signature.
         reasons = [REASON_WATCH, REASON_LOOP, REASON_SANDWICH, REASON_SLEEP,
-                   REASON_SLOW, REASON_BG_WATCH, REASON_BG_LOOP,
-                   REASON_BG_SANDWICH, REASON_BG_SLEEP]
+                   REASON_SLOW, REASON_SLOW_TARGET, REASON_BG_WATCH,
+                   REASON_BG_LOOP, REASON_BG_SANDWICH, REASON_BG_SLEEP]
         for reason in reasons:
             hits = [c for c, rx in fr.CATEGORY_PATTERNS.items()
                     if rx.search(reason)]
@@ -197,6 +201,10 @@ class TargetExtractionTests(unittest.TestCase):
     def test_slow_names_the_pattern(self):
         self.assertEqual(fr.named_target(REASON_SLOW), r"make test-race\b")
         self.assertEqual(fr.tool_of(REASON_SLOW), "make")
+
+    def test_slow_target_form_names_the_target(self):
+        self.assertEqual(fr.named_target(REASON_SLOW_TARGET), "make e2e*")
+        self.assertEqual(fr.tool_of(REASON_SLOW_TARGET), "make")
 
     def test_template_categories_have_no_named_target(self):
         # loop/sandwich/bare-sleep lead with a generic template, not a command.

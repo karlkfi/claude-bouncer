@@ -623,6 +623,96 @@ class SlowCommandPositionTests(unittest.TestCase):
         self.assertIsNone(d)
 
 
+# The target-aware form the hook anchors itself: exact command word, whole-
+# token glob per argument. A quoted argument that merely mentions the target
+# must never fire (#21).
+TARGET_CFG = {"slow": {"commands": {
+    "make": {"e2e*": 1800000, "test-race": 600000}}}}
+
+
+class SlowTargetTests(unittest.TestCase):
+    def assert_runs(self, command, **kw):
+        d, r = run_hook(command, config=TARGET_CFG, **kw)
+        self.assertEqual(d, "ask", "expected ask for %r" % command)
+        return r
+
+    def assert_defer(self, command, **kw):
+        d, r = run_hook(command, config=TARGET_CFG, **kw)
+        self.assertIsNone(d, "expected defer for %r, got %s" % (command, r))
+
+    def test_target_invocation_asks(self):
+        r = self.assert_runs("make e2e")
+        self.assertIn("slow-command target `make e2e*`", r)
+        self.assertIn("1800000", r)
+
+    def test_glob_prefix_and_flags(self):
+        self.assert_runs("make -C sub e2e-test")
+        self.assert_runs("make -j4 e2e")
+
+    def test_second_target(self):
+        r = self.assert_runs("make test-race")
+        self.assertIn("600000", r)
+
+    def test_quoted_argument_mention_defers(self):
+        # The #21 repro: the target name inside a quoted argument is a
+        # mention, not a target.
+        self.assert_defer('make -n help NOTE="a note mentioning e2e somewhere"')
+        self.assert_defer(
+            'make queue-id TITLE="No per-spec filter on the e2e make target"')
+
+    def test_other_target_defers(self):
+        self.assert_defer("make build")
+
+    def test_other_command_same_word_defers(self):
+        self.assert_defer("ninja e2e")
+
+    def test_command_word_matched_by_basename(self):
+        self.assert_runs("/usr/bin/make e2e")
+
+    def test_target_anywhere_in_chain(self):
+        self.assert_runs("git pull && make e2e")
+
+    def test_adequate_timeout_defers(self):
+        self.assert_defer("make e2e", timeout_ms=1800000)
+        # Adequate for test-race but not e2e: only e2e fires.
+        r = self.assert_runs("make e2e", timeout_ms=600000)
+        d, _ = run_hook("make test-race", config=TARGET_CFG, timeout_ms=600000)
+        self.assertIsNone(d)
+        self.assertIn("e2e*", r)
+
+    def test_backgrounded_defers(self):
+        self.assert_defer("make e2e", run_in_background=True)
+
+    def test_mixed_registry_forms(self):
+        cfg = {"slow": {"commands": {
+            "make": {"e2e*": 1800000},
+            r"go test ./\.\.\..*-race": 600000}}}
+        d, r = run_hook("make e2e", config=cfg)
+        self.assertEqual(d, "ask")
+        self.assertIn("slow-command target", r)
+        d, r = run_hook("go test ./... -race", config=cfg)
+        self.assertEqual(d, "ask")
+        self.assertIn("slow-command pattern", r)
+
+    def test_target_maps_merge_across_config_files(self):
+        # A user-level file registers one target, the project file another:
+        # the per-command maps merge additively instead of replacing.
+        extra = make_project({"slow": {"commands": {"make": {"bench*": 900000}}}})
+        env = {"FOREGROUND_GUARD_CONFIG":
+               os.path.join(extra, ".claude", "foreground-guard.json")}
+        d, _ = run_hook("make bench-all", config=TARGET_CFG, env_extra=env)
+        self.assertEqual(d, "ask")
+        d, _ = run_hook("make e2e", config=TARGET_CFG, env_extra=env)
+        self.assertEqual(d, "ask")
+
+    def test_non_numeric_target_value_loses_itself(self):
+        cfg = {"slow": {"commands": {"make": {"e2e*": "long", "test-race": 600000}}}}
+        d, _ = run_hook("make e2e", config=cfg)
+        self.assertIsNone(d)
+        d, _ = run_hook("make test-race", config=cfg)
+        self.assertEqual(d, "ask")
+
+
 SLOW_DENY_CFG = {"slow": {"action": "deny",
                           "commands": {r"make test-race\b": 600000}}}
 

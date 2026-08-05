@@ -59,6 +59,7 @@ Parsing rules inherited from the sibling guards:
 
 Reads the hook JSON on stdin, emits a PreToolUse decision on stdout.
 """
+import fnmatch
 import json
 import os
 import re
@@ -101,7 +102,7 @@ def load_config():
         'sleep_floor_seconds': DEFAULT_SLEEP_FLOOR_SECONDS,
         'slow_enabled': True,
         'slow_action': 'ask',          # 'ask' | 'deny' (config may escalate)
-        'slow_commands': {},           # {regex: min_timeout_ms}, additive
+        'slow_commands': {},           # {regex: ms} | {cmd: {glob: ms}}, additive
         'hint': '',                    # per-repo watcher-machinery hint
     }
     for path in _config_paths():
@@ -138,9 +139,24 @@ def load_config():
             cmds = slow.get('commands')
             if isinstance(cmds, dict):
                 for pat, ms in cmds.items():
-                    if isinstance(pat, str) and isinstance(ms, (int, float)) \
+                    if not isinstance(pat, str):
+                        continue
+                    if isinstance(ms, (int, float)) \
                             and not isinstance(ms, bool):
                         cfg['slow_commands'][pat] = int(ms)
+                    elif isinstance(ms, dict):
+                        # Target-aware form: {command: {argument glob: ms}}.
+                        # Target maps merge additively per command word.
+                        targets = cfg['slow_commands'].get(pat)
+                        if not isinstance(targets, dict):
+                            targets = {}
+                        for tgt, v in ms.items():
+                            if isinstance(tgt, str) \
+                                    and isinstance(v, (int, float)) \
+                                    and not isinstance(v, bool):
+                                targets[tgt] = int(v)
+                        if targets:
+                            cfg['slow_commands'][pat] = targets
         if isinstance(data.get('hint'), str):
             cfg['hint'] = data['hint']
     return cfg
@@ -629,17 +645,17 @@ def finding_sleep(cfg, secs):
         'not ready, %s' % retry)
 
 
-def finding_slow(cfg, pattern, min_ms, timeout_ms, timeout_was_set):
+def finding_slow(cfg, what, min_ms, timeout_ms, timeout_was_set):
     sev = DENY if cfg['slow_action'] == 'deny' else ASK
     cur = ('the %d ms timeout set on this call' % timeout_ms
            if timeout_was_set
            else 'the default %d ms timeout' % timeout_ms)
-    msg = ('foreground-guard: this command matches the slow-command pattern '
-           '`%s`, registered as needing at least %d ms, but it would run in '
-           'the foreground with %s — the Bash tool will kill it before it '
-           'finishes and the whole run is wasted. Fix: set `timeout: %d` on '
-           'this Bash call, or run it with run_in_background: true.'
-           % (pattern, min_ms, cur, min_ms))
+    msg = ('foreground-guard: this command matches %s, registered as needing '
+           'at least %d ms, but it would run in the foreground with %s — the '
+           'Bash tool will kill it before it finishes and the whole run is '
+           'wasted. Fix: set `timeout: %d` on this Bash call, or run it with '
+           'run_in_background: true.'
+           % (what, min_ms, cur, min_ms))
     msg += ' ' + CONFIG_HINT
     return (sev, msg)
 
@@ -802,18 +818,46 @@ def runs_command(rx, argv):
     return m is not None and m.start() < len(argv[0])
 
 
+def runs_target(name, glob_pat, argv):
+    """True when `argv` runs command `name` with an argument word matching
+    `glob_pat`. The command word is compared by basename and each argument is
+    glob-matched as a WHOLE token, so a quoted argument that merely mentions
+    the target (`make -n help NOTE="... e2e ..."`) can never fire (#21)."""
+    return os.path.basename(argv[0]) == name and \
+        any(fnmatch.fnmatchcase(a, glob_pat) for a in argv[1:])
+
+
 def analyze_class_b(raw, cfg, timeout_ms, timeout_was_set):
     """Class B findings: registered slow command about to run with an
-    inadequate foreground timeout. Patterns are regexes matched at the command
-    position of a simple command, so a pattern naming a script fires on the
-    invocation and not on a `grep`/`wc`/commit message that merely mentions the
-    path (#16); prefix a pattern with `.*` to match an argument instead. The
-    registry ships empty and is populated per-repo."""
+    inadequate foreground timeout. Two registration forms:
+
+      * regex -> ms: matched at the command position of a simple command, so
+        a pattern naming a script fires on the invocation and not on a
+        `grep`/`wc`/commit message that merely mentions the path (#16);
+        prefix a pattern with `.*` to match an argument instead — which puts
+        the whole segment, quoted arguments included, in scope.
+      * command -> {argument glob -> ms}: the hook does the anchoring itself —
+        exact command word, whole-token glob per argument — so the common
+        `make <target>` case needs no regex and cannot leak into a quoted
+        argument (#21).
+
+    The registry ships empty and is populated per-repo."""
     findings = []
     commands = simple_commands(raw)
     if commands is None:
         return findings  # unparseable: fail-open, defer
-    for pat, min_ms in cfg['slow_commands'].items():
+    for pat, spec in cfg['slow_commands'].items():
+        if isinstance(spec, dict):
+            for glob_pat, min_ms in spec.items():
+                if timeout_ms >= min_ms:
+                    continue
+                if any(runs_target(pat, glob_pat, argv) for argv in commands):
+                    findings.append(finding_slow(
+                        cfg, 'the slow-command target `%s %s`'
+                        % (pat, glob_pat), min_ms, timeout_ms,
+                        timeout_was_set))
+            continue
+        min_ms = spec
         if timeout_ms >= min_ms:
             continue
         try:
@@ -821,8 +865,9 @@ def analyze_class_b(raw, cfg, timeout_ms, timeout_was_set):
         except re.error:
             continue  # a broken pattern loses itself
         if any(runs_command(rx, argv) for argv in commands):
-            findings.append(finding_slow(cfg, pat, min_ms, timeout_ms,
-                                         timeout_was_set))
+            findings.append(finding_slow(
+                cfg, 'the slow-command pattern `%s`' % pat, min_ms,
+                timeout_ms, timeout_was_set))
     return findings
 
 
