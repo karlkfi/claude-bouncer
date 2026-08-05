@@ -94,10 +94,14 @@ user which categories dominate their report, then apply the matching fix:
    `poll.sleep_floor_seconds` so they fall below it — but keep the floor low
    enough that real long waits still prompt.
 5. **`slow-timeout`** (Class B) — a registered slow command about to be killed by
-   an inadequate timeout. **Reason:** "…matches the slow-command pattern…". Set an
-   adequate `timeout:` on the Bash call (the reason names the minimum in ms), or
-   run it with `run_in_background: true`. If a command is flagged slow but is
-   *not* actually slow anymore, remove or lower its entry in `slow.commands`.
+   an inadequate timeout. **Reason:** "…matches the slow-command pattern…" or
+   "…matches the slow-command target…". Set an adequate `timeout:` on the Bash
+   call (the reason names the minimum in ms), or run it with
+   `run_in_background: true`. If a command is flagged slow but is *not* actually
+   slow anymore, remove or lower its entry in `slow.commands`. If a **regex**
+   entry with `.*` is firing on commands that merely *mention* the registered
+   word in an argument, rewrite it in the target form —
+   `"make": {"e2e*": 1800000}` — which matches whole argument words only.
 
 The **Top flagged targets / commands** rankings tell you *which* commands to
 target first — fix the highest-count rows for the biggest reduction. If the report
