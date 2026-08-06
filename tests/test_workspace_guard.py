@@ -4874,6 +4874,73 @@ class ClassifyPkillTests(unittest.TestCase):
                          ("pkill", ["x"]))
 
 
+class ClassifyTaskkillTests(unittest.TestCase):
+    """Selection classification for Windows' `taskkill` (Q58)."""
+
+    def classify(self, text):
+        return guard.classify_taskkill(shlex.split(text))
+
+    def test_non_kill_command_returns_none(self):
+        self.assertIsNone(self.classify("tasklist /IM node.exe"))
+        self.assertIsNone(self.classify("kill 1234"))
+        self.assertIsNone(guard.classify_taskkill([]))
+
+    def test_command_word_is_normalized_like_windows_resolves_it(self):
+        for head in ("taskkill", "TASKKILL", "taskkill.exe", "TaskKill.EXE",
+                     "/c/Windows/System32/taskkill.exe"):
+            self.assertEqual(self.classify("%s /IM node.exe" % head),
+                             ("other", [2]), head)
+
+    def test_every_flag_prefix_binds(self):
+        # `/IM` is the documented form, `-IM` is accepted too, and `//IM` is what
+        # Git Bash's MSYS path mangling requires.
+        for flag in ("/IM", "//IM", "-IM", "/im", "-Im"):
+            self.assertEqual(self.classify("taskkill %s node.exe" % flag),
+                             ("other", [2]), flag)
+
+    def test_image_name_and_filter_are_selection(self):
+        self.assertEqual(self.classify('taskkill /FI "IMAGENAME eq node.exe"'),
+                         ("other", [2]))
+        self.assertEqual(
+            self.classify('taskkill /IM node.exe /FI "STATUS eq RUNNING"'),
+            ("other", [2, 4]))
+
+    def test_literal_pid_needs_no_anchor(self):
+        for text in ("taskkill /PID 1234", "taskkill /F /T /PID 1234",
+                     "taskkill //PID 1234"):
+            self.assertEqual(self.classify(text), ("pid", []), text)
+
+    def test_expandable_pid_is_not_a_pid(self):
+        # The `Stop-Process -Id $p.Id` case: host-wide, and the hook cannot tell
+        # it from a pid the agent looked up.
+        self.assertEqual(self.classify("taskkill /PID $p"), ("other", [2]))
+
+    def test_mixed_pid_and_image_reads_as_selection(self):
+        self.assertEqual(self.classify("taskkill /PID 1234 /IM node.exe"),
+                         ("other", [4]))
+
+    def test_switches_are_not_selection(self):
+        self.assertEqual(self.classify("taskkill /F /T"), ("other", []))
+
+    def test_remote_flags_consume_their_value(self):
+        # Without `consume` handling, `box` lands in the operand stream and drags
+        # a by-pid kill into a deny.
+        self.assertEqual(
+            self.classify("taskkill /S box /U karl /P pw /PID 1234"),
+            ("pid", []))
+
+    def test_no_selector_at_all_is_denied_selection(self):
+        self.assertEqual(self.classify("taskkill"), ("other", []))
+
+    def test_help_invocation_kills_nothing(self):
+        self.assertIsNone(self.classify("taskkill /?"))
+
+    def test_bare_operand_is_selection_the_hook_cannot_vouch_for(self):
+        # `taskkill node.exe` is a syntax error to Windows — nothing here is
+        # positional — but reading it as selection keeps the deny direction.
+        self.assertEqual(self.classify("taskkill node.exe"), ("other", [1]))
+
+
 class WorkspaceAnchorTests(unittest.TestCase):
     """The path fragment that pins a kill pattern to this workspace (issue 125)."""
 
@@ -5020,6 +5087,97 @@ class UnanchoredKillEndToEndTests(unittest.TestCase):
 
     def test_bypass_mode_still_denies(self):
         self._decision('pkill -f ginkgo', "deny",
+                       permission_mode="bypassPermissions")
+
+
+class TaskkillEndToEndTests(unittest.TestCase):
+    """Decisions for `taskkill` through the Bash frontend (Q58).
+
+    Git Bash is where a bash-tool session reaches Windows' own kill. No process
+    is ever signalled: the hook reads the command as a JSON string and the test
+    never invokes a shell on it.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.base = os.path.realpath(self._tmp.name)
+        self.workspace = os.path.join(self.base, "wt-a")
+        os.mkdir(self.workspace)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _out(self, cmd, **kw):
+        return run_hook(cmd, self.workspace, project_dir=self.workspace, **kw)
+
+    def _decision(self, cmd, expected, **kw):
+        out = self._out(cmd, **kw)
+        if expected == "defer":
+            self.assertIsNone(out, f"expected defer for {cmd!r}, got {out!r}")
+            return None
+        self.assertIsNotNone(out, f"expected a decision, got defer for: {cmd!r}")
+        got = out["hookSpecificOutput"]["permissionDecision"]
+        self.assertEqual(got, expected, f"expected {expected!r} for {cmd!r}")
+        return out["hookSpecificOutput"]["permissionDecisionReason"]
+
+    def test_image_name_denies(self):
+        # `taskkill /IM node.exe` is `killall node` — every checkout's node.
+        for cmd in ("taskkill //IM node.exe", "taskkill /IM node.exe",
+                    "taskkill -IM node.exe", "taskkill /F /T //IM node.exe",
+                    "TASKKILL.EXE //IM node.exe"):
+            self._decision(cmd, "deny")
+
+    def test_filter_denies(self):
+        self._decision('taskkill //FI "IMAGENAME eq node.exe"', "deny")
+
+    def test_no_selector_denies(self):
+        r = self._decision("taskkill", "deny")
+        self.assertIn("no pattern at all", r)
+
+    def test_kill_by_literal_pid_is_untouched(self):
+        for cmd in ("taskkill //PID 1234", "taskkill /F //PID 1234",
+                    "taskkill //S box //U karl //PID 1234", "taskkill /?"):
+            self._decision(cmd, "defer")
+
+    def test_expandable_pid_denies(self):
+        self._decision("taskkill //PID $p", "deny")
+
+    def test_anchored_filter_defers(self):
+        # Defer, not allow: an anchored kill is out of this hook's scope, and an
+        # `allow` would short-circuit the user's own permission settings.
+        self._decision('taskkill //FI %s' % sh(
+            'WINDOWTITLE eq %s' % os.path.join(self.workspace, '*')), "defer")
+
+    def test_sibling_worktree_filter_denies(self):
+        self._decision('taskkill //FI %s' % sh(
+            'WINDOWTITLE eq %s' % os.path.join(self.base, 'wt-b', '*')), "deny")
+
+    def test_reason_names_the_taskkill_rewrites(self):
+        r = self._decision("taskkill //IM node.exe", "deny")
+        self.assertIn("node.exe", r)
+        self.assertIn("taskkill /PID", r)
+        self.assertIn("tasklist", r)
+        self.assertIn("WORKSPACE_GUARD_OVERRIDE", r)
+        self.assertNotIn("pgrep", r)          # the pkill rewrite, wrong command
+
+    def test_clean_read_never_launders_a_taskkill(self):
+        # `allow` speaks for the whole string, so a clean `cat` must not carry
+        # even the by-pid form past the user's own permission settings.
+        self._decision("cat ./in.txt && taskkill //IM node.exe", "deny")
+        self._decision("cat ./in.txt && taskkill //PID 1234", "defer")
+
+    def test_kill_inside_command_substitution_is_caught(self):
+        self._decision('echo "$(taskkill //IM node.exe)"', "deny")
+
+    def test_override_downgrades_to_ask(self):
+        out = self._out("taskkill //IM node.exe",
+                        env_extra={"WORKSPACE_GUARD_OVERRIDE": "stuck harness"})
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "ask")
+        self.assertIn("stuck harness",
+                      out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_bypass_mode_still_denies(self):
+        self._decision("taskkill //IM node.exe", "deny",
                        permission_mode="bypassPermissions")
 
 
@@ -7081,12 +7239,14 @@ class PowerShellKillAnchorTests(unittest.TestCase):
             r"C:\ws\repo\bin", False, None))
 
 
-class PowerShellUnanchoredKillEndToEndTests(unittest.TestCase):
-    """Decisions the script emits for a PowerShell `Stop-Process` (Q57).
+class PowerShellKillFixture(object):
+    """Workspace and hook-invocation harness for the PowerShell kill suites.
 
     `wt-a` is this session's workspace and `wt-b` stands in for a sibling
     worktree. No process is ever signalled: the hook reads the command as a JSON
-    string and the test never invokes a shell on it.
+    string and the tests never invoke a shell on it. A mixin rather than a base
+    TestCase so the loader doesn't collect it, and so neither suite re-runs the
+    other's cases.
     """
 
     def setUp(self):
@@ -7124,6 +7284,11 @@ class PowerShellUnanchoredKillEndToEndTests(unittest.TestCase):
         got = out["hookSpecificOutput"]["permissionDecision"]
         self.assertEqual(got, expected, f"expected {expected!r} for {command!r}")
         return out["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+class PowerShellUnanchoredKillEndToEndTests(PowerShellKillFixture,
+                                            unittest.TestCase):
+    """Decisions the script emits for a PowerShell `Stop-Process` (Q57)."""
 
     def test_kill_by_name_denies(self):
         for cmd in ("Stop-Process -Name node", "kill -Name node",
@@ -7228,6 +7393,84 @@ class PowerShellUnanchoredKillEndToEndTests(unittest.TestCase):
     def test_an_offending_kill_outranks_a_clean_cmdlet(self):
         # Suppression removes the `allow`; it must not also swallow the deny.
         self._decision(r"Get-Content .\in.txt; Stop-Process -Name node", "deny")
+
+
+class PowerShellTaskkillEndToEndTests(PowerShellKillFixture, unittest.TestCase):
+    """Decisions for `taskkill` through the PowerShell frontend (Q58).
+
+    The same verdicts the Bash frontend gives the same command — `taskkill` is
+    one program, and the two frontends must not disagree about it.
+    """
+
+    def test_image_name_denies(self):
+        for cmd in ("taskkill /IM node.exe", "taskkill /F /T /IM node.exe",
+                    "TASKKILL.EXE /IM node.exe"):
+            self._decision(cmd, "deny")
+
+    def test_filter_denies(self):
+        self._decision('taskkill /FI "IMAGENAME eq node.exe"', "deny")
+
+    def test_no_selector_denies(self):
+        self._decision("taskkill", "deny")
+
+    def test_kill_by_literal_pid_is_untouched(self):
+        for cmd in ("taskkill /PID 1234", "taskkill /F /PID 1234",
+                    "taskkill /?"):
+            self._decision(cmd, "defer")
+
+    def test_expandable_pid_denies(self):
+        self._decision("taskkill /PID $p", "deny")
+
+    def test_anchored_filter_defers(self):
+        self._decision("taskkill /FI %s"
+                       % ps("WINDOWTITLE eq %s"
+                            % os.path.join(self.base, "wt-a", "*")), "defer")
+
+    def test_sibling_worktree_filter_denies(self):
+        self._decision("taskkill /FI %s"
+                       % ps("WINDOWTITLE eq %s"
+                            % os.path.join(self.base, "wt-b", "*")), "deny")
+
+    def test_upstream_anchor_does_not_reach_a_taskkill(self):
+        # The divergence from `Stop-Process`: `taskkill` reads no pipeline, so a
+        # filter written upstream of it is not what selects the processes.
+        self._decision(
+            "Get-Process | Where-Object { $_.Path -like %s } | "
+            "taskkill /IM node.exe" % self._glob("wt-a"), "deny")
+
+    def test_reason_names_the_taskkill_rewrites(self):
+        r = self._decision("taskkill /IM node.exe", "deny")
+        self.assertIn("node.exe", r)
+        self.assertIn("taskkill /PID", r)
+        self.assertIn("tasklist", r)
+        self.assertNotIn("Where-Object", r)   # the Stop-Process rewrite
+
+    def test_override_downgrades_to_ask(self):
+        out = self._out("taskkill /IM node.exe",
+                        env_extra={"WORKSPACE_GUARD_OVERRIDE": "stuck harness"})
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "ask")
+
+    def test_bypass_mode_still_denies(self):
+        self._decision("taskkill /IM node.exe", "deny",
+                       permission_mode="bypassPermissions")
+
+    def test_a_clean_guarded_cmdlet_never_speaks_for_a_taskkill(self):
+        # Q59's suppression has to reach this kill too: `taskkill /PID 1234`
+        # earns no offender, which is exactly what leaves it available for a
+        # clean `Get-Content` to launder into a blanket `allow`.
+        for cmd in (r"Get-Content .\in.txt; taskkill /PID 1234",
+                    r"taskkill /PID 1234; Get-Content .\in.txt",
+                    r"Get-Content .\in.txt | taskkill /PID 1234",
+                    r"Get-Content .\in.txt; $(taskkill /PID 1234)"):
+            self._decision(cmd, "defer")
+
+    def test_a_help_invocation_does_not_suppress_the_allow(self):
+        # `taskkill /?` kills nothing, so there is no kill to speak for.
+        self._decision(r"Get-Content .\in.txt; taskkill /?", "allow")
+
+    def test_an_offending_taskkill_outranks_a_clean_cmdlet(self):
+        # Suppression removes the `allow`; it must not also swallow the deny.
+        self._decision(r"Get-Content .\in.txt; taskkill /IM node.exe", "deny")
 
 
 class PowerShellEndToEndTests(unittest.TestCase):

@@ -69,10 +69,10 @@ aren't covered yet (see [`docs/STATUS.md`](docs/STATUS.md)). A **redirect**
 target (`> file`) is checked on *any* command, guarded or not — it's a write the
 shell performs regardless of the command word.
 
-Process kills are guarded too, though they touch no file: `pkill`/`killall` and
-PowerShell's `Stop-Process` signal a process by *pattern* or by *name*, which
-reaches every checkout on the host — and so does a `kill` fed pids by a `pgrep`
-or a `ps | grep`. See
+Process kills are guarded too, though they touch no file: `pkill`/`killall`,
+PowerShell's `Stop-Process`, and Windows' `taskkill` signal a process by
+*pattern* or by *name*, which reaches every checkout on the host — and so does a
+`kill` fed pids by a `pgrep` or a `ps | grep`. See
 [Unanchored process-kill deny](#unanchored-process-kill-deny).
 
 The same outside-workspace check also runs on Claude's **native file tools**, so
@@ -186,6 +186,9 @@ project's scratch still asks entirely.
 | `ps -eo pid,command \| grep ginkgo \| awk '{print $1}' \| xargs kill` | **deny** |
 | `for p in $(pgrep -f ginkgo); do kill $p; done` | **deny** |
 | `pgrep -f "<this-root>/bin/x" \| xargs -r kill` (anchored) | defer |
+| `taskkill //IM node.exe` · `taskkill //FI "IMAGENAME eq node.exe"` | **deny** |
+| `taskkill` (no selector at all)      | **deny** |
+| `taskkill //PID 1234` · `taskkill /?` | defer   |
 | `kill 1234` · `kill -0 1234` · `kill $pid` | defer |
 | `pgrep -fl ginkgo` · `pgrep -f ginkgo; kill 1234` | defer |
 | `cat in.txt && kill 1234` (clean read, but signals) | defer |
@@ -234,7 +237,8 @@ Guarded cmdlets: `Get-Content`, `Select-String`, `Import-Csv`, `Import-Clixml`,
 `Set-Content`, `Add-Content`, `Out-File`, `Tee-Object`, `Export-Csv`,
 `Export-Clixml`, `Copy-Item`, `Move-Item`, `Remove-Item`, `Rename-Item`, and
 their aliases. Output redirects (`>`, `>>`, `2>`) are checked on any command.
-`Stop-Process` (and `kill`, `spps`) is guarded as well, as a process kill.
+`Stop-Process` (and `kill`, `spps`) is guarded as well, as a process kill, as is
+Windows' own `taskkill`.
 
 | Command                                        | Decision |
 | ---------------------------------------------- | -------- |
@@ -257,8 +261,10 @@ their aliases. Output redirects (`>`, `>>`, `2>`) are checked on any command.
 | `Get-Process node \| Stop-Process`              | **deny** |
 | `Stop-Process -Id $p.Id`                       | **deny** |
 | `Get-Process \| Where-Object { $_.Path -like '<this-root>\*' } \| Stop-Process` | defer |
-| `Stop-Process -Id 1234`                        | defer    |
+| `taskkill /IM node.exe`                        | **deny** |
+| `Stop-Process -Id 1234` · `taskkill /PID 1234` | defer    |
 | `Get-Content .\in.txt; Stop-Process -Id 1234`  | defer    |
+| `Get-Content .\in.txt; taskkill /PID 1234`     | defer    |
 | `Get-ChildItem C:\out` (not a guarded cmdlet)  | defer    |
 | `Get-Content "unterminated` (unparseable)      | defer    |
 
@@ -271,9 +277,9 @@ operand resolves against the right directory; anything the hook can't follow
 (a bare `cd`, a `$var` target, `Pop-Location`) drops tracking and prompts on
 relative operands rather than guessing.
 
-`Stop-Process` is guarded as a process kill rather than as a file operation —
-see [Unanchored process-kill deny](#unanchored-process-kill-deny) for the rule
-and the two rewrites the deny recommends.
+`Stop-Process` and `taskkill` are guarded as process kills rather than as file
+operations — see [Unanchored process-kill deny](#unanchored-process-kill-deny)
+for the rule and the rewrites each deny recommends.
 
 A cmdlet that isn't in the table is **not checked**, and neither is a .NET call
 or a native `.exe`. See [Limitations](#limitations) for why that's the posture
@@ -460,11 +466,37 @@ the deny teaches the agent to reach for `Get-Process node | Stop-Process`
 instead — the same host-wide kill, one keystroke further away.
 
 A clean cmdlet in the same string doesn't speak for the kill either. A
-`Stop-Process` anywhere in the string — including one inside a `$(…)` body —
-suppresses the blanket `allow` a `Get-Content` would otherwise earn, so
-`Get-Content .\in.txt; Stop-Process -Id 1234` emits nothing and your own
+`Stop-Process` or a `taskkill` anywhere in the string — including one inside a
+`$(…)` body — suppresses the blanket `allow` a `Get-Content` would otherwise
+earn, so `Get-Content .\in.txt; Stop-Process -Id 1234` emits nothing and your own
 permission settings decide. That covers the kills this rule leaves alone, by
 literal pid or anchored: they were never the hook's to green-light.
+
+#### Windows: `taskkill`
+
+`taskkill` is the same kill again, and it reaches both shells — Git Bash spawns
+it as a native executable, PowerShell as a native command — so it is checked in
+both:
+
+```
+taskkill /IM node.exe                       # -> deny (this is `killall`)
+taskkill /FI "IMAGENAME eq node.exe"        # -> deny (a filter names no path)
+taskkill                                    # -> deny (nothing selects)
+taskkill /PID $p                            # -> deny (the hook can't see the pid)
+taskkill /PID 1234                          # defer  (by pid, the safe rewrite)
+taskkill /?                                 # defer  (kills nothing)
+```
+
+Flags bind whichever prefix you write — `/IM`, `-IM`, or the `//IM` that Git
+Bash's path mangling requires — and their names are case-insensitive, as is the
+command word (`TASKKILL.EXE` is `taskkill`). The rewrite the deny names is this
+command's own: `tasklist /FI "IMAGENAME eq <name>"` to find the process, then
+`taskkill /PID <pid>` to kill just that one.
+
+Unlike `Stop-Process`, a `taskkill` is judged on **its own arguments**, not on
+the whole statement. It reads no pipeline — its selection is entirely in its own
+flags — so an anchor written upstream of it isn't what picks the processes, and
+counting one would clear a kill it has nothing to do with.
 
 ## Install
 
@@ -829,16 +861,19 @@ through the same boundary rules and produce the same reasons. Symlink staging
    `WORKSPACE_GUARD_OVERRIDE=<reason>` downgrades the deny to `ask`. PowerShell's
    `Stop-Process` runs the same check with its own selection rules — the anchor is
    looked for across the whole statement there, since the anchored form is a
-   `Where-Object` filter upstream in the pipeline. See
+   `Where-Object` filter upstream in the pipeline. Windows' `taskkill` runs it in
+   *both* frontends, on its own arguments only: it reads no pipeline, so nothing
+   upstream selects what it kills. A literal `/PID` defers, `/IM` and `/FI` deny,
+   and `/?` kills nothing so it defers too. See
    [Unanchored process-kill deny](#unanchored-process-kill-deny).
    The same step covers a kill fed by a pattern rather than named by one, in the
    Bash tool. Any signalling command in the string (`kill`, `pkill`, `killall`,
-   directly or as an `xargs` command word) suppresses the blanket `allow` a clean
-   guarded command would otherwise earn, so a `grep` can never carry an
-   `xargs kill` past your permission settings — `allow` speaks for the whole
-   string. A `Stop-Process` suppresses the PowerShell `allow` the same way,
-   including one this step had no cause to deny and one written inside a `$(…)`
-   body. And the pattern
+   `taskkill`, directly or as an `xargs` command word) suppresses the blanket
+   `allow` a clean guarded command would otherwise earn, so a `grep` can never
+   carry an `xargs kill` past your permission settings — `allow` speaks for the
+   whole string. A `Stop-Process` or a `taskkill` suppresses the PowerShell
+   `allow` the same way, including one this step had no cause to deny and one
+   written inside a `$(…)` body. And the pattern
    operands of the pid *sources* — `pgrep`'s, and those of a `grep` in a pipeline
    that also contains `ps` — go through the anchor test above; a `kill` whose
    operands aren't all literal pids, with no anchoring pattern anywhere in the
@@ -954,7 +989,10 @@ flowing, avoid triggering it:
   `Stop-Process`: `-Name` and an unfiltered `Get-Process … | Stop-Process` are
   denied, `Stop-Process -Id <literal pid>` is never blocked, and the anchored
   form is `Get-Process | Where-Object { $_.Path -like '<root>\*' } |
-  Stop-Process`. For a deliberate cross-workspace kill, set
+  Stop-Process`. On Windows, `taskkill /IM <name>` and `taskkill /FI <filter>`
+  are denied from either shell; find the process with
+  `tasklist /FI "IMAGENAME eq <name>"` and kill it with `taskkill /PID <pid>`,
+  which is never blocked. For a deliberate cross-workspace kill, set
   `WORKSPACE_GUARD_OVERRIDE=<reason>`.
 - **Routing the same pattern through pids doesn't help.**
   `pgrep -f ginkgo | xargs kill`, `kill $(pgrep -f ginkgo)`, and
@@ -1231,11 +1269,13 @@ final output.
   weakened). A main-checkout session is a deliberate no-op even when worktrees
   exist.
 - The unanchored-kill deny covers `pkill`, `killall`, and a pattern-fed `kill`
-  in the Bash tool, and `Stop-Process` in the PowerShell tool. `taskkill` is
-  checked in **neither**, and neither is a kill routed through something the hook
-  doesn't parse (a script that kills on your behalf). `Get-Process -Id 1234 |
+  in the Bash tool, `Stop-Process` in the PowerShell tool, and `taskkill` in
+  both. A kill routed through something the hook doesn't parse — a script that
+  kills on your behalf — is checked in **neither**. `Get-Process -Id 1234 |
   Stop-Process` denies even though the pid is literal — it's bound on the
   upstream cmdlet, which the kill rule doesn't read; write `Stop-Process -Id 1234`.
+  `taskkill /FI "PID eq 1234"` denies for the same shape of reason: filter
+  expressions aren't parsed, so write `taskkill /PID 1234`.
   Anchoring is also *lexical*, which cuts both ways: a process
   started with a relative command line (`make check`) carries no path for `-f` to
   match, so it can't be anchored at all and the answer there is `pgrep -fl` plus
@@ -1267,7 +1307,7 @@ final output.
   `Out-File`, `Tee-Object`, `Export-Csv`, `Export-Clixml`, `Copy-Item`,
   `Move-Item`, `Remove-Item`, `Rename-Item`, their aliases (`cat`, `type`, `gc`,
   `sls`, `sc`, `ac`, `cp`, `mv`, `rm`, `del`, …), output redirects, and
-  `Stop-Process` as a process kill.
+  `Stop-Process` and `taskkill` as process kills.
   Everything else — a cmdlet not on that list, a .NET call such as
   `[IO.File]::ReadAllText(…)`, a native `.exe` — is **not checked**, and the
   session gets no signal that it wasn't. The alternative was to prompt on

@@ -15,7 +15,6 @@ Specific actionable items in priority order. Pick from the top; skip 🚫 items 
 
 | ID | Item | Labels | St | Sz | Notes |
 |---|---|---|---|---|---|
-| <a id="Q58"></a>Q58 | Guard `taskkill`, on both frontends | `security` | 🔲 | S | `taskkill /IM node.exe` is the same host-wide kill as `pkill` and `Stop-Process`, and neither frontend checks it, so it walks past the unanchored-kill deny. Recorded as a limitation in [Q57's plan](plan/q57-powershell-stop-process.md). |
 | <a id="Q60"></a>Q60 | Catch a pattern-fed kill whose filter isn't grep | `security` | 🔲 | M | `ps \| awk '/pat/ {print $1}' \| xargs kill` collects no pattern and defers; so does a kill wrapped in `sh -c '…'`. Reading an awk program as a pattern would deny every anchored pipeline, so this needs real pid provenance. See [plan](plan/pattern-fed-kill-deny.md). |
 
 ## Deferred

@@ -1938,6 +1938,80 @@ def classify_pkill(tokens):
     return (name, operands)
 
 
+# --- Windows `taskkill` (Q58) ------------------------------------------------
+# Windows' own host-wide kill, and reachable from BOTH frontends — Git Bash
+# spawns it as a native exe, PowerShell as a native command. `taskkill /IM
+# node.exe` is `killall node`, so it earns the same verdict; it needs its own
+# classifier because neither `KILL_CONSUME` nor a PS_SPEC row describes its
+# grammar. Flags take a `/` or a `-` prefix (taskkill accepts both), or `//` once
+# Git Bash's MSYS path mangling has had its say, and their names are
+# case-insensitive. Nothing is positional: every selector is flagged, so a bare
+# word is a syntax error rather than a pattern.
+TASKKILL_CMDS = frozenset({'taskkill'})
+
+# Value-taking flags. `/S` `/U` `/P` address a remote host and are not selection;
+# the other three are.
+TASKKILL_SELECTORS = frozenset({'fi', 'im', 'pid'})
+TASKKILL_CONSUME = TASKKILL_SELECTORS | frozenset({'s', 'u', 'p'})
+
+# A flag rather than an operand. `[A-Za-z?]+` is deliberately tight: it leaves a
+# path-shaped token like `/tmp/x` to be read as an operand, and matches `/?`.
+TASKKILL_FLAG_RE = re.compile(r'^(?:/{1,2}|-)([A-Za-z?]+)$')
+
+
+def native_cmd_name(tok):
+    """Command word normalized the way Windows resolves one: basename,
+    lowercased, `.exe` dropped. `TASKKILL.EXE` and `taskkill` are one command to
+    cmd.exe and to PowerShell alike."""
+    name = os.path.basename(tok).lower()
+    return name[:-4] if name.endswith('.exe') else name
+
+
+def classify_taskkill(words):
+    """For a `taskkill` command, return `(mode, [operand indices])`; else None.
+
+    `mode` is 'pid' when every selector is a literal `/PID <digits>` — the by-pid
+    kill left alone exactly as `kill 1234` and `Stop-Process -Id 1234` are, since
+    it is the rewrite the deny recommends — and 'other' for anything else: an
+    `/IM` image name, an `/FI` filter, a `/PID` the shell expands, or no selector
+    at all. The caller denies an 'other' unless one of the operands anchors.
+
+    Operands come back as INDICES into `words` so each frontend keeps its own
+    token representation: PowerShell's anchor check needs the tokenizer's
+    `expandable` flag, which a list of plain strings would drop.
+
+    Returns None for a help invocation (`taskkill /?`), which kills nothing —
+    the same reason `classify_mktemp` returns None for `--version`.
+    """
+    if not words or native_cmd_name(words[0]) not in TASKKILL_CMDS:
+        return None
+    kinds, operands = set(), []
+    i, n = 1, len(words)
+    while i < n:
+        m = TASKKILL_FLAG_RE.match(words[i])
+        if m is None:
+            kinds.add('other')
+            operands.append(i)
+            i += 1
+            continue
+        key = m.group(1).lower()
+        if key == '?':
+            return None
+        if key not in TASKKILL_CONSUME:
+            i += 1                            # a switch (`/T`, `/F`) or unknown
+            continue
+        if key in TASKKILL_SELECTORS and i + 1 < n:
+            if key == 'pid' and words[i + 1].isdigit():
+                kinds.add('pid')
+            else:
+                kinds.add('other')
+                operands.append(i + 1)
+        i += 2
+    if 'other' in kinds or not kinds:
+        return ('other', operands)
+    return ('pid', [])
+
+
 # --- Pattern-fed kills (issue 125 follow-up) ---------------------------------
 # The deny above names the kill command. The same blind kill dodges it by
 # deriving pids from a pattern instead: `pgrep -f ginkgo | xargs kill`,
@@ -1951,7 +2025,7 @@ def classify_pkill(tokens):
 # pattern operands of the pid *sources* run through the same
 # `kill_operand_anchored` check the kill command's own pattern does.
 
-SIGNAL_CMDS = frozenset({'kill', 'pkill', 'killall'})
+SIGNAL_CMDS = frozenset({'kill', 'pkill', 'killall', 'taskkill'})
 
 # An operand that was demonstrably not derived from a pattern: a literal pid or a
 # job spec (`%1`, `%+`, `%make`). A `kill` whose operands are all of this shape
@@ -1979,9 +2053,10 @@ def signal_command(tokens):
 
     `launderable` marks a kill whose target could have come from a pattern —
     everything except a `kill` whose operands are all literal pids or job specs.
-    `pkill`/`killall` are never launderable: they carry their own anchor rule
-    (`classify_pkill`), and folding them in here would let an unrelated
-    unanchored pattern elsewhere in the string deny a correctly anchored one.
+    `pkill`/`killall`/`taskkill` are never launderable: they carry their own
+    anchor rule (`classify_pkill`, `classify_taskkill`), and folding them in here
+    would let an unrelated unanchored pattern elsewhere in the string deny a
+    correctly anchored one.
 
     An `xargs` group is inspected for a signal command word among its tokens
     rather than parsed for it. Both misparse directions of a real xargs option
@@ -1992,7 +2067,7 @@ def signal_command(tokens):
     """
     if not tokens:
         return None
-    head = os.path.basename(tokens[0])
+    head = native_cmd_name(tokens[0])
     if head in SIGNAL_CMDS:
         if head != 'kill':
             return (head, False)
@@ -2002,8 +2077,8 @@ def signal_command(tokens):
         return (head, launderable)
     if head == 'xargs':
         for t in tokens[1:]:
-            if os.path.basename(t) in SIGNAL_CMDS:
-                return (os.path.basename(t), True)
+            if native_cmd_name(t) in SIGNAL_CMDS:
+                return (native_cmd_name(t), True)
     return None
 
 
@@ -2448,7 +2523,8 @@ def build_kill_hint(kills, override=None):
     `kills` is a list of `(token, detail)` where `detail` carries the kill
     command `cmd`, the offending `pattern` (None when the invocation selects by
     uid/ppid/session — or over a pipeline — with no pattern at all), the
-    workspace `root` to anchor to, and the `shell` whose rewrites to name. When
+    workspace `root` to anchor to, and the `shell` whose rewrites to name. A
+    `taskkill` names its own rewrite whichever shell ran it. When
     `override` is set the kill is downgraded to a prompt rather than blocked, so
     the wording adjusts.
     """
@@ -2475,7 +2551,13 @@ def build_kill_hint(kills, override=None):
         lead = ("Unanchored process kill(s) blocked: a pattern that names no "
                 "path in this workspace matches the same process in every "
                 "checkout on this host, so it can kill another session's work. ")
-        if shell == 'powershell':
+        if any(d.get('cmd') == 'taskkill' for _, d in kills):
+            # Neither of the other two rewrites is `taskkill`'s: it has no
+            # `pgrep`, and `Stop-Process` is a different command.
+            fix = ('Fix: run `tasklist /FI "IMAGENAME eq <name>"` and '
+                   "`taskkill /PID <pid>` for the one(s) you meant — `/IM` and "
+                   "`/FI` reach that image in every checkout on this host.")
+        elif shell == 'powershell':
             fix = ("Fix: run `Get-Process <name> | Select-Object Id, Path` and "
                    "`Stop-Process -Id <pid>` for the one(s) you meant, or filter "
                    "the pipeline to this workspace first (`Get-Process | "
@@ -3148,6 +3230,22 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0):
                        for o in operands):
                 outside.append((g[0], 'kill', {
                     'cmd': name, 'root': proj,
+                    'pattern': ' '.join(operands) if operands else None}))
+            continue
+        tk = classify_taskkill(g)
+        if tk is not None:
+            # Same category and the same reason `guarded` stays clear as the
+            # `pkill` branch above. The anchor scan is this command's own tokens:
+            # `taskkill` reads no pipeline, so an anchor written upstream of it
+            # cannot be what selects the processes.
+            mode, idx = tk
+            operands = [g[i] for i in idx]
+            if mode != 'pid' and not any(
+                    kill_operand_anchored(o, ctx.kill_anchor, group_cwd,
+                                          group_cwd_unknown)
+                    for o in operands):
+                outside.append((g[0], 'kill', {
+                    'cmd': 'taskkill', 'root': proj,
                     'pattern': ' '.join(operands) if operands else None}))
             continue
         fs = files_in_command(g)
@@ -4040,24 +4138,51 @@ def ps_statement_kills(segments, ctx):
     The signal flag counts a kill that earns no offender — one by literal pid,
     or one the anchor cleared — because suppressing the caller's blanket `allow`
     is exactly what those cases need (Q59).
+
+    A `taskkill` segment is judged here too, but on its OWN tokens: it reads no
+    pipeline, so an anchor upstream of it selects nothing it kills. It shares
+    this function only so one place answers "did this statement signal" (Q58).
     """
-    kills, signal = [], False
+    kills, signal, offenders = [], False, []
     for seg in segments:
-        kl = ps_classify_kill(ps_strip_head([t for t in seg if t[0] == 'word']))
+        words = ps_strip_head([t for t in seg if t[0] == 'word'])
+        tk = classify_taskkill([w[1] for w in words])
+        if tk is not None:
+            signal = True
+            offenders.extend(ps_taskkill_offenders(words, tk, ctx))
+            continue
+        kl = ps_classify_kill(words)
         if kl is None:
             continue
         signal = True
         if kl[0] != 'pid':
             kills.append(kl)
     if not kills:
-        return [], signal
+        return offenders, signal
     anchored = any(ps_kill_operand_anchored(t[1], t[2], ctx.kill_anchor)
                    for seg in segments for t in seg if t[0] == 'word')
-    offenders = [('Stop-Process', 'kill',
-                  {'cmd': 'Stop-Process', 'root': ctx.proj, 'shell': 'powershell',
-                   'pattern': ' '.join(selectors) or None})
-                 for mode, selectors in kills if mode == 'name' or not anchored]
+    offenders += [('Stop-Process', 'kill',
+                   {'cmd': 'Stop-Process', 'root': ctx.proj, 'shell': 'powershell',
+                    'pattern': ' '.join(selectors) or None})
+                  for mode, selectors in kills if mode == 'name' or not anchored]
     return offenders, signal
+
+
+def ps_taskkill_offenders(words, tk, ctx):
+    """Offenders for a `taskkill` segment already classified as `tk`.
+
+    The bash frontend runs the same rule over the same operands; only the
+    resolution differs, so the anchor check is PowerShell's and the verdict is
+    identical for a given command.
+    """
+    mode, idx = tk
+    if mode == 'pid' or any(
+            ps_kill_operand_anchored(words[i][1], words[i][2], ctx.kill_anchor)
+            for i in idx):
+        return []
+    return [(words[0][1], 'kill',
+             {'cmd': 'taskkill', 'root': ctx.proj, 'shell': 'powershell',
+              'pattern': ' '.join(words[i][1] for i in idx) or None})]
 
 
 def ps_analyze_segment(tokens, ctx, cwd, cwd_unknown):
