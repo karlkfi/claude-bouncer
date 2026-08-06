@@ -72,14 +72,18 @@ exemptions below); `Edit`, `Write`, `MultiEdit`, and `NotebookEdit` are treated
 as writes. See [Beyond Bash](#beyond-bash-native-file-tools).
 
 It also stays quiet for paths that aren't really "outside your project":
-`/dev/null` and friends, and the session's **own** background-task output under
-`/tmp/claude-<uid>/…` that the agent polls with `cat`/`tail`/`grep`. So
-sessions that spawn and manage background work aren't spammed with prompts for
-reading their own output — in real usage that one case accounted for ~37% of
-all prompts. Read-only commands may also poll a **sibling** session's output
-under the same project's scratch dir — the dispatcher-tails-workers pattern of
-parallel dispatch. Writing into another session's scratch still asks, and a
-different project's scratch still asks entirely.
+`/dev/null` and friends, and the session's **own** Claude-managed scratch tree
+under `/tmp/claude-<uid>/…/<session>/…` — both the background-task output the
+agent polls with `cat`/`tail`/`grep` and the `scratchpad/` dir Claude Code
+points the session at for temp files. That whole tree is exempt for **reads and
+writes alike**: Claude Code chose the path and cleans it up, so a throwaway that
+shouldn't outlive the session belongs there. Sessions that spawn and manage
+background work therefore aren't spammed with prompts for reading their own
+output — in real usage that one case accounted for ~37% of all prompts.
+Read-only commands may also poll a **sibling** session's output under the same
+project's scratch dir — the dispatcher-tails-workers pattern of parallel
+dispatch. Writing into another session's scratch still asks, and a different
+project's scratch still asks entirely.
 
 | Command                              | Decision |
 | ------------------------------------ | -------- |
@@ -108,6 +112,7 @@ different project's scratch still asks entirely.
 | `cd "$(git rev-parse --show-toplevel)" && cat README.md` | allow |
 | `cd "$(pwd)" && cat README.md`       | allow    |
 | `tail /tmp/claude-501/…/<this-session>/…` (own task output) | allow |
+| `echo x > /tmp/claude-501/…/<this-session>/scratchpad/f` (own scratch write) | allow |
 | `tail /tmp/claude-501/<this-project>/<sibling-session>/…` (sibling read) | allow |
 | `f=notes.md; cat $f`                 | allow    |
 | `d=sub; cd $d && cat x.txt`          | allow    |
@@ -578,11 +583,13 @@ through the same boundary rules and produce the same reasons. Symlink staging
    read-only commands, sibling sessions of the same project. Claude Code writes
    each background task's output to
    `/tmp/claude-<uid>/<encoded-project>/<session-uuid>/tasks/<id>.output`, and
-   the agent reads it back with `cat`/`tail`/`grep`. Reading command output
-   isn't the boundary this hook guards, so:
+   the agent reads it back with `cat`/`tail`/`grep`. The same `<session-uuid>`
+   dir holds the `scratchpad/` Claude Code hands the session for temp files.
+   Neither is the boundary this hook guards, so:
    - a path under `/tmp/claude-<uid>/` that carries the **current** session's id
-     as a path segment is allowed for any guarded command (your own scratch);
-     and
+     as a path segment is allowed for any guarded command, **read or write** —
+     this check runs before the read/write split, so the session's whole scratch
+     tree is writable, not just readable; and
    - for **read-only** commands, a path under the current project's scratch dir
      (`/tmp/claude-<uid>/<encoded-project>/`) is allowed even when it belongs to
      a *different* session — the dispatcher-tails-workers pattern of parallel
@@ -717,14 +724,16 @@ flowing, avoid triggering it:
   (`/tmp`, `/var/tmp`, `$TMPDIR`, and `%TMP%` on Windows) is **denied** by
   default — not just prompted —
   because it's shared across sessions and worktrees and lives outside the root.
-  Use a repo-local gitignored scratch dir like `./tmp/out.txt` instead. (Redirects
+  Use a repo-local gitignored scratch dir like `./tmp/out.txt` instead — or, for
+  a throwaway that shouldn't outlive the session, this session's *own*
+  Claude-managed tree under `/tmp/claude-<uid>/…/<session>/…`, including the
+  `scratchpad/` dir Claude Code points you at. That tree is exempt for **reads
+  and writes both** — Claude Code chose the path and cleans it up. (Redirects
   and command output to `/dev/null`, `/dev/stdout`, `/dev/stderr`, and `/dev/fd/N`
-  are exempt and never prompt. Reading back this session's *own* background-task
-  output under `/tmp/claude-<uid>/…/<session>/…` is also exempt — that path is
-  managed by Claude Code, not something you choose — as is *read-only* access to
-  a sibling session's output under the same project's scratch dir.) Reading
-  files under `~/.claude/projects/` (Claude Code's own session and sub-agent
-  data) is also exempt for read-only commands.
+  are exempt and never prompt. Only *read-only* access extends to a sibling
+  session's output under the same project's scratch dir; writing there still
+  asks.) Reading files under `~/.claude/projects/` (Claude Code's own session
+  and sub-agent data) is also exempt for read-only commands.
 - **Read dependency source from in-workspace vendored/pinned copies, not the
   global cache.** Out-of-tree caches (Go's `~/go/pkg/mod`, npm's `~/.npm`, pip's
   `~/.cache/pip`, cargo's `~/.cargo/registry`) are outside the project root, so
@@ -943,9 +952,10 @@ final output.
   redirect (`cat 2 >out`, where `2` is a file) is indistinguishable from the fd
   form and won't be checked. Such a path resolves in-root (and is allowed)
   anyway except after a `cd` outside the root — a pathological combination.
-- The current session's own Claude-managed task-output dir
-  (`/tmp/claude-<uid>/…/<session>/…`) is allowed silently, scoped to the
-  session via the hook's `session_id`. Read-only commands are additionally
+- The current session's own Claude-managed scratch tree
+  (`/tmp/claude-<uid>/…/<session>/…` — task output *and* `scratchpad/`) is
+  allowed silently for reads and writes alike, scoped to the session via the
+  hook's `session_id`. Read-only commands are additionally
   allowed on a *sibling* session's output under the same project's scratch dir
   (`/tmp/claude-<uid>/<encoded-project>/`), located by scanning the temp root
   for the slug directory that holds the current `session_id` — the

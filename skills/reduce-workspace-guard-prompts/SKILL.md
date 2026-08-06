@@ -98,8 +98,12 @@ Tell the user the cause(s) you found, then apply the habits that prevent them:
   drop tracking.) A literal `cd` outside the root keeps tracking, but every
   relative path after it is then genuinely outside the workspace and prompts
   deliberately.
-- **Write temp files inside the root** (`./.tmp/out.txt`), not `/tmp`. Redirects
-  to `/dev/null`, `/dev/stdout`, `/dev/stderr`, and `/dev/fd/N` are exempt.
+- **Write temp files inside the root** (`./.tmp/out.txt`), not `/tmp` — or, for
+  a throwaway that shouldn't outlive the session, into this session's own
+  Claude-managed tree under `/tmp/claude-<uid>/…/<session>/…` (the `scratchpad/`
+  dir Claude Code points the session at), which is exempt for reads and writes
+  both. Redirects to `/dev/null`, `/dev/stdout`, `/dev/stderr`, and `/dev/fd/N`
+  are exempt too.
 
 ## Make it stick
 

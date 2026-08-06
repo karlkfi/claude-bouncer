@@ -2669,6 +2669,25 @@ class HookEndToEndTests(unittest.TestCase):
         self._decision(f"cat in.txt > {sh(self._session_tmp(sess, 'log'))}",
                        "allow", session_id=sess)
 
+    def _session_scratchpad(self, session_id, name="note.txt"):
+        return os.path.join(
+            guard.claude_tmp_root(), "-Users-me-proj",
+            session_id, "scratchpad", name)
+
+    def test_claude_session_scratchpad_write_allow(self):
+        # The session's whole scratch tree — not just task output — is exempt
+        # for write commands too, which is what the README now promises. (#126)
+        sess = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        self._decision(f"echo hi | tee {sh(self._session_scratchpad(sess))}",
+                       "allow", session_id=sess)
+
+    def test_claude_other_session_scratchpad_write_ask(self):
+        # The read-write exemption stops at the session boundary.
+        owner = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        current = "ffffffff-0000-1111-2222-333333333333"
+        self._decision(f"cp in.txt {sh(self._session_scratchpad(owner))}",
+                       "ask", session_id=current)
+
     def test_claude_other_session_tmp_ask(self):
         # A path carrying a DIFFERENT session's uuid must still prompt — this is
         # the cross-session leak the per-session scope prevents.
