@@ -64,7 +64,7 @@ grep -rn '"version"' .claude-plugin/
 7. **Create the GitHub Release** on that tag, marked latest:
 
    ```
-   gh release create vX.Y.Z --title "vX.Y.Z" --latest --notes "..."
+   gh release create vX.Y.Z --title "vX.Y.Z" --latest --notes-file <notes.md>
    ```
 
    See §Release notes for the body format.
@@ -77,19 +77,31 @@ This is the *only* sanctioned direct-to-main push. It is narrow by design: a two
 
 ## Release notes
 
-Match the established format (see any release of the sibling guard plugins for a reference):
+The body is a curated document, not a generated changelog. Every release since v0.4.0 uses the same skeleton, and the latest body is the template:
 
-- A one-line intro summarizing the release theme (e.g. "Patch release: a parsing hardening fix and docs improvements.").
-- A bullet per notable PR: `* <title> by @<author> in <PR-url>`. Curate — highlight user-facing changes; routine chores can be folded into the changelog link.
-- A trailing `**Full Changelog**: https://github.com/karlkfi/claude-foreground-guard/compare/v<PREV>...vX.Y.Z` line.
+```
+gh release view "$(git tag --sort=-v:refname | head -1)" --json body --jq .body
+```
 
-To enumerate what shipped since the last tag:
+The sections, in order:
+
+- **Tagline** — one line saying what the plugin does, for the reader who arrived from a search result.
+- **Highlights** — the changes worth upgrading for (three or four), each a paragraph opening with a bold claim and linking into the tagged README (`blob/vX.Y.Z/...`), never `main`.
+- **Upgrading** — what an existing install must or may do, and an explicit "Nothing is deprecated or removed in this release" line when that is true (it usually is).
+- **Configuration surface** — config keys added, removed, or changed in meaning since the previous release; state "no keys were added or removed" when measured true.
+- **Everything since v\<PREV\>** — a count, then a bullet per PR: `* <title> by @<author> in <PR-url>`.
+- **Validation** — receipts, not adjectives: the test count and Python versions with a link to the CI run on the release commit, the count at the previous release for contrast, what the new tests cover, and the never-`allow` invariant. Ends with a `<details>` fold titled "What the suite does not assert".
+- **Security** — written even when there is nothing to report: no advisory, stdlib-only with no telemetry, a PRIVACY.md link pinned to the tag, and the productivity-guard-not-security-boundary framing.
+- **Installing this release** — the `/plugin` commands, the `> [!NOTE]` callout that third-party marketplaces don't auto-update, and the sibling-guards paragraph explaining why the hook never emits `allow`.
+- A trailing **Full changelog:** line linking the `v<PREV>...vX.Y.Z` compare.
+
+Two rendering rules, because GitHub renders release bodies with comment-flavour GFM: never hard-wrap a paragraph (a single newline becomes `<br>`), and in-page anchors don't work — refer to sections by name.
+
+`scripts/cut-release.sh` generates only the seed of this — the theme line, the feat/fix PR bullets, and the changelog link. Expand it to the full skeleton in the `$EDITOR` pause, or write the body first and pass `--notes-file`. To enumerate what shipped since the last tag:
 
 ```
 git log --oneline v<PREV>..HEAD
 ```
-
-`gh release create ... --generate-notes` produces a usable first draft in this shape; edit the intro line and prune the bullets before publishing.
 
 ## Anti-patterns to watch for
 
