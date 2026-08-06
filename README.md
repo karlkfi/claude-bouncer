@@ -258,6 +258,7 @@ their aliases. Output redirects (`>`, `>>`, `2>`) are checked on any command.
 | `Stop-Process -Id $p.Id`                       | **deny** |
 | `Get-Process \| Where-Object { $_.Path -like '<this-root>\*' } \| Stop-Process` | defer |
 | `Stop-Process -Id 1234`                        | defer    |
+| `Get-Content .\in.txt; Stop-Process -Id 1234`  | defer    |
 | `Get-ChildItem C:\out` (not a guarded cmdlet)  | defer    |
 | `Get-Content "unterminated` (unparseable)      | defer    |
 
@@ -457,6 +458,13 @@ parentheses and script-block braces all stay inside it.
 Covering the pipeline form is what keeps the rule honest. Guard only `-Name` and
 the deny teaches the agent to reach for `Get-Process node | Stop-Process`
 instead — the same host-wide kill, one keystroke further away.
+
+A clean cmdlet in the same string doesn't speak for the kill either. A
+`Stop-Process` anywhere in the string — including one inside a `$(…)` body —
+suppresses the blanket `allow` a `Get-Content` would otherwise earn, so
+`Get-Content .\in.txt; Stop-Process -Id 1234` emits nothing and your own
+permission settings decide. That covers the kills this rule leaves alone, by
+literal pid or anchored: they were never the hook's to green-light.
 
 ## Install
 
@@ -828,7 +836,9 @@ through the same boundary rules and produce the same reasons. Symlink staging
    directly or as an `xargs` command word) suppresses the blanket `allow` a clean
    guarded command would otherwise earn, so a `grep` can never carry an
    `xargs kill` past your permission settings — `allow` speaks for the whole
-   string. (The PowerShell frontend does not do this yet.) And the pattern
+   string. A `Stop-Process` suppresses the PowerShell `allow` the same way,
+   including one this step had no cause to deny and one written inside a `$(…)`
+   body. And the pattern
    operands of the pid *sources* — `pgrep`'s, and those of a `grep` in a pipeline
    that also contains `ps` — go through the anchor test above; a `kill` whose
    operands aren't all literal pids, with no anchoring pattern anywhere in the

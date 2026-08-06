@@ -126,7 +126,7 @@ pid it derived some other way; `WORKSPACE_GUARD_OVERRIDE=<reason>` covers it.
   token to the tokenizer, so it reads as neither a signal nor a launderable kill.
 * **Bash only.** PowerShell's `Stop-Process` got its own anchor rule in PR 130,
   but not the `allow` suppression of Part 1 — a clean `Get-Content` in the same
-  statement still speaks for the kill there. That half is Q59.
+  statement still spoke for the kill there. Closed since, as Q59.
 
 ## One rule the smoke tests forced
 

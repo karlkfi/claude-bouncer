@@ -7200,6 +7200,35 @@ class PowerShellUnanchoredKillEndToEndTests(unittest.TestCase):
         self._decision("Stop-Process -Name node", "deny",
                        permission_mode="bypassPermissions")
 
+    # --- Q59: a clean guarded cmdlet never speaks for the kill ---------------
+
+    def test_a_clean_guarded_cmdlet_never_speaks_for_a_kill(self):
+        # These kills earn no offender — by literal pid, or anchored — but
+        # `allow` speaks for the WHOLE string and short-circuits the user's own
+        # permission settings, so the cmdlet must not launder them into one.
+        for cmd in (r"Get-Content .\in.txt; Stop-Process -Id 1234",
+                    r"Stop-Process -Id 1234; Get-Content .\in.txt",
+                    r"Get-Content .\in.txt && kill 1234",
+                    r"Get-Content .\in.txt; Get-Process | Where-Object "
+                    r"{ $_.Path -like %s } | Stop-Process" % self._glob("wt-a"),
+                    r"Get-Content .\in.txt; Get-Process | Where-Object "
+                    r"{ $_.Path -like %s } | ForEach-Object "
+                    r"{ Stop-Process -Id $_.Id }" % self._glob("wt-a")):
+            self._decision(cmd, "defer")
+
+    def test_a_kill_in_a_subexpression_suppresses_the_allow(self):
+        # The body is masked out of the outer text, so the clean cmdlet and the
+        # kill sit on opposite sides of the recursion.
+        self._decision(r"Get-Content .\in.txt; $(Stop-Process -Id 1234)",
+                       "defer")
+
+    def test_a_guarded_cmdlet_with_no_kill_still_allows(self):
+        self._decision(r"Get-Content .\in.txt", "allow")
+
+    def test_an_offending_kill_outranks_a_clean_cmdlet(self):
+        # Suppression removes the `allow`; it must not also swallow the deny.
+        self._decision(r"Get-Content .\in.txt; Stop-Process -Name node", "deny")
+
 
 class PowerShellEndToEndTests(unittest.TestCase):
     """Decisions the script emits for `tool_name: PowerShell`.

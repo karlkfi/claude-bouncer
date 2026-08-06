@@ -4029,27 +4029,35 @@ def ps_kill_operand_anchored(tok, expandable, anchor):
 
 
 def ps_statement_kills(segments, ctx):
-    """Offenders for the unanchored `Stop-Process` calls in one statement.
+    """Offenders for the unanchored `Stop-Process` calls in one statement, and
+    whether the statement signalled a process at all.
 
     `segments` is the statement's pipeline segments, each a token list. The
     anchor is looked for across all of them because the anchored rewrite is a
     pipeline (see PS_STATEMENT_OPS). A `-Name` kill is exempt from that scan —
     no amount of surrounding text scopes a bare process name to this workspace.
+
+    The signal flag counts a kill that earns no offender — one by literal pid,
+    or one the anchor cleared — because suppressing the caller's blanket `allow`
+    is exactly what those cases need (Q59).
     """
-    kills = []
+    kills, signal = [], False
     for seg in segments:
         kl = ps_classify_kill(ps_strip_head([t for t in seg if t[0] == 'word']))
-        if kl is None or kl[0] == 'pid':
+        if kl is None:
             continue
-        kills.append(kl)
+        signal = True
+        if kl[0] != 'pid':
+            kills.append(kl)
     if not kills:
-        return []
+        return [], signal
     anchored = any(ps_kill_operand_anchored(t[1], t[2], ctx.kill_anchor)
                    for seg in segments for t in seg if t[0] == 'word')
-    return [('Stop-Process', 'kill',
-             {'cmd': 'Stop-Process', 'root': ctx.proj, 'shell': 'powershell',
-              'pattern': ' '.join(selectors) or None})
-            for mode, selectors in kills if mode == 'name' or not anchored]
+    offenders = [('Stop-Process', 'kill',
+                  {'cmd': 'Stop-Process', 'root': ctx.proj, 'shell': 'powershell',
+                   'pattern': ' '.join(selectors) or None})
+                 for mode, selectors in kills if mode == 'name' or not anchored]
+    return offenders, signal
 
 
 def ps_analyze_segment(tokens, ctx, cwd, cwd_unknown):
@@ -4109,19 +4117,34 @@ def ps_analyze_segment(tokens, ctx, cwd, cwd_unknown):
 def ps_analyze_command(cmd, ctx, base_cwd, depth=0):
     """Analyze a PowerShell command string. Returns `(offenders, guarded)`,
     matching `analyze_command`'s contract so the two frontends share the
-    emit logic below."""
+    emit logic below.
+
+    `guarded` is cleared when anything in the string signals a process, for the
+    reason the bash side clears it: `allow` speaks for the WHOLE string and
+    short-circuits the user's own permission settings, so a clean `Get-Content`
+    must never speak for a `Stop-Process` sharing the string with it — including
+    the kills the decision layer had no cause to deny, by literal pid or
+    anchored. Those defer instead, which is the posture an anchored kill on its
+    own already gets. (Q59)
+    """
+    offenders, guarded, signal = _ps_analyze_command(cmd, ctx, base_cwd, depth)
+    return offenders, guarded and not signal
+
+
+def _ps_analyze_command(cmd, ctx, base_cwd, depth=0):
+    """Analyze one PowerShell string; returns `(offenders, guarded, signal)`."""
     if not cmd.strip():
-        return [], False
+        return [], False, False
     expandable_text = ps_strip_here_strings(cmd, literal_only=True)
     stripped = ps_strip_here_strings(cmd)
     if expandable_text is None or stripped is None:
-        return [], False                      # open here-string -> defer
+        return [], False, False               # open here-string -> defer
     bodies = ps_subexpressions(expandable_text)[1]
     toks = ps_tokenize(ps_subexpressions(stripped)[0])
     if toks is None:
-        return [], False                      # open quote -> defer
+        return [], False, False               # open quote -> defer
 
-    offenders, guarded = [], False
+    offenders, guarded, signal = [], False, False
     cwd, cwd_unknown, seg, stmt = base_cwd, False, [], []
     for tok in toks + [('op', ';', False, False)]:
         if tok[0] == 'op':
@@ -4132,22 +4155,31 @@ def ps_analyze_command(cmd, ctx, base_cwd, depth=0):
                 guarded = guarded or g
                 stmt.append(seg)
             seg = []
-            # A kill never sets `guarded`, same as the bash side: an anchored one
-            # defers rather than emitting `allow`, leaving the user's own
-            # permission settings to have their say on a destructive command.
+            # A kill never sets `guarded` itself, and clears anyone else's: an
+            # anchored one defers rather than emitting `allow`, leaving the
+            # user's own permission settings to have their say on a destructive
+            # command.
             if tok[1] in PS_STATEMENT_OPS:
-                offenders.extend(ps_statement_kills(stmt, ctx))
+                off, sig = ps_statement_kills(stmt, ctx)
+                offenders.extend(off)
+                signal = signal or sig
                 stmt = []
         else:
             seg.append(tok)
 
     # Subexpression bodies contribute offenders only — a clean guarded cmdlet
-    # inside one never flips a deferring outer command into an `allow`.
+    # inside one never flips a deferring outer command into an `allow`. Their
+    # signal DOES fold up, because `ps_subexpressions` masks the body out of the
+    # outer text entirely: in `Get-Content .\in.txt; $(Stop-Process -Id 1234)`
+    # the two halves sit on opposite sides of this recursion, and neither is an
+    # offender on its own.
     if depth < MAX_SUBST_DEPTH:
         for body in bodies:
-            offenders.extend(ps_analyze_command(body, ctx, base_cwd,
-                                                depth + 1)[0])
-    return offenders, guarded
+            sub_off, _, sub_sig = _ps_analyze_command(body, ctx, base_cwd,
+                                                      depth + 1)
+            offenders.extend(sub_off)
+            signal = signal or sub_sig
+    return offenders, guarded, signal
 
 
 def handle_powershell(data):
