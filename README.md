@@ -18,7 +18,8 @@ workspace-guard is a `PreToolUse` hook for the shell tools (`Bash` and
 asks for confirmation only when a path resolves outside your project root
 (`$CLAUDE_PROJECT_DIR`). In-repo reads and pure pipelines run silently. A path is
 the main way out of that boundary but not the only one, so the same rule covers
-`pkill`, which reaches another checkout's processes by pattern instead.
+`pkill` and `Stop-Process`, which reach another checkout's processes by pattern
+instead.
 
 ![Claude Code's permission prompt when grep targets a file outside the project root](docs/img/ask-prompt.png)
 
@@ -50,8 +51,8 @@ The hook produces one of four outcomes:
   instead of prompting, the hook steers you to a repo-local gitignored scratch
   dir (`./tmp/`). It's also the default for **writes into a sibling checkout of
   the same repo** when the session runs in a git worktree, and for a
-  **`pkill`/`killall` pattern that names no path in this workspace** (both
-  below). Configurable down to `ask`; see [Configuration](#configuration).
+  **process kill that names no path in this workspace** (both below).
+  Configurable down to `ask`; see [Configuration](#configuration).
 - **defer** — the hook stays silent; your normal permission settings apply.
 
 Guarded commands: `grep` (and `egrep`, `fgrep`), `rg`, `sed`, `awk` (and
@@ -67,8 +68,9 @@ aren't covered yet (see [`docs/STATUS.md`](docs/STATUS.md)). A **redirect**
 target (`> file`) is checked on *any* command, guarded or not — it's a write the
 shell performs regardless of the command word.
 
-One non-file command is guarded too: `pkill`/`killall` signal a process by
-*pattern*, which reaches every checkout on the host. See
+Process kills are guarded too, though they touch no file: `pkill`/`killall` and
+PowerShell's `Stop-Process` signal a process by *pattern* or by *name*, which
+reaches every checkout on the host. See
 [Unanchored process-kill deny](#unanchored-process-kill-deny).
 
 The same outside-workspace check also runs on Claude's **native file tools**, so
@@ -223,6 +225,7 @@ Guarded cmdlets: `Get-Content`, `Select-String`, `Import-Csv`, `Import-Clixml`,
 `Set-Content`, `Add-Content`, `Out-File`, `Tee-Object`, `Export-Csv`,
 `Export-Clixml`, `Copy-Item`, `Move-Item`, `Remove-Item`, `Rename-Item`, and
 their aliases. Output redirects (`>`, `>>`, `2>`) are checked on any command.
+`Stop-Process` (and `kill`, `spps`) is guarded as well, as a process kill.
 
 | Command                                        | Decision |
 | ---------------------------------------------- | -------- |
@@ -241,6 +244,11 @@ their aliases. Output redirects (`>`, `>>`, `2>`) are checked on any command.
 | `Write-Output hi > C:\out\x` (redirect)        | **ask**  |
 | `Write-Output "$(Get-Content C:\out\x)"`       | **ask**  |
 | `Get-Content $env:USERPROFILE\x`               | **ask**  |
+| `Stop-Process -Name node`                      | **deny** |
+| `Get-Process node \| Stop-Process`              | **deny** |
+| `Stop-Process -Id $p.Id`                       | **deny** |
+| `Get-Process \| Where-Object { $_.Path -like '<this-root>\*' } \| Stop-Process` | defer |
+| `Stop-Process -Id 1234`                        | defer    |
 | `Get-ChildItem C:\out` (not a guarded cmdlet)  | defer    |
 | `Get-Content "unterminated` (unparseable)      | defer    |
 
@@ -252,6 +260,10 @@ ordered. `Set-Location` and `Push-Location` are followed so a later relative
 operand resolves against the right directory; anything the hook can't follow
 (a bare `cd`, a `$var` target, `Pop-Location`) drops tracking and prompts on
 relative operands rather than guessing.
+
+`Stop-Process` is guarded as a process kill rather than as a file operation —
+see [Unanchored process-kill deny](#unanchored-process-kill-deny) for the rule
+and the two rewrites the deny recommends.
 
 A cmdlet that isn't in the table is **not checked**, and neither is a .NET call
 or a native `.exe`. See [Limitations](#limitations) for why that's the posture
@@ -365,6 +377,30 @@ An **anchored** kill *defers* rather than emitting `allow`: it's out of this
 hook's scope, and an `allow` would short-circuit your own permission settings on
 a destructive command. `kill <pid>` is untouched — killing by pid is the rewrite
 the deny recommends, not a hazard.
+
+#### PowerShell: `Stop-Process`
+
+The same rule, adapted to a cmdlet with three ways to name its target:
+
+```
+Stop-Process -Name node                     # -> deny (this is `killall`)
+Get-Process node | Stop-Process             # -> deny (nothing scopes the pipeline)
+Stop-Process -Id $p.Id                      # -> deny (the hook can't see the pid)
+Stop-Process -Id 1234                       # defer  (by pid, the safe rewrite)
+Get-Process | Where-Object { $_.Path -like '<this-root>\*' } | Stop-Process   # defer
+```
+
+`-Id` with literal pids is the `kill <pid>` case and is untouched. `-Name` is
+denied outright and *cannot* be rescued by an anchor: a process name carries no
+path, so nothing written around it scopes it to this workspace. Everything else —
+`-InputObject`, or processes arriving over the pipeline — is anchored by the rest
+of the **statement**, which is why the `Where-Object` filter two segments
+upstream counts. A statement ends at `;`, a newline, `&&`, `||` or `&`; `|`,
+parentheses and script-block braces all stay inside it.
+
+Covering the pipeline form is what keeps the rule honest. Guard only `-Name` and
+the deny teaches the agent to reach for `Get-Process node | Stop-Process`
+instead — the same host-wide kill, one keystroke further away.
 
 ## Install
 
@@ -492,7 +528,7 @@ After upgrading either way:
 These steps describe the `Bash` frontend. The `PowerShell` tool has its own
 tokenizer, cmdlet table, and path resolution — backslash is a path character
 there, not an escape (see [The PowerShell tool](#the-powershell-tool)) — and
-rejoins this one at the classification steps (9–12), so both reach a decision
+rejoins this one at the classification steps (9–13), so both reach a decision
 through the same boundary rules and produce the same reasons. Symlink staging
 (step 7) has no PowerShell equivalent yet.
 
@@ -726,7 +762,10 @@ through the same boundary rules and produce the same reasons. Symlink staging
    lags an implementation's options costs friction, never a hole. An anchored
    kill emits nothing — it **defers** rather than `allow`ing, leaving your own
    permission settings in charge of a destructive command.
-   `WORKSPACE_GUARD_OVERRIDE=<reason>` downgrades the deny to `ask`; see
+   `WORKSPACE_GUARD_OVERRIDE=<reason>` downgrades the deny to `ask`. PowerShell's
+   `Stop-Process` runs the same check with its own selection rules — the anchor is
+   looked for across the whole statement there, since the anchored form is a
+   `Where-Object` filter upstream in the pipeline. See
    [Unanchored process-kill deny](#unanchored-process-kill-deny).
 14. **Recurse into command substitutions.** A guarded command hidden in a
    `"$(…)"` or backtick `` `…` `` substitution — `echo "$(mktemp -p /tmp x)"`,
@@ -834,8 +873,12 @@ flowing, avoid triggering it:
   root's directory name in the pattern as a path component with a separator
   (`pkill -f "<root-dirname>/.build/ginkgo"`), which is allowed through. A bare
   word doesn't count as an anchor, nor does a pattern with an unexpanded `$VAR`
-  in it. `kill <pid>` is never blocked. For a deliberate cross-workspace kill,
-  set `WORKSPACE_GUARD_OVERRIDE=<reason>`.
+  in it. `kill <pid>` is never blocked. In PowerShell the same rule applies to
+  `Stop-Process`: `-Name` and an unfiltered `Get-Process … | Stop-Process` are
+  denied, `Stop-Process -Id <literal pid>` is never blocked, and the anchored
+  form is `Get-Process | Where-Object { $_.Path -like '<root>\*' } |
+  Stop-Process`. For a deliberate cross-workspace kill, set
+  `WORKSPACE_GUARD_OVERRIDE=<reason>`.
 ```
 
 The plugin also ships a **`reduce-workspace-guard-prompts`** skill: ask Claude
@@ -1101,10 +1144,13 @@ final output.
   (fail-safe: the deny is never applied on uncertainty, so the boundary is never
   weakened). A main-checkout session is a deliberate no-op even when worktrees
   exist.
-- The unanchored-kill deny covers `pkill` and `killall` in the Bash tool only.
-  PowerShell's `Stop-Process` is not checked, and neither is a kill routed
-  through something the hook doesn't parse (`xargs kill`, a script that kills on
-  your behalf). Anchoring is also *lexical*, which cuts both ways: a process
+- The unanchored-kill deny covers `pkill` and `killall` in the Bash tool, and
+  `Stop-Process` in the PowerShell tool. `taskkill` is checked in **neither**,
+  and neither is a kill routed through something the hook doesn't parse
+  (`xargs kill`, a script that kills on your behalf). `Get-Process -Id 1234 |
+  Stop-Process` denies even though the pid is literal — it's bound on the
+  upstream cmdlet, which the kill rule doesn't read; write `Stop-Process -Id 1234`.
+  Anchoring is also *lexical*, which cuts both ways: a process
   started with a relative command line (`make check`) carries no path for `-f` to
   match, so it can't be anchored at all and the answer there is `pgrep -fl` plus
   a kill by pid; and a pattern naming an unrelated directory that happens to
@@ -1123,7 +1169,8 @@ final output.
   `Select-String`, `Import-Csv`, `Import-Clixml`, `Set-Content`, `Add-Content`,
   `Out-File`, `Tee-Object`, `Export-Csv`, `Export-Clixml`, `Copy-Item`,
   `Move-Item`, `Remove-Item`, `Rename-Item`, their aliases (`cat`, `type`, `gc`,
-  `sls`, `sc`, `ac`, `cp`, `mv`, `rm`, `del`, …), and output redirects.
+  `sls`, `sc`, `ac`, `cp`, `mv`, `rm`, `del`, …), output redirects, and
+  `Stop-Process` as a process kill.
   Everything else — a cmdlet not on that list, a .NET call such as
   `[IO.File]::ReadAllText(…)`, a native `.exe` — is **not checked**, and the
   session gets no signal that it wasn't. The alternative was to prompt on

@@ -2302,17 +2302,19 @@ def build_sibling_hint(siblings, override=None):
 
 
 def build_kill_hint(kills, override=None):
-    """One-line guidance for a `pkill`/`killall` with no workspace anchor.
+    """One-line guidance for a process kill with no workspace anchor.
 
     `kills` is a list of `(token, detail)` where `detail` carries the kill
     command `cmd`, the offending `pattern` (None when the invocation selects by
-    uid/ppid/session with no pattern at all), and the workspace `root` to anchor
-    to. When `override` is set the kill is downgraded to a prompt rather than
-    blocked, so the wording adjusts.
+    uid/ppid/session — or over a pipeline — with no pattern at all), the
+    workspace `root` to anchor to, and the `shell` whose rewrites to name. When
+    `override` is set the kill is downgraded to a prompt rather than blocked, so
+    the wording adjusts.
     """
-    seen, parts, root = set(), [], ''
+    seen, parts, root, shell = set(), [], '', 'bash'
     for _, d in kills:
         root = root or d.get('root') or ''
+        shell = d.get('shell') or shell
         key = (d.get('cmd'), d.get('pattern'))
         if key in seen:
             continue
@@ -2332,11 +2334,19 @@ def build_kill_hint(kills, override=None):
         lead = ("Unanchored process kill(s) blocked: a pattern that names no "
                 "path in this workspace matches the same process in every "
                 "checkout on this host, so it can kill another session's work. ")
-        tail = (" Fix: run `pgrep -fl <pattern>` and kill the pid(s) you meant, "
-                "or put this workspace's path in the pattern (`%s/…`). For a "
-                "deliberate cross-workspace kill set "
+        if shell == 'powershell':
+            fix = ("Fix: run `Get-Process <name> | Select-Object Id, Path` and "
+                   "`Stop-Process -Id <pid>` for the one(s) you meant, or filter "
+                   "the pipeline to this workspace first (`Get-Process | "
+                   "Where-Object { $_.Path -like '%s' } | Stop-Process`)."
+                   % os.path.join(root, '*'))
+        else:
+            fix = ("Fix: run `pgrep -fl <pattern>` and kill the pid(s) you "
+                   "meant, or put this workspace's path in the pattern "
+                   "(`%s/…`)." % root)
+        tail = (" " + fix + " For a deliberate cross-workspace kill set "
                 "WORKSPACE_GUARD_OVERRIDE=<reason> to downgrade this to a "
-                "prompt." % root)
+                "prompt.")
     return lead + body + tail
 
 
@@ -2363,9 +2373,10 @@ def build_reason(offenders, scratch_hint='', override=None):
       * 'sibling'   — a WRITE into a sibling checkout of the same repo (primary
                       checkout or another worktree). `detail` carries the
                       checkout root, branch, and corrected in-session path.
-      * 'kill'      — a `pkill`/`killall` whose pattern names no path in this
-                      workspace. `detail` carries the command, the pattern, and
-                      the workspace root to anchor to.
+      * 'kill'      — a `pkill`/`killall`, or a PowerShell `Stop-Process`, with
+                      nothing naming a path in this workspace. `detail` carries
+                      the command, the pattern, the workspace root to anchor to,
+                      and the shell whose rewrites to name.
       * 'hosttemp'  — a path under a host-wide temp root (`/tmp`, `/var/tmp`,
                       `$TMPDIR`). Steered to a repo-local gitignored scratch dir
                       via `scratch_hint` (see build_scratch_hint).
@@ -3237,7 +3248,37 @@ PS_ALIASES = {
     'rni': 'rename-item', 'ren': 'rename-item',
     'cd': 'set-location', 'sl': 'set-location', 'chdir': 'set-location',
     'pushd': 'push-location', 'popd': 'pop-location',
+    'spps': 'stop-process', 'kill': 'stop-process',
 }
+
+# --- PowerShell process kills (Q57) ------------------------------------------
+# `Stop-Process` is this shell's `pkill`, and the bash section on issue 125 gives
+# the reasoning: a kill selected by process name, or fed by an unfiltered
+# pipeline, reaches that process in every checkout on the host. Its own rule
+# rather than a PS_SPEC row, because nothing here is a file path — selection is
+# by name, by pid, or by piped object.
+PS_KILL_CMDS = frozenset({'stop-process'})
+
+# The three selectors, and the verdict each earns:
+#   -Id           kill by pid. Untouched, exactly as the bash side leaves
+#                 `kill <pid>` alone — it is the rewrite the deny recommends.
+#   -Name         `killall`. Denied outright: a process name carries no path, so
+#                 nothing in the statement can scope it to this workspace.
+#   -InputObject  the processes came from somewhere the hook can see, so the
+#                 rest of the statement is where an anchor may appear. Bare
+#                 pipeline input (no selector at all) reads the same way.
+PS_KILL_SELECTORS = frozenset({'id', 'name', 'inputobject'})
+PS_KILL_SPEC = _ps_row(
+    {},                                   # nothing here names a file
+    consume=tuple(PS_KILL_SELECTORS),
+    switches=('force', 'passthru'))
+
+# A kill is judged over the whole STATEMENT, not one pipeline segment: the
+# anchored rewrite is `Get-Process | Where-Object { $_.Path -like '<root>\*' } |
+# Stop-Process`, where the anchor sits two segments upstream of the kill. So `|`,
+# `(`/`)` and `{`/`}` all stay inside the scope and only these end it.
+PS_STATEMENT_OPS = frozenset({';', '\n', '&&', '||', '&'})
+
 
 # `@"` / `@'` opens a here-string; the body ends at a line whose first
 # non-blank characters are the closing delimiter.
@@ -3667,6 +3708,126 @@ def ps_apply_location(words, cwd, cwd_unknown):
     return ps_realpath(p, cwd), False
 
 
+def ps_strip_head(words):
+    """Drop an assignment prefix or the dot-source operator, so the command word
+    is at index 0 — `$out = Get-Content …` heads on Get-Content."""
+    if words and words[0][1].startswith('$'):
+        if len(words) > 1 and words[1][1] == '=':
+            words = words[2:]
+        elif words[0][1].endswith('='):
+            words = words[1:]
+    if words and words[0][1] == '.':        # dot-source operator
+        words = words[1:]
+    return words
+
+
+def ps_pid_list(tok):
+    """True when `tok` is a literal pid or a comma-joined list of them."""
+    return all(p.isdigit() for p in tok.split(','))
+
+
+def ps_classify_kill(words):
+    """Classify a `Stop-Process` segment, or None when it isn't one.
+
+    Returns `(mode, selectors)` with mode 'pid' (every selector is a literal
+    process id — nothing to guard), 'name' (`-Name` was used, which no anchor can
+    rescue), or 'other' (anchorable by the rest of the statement).
+
+    An `-Id` value carrying a `$` is NOT the pid case: after `$p = Get-Process
+    -Name node`, `Stop-Process -Id $p.Id` is host-wide and the hook can't see the
+    difference. Only literal digits count.
+    """
+    if not words:
+        return None
+    name = PS_ALIASES.get(words[0][1].lower(), words[0][1].lower())
+    if name not in PS_KILL_CMDS:
+        return None
+    kinds, selectors = set(), []
+
+    def take(key, val, exp):
+        if key == 'id' and not exp and ps_pid_list(val):
+            kinds.add('pid')
+            return
+        kinds.add('name' if key == 'name' else 'other')
+        selectors.append(val)
+
+    i, n, verbatim = 1, len(words), False
+    while i < n:
+        _, val, exp, _ = words[i]
+        if val == '--%':
+            # Stop-parsing: the tail goes to the target verbatim, so the hook
+            # reads it as selection it cannot vouch for rather than as flags.
+            verbatim = True
+            i += 1
+            continue
+        if not verbatim and len(val) > 1 and val[0] == '-' and not exp \
+                and not val[1].isdigit() and val[1] != '.':
+            pname, attached = val[1:], None
+            if ':' in pname:              # `-Name:node` binds without a space
+                pname, attached = pname.split(':', 1)
+            key = ps_resolve_param(pname.lower(), PS_KILL_SPEC)
+            if key in PS_KILL_SELECTORS:
+                if attached is not None:
+                    take(key, attached, exp)
+                elif i + 1 < n:
+                    take(key, words[i + 1][1], words[i + 1][2])
+                    i += 1
+            elif key in PS_KILL_SPEC['consume'] and attached is None:
+                i += 1                    # an ordinary value-taking parameter
+            i += 1
+            continue
+        take('id', val, exp)              # positional 0 is -Id, else -InputObject
+        i += 1
+
+    if 'name' in kinds:
+        return 'name', selectors
+    if 'other' in kinds or not kinds:     # no selector at all -> pipeline input
+        return 'other', selectors
+    return 'pid', selectors
+
+
+def ps_kill_operand_anchored(tok, expandable, anchor):
+    """True when statement token `tok` pins a `Stop-Process` to this workspace.
+
+    Same anchor as the bash side — the project root's directory name as a whole
+    path component — with PowerShell's resolution rules in front of it. The
+    tokenizer's `expandable` flag stands in for `EXPANSION_RE`: `ps_subexpressions`
+    has already reduced a `$(…)` to a bare `$`, and PowerShell decides at runtime
+    where `$env:USERPROFILE\\repo\\bin` lands, so the `\\repo\\` in it proves
+    nothing.
+    """
+    if anchor is None or expandable:
+        return False
+    p = ps_expand_tilde(tok)
+    if p.startswith('~'):
+        return False
+    return anchor.search(p) is not None
+
+
+def ps_statement_kills(segments, ctx):
+    """Offenders for the unanchored `Stop-Process` calls in one statement.
+
+    `segments` is the statement's pipeline segments, each a token list. The
+    anchor is looked for across all of them because the anchored rewrite is a
+    pipeline (see PS_STATEMENT_OPS). A `-Name` kill is exempt from that scan —
+    no amount of surrounding text scopes a bare process name to this workspace.
+    """
+    kills = []
+    for seg in segments:
+        kl = ps_classify_kill(ps_strip_head([t for t in seg if t[0] == 'word']))
+        if kl is None or kl[0] == 'pid':
+            continue
+        kills.append(kl)
+    if not kills:
+        return []
+    anchored = any(ps_kill_operand_anchored(t[1], t[2], ctx.kill_anchor)
+                   for seg in segments for t in seg if t[0] == 'word')
+    return [('Stop-Process', 'kill',
+             {'cmd': 'Stop-Process', 'root': ctx.proj, 'shell': 'powershell',
+              'pattern': ' '.join(selectors) or None})
+            for mode, selectors in kills if mode == 'name' or not anchored]
+
+
 def ps_analyze_segment(tokens, ctx, cwd, cwd_unknown):
     """Analyze one pipeline segment. Returns `(offenders, guarded, cwd,
     cwd_unknown)` — the trailing pair carries location tracking to the next
@@ -3687,15 +3848,7 @@ def ps_analyze_segment(tokens, ctx, cwd, cwd_unknown):
         words.append(tokens[i])
         i += 1
 
-    # `$out = Get-Content …` — drop the assignment so the cmdlet is the head.
-    if words and words[0][1].startswith('$'):
-        if len(words) > 1 and words[1][1] == '=':
-            words = words[2:]
-        elif words[0][1].endswith('='):
-            words = words[1:]
-    if words and words[0][1] == '.':        # dot-source operator
-        words = words[1:]
-
+    words = ps_strip_head(words)
     guarded = False
     if words:
         name = PS_ALIASES.get(words[0][1].lower(), words[0][1].lower())
@@ -3745,7 +3898,7 @@ def ps_analyze_command(cmd, ctx, base_cwd, depth=0):
         return [], False                      # open quote -> defer
 
     offenders, guarded = [], False
-    cwd, cwd_unknown, seg = base_cwd, False, []
+    cwd, cwd_unknown, seg, stmt = base_cwd, False, [], []
     for tok in toks + [('op', ';', False, False)]:
         if tok[0] == 'op':
             if seg:
@@ -3753,7 +3906,14 @@ def ps_analyze_command(cmd, ctx, base_cwd, depth=0):
                     seg, ctx, cwd, cwd_unknown)
                 offenders.extend(off)
                 guarded = guarded or g
+                stmt.append(seg)
             seg = []
+            # A kill never sets `guarded`, same as the bash side: an anchored one
+            # defers rather than emitting `allow`, leaving the user's own
+            # permission settings to have their say on a destructive command.
+            if tok[1] in PS_STATEMENT_OPS:
+                offenders.extend(ps_statement_kills(stmt, ctx))
+                stmt = []
         else:
             seg.append(tok)
 

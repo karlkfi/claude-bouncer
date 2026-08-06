@@ -67,11 +67,13 @@ The deny (rather than `ask`) is the secure default here specifically because the
 
 ### Why a process kill is in scope, though it touches no file
 
-`pkill -f` is the one command that reaches another session's work without naming a path. It signals by *pattern*, matched against the whole command line, so `pkill -f "make check"` hits every checkout on the host running one — the same wrong-branch mistake as a sibling-checkout write, addressed the one way a path check cannot see. It sits in this plugin rather than a new one for the same reason the write tools do: the workspace root, the tokenizer, and the override are already here.
+`pkill -f` — and `Stop-Process` on the PowerShell side — reaches another session's work without naming a path. It signals by *pattern*, matched against the whole command line, so `pkill -f "make check"` hits every checkout on the host running one — the same wrong-branch mistake as a sibling-checkout write, addressed the one way a path check cannot see. It sits in this plugin rather than a new one for the same reason the write tools do: the workspace root, the tokenizer, and the override are already here.
 
 The rule is an *anchor*, not a pattern allowlist: some operand must contain the project root's directory name as a whole path component with a separator on at least one side. That is a mechanical test with no judgment in it — a bare word is a substring match against a command line, and the hook has no basis for deciding whether `api` excludes a sibling. Both misparse directions of the flag table land on `deny`, so lagging an implementation's options costs friction, never a hole.
 
 `deny` rather than `ask` here is measured, not assumed: of 38 `pkill` targets observed across one developer's session transcripts, 36 carried nothing identifying the worktree that started them. An `ask` on 36 of 38 kills trains the reflexive approval it exists to prevent. Unlike the file tiers, an *anchored* kill defers rather than emitting `allow` — this hook has nothing more to say about it, and an `allow` would strip the user's own permission settings from a destructive command.
+
+PowerShell's `Stop-Process` is the same hazard behind a different grammar, and covering it changed one thing about the rule: the scope is the whole *statement*, not one command. The anchored rewrite there is `Get-Process | Where-Object { $_.Path -like '<root>\*' } | Stop-Process`, where the anchor sits two pipeline segments upstream of the kill, so a segment-local scan would deny the very rewrite the message recommends. Covering the pipeline form at all is not optional: guard only `-Name` and the deny teaches the agent to reach for `Get-Process node | Stop-Process` — the identical host-wide kill, one step further from the check.
 
 ## Alternatives considered and rejected
 

@@ -6532,9 +6532,15 @@ class PowerShellSpecShapeTests(unittest.TestCase):
                              f"{name}: parameter is both a file and a value")
 
     def test_aliases_resolve_to_real_rows(self):
-        known = set(guard.PS_SPEC) | guard.PS_LOCATION_CMDS
+        known = set(guard.PS_SPEC) | guard.PS_LOCATION_CMDS | guard.PS_KILL_CMDS
         for alias, target in guard.PS_ALIASES.items():
             self.assertIn(target, known, f"alias {alias!r} -> unknown {target!r}")
+
+    def test_kill_selectors_are_declared_values(self):
+        # A selector missing from `consume` would leave its value in the
+        # positional stream, where a literal pid reads as the safe 'pid' mode —
+        # `Stop-Process -Name 1234` would defer.
+        self.assertTrue(guard.PS_KILL_SELECTORS <= guard.PS_KILL_SPEC["consume"])
 
     def test_posix_lookalike_aliases_do_not_reach_the_bash_spec(self):
         # `cat`, `rm`, `cp`, `mv`, `tee` name cmdlets with entirely different
@@ -6752,6 +6758,224 @@ class PowerShellPathPartsTests(unittest.TestCase):
 
     def test_quoted_operand_keeps_its_comma(self):
         self.assertEqual(guard.ps_path_parts(r"a,b.txt", True), [r"a,b.txt"])
+
+
+class PowerShellKillClassifyTests(unittest.TestCase):
+    """Selection classification for `Stop-Process` (Q57)."""
+
+    def classify(self, text):
+        toks = guard.ps_tokenize(text)
+        self.assertIsNotNone(toks, f"unexpected defer for {text!r}")
+        return guard.ps_classify_kill([t for t in toks if t[0] == "word"])
+
+    def test_pid_list_accepts_only_literal_digits(self):
+        for tok in ("1234", "12,34"):
+            self.assertTrue(guard.ps_pid_list(tok), tok)
+        for tok in ("", "node", "12,", "12a"):
+            self.assertFalse(guard.ps_pid_list(tok), tok)
+
+    def test_non_kill_returns_none(self):
+        self.assertIsNone(self.classify("Get-Process -Name node"))
+        self.assertIsNone(self.classify("Get-Content in.txt"))
+        self.assertIsNone(guard.ps_classify_kill([]))
+
+    def test_aliases_and_case_are_kills(self):
+        for text in ("Stop-Process -Name node", "stop-process -Name node",
+                     "kill -Name node", "spps -Name node"):
+            self.assertEqual(self.classify(text), ("name", ["node"]), text)
+
+    def test_literal_pid_needs_no_anchor(self):
+        for text in ("Stop-Process -Id 1234", "Stop-Process 1234",
+                     "Stop-Process -Id 1234,5678", "Stop-Process -Id:1234"):
+            self.assertEqual(self.classify(text)[0], "pid", text)
+
+    def test_expandable_pid_is_not_a_pid(self):
+        # `$p = Get-Process -Name node; Stop-Process -Id $p.Id` is host-wide, and
+        # the hook cannot tell it from a pid the agent looked up.
+        self.assertEqual(self.classify("Stop-Process -Id $p.Id"),
+                         ("other", ["$p.Id"]))
+
+    def test_name_binds_by_prefix_and_by_colon(self):
+        for text in ("Stop-Process -Na node", "Stop-Process -Name:node"):
+            self.assertEqual(self.classify(text), ("name", ["node"]), text)
+
+    def test_no_selector_reads_as_pipeline_input(self):
+        self.assertEqual(self.classify("Stop-Process"), ("other", []))
+        self.assertEqual(self.classify("Stop-Process -Force"), ("other", []))
+
+    def test_inputobject_is_anchorable_selection(self):
+        self.assertEqual(self.classify("Stop-Process -InputObject $p"),
+                         ("other", ["$p"]))
+
+    def test_ordinary_value_parameter_is_not_selection(self):
+        # Without `consume` handling, `SilentlyContinue` lands in the positional
+        # stream and drags a by-pid kill into a deny.
+        self.assertEqual(
+            self.classify("Stop-Process -ErrorAction SilentlyContinue -Id 1234"),
+            ("pid", []))
+
+    def test_switches_are_not_selection(self):
+        self.assertEqual(
+            self.classify("Stop-Process -Id 1234 -Force -PassThru -WhatIf"),
+            ("pid", []))
+
+    def test_stop_parsing_tail_is_selection_it_cannot_vouch_for(self):
+        self.assertEqual(self.classify("Stop-Process --% /IM node.exe")[0],
+                         "other")
+
+
+class PowerShellKillAnchorTests(unittest.TestCase):
+    """Expansion handling in the PowerShell anchor check (Q57)."""
+
+    def setUp(self):
+        # A slash-separated root, so `os.path.basename` finds `repo` on a POSIX
+        # test host as well as on Windows. Given `C:\ws\repo`, POSIX basename
+        # returns the whole string and every assertion below tests the wrong
+        # regex.
+        self.anchor = guard.workspace_anchor_re("/ws/repo")
+
+    def test_literal_path_anchors_with_either_separator(self):
+        for tok in (r"C:\ws\repo\bin\*", "C:/ws/repo/bin/*", r"repo\bin"):
+            self.assertTrue(
+                guard.ps_kill_operand_anchored(tok, False, self.anchor), tok)
+
+    def test_expandable_token_never_anchors(self):
+        # PowerShell decides at runtime where this lands, so the `\repo\` in it
+        # proves nothing — the same rule the file checks apply.
+        self.assertFalse(guard.ps_kill_operand_anchored(
+            r"$env:USERPROFILE\repo\bin", True, self.anchor))
+
+    def test_partial_component_does_not_anchor(self):
+        self.assertFalse(guard.ps_kill_operand_anchored(
+            r"C:\ws\repo-branch1\bin", False, self.anchor))
+
+    def test_unresolved_tilde_never_anchors(self):
+        self.assertFalse(guard.ps_kill_operand_anchored(
+            r"~someone\repo\bin", False, self.anchor))
+
+    def test_no_anchor_available_denies_everything(self):
+        self.assertFalse(guard.ps_kill_operand_anchored(
+            r"C:\ws\repo\bin", False, None))
+
+
+class PowerShellUnanchoredKillEndToEndTests(unittest.TestCase):
+    """Decisions the script emits for a PowerShell `Stop-Process` (Q57).
+
+    `wt-a` is this session's workspace and `wt-b` stands in for a sibling
+    worktree. No process is ever signalled: the hook reads the command as a JSON
+    string and the test never invokes a shell on it.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.base = os.path.realpath(self._tmp.name)
+        self.workspace = os.path.join(self.base, "wt-a")
+        os.mkdir(self.workspace)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _glob(self, *parts):
+        return ps(os.path.join(self.base, *parts, "*"))
+
+    def _out(self, command, permission_mode=None, env_extra=None):
+        env = os.environ.copy()
+        env["CLAUDE_PROJECT_DIR"] = self.workspace
+        env.update(env_extra or {})
+        data = {"tool_name": "PowerShell", "cwd": self.workspace,
+                "tool_input": {"command": command}}
+        if permission_mode is not None:
+            data["permission_mode"] = permission_mode
+        r = subprocess.run([sys.executable, str(SCRIPT)], input=json.dumps(data),
+                           capture_output=True, text=True, env=env, timeout=10)
+        self.assertEqual(r.returncode, 0, f"hook errored: {r.stderr!r}")
+        out = r.stdout.strip()
+        return json.loads(out) if out else None
+
+    def _decision(self, command, expected, **kw):
+        out = self._out(command, **kw)
+        if expected == "defer":
+            self.assertIsNone(out, f"expected defer for {command!r}, got {out!r}")
+            return None
+        self.assertIsNotNone(out, f"expected {expected}, got defer for {command!r}")
+        got = out["hookSpecificOutput"]["permissionDecision"]
+        self.assertEqual(got, expected, f"expected {expected!r} for {command!r}")
+        return out["hookSpecificOutput"]["permissionDecisionReason"]
+
+    def test_kill_by_name_denies(self):
+        for cmd in ("Stop-Process -Name node", "kill -Name node",
+                    "spps -Name node -Force"):
+            self._decision(cmd, "deny")
+
+    def test_pipeline_kill_denies(self):
+        # The idiomatic form, and the one an agent denied on -Name reaches for
+        # next. Leaving it would make the -Name deny train the bypass.
+        self._decision("Get-Process node | Stop-Process", "deny")
+
+    def test_anchored_pipeline_defers(self):
+        # Defer, not allow: an anchored kill is out of this hook's scope, and an
+        # `allow` would short-circuit the user's own permission settings on a
+        # destructive command.
+        self._decision(
+            "Get-Process | Where-Object { $_.Path -like %s } | Stop-Process"
+            % self._glob("wt-a"), "defer")
+
+    def test_sibling_worktree_filter_denies(self):
+        self._decision(
+            "Get-Process | Where-Object { $_.Path -like %s } | Stop-Process"
+            % self._glob("wt-b"), "deny")
+
+    def test_name_kill_denies_even_inside_an_anchored_pipeline(self):
+        # A process name carries no path, so nothing around it can scope it.
+        self._decision(
+            "Get-Process | Where-Object { $_.Path -like %s } | "
+            "Stop-Process -Name node" % self._glob("wt-a"), "deny")
+
+    def test_kill_by_literal_pid_is_untouched(self):
+        for cmd in ("Stop-Process -Id 1234", "Stop-Process 1234",
+                    "Get-Process -Name node"):
+            self._decision(cmd, "defer")
+
+    def test_expandable_pid_denies(self):
+        self._decision("Stop-Process -Id $p.Id", "deny")
+
+    def test_anchor_does_not_carry_across_a_statement_boundary(self):
+        for sep in (";", "\n", "&&"):
+            self._decision(
+                "Get-ChildItem %s%s Get-Process node | Stop-Process"
+                % (ps(self.workspace), sep), "deny")
+
+    def test_kill_in_a_script_block_is_seen(self):
+        self._decision(
+            "Get-Process node | ForEach-Object { Stop-Process -Id $_.Id }",
+            "deny")
+        self._decision(
+            "Get-Process | Where-Object { $_.Path -like %s } | "
+            "ForEach-Object { Stop-Process -Id $_.Id }" % self._glob("wt-a"),
+            "defer")
+
+    def test_kill_inside_a_subexpression_is_caught(self):
+        self._decision("Write-Output $(Stop-Process -Name node)", "deny")
+
+    def test_reason_names_the_powershell_rewrites(self):
+        r = self._decision("Stop-Process -Name node", "deny")
+        self.assertIn("node", r)
+        self.assertIn("Stop-Process -Id", r)
+        self.assertIn("Where-Object", r)
+        self.assertIn(self.workspace, r)
+        self.assertIn("WORKSPACE_GUARD_OVERRIDE", r)
+        self.assertNotIn("pgrep", r)      # the bash rewrite, wrong shell
+
+    def test_override_downgrades_to_ask(self):
+        out = self._out("Stop-Process -Name node",
+                        env_extra={"WORKSPACE_GUARD_OVERRIDE": "stuck harness"})
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "ask")
+        self.assertIn("stuck harness",
+                      out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_bypass_mode_still_denies(self):
+        self._decision("Stop-Process -Name node", "deny",
+                       permission_mode="bypassPermissions")
 
 
 class PowerShellEndToEndTests(unittest.TestCase):
