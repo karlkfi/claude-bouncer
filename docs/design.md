@@ -65,6 +65,14 @@ Detection lives in the same script the Bash hook uses (dispatched on `tool_name`
 
 The deny (rather than `ask`) is the secure default here specifically because the failure mode is an approvable-by-reflex prompt whose only correct answer was "reject and retype the path"; a deny self-heals in one agent round trip. `WORKSPACE_GUARD_OVERRIDE=<reason>` is the documented, reasoned escape hatch for deliberate cross-checkout work.
 
+### Why a process kill is in scope, though it touches no file
+
+`pkill -f` is the one command that reaches another session's work without naming a path. It signals by *pattern*, matched against the whole command line, so `pkill -f "make check"` hits every checkout on the host running one — the same wrong-branch mistake as a sibling-checkout write, addressed the one way a path check cannot see. It sits in this plugin rather than a new one for the same reason the write tools do: the workspace root, the tokenizer, and the override are already here.
+
+The rule is an *anchor*, not a pattern allowlist: some operand must contain the project root's directory name as a whole path component with a separator on at least one side. That is a mechanical test with no judgment in it — a bare word is a substring match against a command line, and the hook has no basis for deciding whether `api` excludes a sibling. Both misparse directions of the flag table land on `deny`, so lagging an implementation's options costs friction, never a hole.
+
+`deny` rather than `ask` here is measured, not assumed: of 38 `pkill` targets observed across one developer's session transcripts, 36 carried nothing identifying the worktree that started them. An `ask` on 36 of 38 kills trains the reflexive approval it exists to prevent. Unlike the file tiers, an *anchored* kill defers rather than emitting `allow` — this hook has nothing more to say about it, and an `allow` would strip the user's own permission settings from a destructive command.
+
 ## Alternatives considered and rejected
 
 - **Sandboxing (seccomp, App Sandbox, bind mounts, chroot).** Too heavyweight; platform-specific; breaks legitimate cross-workspace reads. A user who wants this level of isolation should run the whole agent in a container, not bolt on a partial sandbox.

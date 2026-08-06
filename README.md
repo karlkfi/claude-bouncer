@@ -47,8 +47,9 @@ The hook produces one of four outcomes:
   shared across every session and worktree and live outside the project root, so
   instead of prompting, the hook steers you to a repo-local gitignored scratch
   dir (`./tmp/`). It's also the default for **writes into a sibling checkout of
-  the same repo** when the session runs in a git worktree (see below).
-  Configurable down to `ask`; see [Configuration](#configuration).
+  the same repo** when the session runs in a git worktree, and for a
+  **`pkill`/`killall` pattern that names no path in this workspace** (both
+  below). Configurable down to `ask`; see [Configuration](#configuration).
 - **defer** — the hook stays silent; your normal permission settings apply.
 
 Guarded commands: `grep` (and `egrep`, `fgrep`), `rg`, `sed`, `awk` (and
@@ -63,6 +64,10 @@ commands Claude reaches for most often; tools like `ls`, `find`, and `xargs`
 aren't covered yet (see [`docs/STATUS.md`](docs/STATUS.md)). A **redirect**
 target (`> file`) is checked on *any* command, guarded or not — it's a write the
 shell performs regardless of the command word.
+
+One non-file command is guarded too: `pkill`/`killall` signal a process by
+*pattern*, which reaches every checkout on the host. See
+[Unanchored process-kill deny](#unanchored-process-kill-deny).
 
 The same outside-workspace check also runs on Claude's **native file tools**, so
 the guard can't be sidestepped by switching from a bash command to the
@@ -166,6 +171,12 @@ project's scratch still asks entirely.
 | `mktemp -dp ./scratch x.XXXX` (clustered `-d -p`) | allow |
 | `cat /tmpfoo/x` (not under `/tmp`)   | **ask**  |
 | `ls > /etc/out.txt` (unguarded redirect, outside) | **ask** |
+| `pkill -f ginkgo` · `pkill -f "make check"` | **deny** |
+| `pkill -f "<sibling-worktree>/bin/x"` | **deny** |
+| `pkill -u karl` (no pattern at all)  | **deny** |
+| `killall node`                       | **deny** |
+| `pkill -f "<this-root>/.build/ginkgo"` (anchored) | defer |
+| `kill 1234` · `pgrep -fl ginkgo`     | defer    |
 | `ls /etc` (unguarded, no redirect)   | defer    |
 | `mktemp --version` (creates nothing) | defer    |
 | `echo '$(mktemp -d)'` (single-quoted, no subst) | defer |
@@ -301,6 +312,57 @@ a worktree, and a path in an *unrelated* git repo is never treated as a sibling
 (it shares no git common-dir with your repo). For deliberate cross-checkout work,
 `WORKSPACE_GUARD_OVERRIDE=<reason>` downgrades the deny to `ask`; see
 [Configuration](#configuration).
+
+### Unanchored process-kill deny
+
+Every check above is about *paths*. `pkill -f` addresses a process by **pattern**
+instead, which is a write to another session's work through the one door the
+workspace boundary can't see:
+
+```
+pkill -f "make check"      # every checkout on this host running make check
+pkill -f ginkgo            # every checkout on this host running ginkgo
+```
+
+Run several worktrees of one repo in parallel and a bare-program pattern reaches
+all of them. Measured across one developer's session transcripts: 38 `pkill`
+targets, 2 of which carried anything identifying the worktree that started them.
+One of the other 36 did the damage — a load harness cleaned up with
+`pkill -f 'make scripts-test'` killed the verification run in its own worktree
+and recorded a passing suite as a failure.
+
+So `pkill` and `killall` are **denied** unless some operand **anchors** the
+pattern to this workspace — the project root's directory name appearing as a
+whole path component, with a path separator on at least one side:
+
+```
+pkill -f "issue-125-a1b2/.build/ginkgo"   # anchored -> defer
+pkill -f "/home/k/ws/repo/bin/server"     # anchored -> defer
+pkill -f ginkgo                           # -> deny
+pkill -f issue-125-a1b2                   # -> deny (bare word, no separator)
+killall node                              # -> deny (a process name can't anchor)
+pkill -u karl                             # -> deny (no pattern at all)
+```
+
+A bare word doesn't count however distinctive it looks: the pattern is a
+substring match against a command line, not a path, and the hook can't judge
+whether a given word excludes a sibling. Component bounds treat `-`, `.` and `_`
+as name characters, so a root named `repo` does not anchor inside
+`repo-branch1`. A token still carrying an unresolved expansion never anchors
+either — bash decides at runtime where `$HOME/repo/bin` lands, so the `/repo/` in
+it proves nothing.
+
+**Deny rather than ask**, because 36 of those 38 kills would have raised a
+prompt: an `ask` on nearly every kill trains reflexive approval, which is the
+failure it exists to prevent. The two rewrites the message names cost nothing in
+the normal case — run `pgrep -fl <pattern>` and kill the pid(s) you meant, or put
+the workspace path in the pattern. For a deliberate cross-workspace kill,
+`WORKSPACE_GUARD_OVERRIDE=<reason>` downgrades it to `ask`.
+
+An **anchored** kill *defers* rather than emitting `allow`: it's out of this
+hook's scope, and an `allow` would short-circuit your own permission settings on
+a destructive command. `kill <pid>` is untouched — killing by pid is the rewrite
+the deny recommends, not a hazard.
 
 ## Install
 
@@ -649,14 +711,27 @@ through the same boundary rules and produce the same reasons. Symlink staging
    outside `ask`. The same rule is the sole active check on the `Edit`, `Write`,
    `MultiEdit`, and `NotebookEdit` tools. `WORKSPACE_GUARD_OVERRIDE=<reason>`
    downgrades it to `ask`; see [Configuration](#configuration).
-13. **Recurse into command substitutions.** A guarded command hidden in a
+13. **Deny** a process kill with no workspace anchor. `pkill` and `killall`
+   address a process by pattern rather than by path, so they reach every checkout
+   on the host. Value-taking flags come off (`-u karl`, `--signal TERM`), `--`
+   ends options, and a signal flag (`-9`, `-TERM`) is skipped like any other
+   flag; what remains are the pattern operands. Unless one of them contains the
+   project root's directory name as a whole path component *with a path
+   separator on at least one side*, the command is `deny`ed with the two safe
+   rewrites. Both misparse directions land on `deny`, so a flag table that
+   lags an implementation's options costs friction, never a hole. An anchored
+   kill emits nothing — it **defers** rather than `allow`ing, leaving your own
+   permission settings in charge of a destructive command.
+   `WORKSPACE_GUARD_OVERRIDE=<reason>` downgrades the deny to `ask`; see
+   [Unanchored process-kill deny](#unanchored-process-kill-deny).
+14. **Recurse into command substitutions.** A guarded command hidden in a
    `"$(…)"` or backtick `` `…` `` substitution — `echo "$(mktemp -p /tmp x)"`,
    `` x=`grep secret /etc/passwd` `` — isn't tokenized as its own command by the
    step-1 lexer (the metacharacters are inside quotes), so its file ops would be
    invisible. The hook scans the *raw* command for substitution bodies in
    unquoted or double-quoted context (single-quoted `'$(…)'` is a bash literal
    and is skipped; `$((…))` arithmetic has no command) and runs each body back
-   through steps 1–13. Heredoc bodies leave the command line first and are
+   through steps 1–14. Heredoc bodies leave the command line first and are
    scanned on their own: a quoted-delimiter body is literal to bash and is
    dropped, an unquoted one is scanned with quoting turned off, because bash
    applies none inside it — so the apostrophe in a `don't` there is text, not
@@ -748,6 +823,15 @@ flowing, avoid triggering it:
   on the wrong branch. Use the same relative path under your session root. For
   deliberate cross-checkout work, set `WORKSPACE_GUARD_OVERRIDE=<reason>` to
   downgrade the deny to a prompt.
+- **Never kill a process by an unanchored pattern.** `pkill`/`killall` match
+  every checkout on the host, so `pkill -f "make check"` or `pkill -f ginkgo`
+  kills whatever another session is running — both are **denied**. Run
+  `pgrep -fl <pattern>` first and kill the pid(s) you meant, or put the project
+  root's directory name in the pattern as a path component with a separator
+  (`pkill -f "<root-dirname>/.build/ginkgo"`), which is allowed through. A bare
+  word doesn't count as an anchor, nor does a pattern with an unexpanded `$VAR`
+  in it. `kill <pid>` is never blocked. For a deliberate cross-workspace kill,
+  set `WORKSPACE_GUARD_OVERRIDE=<reason>`.
 ```
 
 The plugin also ships a **`reduce-workspace-guard-prompts`** skill: ask Claude
@@ -821,22 +905,25 @@ means `C:\Users\me\shared` — as it does in a command — rather than a `c` fol
 on whichever drive is current. Both rules apply to every configured path: the
 host-temp roots and allowlist above, and these prefixes.
 
-### Sibling-checkout (worktree) deny
+### Cross-workspace denies
 
-When the session runs in a git worktree, writes into a sibling checkout of the
-same repo are **denied** (see
-[Worktree-aware sibling-checkout deny](#worktree-aware-sibling-checkout-deny)).
-One env var tunes this, read at hook time (no restart needed):
+Two denies fire on work that reaches past this session's own checkout: a write
+into a sibling checkout of the same repo (see
+[Worktree-aware sibling-checkout deny](#worktree-aware-sibling-checkout-deny)),
+and a process kill with no workspace anchor (see
+[Unanchored process-kill deny](#unanchored-process-kill-deny)). One env var tunes
+both, read at hook time (no restart needed):
 
 | Env var | Default | Effect |
 | --- | --- | --- |
-| `WORKSPACE_GUARD_OVERRIDE` | (empty) | When set to a non-empty reason string, downgrades the sibling-checkout deny to `ask` for deliberate cross-checkout work. The reason is echoed back in the prompt. |
+| `WORKSPACE_GUARD_OVERRIDE` | (empty) | When set to a non-empty reason string, downgrades the sibling-checkout deny and the unanchored-kill deny to `ask`, for work that deliberately reaches another checkout. The reason is echoed back in the prompt. |
 
 `WORKSPACE_GUARD_OVERRIDE` is the one knob that *loosens* this guard, so it's
-empty by default and opt-in. The deny is the secure default: it self-heals in one
-agent round trip, whereas an approvable prompt invites the reflexive "yes" that
-lands the change on the wrong branch. Scope the override to the moment you
-actually need it (e.g. one command), not the whole session.
+empty by default and opt-in. The denies are the secure default: they self-heal in
+one agent round trip, whereas an approvable prompt invites the reflexive "yes"
+that lands the change on the wrong branch, or kills the wrong process. Scope the
+override to the moment you actually need it (e.g. one command), not the whole
+session.
 
 ### Outside-workspace ask vs. deny
 
@@ -1008,6 +1095,18 @@ final output.
   (fail-safe: the deny is never applied on uncertainty, so the boundary is never
   weakened). A main-checkout session is a deliberate no-op even when worktrees
   exist.
+- The unanchored-kill deny covers `pkill` and `killall` in the Bash tool only.
+  PowerShell's `Stop-Process` is not checked, and neither is a kill routed
+  through something the hook doesn't parse (`xargs kill`, a script that kills on
+  your behalf). Anchoring is also *lexical*, which cuts both ways: a process
+  started with a relative command line (`make check`) carries no path for `-f` to
+  match, so it can't be anchored at all and the answer there is `pgrep -fl` plus
+  a kill by pid; and a pattern naming an unrelated directory that happens to
+  share this root's basename reads as anchored. What the rule does reliably
+  exclude is a *sibling* checkout, whose directory name differs by construction.
+  A pattern naming a worktree nested under the project root (`.claude/worktrees/*`)
+  counts as in-workspace, consistent with the boundary the rest of the hook
+  draws.
 - **The PowerShell tool is guarded for a known set of cmdlets, and only those.**
   Claude Code ships two shell tools. Which one a Windows session gets depends on
   whether Git for Windows is installed — without it there is no Bash tool and

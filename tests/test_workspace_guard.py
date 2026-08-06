@@ -4108,6 +4108,31 @@ class BuildReasonTests(unittest.TestCase):
         self.assertIn("prompting because", r)
         self.assertIn("deliberate", r)
 
+    def test_kill_category_names_pattern_and_both_rewrites(self):
+        r = guard.build_reason([(
+            "pkill", "kill",
+            {"cmd": "pkill", "pattern": "ginkgo", "root": "/repo/wt"},
+        )])
+        self.assertIn("Unanchored process kill", r)
+        self.assertIn("ginkgo", r)
+        self.assertIn("pgrep -fl", r)
+        self.assertIn("/repo/wt", r)
+        self.assertIn("WORKSPACE_GUARD_OVERRIDE", r)
+
+    def test_kill_without_a_pattern_says_so(self):
+        r = guard.build_reason([(
+            "pkill", "kill", {"cmd": "pkill", "pattern": None, "root": "/repo/wt"},
+        )])
+        self.assertIn("no pattern at all", r)
+
+    def test_kill_override_wording_downgrades(self):
+        r = guard.build_reason(
+            [("pkill", "kill",
+              {"cmd": "pkill", "pattern": "ginkgo", "root": "/repo/wt"})],
+            override="stuck harness")
+        self.assertIn("prompting because", r)
+        self.assertIn("stuck harness", r)
+
 
 class ReasonAdviceEndToEndTests(unittest.TestCase):
     """The emitted reason carries actionable advice end-to-end (subprocess)."""
@@ -4745,6 +4770,210 @@ class SiblingCheckoutTests(unittest.TestCase):
         # shell-expand) -> defer to builtin permissions.
         out = self._edit("Write", "$HOME/somewhere/x.txt")
         self.assertIsNone(out, f"expected defer, got {out!r}")
+
+
+class ClassifyPkillTests(unittest.TestCase):
+    """Operand extraction for `pkill`/`killall` (issue 125)."""
+
+    def test_non_kill_command_returns_none(self):
+        self.assertIsNone(guard.classify_pkill(["pgrep", "-f", "make"]))
+        self.assertIsNone(guard.classify_pkill(["kill", "1234"]))
+        self.assertIsNone(guard.classify_pkill([]))
+
+    def test_pattern_operand(self):
+        self.assertEqual(guard.classify_pkill(["pkill", "-f", "make check"]),
+                         ("pkill", ["make check"]))
+
+    def test_signal_flag_is_not_a_value_flag(self):
+        # `-9`/`-TERM` are signal selectors, not value-taking options: the
+        # pattern after them must survive as an operand.
+        self.assertEqual(guard.classify_pkill(["pkill", "-9", "-f", "ginkgo"]),
+                         ("pkill", ["ginkgo"]))
+        self.assertEqual(guard.classify_pkill(["pkill", "-TERM", "ginkgo"]),
+                         ("pkill", ["ginkgo"]))
+
+    def test_value_flags_consume_their_value(self):
+        self.assertEqual(guard.classify_pkill(["pkill", "-u", "karl", "node"]),
+                         ("pkill", ["node"]))
+        self.assertEqual(
+            guard.classify_pkill(["pkill", "--signal", "TERM", "-f", "node"]),
+            ("pkill", ["node"]))
+
+    def test_inline_value_flag_does_not_consume_next_token(self):
+        self.assertEqual(
+            guard.classify_pkill(["pkill", "--signal=TERM", "-f", "node"]),
+            ("pkill", ["node"]))
+
+    def test_selector_only_invocation_has_no_operands(self):
+        # Nothing ties `pkill -u karl` or `pkill -P 1234` to this workspace, so
+        # the caller must still deny — an empty list, not None.
+        self.assertEqual(guard.classify_pkill(["pkill", "-u", "karl"]),
+                         ("pkill", []))
+        self.assertEqual(guard.classify_pkill(["pkill", "-P", "1234"]),
+                         ("pkill", []))
+
+    def test_end_of_options(self):
+        self.assertEqual(guard.classify_pkill(["pkill", "-f", "--", "-weird"]),
+                         ("pkill", ["-weird"]))
+
+    def test_clustered_boolean_flags_fall_through(self):
+        self.assertEqual(guard.classify_pkill(["pkill", "-fx", "ginkgo"]),
+                         ("pkill", ["ginkgo"]))
+
+    def test_killall_and_absolute_command_path(self):
+        self.assertEqual(guard.classify_pkill(["killall", "-u", "karl", "node"]),
+                         ("killall", ["node"]))
+        self.assertEqual(guard.classify_pkill(["/usr/bin/pkill", "-f", "x"]),
+                         ("pkill", ["x"]))
+
+
+class WorkspaceAnchorTests(unittest.TestCase):
+    """The path fragment that pins a kill pattern to this workspace (issue 125)."""
+
+    def _anchored(self, proj, pattern):
+        return guard.workspace_anchor_re(proj).search(pattern) is not None
+
+    def test_component_with_separator_anchors(self):
+        for pattern in ("repo/bin/server", "/ws/repo/bin", "bin/repo",
+                        "x\\repo\\bin"):
+            self.assertTrue(self._anchored("/ws/repo", pattern), pattern)
+
+    def test_bare_word_does_not_anchor(self):
+        # A pattern is a substring match against a command line, not a path;
+        # without a separator there is nothing making it a path anchor.
+        self.assertFalse(self._anchored("/ws/repo", "repo"))
+
+    def test_partial_component_does_not_anchor(self):
+        # The whole point: a sibling worktree whose name merely contains the
+        # root's name must not read as this workspace.
+        for pattern in ("repo-branch1/bin", "x/repo-branch1/bin",
+                        "/ws/myrepo/bin", "repo.old/bin", "/ws/repo_2/bin"):
+            self.assertFalse(self._anchored("/ws/repo", pattern), pattern)
+
+    def test_trailing_separator_on_root_is_ignored(self):
+        self.assertTrue(self._anchored("/ws/repo/", "repo/bin"))
+
+    def test_filesystem_root_has_no_anchor(self):
+        self.assertIsNone(guard.workspace_anchor_re(os.sep))
+
+
+class KillOperandAnchorTests(unittest.TestCase):
+    """Expansion handling in the anchor check (issue 125)."""
+
+    def setUp(self):
+        self.anchor = guard.workspace_anchor_re("/ws/repo")
+
+    def _ok(self, tok, cwd="/ws/repo", unknown=False):
+        return guard.kill_operand_anchored(tok, self.anchor, cwd, unknown)
+
+    def test_literal_path_anchors(self):
+        self.assertTrue(self._ok("/ws/repo/bin/server"))
+
+    def test_unresolved_expansion_never_anchors(self):
+        # `$HOME/repo/bin` contains the literal text `/repo/`, but bash decides
+        # at runtime where it lands, so the text proves nothing.
+        self.assertFalse(self._ok("$HOME/repo/bin"))
+        self.assertFalse(self._ok("~someuser/repo/bin"))
+
+    def test_trailing_dollar_is_a_regex_anchor_not_an_expansion(self):
+        self.assertTrue(self._ok("repo/bin$"))
+
+    def test_pwd_substitution_prefix_resolves(self):
+        self.assertTrue(self._ok("$(pwd)/bin/server"))
+
+    def test_pwd_substitution_needs_a_tracked_cwd(self):
+        self.assertFalse(self._ok("$(pwd)/bin/server", unknown=True))
+
+    def test_no_anchor_available_denies_everything(self):
+        self.assertFalse(
+            guard.kill_operand_anchored("/ws/repo/bin", None, "/ws/repo", False))
+
+
+class UnanchoredKillEndToEndTests(unittest.TestCase):
+    """Decisions for `pkill`/`killall` end-to-end (issue 125).
+
+    The workspace is a directory with a distinctive name so an anchored pattern
+    is unambiguous, and `wt-b` stands in for a sibling worktree. No process is
+    ever signalled: the hook reads the command as a JSON string and the test
+    never invokes bash on it.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.base = os.path.realpath(self._tmp.name)
+        self.workspace = os.path.join(self.base, "wt-a")
+        os.mkdir(self.workspace)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _out(self, cmd, **kw):
+        return run_hook(cmd, self.workspace, project_dir=self.workspace, **kw)
+
+    def _decision(self, cmd, expected, **kw):
+        out = self._out(cmd, **kw)
+        if expected == "defer":
+            self.assertIsNone(out, f"expected defer for {cmd!r}, got {out!r}")
+            return None
+        self.assertIsNotNone(out, f"expected a decision, got defer for: {cmd!r}")
+        got = out["hookSpecificOutput"]["permissionDecision"]
+        self.assertEqual(got, expected, f"expected {expected!r} for {cmd!r}")
+        return out["hookSpecificOutput"]["permissionDecisionReason"]
+
+    def test_bare_program_pattern_denies(self):
+        for cmd in ('pkill -f ginkgo', 'pkill -f "make check"',
+                    'pkill -9 -f "usr/bin/make check"', 'killall node'):
+            self._decision(cmd, "deny")
+
+    def test_sibling_worktree_name_denies(self):
+        # The motivating case: a pattern naming a *different* worktree.
+        self._decision('pkill -f "wt-b/.build/ginkgo"', "deny")
+
+    def test_anchored_pattern_defers(self):
+        # Defer, not allow: an anchored kill is out of this hook's scope, and an
+        # `allow` would short-circuit the user's own permission settings on a
+        # destructive command.
+        self._decision('pkill -f "wt-a/.build/ginkgo"', "defer")
+        self._decision('pkill -f %s' % sh(os.path.join(
+            self.workspace, "bin", "server")), "defer")
+
+    def test_selector_without_pattern_denies(self):
+        r = self._decision('pkill -u karl', "deny")
+        self.assertIn("no pattern at all", r)
+
+    def test_kill_by_pid_is_untouched(self):
+        # Killing by pid is the rewrite the deny message recommends.
+        self._decision('kill 1234', "defer")
+        self._decision('pgrep -fl ginkgo', "defer")
+
+    def test_reason_names_the_pattern_and_both_rewrites(self):
+        r = self._decision('pkill -f ginkgo', "deny")
+        self.assertIn("ginkgo", r)
+        self.assertIn("pgrep -fl", r)
+        self.assertIn(self.workspace, r)
+        self.assertIn("WORKSPACE_GUARD_OVERRIDE", r)
+
+    def test_override_downgrades_to_ask(self):
+        out = self._out('pkill -f ginkgo',
+                        env_extra={"WORKSPACE_GUARD_OVERRIDE": "stuck harness"})
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "ask")
+        self.assertIn("stuck harness",
+                      out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_propagated_literal_variable_is_checked(self):
+        self._decision('P=ginkgo; pkill -f $P', "deny")
+
+    def test_kill_inside_command_substitution_is_caught(self):
+        self._decision('echo "$(pkill -f ginkgo)"', "deny")
+
+    def test_unanchored_kill_beats_a_clean_guarded_command(self):
+        # A clean `cat` would emit `allow` for the whole string; the kill's deny
+        # must win rather than being laundered into a blanket allow.
+        self._decision('cat ./in.txt && pkill -f ginkgo', "deny")
+
+    def test_bypass_mode_still_denies(self):
+        self._decision('pkill -f ginkgo', "deny",
+                       permission_mode="bypassPermissions")
 
 
 class SiblingSessionScratchE2ETests(unittest.TestCase):

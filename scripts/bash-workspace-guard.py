@@ -759,9 +759,12 @@ def sibling_checkout_for(rp, session):
     return (co['root'], _branch_label(co['admin']))
 
 
-def sibling_override():
-    """Reason string from ``WORKSPACE_GUARD_OVERRIDE`` (downgrades the sibling
-    deny to ``ask`` for deliberate cross-checkout work), or None when unset."""
+def guard_override():
+    """Reason string from ``WORKSPACE_GUARD_OVERRIDE``, or None when unset.
+
+    Downgrades the two cross-workspace denies to ``ask`` — a write into a
+    sibling checkout, and an unanchored process kill — for work that
+    deliberately reaches past this session's own checkout."""
     v = (os.environ.get('WORKSPACE_GUARD_OVERRIDE') or '').strip()
     return v or None
 
@@ -1839,6 +1842,111 @@ def classify_dd(tokens):
     return files
 
 
+# --- Process kills (issue 125) -----------------------------------------------
+# `pkill`/`killall` address a process by *pattern*, not by path, so a pattern
+# naming only the program ("make check", "ginkgo") matches the same process in
+# every checkout on the host — including sibling worktrees of this repo running
+# their own sessions. That is a write to another session's work, addressed the
+# one way the path checks above cannot see.
+#
+# A kill passes only when some operand ANCHORS the pattern to this workspace:
+# the project root's directory name as a whole path component with a path
+# separator on at least one side. A bare word does not count however distinctive
+# it looks — the pattern is a substring match against a command line, not a path,
+# and the hook has no way to judge whether `api` excludes a sibling.
+
+# Flags whose *value* is the following token, so it is not a pattern operand.
+# Both misparse directions are safe: swallowing a real pattern leaves nothing
+# anchored (deny), and mistaking a value for an operand yields an unanchored
+# operand (deny). Precision here buys fewer false denies, never a hole. The
+# union of the procps-ng and BSD/macOS option sets is used, since the hook
+# can't tell which implementation is on PATH.
+KILL_CONSUME = {
+    'pkill': frozenset({
+        '-F', '--pidfile', '-G', '--group', '-J', '-M', '-N', '-P', '--parent',
+        '-T', '-U', '--uid', '-g', '--pgroup', '-j', '-s', '--session',
+        '-t', '--terminal', '-u', '--euid', '--signal', '--ns', '--nslist'}),
+    'killall': frozenset({
+        '-c', '-n', '--ns', '-o', '--older-than', '-s', '--signal',
+        '-t', '-u', '--user', '-y', '--younger-than', '-Z', '--context'}),
+}
+
+# What counts as a path-component name character. A root named `repo` must not
+# anchor inside `repo-branch1`, so `-`, `.` and `_` bind rather than separate.
+KILL_ANCHOR_NAME = 'A-Za-z0-9._-'
+
+
+def classify_pkill(tokens):
+    """For a `pkill`/`killall` command, return `(name, [pattern operands])`.
+
+    Returns None when the command isn't one of them. The operand list is empty
+    for an invocation selecting purely by uid/ppid/session (`pkill -u karl`,
+    `pkill -P 1234`) — still a kill with nothing tying it to this workspace, so
+    the caller denies that too.
+
+    Value-taking flags come off via `KILL_CONSUME`; `--opt=val` splits; `--`
+    ends options; a signal flag (`-9`, `-TERM`) falls through as an ordinary
+    flag and is skipped.
+    """
+    if not tokens:
+        return None
+    name = os.path.basename(tokens[0])
+    consume = KILL_CONSUME.get(name)
+    if consume is None:
+        return None
+    operands = []
+    i, n, end_opts = 1, len(tokens), False
+    while i < n:
+        tok = tokens[i]
+        if not end_opts and tok == '--':
+            end_opts = True; i += 1; continue
+        if not end_opts and tok.startswith('-') and tok != '-':
+            key, inline = split_eq(tok)
+            if key in consume and inline is None:
+                i += 2; continue
+            i += 1; continue
+        operands.append(tok); i += 1
+    return (name, operands)
+
+
+def workspace_anchor_re(proj):
+    """Regex for a path fragment that pins a kill pattern to workspace `proj`.
+
+    Matches the project root's directory name as a whole path component with a
+    path separator on at least one side — `<root>/…`, `…/<root>`, `…/<root>/…`.
+    Returns None when the root has no basename (a filesystem root), which leaves
+    every pattern unanchored.
+    """
+    base = os.path.basename(proj.rstrip('/\\' + os.sep))
+    if not base:
+        return None
+    b = re.escape(base)
+    sep = '[/\\\\]'
+    return re.compile('(?:%s%s(?![%s]))|(?:(?<![%s])%s%s)'
+                      % (sep, b, KILL_ANCHOR_NAME, KILL_ANCHOR_NAME, b, sep))
+
+
+def kill_operand_anchored(tok, anchor, group_cwd, group_cwd_unknown):
+    """True when kill-pattern operand `tok` anchors to this workspace.
+
+    `~`/`~/…` and a leading `$(pwd)` / `$(git rev-parse --show-toplevel)` resolve
+    first — the same forms the file checks resolve — so a pattern written that
+    way anchors like the literal it expands to. A token still carrying an
+    expansion afterwards (`$VAR`, `~user`) can never anchor, however much
+    workspace-shaped text surrounds it: bash decides at runtime where
+    `$HOME/repo/bin` lands, so the `/repo/` in it proves nothing. This is the
+    same unresolvable-means-outside rule `resolve_token` applies to file args.
+    """
+    if anchor is None:
+        return False
+    tok = expand_tilde(tok)
+    if not group_cwd_unknown:
+        tok = resolve_subst_prefix(tok, group_cwd)
+    if tok.startswith('~') or EXPANSION_RE.search(tok):
+        return False
+    return anchor.search(tok) is not None
+
+
 def default_temp_dir():
     """Directory ``mktemp`` (and bash) fall back to when none is given
     explicitly: ``$TMPDIR`` if set, else ``/tmp``. Both are among
@@ -2164,6 +2272,45 @@ def build_sibling_hint(siblings, override=None):
     return lead + body + tail
 
 
+def build_kill_hint(kills, override=None):
+    """One-line guidance for a `pkill`/`killall` with no workspace anchor.
+
+    `kills` is a list of `(token, detail)` where `detail` carries the kill
+    command `cmd`, the offending `pattern` (None when the invocation selects by
+    uid/ppid/session with no pattern at all), and the workspace `root` to anchor
+    to. When `override` is set the kill is downgraded to a prompt rather than
+    blocked, so the wording adjusts.
+    """
+    seen, parts, root = set(), [], ''
+    for _, d in kills:
+        root = root or d.get('root') or ''
+        key = (d.get('cmd'), d.get('pattern'))
+        if key in seen:
+            continue
+        seen.add(key)
+        if d.get('pattern') is None:
+            parts.append("`%s` selects processes with no pattern at all"
+                         % d.get('cmd'))
+        else:
+            parts.append("`%s` pattern `%s` names no path in this workspace"
+                         % (d.get('cmd'), d.get('pattern')))
+    body = "; ".join(parts) + "."
+    if override:
+        lead = ("Unanchored process kill(s) — prompting because "
+                "WORKSPACE_GUARD_OVERRIDE is set (%s): " % override)
+        tail = ""
+    else:
+        lead = ("Unanchored process kill(s) blocked: a pattern that names no "
+                "path in this workspace matches the same process in every "
+                "checkout on this host, so it can kill another session's work. ")
+        tail = (" Fix: run `pgrep -fl <pattern>` and kill the pid(s) you meant, "
+                "or put this workspace's path in the pattern (`%s/…`). For a "
+                "deliberate cross-workspace kill set "
+                "WORKSPACE_GUARD_OVERRIDE=<reason> to downgrade this to a "
+                "prompt." % root)
+    return lead + body + tail
+
+
 def offender_display(tok, rp):
     """Display form of an offending file token for the decision reason.
 
@@ -2187,6 +2334,9 @@ def build_reason(offenders, scratch_hint='', override=None):
       * 'sibling'   — a WRITE into a sibling checkout of the same repo (primary
                       checkout or another worktree). `detail` carries the
                       checkout root, branch, and corrected in-session path.
+      * 'kill'      — a `pkill`/`killall` whose pattern names no path in this
+                      workspace. `detail` carries the command, the pattern, and
+                      the workspace root to anchor to.
       * 'hosttemp'  — a path under a host-wide temp root (`/tmp`, `/var/tmp`,
                       `$TMPDIR`). Steered to a repo-local gitignored scratch dir
                       via `scratch_hint` (see build_scratch_hint).
@@ -2200,18 +2350,22 @@ def build_reason(offenders, scratch_hint='', override=None):
     de-duplicated.
     """
     buckets = {'hosttemp': [], 'outside': [], 'expand': [], 'untracked': []}
-    siblings = []
+    siblings, kills = [], []
     for item in offenders:
         tok, cat = item[0], item[1]
         detail = item[2] if len(item) > 2 else None
         if cat == 'sibling':
             siblings.append((tok, detail or {}))
+        elif cat == 'kill':
+            kills.append((tok, detail or {}))
         else:
             buckets[cat].append(tok)
 
     hints = []
     if siblings:
         hints.append(build_sibling_hint(siblings, override))
+    if kills:
+        hints.append(build_kill_hint(kills, override))
     if buckets['hosttemp']:
         hints.append(
             "Host-wide temp path(s): "
@@ -2263,7 +2417,7 @@ def emit(decision, reason):
 Ctx = collections.namedtuple('Ctx', [
     'proj', 'cwd', 'session_id', 'session_tmp_root', 'session_proj_dir',
     'tmp_roots', 'tmp_allow', 'tmp_action', 'read_prefixes', 'session_wt',
-    'sib_override'])
+    'override', 'kill_anchor'])
 
 
 def build_context(data):
@@ -2280,7 +2434,9 @@ def build_context(data):
       * ``read_prefixes`` — prefixes always allowed for READS (never writes).
       * ``session_wt`` — the session's own checkout, for the sibling-checkout
         deny; a no-op unless the session is itself a linked worktree.
-      * ``sib_override`` — WORKSPACE_GUARD_OVERRIDE reason, or None.
+      * ``override`` — WORKSPACE_GUARD_OVERRIDE reason, or None.
+      * ``kill_anchor`` — compiled regex a ``pkill``/``killall`` pattern must
+        match to count as scoped to this workspace (issue 125).
     """
     cwd = data.get('cwd') or os.getcwd()
     proj = os.path.realpath(os.environ.get('CLAUDE_PROJECT_DIR') or cwd)
@@ -2295,7 +2451,8 @@ def build_context(data):
         tmp_action=host_temp_action(),
         read_prefixes=allowed_read_prefixes(cwd),
         session_wt=resolve_session_worktree(proj),
-        sib_override=sibling_override())
+        override=guard_override(),
+        kill_anchor=workspace_anchor_re(proj))
 
 
 def path_is_outside(rp, proj):
@@ -2355,17 +2512,18 @@ def decide(offenders, ctx, bypass):
     Shared final step for every handler. ``deny`` when running under
     ``bypassPermissions`` (no human to answer an ask), when a host-temp path is
     hit and the configured action is ``deny``, or when a sibling-checkout write
-    is hit without an override; otherwise ``ask``. Both decisions block equally —
-    this is a recoverability/steering choice, not a weakening of the boundary."""
+    or an unanchored process kill is hit without an override; otherwise ``ask``.
+    Both decisions block equally — this is a recoverability/steering choice, not
+    a weakening of the boundary."""
     host_temp_hit = any(cat == 'hosttemp' for _, cat, _ in offenders)
-    sibling_hit = any(cat == 'sibling' for _, cat, _ in offenders)
-    sibling_deny = sibling_hit and ctx.sib_override is None
+    cross_hit = any(cat in ('sibling', 'kill') for _, cat, _ in offenders)
+    cross_deny = cross_hit and ctx.override is None
     deny_now = bypass or (host_temp_hit and ctx.tmp_action == 'deny') \
-        or sibling_deny
+        or cross_deny
     decision = "deny" if deny_now else "ask"
     reason = build_reason(offenders,
                           build_scratch_hint(ctx.proj, scratch_dir_name()),
-                          override=ctx.sib_override)
+                          override=ctx.override)
     return decision, reason
 
 
@@ -2724,6 +2882,20 @@ def analyze_command(cmd, ctx, base_cwd, depth=0):
                 if o is not None:
                     outside.append(o)
             continue
+        kl = classify_pkill(g)
+        if kl is not None:
+            # A kill is not a file op, so it never sets `guarded`: an anchored
+            # pattern DEFERS rather than emitting `allow`, leaving the user's own
+            # permission settings to have their say on a destructive command.
+            # An unanchored one is an offender the decision layer denies.
+            name, operands = kl
+            if not any(kill_operand_anchored(o, ctx.kill_anchor, group_cwd,
+                                             group_cwd_unknown)
+                       for o in operands):
+                outside.append((g[0], 'kill', {
+                    'cmd': name, 'root': proj,
+                    'pattern': ' '.join(operands) if operands else None}))
+            continue
         fs = files_in_command(g)
         if fs is None: continue
         guarded = True
@@ -2781,7 +2953,9 @@ def handle_bash(data):
     # non-empty even when `guarded` is False: a redirect target is a shell-level
     # write the hook resolves regardless of the command word, so `echo secret >
     # /tmp/x` (host-temp) and `ls > /outside` are honored here rather than
-    # discarded by an earlier guarded-only gate (Q26).
+    # discarded by an earlier guarded-only gate (Q26). An unanchored `pkill`
+    # arrives the same way — it has no file argument to guard, and an anchored
+    # one deliberately leaves `guarded` False so it defers instead of allowing.
     if not outside and not guarded:
         return
 
@@ -2805,10 +2979,12 @@ def handle_bash(data):
         # are equally blocking — this is a recoverability/steering choice, not a
         # weakening of the boundary.
         #
-        # A third deny driver: a WRITE into a sibling checkout of the same repo
-        # (the 'sibling' category). It denies by default — self-heals in one
-        # agent round trip — unless WORKSPACE_GUARD_OVERRIDE is set, which
-        # downgrades it to `ask` for deliberate cross-checkout work.
+        # Two more deny drivers reach past this session's own checkout: a WRITE
+        # into a sibling checkout of the same repo (the 'sibling' category), and
+        # a `pkill`/`killall` whose pattern names no path in this workspace (the
+        # 'kill' category). Both deny by default — they self-heal in one agent
+        # round trip — unless WORKSPACE_GUARD_OVERRIDE is set, which downgrades
+        # them to `ask` for deliberate cross-workspace work.
         bypass = data.get("permission_mode") == "bypassPermissions"
         decision, reason = decide(outside, ctx, bypass)
     else:
