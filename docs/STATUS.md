@@ -5,7 +5,7 @@ Single source of truth for progress and priorities in workspace-guard. Pick the 
 **Status:** 🔲 ready · 🚫 blocked
 **Size:** S = one session/PR · M = 2–3 sessions · L = needs a plan doc under `docs/plan/`
 **Labels:** `security` `tests` `docs` `infra` `bug` `parsing` `retro`
-**Next ID:** Q57
+**Next ID:** Q58
 
 **Maintaining this file:** see [`docs/development/maintaining-backlog.md`](development/maintaining-backlog.md).
 
@@ -17,7 +17,7 @@ Specific actionable items in priority order. Pick from the top; skip 🚫 items 
 |---|---|---|---|---|---|
 | <a id="Q56"></a>Q56 | Name the session scratchpad in the host-temp deny message | `docs` | 🔲 | S | `build_scratch_hint` steers only to the repo-local `./tmp/`, so an agent denied on `/tmp` infers the session scratchpad is off-limits too and litters the worktree instead. The hook knows the session's scratch dir; naming it as the second legitimate destination fixes the steering where it is actually read. Docs half done in issue 126. |
 | <a id="Q55"></a>Q55 | Author release notes in `docs/releases/vX.Y.Z.md` | `docs` `retro` | 🔲 | S | Notes are typed straight into the GitHub Release today, so they never appear in a diff. Author each tag's body as a file, publish it with `gh release edit --notes-file`, and point the runbook at it. |
-| <a id="Q56"></a>Q56 | Extend the unanchored-kill deny to PowerShell `Stop-Process` | `security` | 🔲 | S | The deny covers bash `pkill`/`killall` only ([plan](plan/unanchored-pkill-deny.md)). `Stop-Process -Name node` is the same host-wide kill, unchecked. Needs its own rule, not a `PS_SPEC` row. |
+| <a id="Q57"></a>Q57 | Extend the unanchored-kill deny to PowerShell `Stop-Process` | `security` | 🔲 | S | The deny covers bash `pkill`/`killall` only ([plan](plan/unanchored-pkill-deny.md)). `Stop-Process -Name node` is the same host-wide kill, unchecked. Needs its own rule, not a `PS_SPEC` row. |
 
 ## Deferred
 

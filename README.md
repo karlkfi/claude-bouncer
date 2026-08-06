@@ -1,6 +1,6 @@
 # workspace-guard
 
-**Path-aware shell permissions for Claude Code.**
+**Workspace-boundary shell permissions for Claude Code.**
 
 [![release](https://img.shields.io/github/v/release/karlkfi/claude-workspace-guard)](https://github.com/karlkfi/claude-workspace-guard/releases) [![tests](https://img.shields.io/github/actions/workflow/status/karlkfi/claude-workspace-guard/tests.yml?branch=main&label=tests)](https://github.com/karlkfi/claude-workspace-guard/actions/workflows/tests.yml) [![License: MIT](https://img.shields.io/github/license/karlkfi/claude-workspace-guard.svg)](LICENSE) [![Claude Code plugin](https://img.shields.io/badge/Claude_Code-plugin-7e57c2)](#install)
 
@@ -16,7 +16,9 @@ workspace-guard is a `PreToolUse` hook for the shell tools (`Bash` and
 `PowerShell`) — and for Claude's native file tools (`Read`, `Grep`, `Glob`,
 `Edit`, `Write`, …) — that parses the command, finds its file arguments, and
 asks for confirmation only when a path resolves outside your project root
-(`$CLAUDE_PROJECT_DIR`). In-repo reads and pure pipelines run silently.
+(`$CLAUDE_PROJECT_DIR`). In-repo reads and pure pipelines run silently. A path is
+the main way out of that boundary but not the only one, so the same rule covers
+`pkill`, which reaches another checkout's processes by pattern instead.
 
 ![Claude Code's permission prompt when grep targets a file outside the project root](docs/img/ask-prompt.png)
 

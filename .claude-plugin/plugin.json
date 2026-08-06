@@ -1,7 +1,7 @@
 {
   "name": "workspace-guard",
   "version": "1.8.0",
-  "description": "Path-aware shell permissions for Claude Code.",
+  "description": "Workspace-boundary shell permissions for Claude Code.",
   "author": {
     "name": "Karl",
     "url": "https://github.com/karlkfi"
