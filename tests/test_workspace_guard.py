@@ -4256,6 +4256,30 @@ class HostTempHelperTests(unittest.TestCase):
             present = guard.build_scratch_hint(proj, "tmp/")
             self.assertIn("Use the repo-local scratch dir `./tmp/`", present)
 
+    def test_build_scratch_hint_names_session_scratchpad(self):
+        # Q56: the second legitimate destination. Absent by default so the
+        # message never points at a directory the harness didn't create.
+        with tempfile.TemporaryDirectory() as proj:
+            self.assertNotIn("scratchpad",
+                             guard.build_scratch_hint(proj, "tmp/"))
+            pad = os.path.join(proj, "pad")
+            hint = guard.build_scratch_hint(proj, "tmp/", pad)
+            self.assertIn(pad, hint)
+            self.assertIn("allowed read-write", hint)
+            # Still steers to the repo-local dir first, knobs still last.
+            self.assertLess(hint.index("tmp"), hint.index(pad))
+            self.assertIn("WORKSPACE_GUARD_TMP_ALLOW", hint)
+
+    def test_session_scratchpad_requires_an_existing_dir(self):
+        with tempfile.TemporaryDirectory() as root:
+            sess = "aaaaaaaa-1111-2222-3333-444444444444"
+            self.assertIsNone(guard.session_scratchpad(sess, root))
+            self.assertIsNone(guard.session_scratchpad("", root))
+            self.assertIsNone(guard.session_scratchpad(sess, None))
+            pad = os.path.join(root, sess, "scratchpad")
+            os.makedirs(pad)
+            self.assertEqual(guard.session_scratchpad(sess, root), pad)
+
 
 class HostTempDenyTests(unittest.TestCase):
     """Host-wide temp (/tmp, /var/tmp, $TMPDIR) is denied (default) and steered
@@ -4415,6 +4439,29 @@ class HostTempDenyTests(unittest.TestCase):
         path = os.path.join(guard.claude_tmp_root(), "-Users-me-proj",
                             owner, "tasks", "abc.output")
         self._expect(f"cat {sh(path)}", "ask", session_id=current)
+
+    def test_deny_message_names_this_sessions_scratchpad(self):
+        # Q56: the deny steers to two destinations, not one — an agent told only
+        # about `./tmp/` infers the harness scratchpad is off-limits too.
+        sess = "5e551011-1111-2222-3333-444444444444"
+        proj_dir = os.path.join(guard.claude_tmp_root(),
+                                "-guardtest-q56-%d" % os.getpid())
+        pad = os.path.join(proj_dir, sess, "scratchpad")
+        try:
+            os.makedirs(pad, exist_ok=True)
+            out = self._expect("cat in.txt > /tmp/q56-hosttemp-log", "deny",
+                               session_id=sess)
+            reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+            self.assertIn(pad, reason)
+            self.assertIn("./tmp/", reason)     # still names the repo-local dir
+        finally:
+            shutil.rmtree(proj_dir, ignore_errors=True)
+
+    def test_deny_message_omits_scratchpad_when_absent(self):
+        # No session_id -> nothing to name; the message is unchanged.
+        out = self._expect("cat in.txt > /tmp/q56-hosttemp-log", "deny")
+        self.assertNotIn(
+            "scratchpad", out["hookSpecificOutput"]["permissionDecisionReason"])
 
     def test_unguarded_command_to_tmp_still_defers(self):
         # The capability only upgrades paths the hook already extracts. An

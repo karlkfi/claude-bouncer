@@ -694,7 +694,9 @@ through the same boundary rules and produce the same reasons. Symlink staging
    `/var/folders/…` are caught; on Windows a command's own `/tmp/x` resolves to
    `%TMP%` too, so it lands on the same root) is
    reclassified from `ask` to `deny`, with a message steering to a repo-local
-   gitignored scratch dir. Because this runs on the already-resolved file
+   gitignored scratch dir — and, when the session's `scratchpad/` from step 9 is
+   on disk, naming that too as the place for a throwaway that shouldn't outlive
+   the session. Because this runs on the already-resolved file
    arguments, a `/tmp` that appears only as text (a grep pattern, an `echo`
    string) is never matched. The Claude-managed temp root from step 9 is
    excluded — another session's task output keeps its `ask` (or, for a
@@ -863,7 +865,9 @@ of `scripts/bash-workspace-guard.py`. Add a row to guard another command.
 ### Host-wide temp (`/tmp`) deny
 
 A guarded file argument that resolves at or under a host-temp root is **denied**
-by default and steered to a repo-local gitignored scratch dir. Four environment
+by default and steered to the two destinations that are allowed: a repo-local
+gitignored scratch dir, and this session's own `scratchpad/` (named only when it
+exists on disk). Four environment
 variables tune this — all read at hook time, so no restart is needed:
 
 | Env var | Default | Effect |

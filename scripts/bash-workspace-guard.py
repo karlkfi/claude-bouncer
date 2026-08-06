@@ -609,12 +609,37 @@ def scratch_dir_name():
     return (os.environ.get('WORKSPACE_GUARD_SCRATCH_DIR') or 'tmp/').strip() or 'tmp/'
 
 
-def build_scratch_hint(proj, scratch):
+def session_scratchpad(session_id, session_proj_dir):
+    """Resolved path of the ``scratchpad/`` dir Claude Code hands THIS session,
+    or None when it can't be located.
+
+    Laid out as ``<tmp_root>/<project-slug>/<session-uuid>/scratchpad``, so it
+    sits inside the tree :func:`is_session_tmp_path` exempts for reads *and*
+    writes — the second legitimate destination for a temp file, alongside the
+    repo-local scratch dir. Gated on an ``os.path.isdir`` stat (no file contents
+    read) for the same reason :func:`build_scratch_hint` gates the repo-local
+    name: steering an agent at a directory that isn't there just trades a deny
+    for a "no such file or directory". (Q56)
+    """
+    if not (session_id and session_proj_dir):
+        return None
+    path = os.path.join(session_proj_dir, session_id, 'scratchpad')
+    try:
+        return path if os.path.isdir(path) else None
+    except OSError:
+        return None
+
+
+def build_scratch_hint(proj, scratch, scratchpad=None):
     """One-line guidance steering off host temp toward a repo-local scratch dir.
 
     Names the dir concretely when it already exists under the project root
     (an ``os.path.isdir`` stat — no file contents are read), otherwise tells the
-    user to create and gitignore it. Closes with the two config knobs."""
+    user to create and gitignore it. When ``scratchpad`` is given (see
+    :func:`session_scratchpad`) it is named as the other allowed destination,
+    so an agent denied on ``/tmp`` doesn't infer the harness-managed scratchpad
+    is off-limits too and litter the worktree instead. Closes with the two
+    config knobs."""
     name = scratch.rstrip('/') or 'tmp'
     rel = './' + name + '/'
     present = False
@@ -627,6 +652,10 @@ def build_scratch_hint(proj, scratch):
     else:
         where = ("Create a gitignored `%s` at the repo root (add `/%s/` to "
                  "`.gitignore`) and use `%s` instead." % (name, name, rel))
+    if scratchpad:
+        where += (" This session's own scratchpad `%s` is allowed read-write "
+                  "too — prefer it for a throwaway that shouldn't outlive the "
+                  "session." % scratchpad)
     return ("Host-wide temp is shared across every session and worktree and "
             "lives outside the project root, so concurrent runs collide and the "
             "write escapes the workspace. " + where
@@ -2429,7 +2458,8 @@ def build_context(data):
         allow to THIS session's own task output (empty on older CLIs -> allow off).
       * ``session_tmp_root`` — ``/tmp/claude-<uid>`` realpath.
       * ``session_proj_dir`` — ``<tmp_root>/<slug>`` holding this session, for the
-        sibling-session read exemption (#61); None when not locatable.
+        sibling-session read exemption (#61) and for naming this session's
+        ``scratchpad/`` in the host-temp deny (Q56); None when not locatable.
       * ``tmp_roots`` / ``tmp_allow`` / ``tmp_action`` — host-temp config.
       * ``read_prefixes`` — prefixes always allowed for READS (never writes).
       * ``session_wt`` — the session's own checkout, for the sibling-checkout
@@ -2522,7 +2552,10 @@ def decide(offenders, ctx, bypass):
         or cross_deny
     decision = "deny" if deny_now else "ask"
     reason = build_reason(offenders,
-                          build_scratch_hint(ctx.proj, scratch_dir_name()),
+                          build_scratch_hint(
+                              ctx.proj, scratch_dir_name(),
+                              session_scratchpad(ctx.session_id,
+                                                 ctx.session_proj_dir)),
                           override=ctx.override)
     return decision, reason
 
