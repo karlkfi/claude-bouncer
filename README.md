@@ -52,8 +52,8 @@ The hook produces one of four outcomes:
   dir (`./tmp/`). It's also the default for **writes into a sibling checkout of
   the same repo** when the session runs in a git worktree, and for a
   **process kill that names no path in this workspace** — whether the pattern is
-  the kill's own (`pkill -f`) or reached it through a `pgrep`/`ps | grep` (all
-  below). Configurable down to `ask`; see [Configuration](#configuration).
+  the kill's own (`pkill -f`) or reached it through a `pgrep` or a `ps` pipeline
+  (all below). Configurable down to `ask`; see [Configuration](#configuration).
 - **defer** — the hook stays silent; your normal permission settings apply.
 
 Guarded commands: `grep` (and `egrep`, `fgrep`), `rg`, `sed`, `awk` (and
@@ -72,7 +72,7 @@ shell performs regardless of the command word.
 Process kills are guarded too, though they touch no file: `pkill`/`killall`,
 PowerShell's `Stop-Process`, and Windows' `taskkill` signal a process by
 *pattern* or by *name*, which reaches every checkout on the host — and so does a
-`kill` fed pids by a `pgrep` or a `ps | grep`. See
+`kill` fed pids by a `pgrep` or by a `ps` pipeline, whatever it filters with. See
 [Unanchored process-kill deny](#unanchored-process-kill-deny).
 
 The same outside-workspace check also runs on Claude's **native file tools**, so
@@ -184,15 +184,22 @@ project's scratch still asks entirely.
 | `pkill -f "<this-root>/.build/ginkgo"` (anchored) | defer |
 | `kill $(pgrep -f ginkgo)` · `pgrep -f ginkgo \| xargs -r kill` | **deny** |
 | `ps -eo pid,command \| grep ginkgo \| awk '{print $1}' \| xargs kill` | **deny** |
+| `ps -eo pid,command \| awk '/ginkgo/ {print $1}' \| xargs kill` | **deny** |
+| `ps -eo pid= \| xargs kill` (no filter at all) | **deny** |
+| `kill $(ps -eo pid= \| head -1)`     | **deny** |
 | `for p in $(pgrep -f ginkgo); do kill $p; done` | **deny** |
 | `pgrep -f "<this-root>/bin/x" \| xargs -r kill` (anchored) | defer |
 | `taskkill //IM node.exe` · `taskkill //FI "IMAGENAME eq node.exe"` | **deny** |
 | `taskkill` (no selector at all)      | **deny** |
 | `taskkill //PID 1234` · `taskkill /?` | defer   |
+| `ps aux \| grep "<this-root>/bin/x" \| awk '{print $1}' \| xargs kill` | defer |
 | `kill 1234` · `kill -0 1234` · `kill $pid` | defer |
+| `./run.sh & p=$!; kill $p; ps -p $p` (ps consumes a pid) | defer |
 | `pgrep -fl ginkgo` · `pgrep -f ginkgo; kill 1234` | defer |
 | `cat in.txt && kill 1234` (clean read, but signals) | defer |
+| `cat in.txt; sh -c '…'` (clean read, opaque body) | defer |
 | `ps aux \| grep ginkgo` (no kill in the string) | allow |
+| `cat in.txt; bash --version` (shell, no `-c` body) | allow |
 | `ls /etc` (unguarded, no redirect)   | defer    |
 | `mktemp --version` (creates nothing) | defer    |
 | `echo '$(mktemp -d)'` (single-quoted, no subst) | defer |
@@ -414,10 +421,9 @@ green-lighting it rather than merely missing it.
 Two rules close that. First, **a clean guarded command never speaks for a kill**:
 if anything in the command string signals a process, the hook emits nothing
 instead of `allow`, so your own permission settings still get their say. Second,
-the **pattern that produced the pids is checked as if it were the kill's own** —
-`pgrep`'s pattern operands, and the pattern of a `grep` filtering `ps` output,
-run through the same anchor test, and a launderable kill with no anchoring
-pattern is denied with the same message and the same override.
+the **source that produced the pids is checked as if its pattern were the kill's
+own** — and a launderable kill whose sources all fail the anchor test is denied
+with the same message and the same override.
 
 What counts as *launderable* is the narrow part: a `kill` whose operands are all
 literal pids or job specs was demonstrably not fed by a pattern, so it stays out
@@ -430,16 +436,61 @@ pgrep -f ginkgo; kill 1234                   # literal pid -> defer
 kill $pid                                    # no pattern in the string -> defer
 ```
 
+The pid sources are `pgrep`'s pattern operands and **`ps` itself** — not the
+command filtering it. A `ps` feeding a kill is a pid source whose selection the
+hook can't read, so it denies whatever the filter is, and denies with no filter
+at all:
+
+```
+ps -eo pid,command | awk '/ginkgo/ {print $1}' | xargs kill   # -> deny
+ps -eo pid,command | sed -n '/ginkgo/s/.*//p' | xargs kill    # -> deny
+ps -eo pid= | xargs kill                                      # -> deny
+kill $(ps -eo pid= | head -1)                                 # -> deny
+```
+
+A **`grep` in the same pipeline is readable**, so its pattern can still anchor
+one: `ps aux | grep "<this-root>/bin/x" | awk '{print $1}' | xargs kill` defers.
+That is the rewrite to reach for. An awk program is not read even when it looks
+anchored — reading one would be unsafe rather than merely imprecise, because an
+inverting program (`awk '!/<this-root>/ {print $1}'`) would scan as anchored
+while killing every *other* checkout.
+
+The pids have to be able to reach the kill: a `ps` counts in the kill's own
+pipeline, or inside a command substitution the kill consumes. So the everyday
+debugging idiom is untouched, because its `ps` consumes a pid rather than
+producing one:
+
+```
+./run.sh & pid=$!; kill $pid; ps -p $pid    # -> defer
+```
+
 An **exclusion** can't anchor a pipeline: `grep -v` removes the pids it matches
 rather than selecting them, so `ps … | grep ginkgo | grep -v "<this-root>/skip"`
 still denies — what reaches the kill is every *other* checkout's `ginkgo`. A
 pattern the hook can't read (`grep -f patterns.txt`) can't clear a pipeline
 either; it reports as unreadable rather than as absent.
 
-Provenance here is co-occurrence within one command string, not dataflow: the
-hook doesn't prove the pids the kill receives came from the pattern it found. The
-literal-pid rule removes the case where that would matter, and
+Provenance here is co-occurrence within one pipeline or command string, not
+dataflow: the hook doesn't prove the pids the kill receives came from the source
+it found. The literal-pid rule removes the case where that would matter, and
 `WORKSPACE_GUARD_OVERRIDE=<reason>` covers the remainder.
+
+#### `sh -c` bodies are opaque, so nothing speaks for them
+
+A shell `-c` operand is a whole command string inside one token, and the hook
+doesn't parse it. It won't *vouch* for it either: any command carrying a shell
+`-c` suppresses the blanket `allow`, so the string defers and your own permission
+settings decide.
+
+```
+cat in.txt; sh -c 'pkill -f ginkgo'     # -> defer (was: allow)
+cat in.txt | xargs -I{} sh -c 'kill {}' # -> defer (was: allow)
+cat in.txt; bash --version              # allow (no -c body)
+```
+
+This covers `sh`, `bash`, `zsh`, `dash` and `ksh` wherever they appear in the
+command — `timeout 5 bash -c …`, `xargs -I{} sh -c …`, `find … -exec sh -c … \;`.
+The body itself is still unchecked; see [Limitations](#limitations).
 
 #### PowerShell: `Stop-Process`
 
@@ -871,14 +922,21 @@ through the same boundary rules and produce the same reasons. Symlink staging
    `taskkill`, directly or as an `xargs` command word) suppresses the blanket
    `allow` a clean guarded command would otherwise earn, so a `grep` can never
    carry an `xargs kill` past your permission settings — `allow` speaks for the
-   whole string. A `Stop-Process` or a `taskkill` suppresses the PowerShell
-   `allow` the same way, including one this step had no cause to deny and one
-   written inside a `$(…)` body. And the pattern
-   operands of the pid *sources* — `pgrep`'s, and those of a `grep` in a pipeline
-   that also contains `ps` — go through the anchor test above; a `kill` whose
-   operands aren't all literal pids, with no anchoring pattern anywhere in the
-   string, is `deny`ed as one. An inverting `grep -v` and a pattern read from a
-   `-f` file contribute nothing that can anchor.
+   whole string. A shell `-c` body suppresses it the same way and for the same
+   reason: the body is one opaque token, so the hook has no basis to vouch for
+   it. A `Stop-Process` or a `taskkill` suppresses the PowerShell `allow` too,
+   including one this step had no cause to deny and one written inside a `$(…)`
+   body. The pid *sources* then go through the anchor test above: `pgrep`'s
+   pattern operands, and **`ps`** — which is the source in a pipeline, rather
+   than whatever filters it. A `ps` contributes an unreadable pattern that can
+   never anchor, so the pipeline is caught whatever the filter is (`awk`, `sed`,
+   `cut`) and with no filter at all; a `grep` in the same pipeline is readable,
+   so its pattern can still anchor. A `kill` whose operands aren't all literal
+   pids, with no anchoring pattern, is `deny`ed as one. `ps` counts only where
+   its pids can reach the kill — the same pipeline, or a substitution the kill
+   consumes — so `run & p=$!; kill $p; ps -p $p` is untouched. An inverting
+   `grep -v` and a pattern read from a `-f` file contribute nothing that can
+   anchor.
 14. **Recurse into command substitutions.** A guarded command hidden in a
    `"$(…)"` or backtick `` `…` `` substitution — `echo "$(mktemp -p /tmp x)"`,
    `` x=`grep secret /etc/passwd` `` — isn't tokenized as its own command by the
@@ -997,12 +1055,22 @@ flowing, avoid triggering it:
 - **Routing the same pattern through pids doesn't help.**
   `pgrep -f ginkgo | xargs kill`, `kill $(pgrep -f ginkgo)`, and
   `ps … | grep ginkgo | awk '{print $1}' | xargs kill` are denied on the same
-  pattern rule — the anchor is what's missing, not the spelling. Note that a
-  `grep -v` exclusion never anchors a pipeline, because what reaches the kill is
-  everything it did *not* match. `kill <literal pid>`, `kill -0 <pid>`, and
-  killing your own backgrounded child (`cmd & pid=$!; kill $pid`) are never
-  blocked — those are the rewrites, and they stay out of the rule even in a
-  string that also runs a `pgrep`.
+  pattern rule — the anchor is what's missing, not the spelling. Nor does
+  changing the filter: `ps` is the pid source, so `ps … | awk '/ginkgo/ {print
+  $1}' | xargs kill`, the `sed`/`cut` spellings, and `ps -eo pid= | xargs kill`
+  with no filter at all are denied too. To scope a `ps` pipeline, put the
+  project root's directory name in a **`grep`** stage — that one the hook reads.
+  Note that a `grep -v` exclusion never anchors a pipeline, because what reaches
+  the kill is everything it did *not* match. `kill <literal pid>`,
+  `kill -0 <pid>`, and killing your own backgrounded child
+  (`cmd & pid=$!; kill $pid`, even alongside a `ps -p $pid`) are never blocked —
+  those are the rewrites, and they stay out of the rule even in a string that
+  also runs a `pgrep`.
+- **Don't wrap work in `sh -c '…'` to get it past the hook.** It won't be
+  analyzed, but it won't be approved either: a shell `-c` body makes the whole
+  command string defer instead of earning the silent `allow` a clean guarded
+  command gets, so you trade an allow for a prompt and gain nothing. Write the
+  command directly.
 ```
 
 The plugin also ships a **`reduce-workspace-guard-prompts`** skill: ask Claude
@@ -1285,17 +1353,28 @@ final output.
   A pattern naming a worktree nested under the project root (`.claude/worktrees/*`)
   counts as in-workspace, consistent with the boundary the rest of the hook
   draws.
-- A pattern-fed kill is caught for the filters the hook can read: `pgrep`, and a
-  grep-family stage of a pipeline that also runs `ps`. A filter that isn't one of
-  those is invisible — `ps … | awk '/ginkgo/ {print $1}' | xargs kill` collects
-  no pattern and *defers* rather than denying. (Reading an `awk` program as a
-  pattern was rejected: the `{print $1}` in every real pipeline can never anchor,
-  so it would deny correctly anchored ones too.) A kill wrapped in a quoted
-  string — `xargs -I{} sh -c 'kill {}'` — is a single token to the tokenizer, so
-  it registers as neither a signal nor a pattern-fed kill. Provenance is
-  co-occurrence within one command string rather than dataflow, so a string that
-  both searches by pattern and kills an unrelated non-literal pid is denied
-  though nothing was laundered; `WORKSPACE_GUARD_OVERRIDE` covers it.
+- A pattern-fed kill's pid sources are `pgrep` and `ps`, matched by command
+  word — a wrapper (`busybox ps`, a shell function, a script that kills on your
+  behalf) is not one. Because the source is `ps` and not the stage reading it,
+  the filter can be anything; the cost is that an *anchored* filter the hook
+  can't read doesn't clear the pipeline either, so
+  `ps … | awk '/<this-root>\/x/ {print $1}' | xargs kill` denies. Anchor with a
+  `grep`, or use `WORKSPACE_GUARD_OVERRIDE`. (Reading an `awk` program was
+  rejected as unsafe, not merely imprecise: an inverting `!/<this-root>/` program
+  would scan as anchored while killing every other checkout.) Provenance is
+  co-occurrence within one pipeline or command string rather than dataflow, so a
+  string that both searches by pattern and kills an unrelated non-literal pid is
+  denied though nothing was laundered; the override covers it.
+- **A shell `-c` body is never analyzed.** `sh -c '<body>'` — and the `bash`,
+  `zsh`, `dash`, `ksh` spellings, wherever they appear (`timeout 5 bash -c …`,
+  `xargs -I{} sh -c …`, `find … -exec sh -c … \;`) — puts a whole command string
+  in one token, so nothing inside is checked: not a kill, not an outside read,
+  not a redirect. What the hook does do is refuse to *vouch* for it: such a
+  command suppresses the blanket `allow`, so the string defers to your own
+  permission settings instead of being green-lit. Analyzing the body would also
+  mean judging paths in bodies that don't run on this host at all — a
+  `docker exec … sh -c 'cat /var/lib/…'` names a path inside the container — so
+  it stays unparsed for now.
 - **The PowerShell tool is guarded for a known set of cmdlets, and only those.**
   Claude Code ships two shell tools. Which one a Windows session gets depends on
   whether Git for Windows is installed — without it there is no Bash tool and

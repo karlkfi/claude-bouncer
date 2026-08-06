@@ -2024,6 +2024,11 @@ def classify_taskkill(words):
 # blanket `allow` (a clean guarded command must never speak for a kill); and the
 # pattern operands of the pid *sources* run through the same
 # `kill_operand_anchored` check the kill command's own pattern does.
+#
+# Q60 widened both. The pid source is `ps` itself, not the filter reading it — so
+# a pipeline is caught whatever it filters with, and one with no filter at all
+# (`ps -eo pid= | xargs kill`) is caught too. And `sh -c '<body>'` joins the
+# constructs the hook refuses to vouch for, since the body is one opaque token.
 
 SIGNAL_CMDS = frozenset({'kill', 'pkill', 'killall', 'taskkill'})
 
@@ -2034,11 +2039,20 @@ SIGNAL_CMDS = frozenset({'kill', 'pkill', 'killall', 'taskkill'})
 # string with a `pgrep`.
 LITERAL_PID_RE = re.compile(r'^(?:\d+|%[-+%A-Za-z0-9_]*)$')
 
-# grep-family rows whose leading positional is a pattern (see SPEC). `awk` is
-# deliberately absent: its program is a pattern in principle, but the `{print $1}`
-# that appears in every real pipeline can never anchor, so counting it would deny
-# correctly anchored pipelines.
+# grep-family rows whose leading positional is a pattern (see SPEC). `awk` and
+# the other filters are deliberately absent: none of them is the pid source. `ps`
+# is (see below), and the filter only decides which of its rows survive — so a
+# pipeline is caught whatever it filters with, and reading an awk program is
+# never needed. (Q60)
 GREP_LIKE = frozenset({'grep', 'rg'})
+
+# Shells whose `-c` operand is a command string the hook cannot read. The body is
+# one token to the tokenizer, so nothing in it is checked — which means the hook
+# must not speak for it either: a group carrying one clears `guarded`, so the
+# string defers instead of emitting the blanket `allow`. Same principle as the
+# signalling-command suppression above, applied to a second opaque construct.
+# The body itself stays unanalyzed; see README Limitations. (Q60)
+SHELL_C_CMDS = frozenset({'sh', 'bash', 'zsh', 'dash', 'ksh'})
 
 # Stand-in for a grep-family pattern the hook cannot read — `grep -f patterns.txt`
 # takes its patterns from a file, and an invocation may carry no pattern operand
@@ -2080,6 +2094,26 @@ def signal_command(tokens):
             if native_cmd_name(t) in SIGNAL_CMDS:
                 return (native_cmd_name(t), True)
     return None
+
+
+def shell_c_group(tokens):
+    """True when the group runs a shell `-c` command string (see SHELL_C_CMDS).
+
+    Every token is scanned rather than just the command word, because the shell
+    is usually not it: `timeout 5 bash -c …`, `xargs -I{} sh -c …` and
+    `find . -exec sh -c … \\;` all carry a body the hook cannot read. A plain
+    scan can only over-report, which costs a defer rather than a silent allow.
+
+    Only a short-option cluster counts as the flag, so `-c`, `-lc` and `-euc`
+    fire while `bash --version` and a long `--config=…` do not.
+    """
+    for i, t in enumerate(tokens):
+        if os.path.basename(t) not in SHELL_C_CMDS:
+            continue
+        if any(u.startswith('-') and not u.startswith('--') and 'c' in u[1:]
+               for u in tokens[i+1:]):
+            return True
+    return False
 
 
 def pgrep_operands(tokens):
@@ -2816,7 +2850,9 @@ def resolve_native_path(raw, cwd):
 # What one command string said about process signalling, merged across its
 # command-substitution bodies (issue 125 follow-up):
 #   signal    — name of a signalling command seen anywhere, else None. Its mere
-#               presence suppresses the blanket `allow`.
+#               presence suppresses the blanket `allow`. Also set to `'sh -c'`
+#               by an unreadable shell `-c` body, which the hook must not speak
+#               for either (Q60).
 #   launder   — name of a signalling command whose target could have come from a
 #               pattern (see signal_command), else None.
 #   patterns  — (text, anchored) for every pid-source pattern collected.
@@ -2835,10 +2871,11 @@ def analyze_command(cmd, ctx, base_cwd, depth=0):
     additionally reports what the string said about process signalling. Two
     things happen with that here, both of them once for the whole string:
 
-    * ``guarded`` is cleared when anything in the string signals a process. A
-      clean guarded command must never launder a kill — ``allow`` speaks for the
-      WHOLE string and short-circuits the user's own permission settings, so
-      ``grep x f | xargs kill`` defers instead.
+    * ``guarded`` is cleared when anything in the string signals a process, or
+      hides one behind a shell ``-c`` body. A clean guarded command must never
+      speak for either — ``allow`` speaks for the WHOLE string and
+      short-circuits the user's own permission settings, so ``grep x f | xargs
+      kill`` and ``grep x f && sh -c '…'`` defer instead.
     * A launderable kill whose pid-source patterns ALL fail the workspace anchor
       test becomes one ``'kill'`` offender, the same category and message
       ``pkill`` produces. "Any pattern anchors ⇒ no offender" mirrors the
@@ -2870,6 +2907,9 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0):
     offender on its own.
     """
     proj, cwd = ctx.proj, base_cwd
+    # Kept under its own name because the group loop below reuses `depth` as the
+    # paren-nesting counter, clobbering the parameter.
+    subst_depth = depth
     if not cmd.strip():
         return [], False, KillFacts(None, None, [])
 
@@ -3104,7 +3144,9 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0):
     # sources after the loop, so a `ps` segment counts wherever in its pipeline
     # it sits rather than only before the grep.
     signal, launder, patterns = None, None, []
-    ps_pipes, grep_pats = set(), []
+    # `kill_pipes` numbers the pipelines holding a launderable kill, so a `ps`
+    # only counts as that kill's pid source when pids can actually reach it.
+    ps_pipes, grep_pats, kill_pipes = set(), [], set()
     for g, g_redir, persists, pipe in groups:
         # Substitute known literals for path checking. The pre-substitution
         # tokens are kept for assignment parsing below — bash decides what is
@@ -3165,6 +3207,12 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0):
             signal = signal or sig[0]
             if sig[1]:
                 launder = launder or sig[0]
+                kill_pipes.add(pipe)
+        elif shell_c_group(g):
+            # An unreadable command string: suppress `allow` the same way a
+            # signalling command does. Checked in the `elif` so a group that is
+            # BOTH (`xargs sh -c 'kill …'`) keeps its signal classification.
+            signal = signal or 'sh -c'
         if os.path.basename(g[0]) == 'ps':
             ps_pipes.add(pipe)
         pg = pgrep_operands(g)
@@ -3272,6 +3320,27 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0):
     for grep_pipe, text, anchored in grep_pats:
         if grep_pipe in ps_pipes:
             patterns.append((text, anchored))
+
+    # `ps` is itself a pid source, and an unreadable one — the hook is not going
+    # to parse `-eo` format strings. Contributing the stand-in is what catches a
+    # pipeline whose filter is not a grep (`awk '/x/ {print $1}'`, `sed -n`,
+    # `cut -f1`) and one with no filter at all (`ps -eo pid= | xargs kill`),
+    # without reading any filter program. A readable grep pattern in the same
+    # pipeline still ANCHORS it, under the unchanged any-pattern-anchors rule.
+    #
+    # Unlike a grep pattern, which is promoted string-wide, this needs the pids
+    # to be able to REACH the kill: a grep pattern is readable, so an unanchored
+    # one is evidence of intent to select processes by name wherever it sits,
+    # whereas a bare `ps` says nothing until it is wired to a kill. So it counts
+    # in the launderable kill's own pipeline, or anywhere inside a substitution
+    # body (whose output the enclosing command consumes by definition, which is
+    # what catches `kill $(ps -eo pid= | head -1)`).
+    #
+    # That requirement is load-bearing: without it the rule denies the commonest
+    # debugging idiom there is — `./run.sh & p=$!; kill $p; ps -p $p` — where the
+    # `ps` is a CONSUMER of an already-known pid, in its own group. (Q60)
+    if (ps_pipes & kill_pipes) or (subst_depth > 0 and ps_pipes):
+        patterns.append((UNREADABLE_PATTERN, False))
 
     # Recurse into command-substitution bodies — `"$(mktemp)"`, backtick
     # `` `cat /outside` ``, and the bare `$(…)` the group loop also split out

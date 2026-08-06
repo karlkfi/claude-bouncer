@@ -5,7 +5,7 @@ Single source of truth for progress and priorities in workspace-guard. Pick the 
 **Status:** 🔲 ready · 🚫 blocked
 **Size:** S = one session/PR · M = 2–3 sessions · L = needs a plan doc under `docs/plan/`
 **Labels:** `security` `tests` `docs` `infra` `bug` `parsing` `retro`
-**Next ID:** Q61
+**Next ID:** Q64
 
 **Maintaining this file:** see [`docs/development/maintaining-backlog.md`](development/maintaining-backlog.md).
 
@@ -15,7 +15,9 @@ Specific actionable items in priority order. Pick from the top; skip 🚫 items 
 
 | ID | Item | Labels | St | Sz | Notes |
 |---|---|---|---|---|---|
-| <a id="Q60"></a>Q60 | Catch a pattern-fed kill whose filter isn't grep | `security` | 🔲 | M | `ps \| awk '/pat/ {print $1}' \| xargs kill` collects no pattern and defers; so does a kill wrapped in `sh -c '…'`. Reading an awk program as a pattern would deny every anchored pipeline, so this needs real pid provenance. See [plan](plan/pattern-fed-kill-deny.md). |
+| <a id="Q61"></a>Q61 | Analyze the body of a shell `-c` command | `security` | 🔲 | M | The body is one opaque token, so no read, write or kill inside it is checked; Q60 only stopped the hook vouching for it. Recursing needs a container-exec exclusion first — see [plan](plan/q60-ps-pid-source.md). |
+| <a id="Q62"></a>Q62 | Stop a `kill -0` liveness probe reading as a launderable kill | `bug` | 🔲 | S | `kill -0` sends no signal, but any non-literal operand marks it launderable, so `while kill -0 $(pgrep -f x)` denies. Exempt the `-0` flag in `signal_command`. |
+| <a id="Q63"></a>Q63 | Restore the command-substitution recursion cap | `bug` | 🔲 | S | `MAX_SUBST_DEPTH` never fires: `_analyze_command` reuses `depth` as the paren counter before the guard reads it, so 40 nested `$(…)` still recurse. Latent — it errs toward more analysis. |
 
 ## Deferred
 

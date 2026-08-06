@@ -121,9 +121,15 @@ pid it derived some other way; `WORKSPACE_GUARD_OVERRIDE=<reason>` covers it.
 * **A filter that isn't grep is invisible.** `ps … | awk '/ginkgo/ {print $1}' |
   xargs kill` collects no pattern, so it defers rather than denies. Treating an
   `awk` program as a pattern would make the common `awk '{print $1}'` an
-  unanchorable pattern and deny every correctly anchored pipeline. Queued as Q60.
+  unanchorable pattern and deny every correctly anchored pipeline. Closed since,
+  as [Q60](q60-ps-pid-source.md) — by moving the pid source off the filter and
+  onto `ps`, so no filter has to be read. The reasoning here understated the
+  case against reading `awk`: it is also *unsafe*, since an inverting program
+  scans as anchored.
 * **A kill inside a quoted `sh -c` string** (`xargs -I{} sh -c 'kill {}'`) is one
   token to the tokenizer, so it reads as neither a signal nor a launderable kill.
+  Half-closed by [Q60](q60-ps-pid-source.md): such a string no longer earns the
+  blanket `allow`. The body is still unparsed — that is Q61.
 * **Bash only.** PowerShell's `Stop-Process` got its own anchor rule in PR 130,
   but not the `allow` suppression of Part 1 — a clean `Get-Content` in the same
   statement still spoke for the kill there. Closed since, as Q59.

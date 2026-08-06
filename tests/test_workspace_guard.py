@@ -5218,6 +5218,37 @@ class SignalCommandTests(unittest.TestCase):
                          ("kill", False))
 
 
+class ShellCGroupTests(unittest.TestCase):
+    """Which groups carry a shell `-c` body the hook cannot read (Q60)."""
+
+    def test_the_shell_spellings(self):
+        for toks in (["sh", "-c", "kill 1"], ["bash", "-c", "x"],
+                     ["zsh", "-c", "x"], ["dash", "-c", "x"],
+                     ["ksh", "-c", "x"], ["/bin/sh", "-c", "x"],
+                     ["bash", "-lc", "x"], ["bash", "-euc", "x"]):
+            self.assertTrue(guard.shell_c_group(toks), toks)
+
+    def test_the_shell_is_usually_not_the_command_word(self):
+        # The wrappers that actually appear in real command strings.
+        for toks in (["timeout", "5", "bash", "-c", "x"],
+                     ["xargs", "-I{}", "sh", "-c", "kill {}"],
+                     ["find", ".", "-exec", "sh", "-c", "cat {}", ";"],
+                     ["env", "FOO=1", "sh", "-c", "x"]):
+            self.assertTrue(guard.shell_c_group(toks), toks)
+
+    def test_a_long_option_is_not_the_c_flag(self):
+        # `--version` and `--config=…` both contain a `c`; neither is `-c`.
+        for toks in (["bash", "--version"], ["sh", "--help"],
+                     ["bash", "--config=x"], ["bash", "script.sh"],
+                     ["bash"]):
+            self.assertFalse(guard.shell_c_group(toks), toks)
+
+    def test_a_c_flag_on_a_non_shell_does_not_fire(self):
+        for toks in (["grep", "-c", "foo", "f.txt"], ["sort", "-c", "f.txt"],
+                     ["ps", "aux"], []):
+            self.assertFalse(guard.shell_c_group(toks), toks)
+
+
 class PidSourcePatternTests(unittest.TestCase):
     """Pattern extraction from the commands that produce a pid list."""
 
@@ -5402,6 +5433,173 @@ class PatternFedKillEndToEndTests(unittest.TestCase):
     def test_bypass_mode_still_denies(self):
         self._decision('pgrep -f ginkgo | xargs -r kill', "deny",
                        permission_mode="bypassPermissions")
+
+
+class PsPidSourceEndToEndTests(unittest.TestCase):
+    """`ps` is the pid source, so the filter reading it need not be a grep (Q60).
+
+    No process is ever signalled: the hook reads the command as a JSON string
+    and the test never invokes bash on it.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.base = os.path.realpath(self._tmp.name)
+        self.workspace = os.path.join(self.base, "wt-a")
+        os.mkdir(self.workspace)
+        with open(os.path.join(self.workspace, "in.txt"), "w") as f:
+            f.write("hello\n")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _out(self, cmd, **kw):
+        return run_hook(cmd, self.workspace, project_dir=self.workspace, **kw)
+
+    def _decision(self, cmd, expected, **kw):
+        out = self._out(cmd, **kw)
+        if expected == "defer":
+            self.assertIsNone(out, f"expected defer for {cmd!r}, got {out!r}")
+            return None
+        self.assertIsNotNone(out, f"expected a decision, got defer for: {cmd!r}")
+        got = out["hookSpecificOutput"]["permissionDecision"]
+        self.assertEqual(got, expected, f"expected {expected!r} for {cmd!r}")
+        return out["hookSpecificOutput"]["permissionDecisionReason"]
+
+    def test_a_filter_that_is_not_grep_no_longer_escapes(self):
+        # Each measured at d076eb4 as a defer. All kill the same processes as the
+        # already-denied `pkill -f ginkgo`.
+        for cmd in ("ps -eo pid,command | awk '/ginkgo/ {print $1}' "
+                    "| xargs -r kill",
+                    "ps aux | awk '/ginkgo/ {print $2}' | xargs kill -9",
+                    "ps -eo pid,command | sed -n '/ginkgo/s/^ *\\([0-9]*\\).*"
+                    "/\\1/p' | xargs kill",
+                    "ps -eo pid,command | cut -d' ' -f1 | xargs kill",
+                    "ps -eo pid,command | head -5 | awk '{print $1}' "
+                    "| xargs kill"):
+            self._decision(cmd, "deny")
+
+    def test_a_pipeline_with_no_filter_at_all_is_caught(self):
+        # The shape the grep-as-source framing could never see: nothing to read.
+        self._decision('ps -eo pid= | xargs kill', "deny")
+        self._decision('ps -eo pid= | xargs -r kill -9', "deny")
+
+    def test_an_anchored_grep_still_clears_the_pipeline(self):
+        # The ps stand-in never anchors, but the unchanged any-pattern-anchors
+        # rule means a readable grep pattern in the same pipeline still does.
+        for cmd in ("ps -eo pid,command | grep 'wt-a/bin/server' "
+                    "| awk '{print $1}' | xargs -r kill",
+                    "ps aux | grep wt-a/api | cut -d' ' -f1 | xargs kill"):
+            self._decision(cmd, "defer")
+
+    def test_an_anchored_awk_program_still_denies(self):
+        # The documented cost. The hook cannot read an awk program, and reading
+        # one would be unsafe rather than imprecise: an inverting program
+        # (`!/wt-a/`) would read as anchored while killing every other checkout.
+        self._decision("ps -eo pid,command | awk '/wt-a\\/ginkgo/ {print $1}' "
+                       "| xargs -r kill", "deny")
+
+    def test_the_background_child_idiom_is_untouched(self):
+        # `ps -p $pid` CONSUMES a pid the shell already knows; it is in its own
+        # group, so no pids flow to the kill. Two real corpus commands have this
+        # shape — without the same-pipeline rule the guard would deny them.
+        for cmd in ('./run.sh & pid=$!; sleep 2; kill -TERM $pid; '
+                    'ps -p $pid >/dev/null && echo alive',
+                    'make check & p=$!; kill $p; ps -p $p',
+                    'ps aux > ./procs.txt; kill $p',
+                    'ps aux; kill $p'):
+            self._decision(cmd, "defer")
+
+    def test_a_ps_pipeline_with_no_kill_is_unaffected(self):
+        # No launderable kill, so the ps contributes nothing and each pipeline
+        # keeps the verdict its own commands earn: `awk` is guarded, `cut` isn't.
+        self._decision("ps aux | awk '{print $1}'", "allow")
+        self._decision("ps -eo pid,command | cut -d' ' -f1", "defer")
+
+    def test_awk_outside_a_ps_pipeline_is_not_a_pid_source(self):
+        self._decision("awk '/ginkgo/ {print $1}' ./in.txt", "allow")
+        self._decision("cat ./in.txt | awk '{print $1}' | xargs kill", "defer")
+
+    def test_the_substitution_boundary(self):
+        # A body's output is consumed by the enclosing command by definition, so
+        # a `ps` anywhere in one reaches an outer launderable kill.
+        self._decision('kill $(ps -eo pid= | head -1)', "deny")
+        self._decision('kill "$(ps aux | awk \'/ginkgo/ {print $1}\')"', "deny")
+        self._decision("kill $(ps -eo pid,command | grep wt-a/api "
+                       "| awk '{print $1}')", "defer")
+
+    def test_a_literal_pid_kill_is_not_laundering(self):
+        self._decision("ps -eo pid,command | awk '{print $1}'; kill 1234",
+                       "defer")
+
+    def test_reason_names_the_unreadable_source(self):
+        r = self._decision("ps -eo pid= | xargs kill", "deny")
+        self.assertIn("Unanchored process kill", r)
+        self.assertIn(guard.UNREADABLE_PATTERN, r)
+        self.assertIn("WORKSPACE_GUARD_OVERRIDE", r)
+
+    def test_override_downgrades_to_ask(self):
+        out = self._out("ps -eo pid= | xargs kill",
+                        env_extra={"WORKSPACE_GUARD_OVERRIDE": "stuck harness"})
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "ask")
+
+    def test_bypass_mode_still_denies(self):
+        self._decision("ps -eo pid= | xargs kill", "deny",
+                       permission_mode="bypassPermissions")
+
+
+class ShellCSuppressesAllowTests(unittest.TestCase):
+    """A shell `-c` body is opaque, so the hook must not vouch for it (Q60).
+
+    Measured at d076eb4: `cat in.txt; sh -c 'cat /q60-fake-target'` came back
+    `allow`, green-lighting an unreadable outside read. The body stays
+    unanalyzed — only the blanket `allow` goes away. Targets are synthetic
+    (repo rule); nothing here is ever executed.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = os.path.realpath(self._tmp.name)
+        with open(os.path.join(self.workspace, "in.txt"), "w") as f:
+            f.write("hello\n")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _decision(self, cmd, expected):
+        out = run_hook(cmd, self.workspace, project_dir=self.workspace)
+        if expected == "defer":
+            self.assertIsNone(out, f"expected defer for {cmd!r}, got {out!r}")
+            return None
+        self.assertIsNotNone(out, f"expected a decision, got defer for: {cmd!r}")
+        got = out["hookSpecificOutput"]["permissionDecision"]
+        self.assertEqual(got, expected, f"expected {expected!r} for {cmd!r}")
+        return out["hookSpecificOutput"]["permissionDecisionReason"]
+
+    def test_a_clean_guarded_command_no_longer_speaks_for_a_body(self):
+        for cmd in ("cat in.txt; sh -c 'pkill -f ginkgo'",
+                    "grep foo in.txt && sh -c 'kill 1234'",
+                    "cat in.txt; sh -c 'cat /q60-fake-target'",
+                    "cat in.txt; sh -c 'echo x > /q60-fake-target'",
+                    "cat in.txt | xargs -I{} sh -c 'kill {}'",
+                    "cat in.txt; timeout 5 bash -c 'pkill -f ginkgo'",
+                    "cat in.txt; find . -exec sh -c 'kill 1' \\;"):
+            self._decision(cmd, "defer")
+
+    def test_a_body_on_its_own_still_defers(self):
+        # No guarded command to suppress; the body remains unanalyzed.
+        for cmd in ("sh -c 'pkill -f ginkgo'", "sh -c 'cat /q60-fake-target'",
+                    "bash -c 'kill $(pgrep -f ginkgo)'"):
+            self._decision(cmd, "defer")
+
+    def test_a_shell_without_the_c_flag_still_allows(self):
+        for cmd in ("cat in.txt; bash --version", "cat in.txt; sh --help",
+                    "cat in.txt; bash ./script.sh"):
+            self._decision(cmd, "allow")
+
+    def test_an_ordinary_guarded_command_still_allows(self):
+        self._decision("cat in.txt", "allow")
+        self._decision("grep -c foo in.txt", "allow")
 
 
 class SiblingSessionScratchE2ETests(unittest.TestCase):
