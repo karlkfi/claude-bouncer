@@ -1,6 +1,6 @@
 # Agent reference: Cutting a release
 
-A release is three artifacts that must agree: the **version string** (in two files), an **annotated git tag**, and a **GitHub Release**. This doc is the checklist for producing all three consistently. Releases are the one place where a commit lands on `main` without a PR — that exception is deliberate and scoped to the version bump only (see §The direct-to-main exception).
+A release is four artifacts that must agree: the **version string** (in two files), a **notes file** under [`docs/releases/`](../releases/), an **annotated git tag**, and a **GitHub Release**. This doc is the checklist for producing all four consistently. Releases are the one place where a commit lands on `main` without a PR — that exception is deliberate and scoped to the version bump only (see §The direct-to-main exception).
 
 ## The version string lives in exactly two files
 
@@ -29,21 +29,25 @@ grep -rn '"version"' .claude-plugin/
    python3 -m unittest discover tests
    ```
 
-3. **Bump both version files** to the new `X.Y.Z`. Patch (`Z`) for fixes, docs, and packaging; minor (`Y`) for new guarded commands or hook surface; major (`X`) for a default-behavior change. Most releases are patch.
+3. **Pick `X.Y.Z`.** Patch (`Z`) for fixes, docs, and packaging; minor (`Y`) for new guarded commands or hook surface; major (`X`) for a default-behavior change. Most releases are patch. The notes file is named after it, so the choice comes first.
 
-4. **Commit the bump alone** — no other changes in this commit:
+4. **Write the notes to `docs/releases/vX.Y.Z.md` and land them through a pull request (PR).** See §Release notes for drafting the body and [`docs/releases/README.md`](../releases/README.md) for what belongs in the file. Landing them before the bump is what puts a tag's own notes inside the tagged commit, and it is the only step that gets the prose reviewed.
+
+5. **Bump both version files** to `X.Y.Z`.
+
+6. **Commit the bump alone** — no other changes in this commit:
 
    ```
    git commit -am "chore(release): bump version to X.Y.Z"
    ```
 
-5. **Push the bump straight to `main`** (see §The direct-to-main exception):
+7. **Push the bump straight to `main`** (see §The direct-to-main exception):
 
    ```
    git push origin HEAD:main
    ```
 
-6. **Tag the bump commit** with an annotated tag whose message is just the version:
+8. **Tag the bump commit** with an annotated tag whose message is just the version:
 
    ```
    git tag -a vX.Y.Z -m "vX.Y.Z" <bump-commit-sha>
@@ -52,13 +56,13 @@ grep -rn '"version"' .claude-plugin/
 
    **Both pushes need an interactive permission mode.** branch-guard confirms any push whose target isn't the worktree branch, which covers `main` *and* the tag. Under `auto`/`dontAsk` there is nobody to answer, so both are denied outright — retrying won't help. Run the session interactively, or hand the two commands over to be run in a terminal. Create the tag in its own command: chained as `git tag … && git push …`, the deny takes out the `git tag` too and the tag never gets created.
 
-7. **Create the GitHub Release** on that tag, marked latest:
+9. **Create the GitHub Release** on that tag, marked latest, from the notes file:
 
    ```
-   gh release create vX.Y.Z --title "vX.Y.Z" --latest --notes "..."
+   gh release create vX.Y.Z --title "vX.Y.Z" --latest --notes-file docs/releases/vX.Y.Z.md
    ```
 
-   See §Release notes for the body format.
+   Never pass `--notes` inline or leave the body to the web form — that is the habit this file layout exists to break. To correct a published body, fix the file, land the fix, and re-publish with `gh release edit vX.Y.Z --notes-file docs/releases/vX.Y.Z.md`.
 
 ## The direct-to-main exception
 
@@ -68,11 +72,13 @@ This is the *only* sanctioned direct-to-main push. It is narrow by design: a two
 
 ## Release notes
 
-Match the established format (`gh release view v1.0.1` for a reference):
+Every published body is in [`docs/releases/`](../releases/), so read a real one rather than guessing. [`v1.0.2.md`](../releases/v1.0.2.md) is the shape of a routine patch; [`v1.8.0.md`](../releases/v1.8.0.md) is the shape of a large release — grouped sections, a `> [!IMPORTANT]` callout for a behavior change an upgrader will feel, and a closing line stating what was validated.
+
+The invariants:
 
 - A one-line intro summarizing the release theme (e.g. "Patch release: a parsing hardening fix and docs improvements.").
 - A bullet per notable PR: `* <title> by @<author> in <PR-url>`. Curate — highlight user-facing changes; routine chores can be folded into the changelog link.
-- A trailing `**Full Changelog**: https://github.com/karlkfi/claude-workspace-guard/compare/v<PREV>...vX.Y.Z` line.
+- A trailing `**Full Changelog**: https://github.com/karlkfi/claude-workspace-guard/compare/v<PREV>...vX.Y.Z` line. It 404s until the tag is pushed; that is expected while the notes PR is in review.
 
 To enumerate what shipped since the last tag:
 
@@ -80,7 +86,14 @@ To enumerate what shipped since the last tag:
 git log --oneline v<PREV>..HEAD
 ```
 
-`gh release create ... --generate-notes` produces a usable first draft in this shape; edit the intro line and prune the bullets before publishing.
+For a first draft in the bullet shape, generate the notes into the file directly. This endpoint only computes a body — it creates and modifies nothing, so it is safe to run before the tag exists:
+
+```
+gh api repos/karlkfi/claude-workspace-guard/releases/generate-notes \
+  -f tag_name=vX.Y.Z -f previous_tag_name=v<PREV> --jq .body > docs/releases/vX.Y.Z.md
+```
+
+Then write the intro, prune the bullets, and group them. Do not reach for `gh release create --generate-notes`: it publishes an unreviewed body and leaves no file behind.
 
 ## Anti-patterns to watch for
 
@@ -89,3 +102,5 @@ git log --oneline v<PREV>..HEAD
 - **Bundling code or docs into the bump commit.** That turns the sanctioned direct-to-main push into an unsanctioned one. Land everything else first, then bump.
 - **Tagging before pushing the bump.** Push `main` first, then tag the commit that's now on `main`, so the tag is never orphaned on a branch.
 - **Skipping the GitHub Release.** A tag without a Release breaks the "Full Changelog" chain and the Latest marker; every prior tag has a matching Release.
+- **Writing the body anywhere but the file.** An inline `--notes`, a `--generate-notes`, or a paste into the web form all ship prose nobody reviewed and leave `docs/releases/` missing a version. Same for fixing a typo on github.com: the file is the source of truth, so the next `--notes-file` publish reverts the fix silently.
+- **Bundling the notes PR into the bump commit.** The notes are ordinary docs and go through review; the bump stays a pure two-line change. Land the notes first, then bump.
