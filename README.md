@@ -51,8 +51,9 @@ The hook produces one of four outcomes:
   instead of prompting, the hook steers you to a repo-local gitignored scratch
   dir (`./tmp/`). It's also the default for **writes into a sibling checkout of
   the same repo** when the session runs in a git worktree, and for a
-  **process kill that names no path in this workspace** (both below).
-  Configurable down to `ask`; see [Configuration](#configuration).
+  **process kill that names no path in this workspace** — whether the pattern is
+  the kill's own (`pkill -f`) or reached it through a `pgrep`/`ps | grep` (all
+  below). Configurable down to `ask`; see [Configuration](#configuration).
 - **defer** — the hook stays silent; your normal permission settings apply.
 
 Guarded commands: `grep` (and `egrep`, `fgrep`), `rg`, `sed`, `awk` (and
@@ -70,7 +71,8 @@ shell performs regardless of the command word.
 
 Process kills are guarded too, though they touch no file: `pkill`/`killall` and
 PowerShell's `Stop-Process` signal a process by *pattern* or by *name*, which
-reaches every checkout on the host. See
+reaches every checkout on the host — and so does a `kill` fed pids by a `pgrep`
+or a `ps | grep`. See
 [Unanchored process-kill deny](#unanchored-process-kill-deny).
 
 The same outside-workspace check also runs on Claude's **native file tools**, so
@@ -180,7 +182,14 @@ project's scratch still asks entirely.
 | `pkill -u karl` (no pattern at all)  | **deny** |
 | `killall node`                       | **deny** |
 | `pkill -f "<this-root>/.build/ginkgo"` (anchored) | defer |
-| `kill 1234` · `pgrep -fl ginkgo`     | defer    |
+| `kill $(pgrep -f ginkgo)` · `pgrep -f ginkgo \| xargs -r kill` | **deny** |
+| `ps -eo pid,command \| grep ginkgo \| awk '{print $1}' \| xargs kill` | **deny** |
+| `for p in $(pgrep -f ginkgo); do kill $p; done` | **deny** |
+| `pgrep -f "<this-root>/bin/x" \| xargs -r kill` (anchored) | defer |
+| `kill 1234` · `kill -0 1234` · `kill $pid` | defer |
+| `pgrep -fl ginkgo` · `pgrep -f ginkgo; kill 1234` | defer |
+| `cat in.txt && kill 1234` (clean read, but signals) | defer |
+| `ps aux \| grep ginkgo` (no kill in the string) | allow |
 | `ls /etc` (unguarded, no redirect)   | defer    |
 | `mktemp --version` (creates nothing) | defer    |
 | `echo '$(mktemp -d)'` (single-quoted, no subst) | defer |
@@ -377,6 +386,53 @@ An **anchored** kill *defers* rather than emitting `allow`: it's out of this
 hook's scope, and an `allow` would short-circuit your own permission settings on
 a destructive command. `kill <pid>` is untouched — killing by pid is the rewrite
 the deny recommends, not a hazard.
+
+#### Kills fed by a pattern, not by a name
+
+The same blind kill dodges a rule that keys on the *command* by deriving pids
+from a pattern instead:
+
+```
+kill $(pgrep -f ginkgo)
+pgrep -f ginkgo | xargs -r kill
+ps -eo pid,command | grep ginkgo | grep -v grep | awk '{print $1}' | xargs -r kill
+for p in $(pgrep -f ginkgo); do kill $p; done
+```
+
+Every one of these kills exactly what `pkill -f ginkgo` kills. The third was the
+worst case: `grep` and `awk` are clean guarded commands, so the hook used to emit
+its blanket `allow` for the whole string *including the kill* — actively
+green-lighting it rather than merely missing it.
+
+Two rules close that. First, **a clean guarded command never speaks for a kill**:
+if anything in the command string signals a process, the hook emits nothing
+instead of `allow`, so your own permission settings still get their say. Second,
+the **pattern that produced the pids is checked as if it were the kill's own** —
+`pgrep`'s pattern operands, and the pattern of a `grep` filtering `ps` output,
+run through the same anchor test, and a launderable kill with no anchoring
+pattern is denied with the same message and the same override.
+
+What counts as *launderable* is the narrow part: a `kill` whose operands are all
+literal pids or job specs was demonstrably not fed by a pattern, so it stays out
+of the rule even when it shares a command string with a `pgrep`.
+
+```
+pgrep -f ginkgo | xargs -r kill              # -> deny
+pgrep -f "<this-root>/bin/x" | xargs kill    # anchored -> defer
+pgrep -f ginkgo; kill 1234                   # literal pid -> defer
+kill $pid                                    # no pattern in the string -> defer
+```
+
+An **exclusion** can't anchor a pipeline: `grep -v` removes the pids it matches
+rather than selecting them, so `ps … | grep ginkgo | grep -v "<this-root>/skip"`
+still denies — what reaches the kill is every *other* checkout's `ginkgo`. A
+pattern the hook can't read (`grep -f patterns.txt`) can't clear a pipeline
+either; it reports as unreadable rather than as absent.
+
+Provenance here is co-occurrence within one command string, not dataflow: the
+hook doesn't prove the pids the kill receives came from the pattern it found. The
+literal-pid rule removes the case where that would matter, and
+`WORKSPACE_GUARD_OVERRIDE=<reason>` covers the remainder.
 
 #### PowerShell: `Stop-Process`
 
@@ -767,6 +823,17 @@ through the same boundary rules and produce the same reasons. Symlink staging
    looked for across the whole statement there, since the anchored form is a
    `Where-Object` filter upstream in the pipeline. See
    [Unanchored process-kill deny](#unanchored-process-kill-deny).
+   The same step covers a kill fed by a pattern rather than named by one, in the
+   Bash tool. Any signalling command in the string (`kill`, `pkill`, `killall`,
+   directly or as an `xargs` command word) suppresses the blanket `allow` a clean
+   guarded command would otherwise earn, so a `grep` can never carry an
+   `xargs kill` past your permission settings — `allow` speaks for the whole
+   string. (The PowerShell frontend does not do this yet.) And the pattern
+   operands of the pid *sources* — `pgrep`'s, and those of a `grep` in a pipeline
+   that also contains `ps` — go through the anchor test above; a `kill` whose
+   operands aren't all literal pids, with no anchoring pattern anywhere in the
+   string, is `deny`ed as one. An inverting `grep -v` and a pattern read from a
+   `-f` file contribute nothing that can anchor.
 14. **Recurse into command substitutions.** A guarded command hidden in a
    `"$(…)"` or backtick `` `…` `` substitution — `echo "$(mktemp -p /tmp x)"`,
    `` x=`grep secret /etc/passwd` `` — isn't tokenized as its own command by the
@@ -873,12 +940,21 @@ flowing, avoid triggering it:
   root's directory name in the pattern as a path component with a separator
   (`pkill -f "<root-dirname>/.build/ginkgo"`), which is allowed through. A bare
   word doesn't count as an anchor, nor does a pattern with an unexpanded `$VAR`
-  in it. `kill <pid>` is never blocked. In PowerShell the same rule applies to
+  in it. In PowerShell the same rule applies to
   `Stop-Process`: `-Name` and an unfiltered `Get-Process … | Stop-Process` are
   denied, `Stop-Process -Id <literal pid>` is never blocked, and the anchored
   form is `Get-Process | Where-Object { $_.Path -like '<root>\*' } |
   Stop-Process`. For a deliberate cross-workspace kill, set
   `WORKSPACE_GUARD_OVERRIDE=<reason>`.
+- **Routing the same pattern through pids doesn't help.**
+  `pgrep -f ginkgo | xargs kill`, `kill $(pgrep -f ginkgo)`, and
+  `ps … | grep ginkgo | awk '{print $1}' | xargs kill` are denied on the same
+  pattern rule — the anchor is what's missing, not the spelling. Note that a
+  `grep -v` exclusion never anchors a pipeline, because what reaches the kill is
+  everything it did *not* match. `kill <literal pid>`, `kill -0 <pid>`, and
+  killing your own backgrounded child (`cmd & pid=$!; kill $pid`) are never
+  blocked — those are the rewrites, and they stay out of the rule even in a
+  string that also runs a `pgrep`.
 ```
 
 The plugin also ships a **`reduce-workspace-guard-prompts`** skill: ask Claude
@@ -1144,10 +1220,10 @@ final output.
   (fail-safe: the deny is never applied on uncertainty, so the boundary is never
   weakened). A main-checkout session is a deliberate no-op even when worktrees
   exist.
-- The unanchored-kill deny covers `pkill` and `killall` in the Bash tool, and
-  `Stop-Process` in the PowerShell tool. `taskkill` is checked in **neither**,
-  and neither is a kill routed through something the hook doesn't parse
-  (`xargs kill`, a script that kills on your behalf). `Get-Process -Id 1234 |
+- The unanchored-kill deny covers `pkill`, `killall`, and a pattern-fed `kill`
+  in the Bash tool, and `Stop-Process` in the PowerShell tool. `taskkill` is
+  checked in **neither**, and neither is a kill routed through something the hook
+  doesn't parse (a script that kills on your behalf). `Get-Process -Id 1234 |
   Stop-Process` denies even though the pid is literal — it's bound on the
   upstream cmdlet, which the kill rule doesn't read; write `Stop-Process -Id 1234`.
   Anchoring is also *lexical*, which cuts both ways: a process
@@ -1159,6 +1235,17 @@ final output.
   A pattern naming a worktree nested under the project root (`.claude/worktrees/*`)
   counts as in-workspace, consistent with the boundary the rest of the hook
   draws.
+- A pattern-fed kill is caught for the filters the hook can read: `pgrep`, and a
+  grep-family stage of a pipeline that also runs `ps`. A filter that isn't one of
+  those is invisible — `ps … | awk '/ginkgo/ {print $1}' | xargs kill` collects
+  no pattern and *defers* rather than denying. (Reading an `awk` program as a
+  pattern was rejected: the `{print $1}` in every real pipeline can never anchor,
+  so it would deny correctly anchored ones too.) A kill wrapped in a quoted
+  string — `xargs -I{} sh -c 'kill {}'` — is a single token to the tokenizer, so
+  it registers as neither a signal nor a pattern-fed kill. Provenance is
+  co-occurrence within one command string rather than dataflow, so a string that
+  both searches by pattern and kills an unrelated non-literal pid is denied
+  though nothing was laundered; `WORKSPACE_GUARD_OVERRIDE` covers it.
 - **The PowerShell tool is guarded for a known set of cmdlets, and only those.**
   Claude Code ships two shell tools. Which one a Windows session gets depends on
   whether Git for Windows is installed — without it there is no Bash tool and

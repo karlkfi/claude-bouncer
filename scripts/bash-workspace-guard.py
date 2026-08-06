@@ -1938,6 +1938,147 @@ def classify_pkill(tokens):
     return (name, operands)
 
 
+# --- Pattern-fed kills (issue 125 follow-up) ---------------------------------
+# The deny above names the kill command. The same blind kill dodges it by
+# deriving pids from a pattern instead: `pgrep -f ginkgo | xargs kill`,
+# `kill $(pgrep -f ginkgo)`, `ps … | grep ginkgo | awk '{print $1}' | xargs kill`.
+# Worse, `grep` and `awk` are clean guarded commands, so the whole string used to
+# come back `allow` — the guard green-lit the laundered kill rather than merely
+# missing it.
+#
+# Two rules close it. A signalling command anywhere in the string suppresses the
+# blanket `allow` (a clean guarded command must never speak for a kill); and the
+# pattern operands of the pid *sources* run through the same
+# `kill_operand_anchored` check the kill command's own pattern does.
+
+SIGNAL_CMDS = frozenset({'kill', 'pkill', 'killall'})
+
+# An operand that was demonstrably not derived from a pattern: a literal pid or a
+# job spec (`%1`, `%+`, `%make`). A `kill` whose operands are all of this shape
+# can't be laundering anything, which is what keeps the common safe forms —
+# `kill 1234`, `kill -0 4321` — clear of the rule even when they share a command
+# string with a `pgrep`.
+LITERAL_PID_RE = re.compile(r'^(?:\d+|%[-+%A-Za-z0-9_]*)$')
+
+# grep-family rows whose leading positional is a pattern (see SPEC). `awk` is
+# deliberately absent: its program is a pattern in principle, but the `{print $1}`
+# that appears in every real pipeline can never anchor, so counting it would deny
+# correctly anchored pipelines.
+GREP_LIKE = frozenset({'grep', 'rg'})
+
+# Stand-in for a grep-family pattern the hook cannot read — `grep -f patterns.txt`
+# takes its patterns from a file, and an invocation may carry no pattern operand
+# at all. It can never anchor, which is the whole point: a grep filtering `ps`
+# output whose pattern is invisible is precisely the case the hook cannot clear,
+# and reporting nothing there would read as "not a pid source".
+UNREADABLE_PATTERN = '(pattern the hook cannot read)'
+
+
+def signal_command(tokens):
+    """For a group that signals a process, return `(name, launderable)`; else None.
+
+    `launderable` marks a kill whose target could have come from a pattern —
+    everything except a `kill` whose operands are all literal pids or job specs.
+    `pkill`/`killall` are never launderable: they carry their own anchor rule
+    (`classify_pkill`), and folding them in here would let an unrelated
+    unanchored pattern elsewhere in the string deny a correctly anchored one.
+
+    An `xargs` group is inspected for a signal command word among its tokens
+    rather than parsed for it. Both misparse directions of a real xargs option
+    table are holes (over- and under-consuming can each hide the command word),
+    whereas a plain scan can only over-report — which costs a defer, never a
+    silent allow. A kill hidden inside a quoted `sh -c 'kill …'` is one token and
+    is missed either way; see README Limitations.
+    """
+    if not tokens:
+        return None
+    head = os.path.basename(tokens[0])
+    if head in SIGNAL_CMDS:
+        if head != 'kill':
+            return (head, False)
+        operands = [t for t in tokens[1:] if not t.startswith('-')]
+        launderable = bool(operands) and not all(
+            LITERAL_PID_RE.match(t) for t in operands)
+        return (head, launderable)
+    if head == 'xargs':
+        for t in tokens[1:]:
+            if os.path.basename(t) in SIGNAL_CMDS:
+                return (os.path.basename(t), True)
+    return None
+
+
+def pgrep_operands(tokens):
+    """Pattern operands of a `pgrep`, or None when the command isn't one.
+
+    `pgrep` and `pkill` share procps-ng's option set — they are one program and
+    one man page — so the extraction is `classify_pkill`'s with `pkill`'s table.
+    """
+    if not tokens or os.path.basename(tokens[0]) != 'pgrep':
+        return None
+    return classify_pkill(['pkill'] + list(tokens[1:]))[1]
+
+
+def grep_pattern_operands(tokens):
+    """Pattern operands of a grep-family command, or None when it isn't one.
+
+    Flags come off the same `SPEC` row `files_in_command` uses, so the two agree
+    about which tokens are values. `-e`/`--regexp` values are collected, and the
+    leading positional counts as a pattern only when no `prog_suppressed_by`
+    flag fired — with `-e` or `-f` present that positional is a FILE, and
+    mistaking a file for a pattern is the unsafe direction: it would let
+    `grep foo wt-a/list.txt` anchor a pipeline it has nothing to do with.
+
+    An **inverting** grep (`-v`) contributes no pattern of its own, only the
+    stand-in: `-v` excludes rather than selects, so its pattern is not what the
+    kill will receive. Counting it would be a hole — `ps … | grep ginkgo |
+    grep -v wt-a/skip | xargs kill` would read as anchored by the exclusion
+    while killing every OTHER checkout's ginkgo.
+
+    Never returns an empty list for a grep-family command: an invocation whose
+    patterns live in a `-f` file (or that carries none at all) yields the
+    `UNREADABLE_PATTERN` stand-in, which can never anchor.
+    """
+    name = ALIASES.get(os.path.basename(tokens[0]), os.path.basename(tokens[0]))
+    if name not in GREP_LIKE:
+        return None
+    spec = SPEC[name]
+    pats, positionals, flags_seen, invert = [], [], set(), False
+    i, n, end_opts = 1, len(tokens), False
+    while i < n:
+        tok = tokens[i]
+        if not end_opts and tok == '--':
+            end_opts = True; i += 1; continue
+        if not end_opts and tok.startswith('-') and tok != '-':
+            key, inline = split_eq(tok)
+            flags_seen.add(key)
+            # `-v` anywhere in a short cluster (`-iv`, `-rv`), and any long form
+            # long enough to be unambiguous (`--inv…`, which GNU grep accepts as
+            # an abbreviation of `--invert-match`).
+            if key.startswith('--'):
+                invert = invert or key.startswith('--inv')
+            else:
+                invert = invert or 'v' in key[1:]
+            if key in ('-e', '--regexp'):
+                if inline is not None:
+                    pats.append(inline); i += 1
+                else:
+                    pats += tokens[i+1:i+2]; i += 2
+                continue
+            if key in spec['file_flags']:
+                cnt = spec['file_flags'][key][0]
+                i += 1 + (0 if inline is not None else cnt); continue
+            if key in spec['consume']:
+                i += 1 + (0 if inline is not None else spec['consume'][key]); continue
+            i += 1; continue
+        positionals.append(tok); i += 1
+    if positionals and not any(f in flags_seen
+                               for f in spec.get('prog_suppressed_by', [])):
+        pats.append(positionals[0])
+    if invert:
+        return [UNREADABLE_PATTERN]
+    return pats or [UNREADABLE_PATTERN]
+
+
 def workspace_anchor_re(proj):
     """Regex for a path fragment that pins a kill pattern to workspace `proj`.
 
@@ -2590,6 +2731,16 @@ def resolve_native_path(raw, cwd):
     return os.path.realpath(p if os.path.isabs(p) else os.path.join(cwd, p))
 
 
+# What one command string said about process signalling, merged across its
+# command-substitution bodies (issue 125 follow-up):
+#   signal    — name of a signalling command seen anywhere, else None. Its mere
+#               presence suppresses the blanket `allow`.
+#   launder   — name of a signalling command whose target could have come from a
+#               pattern (see signal_command), else None.
+#   patterns  — (text, anchored) for every pid-source pattern collected.
+KillFacts = collections.namedtuple('KillFacts', ['signal', 'launder', 'patterns'])
+
+
 def analyze_command(cmd, ctx, base_cwd, depth=0):
     """Analyze one command string against the workspace boundary.
 
@@ -2598,15 +2749,47 @@ def analyze_command(cmd, ctx, base_cwd, depth=0):
     for a guarded-but-clean command). ``base_cwd`` is the cwd file arguments
     resolve against (the tool's cwd at top level).
 
+    This is the public entry point; :func:`_analyze_command` does the work and
+    additionally reports what the string said about process signalling. Two
+    things happen with that here, both of them once for the whole string:
+
+    * ``guarded`` is cleared when anything in the string signals a process. A
+      clean guarded command must never launder a kill — ``allow`` speaks for the
+      WHOLE string and short-circuits the user's own permission settings, so
+      ``grep x f | xargs kill`` defers instead.
+    * A launderable kill whose pid-source patterns ALL fail the workspace anchor
+      test becomes one ``'kill'`` offender, the same category and message
+      ``pkill`` produces. "Any pattern anchors ⇒ no offender" mirrors the
+      ``pkill`` rule, and is what keeps the bare-word pattern of a
+      ``grep -v grep`` stage from denying an otherwise anchored pipeline.
+    """
+    offenders, guarded, kf = _analyze_command(cmd, ctx, base_cwd, depth)
+    if kf.launder and kf.patterns and not any(a for _, a in kf.patterns):
+        texts = list(dict.fromkeys(t for t, _ in kf.patterns))
+        named = [t for t in texts if t != UNREADABLE_PATTERN]
+        offenders.append((kf.launder, 'kill', {
+            'cmd': kf.launder, 'root': ctx.proj,
+            'pattern': ', '.join(named or texts)}))
+    return offenders, guarded and not kf.signal
+
+
+def _analyze_command(cmd, ctx, base_cwd, depth=0):
+    """Analyze one command string; returns ``(offenders, guarded, KillFacts)``.
+
     Command-substitution bodies (``"$(…)"`` and backtick ``` `…` ```, plus the
     bare ``$(…)`` the group loop also splits out) are recursively analyzed and
     their offenders folded in — but their ``guarded`` flag is DISCARDED, so a
     clean guarded command inside a substitution never flips a deferring outer
     command into an ``allow``. Substitution analysis is strictly friction-adding.
+
+    Their KillFacts DO fold in, because the two halves of a laundered kill can
+    sit on opposite sides of the recursion: in ``kill "$(pgrep -f ginkgo)"`` the
+    quoting hides the source from the outer tokenizer, and neither half is an
+    offender on its own.
     """
     proj, cwd = ctx.proj, base_cwd
     if not cmd.strip():
-        return [], False
+        return [], False, KillFacts(None, None, [])
 
     try:
         # `\n` is a punctuation char so a newline command boundary surfaces as
@@ -2629,9 +2812,9 @@ def analyze_command(cmd, ctx, base_cwd, depth=0):
         lex.commenters = ''
         tokens = glue_dollar_paren(split_operator_runs(list(lex)))
     except ValueError:
-        return [], False                          # unbalanced quotes -> defer
+        return [], False, KillFacts(None, None, [])   # unbalanced quotes -> defer
 
-    # Each group is a `(cmd_tokens, redir_targets, persists)` triple: a
+    # Each group is a `(cmd_tokens, redir_targets, persists, pipe)` tuple: a
     # redirect target is collected into the group it textually appears in, so
     # it later resolves against THAT group's cwd rather than the chain's
     # original cwd — this is what lets `cd /tmp && cat /dev/null > evil` flag
@@ -2639,21 +2822,25 @@ def analyze_command(cmd, ctx, base_cwd, depth=0):
     # the group survives into later commands of the same string: at paren
     # depth 0 (not a subshell — `(f=x); cat $f` doesn't set f), not a pipeline
     # segment (each side of `|` runs in a subshell), and not backgrounded
-    # (`f=x & …` assigns in the background copy only).
+    # (`f=x & …` assigns in the background copy only). `pipe` numbers the
+    # pipeline the group belongs to, which is what tells a `grep` filtering `ps`
+    # output apart from a `grep` reading ordinary files.
     groups, cur, cur_redir, i = [], [], [], 0
-    depth, prev_sep = 0, ''
+    depth, prev_sep, pipe = 0, '', 0
     while i < len(tokens):
         t = tokens[i]
         if t in SEPARATORS:
             if cur or cur_redir:
                 persists = (depth == 0 and prev_sep != '|'
                             and t in (';', '\n', '&&', '||'))
-                groups.append((cur, cur_redir, persists))
+                groups.append((cur, cur_redir, persists, pipe))
                 cur, cur_redir = [], []
             if t == '(':
                 depth += 1
             elif t == ')':
                 depth = max(0, depth - 1)
+            if t != '|':
+                pipe += 1
             prev_sep = t
             i += 1; continue
         if t in REDIR or t in DUP:
@@ -2685,7 +2872,7 @@ def analyze_command(cmd, ctx, base_cwd, depth=0):
             i += 1; continue
         cur.append(t); i += 1
     if cur or cur_redir:
-        groups.append((cur, cur_redir, depth == 0 and prev_sep != '|'))
+        groups.append((cur, cur_redir, depth == 0 and prev_sep != '|', pipe))
 
     def is_outside(rp):
         return path_is_outside(rp, proj)
@@ -2830,7 +3017,13 @@ def analyze_command(cmd, ctx, base_cwd, depth=0):
     # later `$NAME` in a file arg is checked against every value bash iterates.
     # Poisoned by the same reassignment/`read`/`eval` rules as varmap (below).
     loopmap = {}
-    for g, g_redir, persists in groups:
+    # Process-signalling facts for this string (issue 125 follow-up). Grep
+    # patterns are held with their pipeline number and only promoted to pid
+    # sources after the loop, so a `ps` segment counts wherever in its pipeline
+    # it sits rather than only before the grep.
+    signal, launder, patterns = None, None, []
+    ps_pipes, grep_pats = set(), []
+    for g, g_redir, persists, pipe in groups:
         # Substitute known literals for path checking. The pre-substitution
         # tokens are kept for assignment parsing below — bash decides what is
         # an assignment before expansion.
@@ -2883,6 +3076,23 @@ def analyze_command(cmd, ctx, base_cwd, depth=0):
                 poison_vars(sub_g, loopmap)       # same rules invalidate loops
         g = strip_env_prefix(kw_g)
         if not g: continue                        # keyword/env-only or redirect-only group
+        # Signalling and pid-source classification runs before every `continue`
+        # below, so no command shape can skip past it.
+        sig = signal_command(g)
+        if sig is not None:
+            signal = signal or sig[0]
+            if sig[1]:
+                launder = launder or sig[0]
+        if os.path.basename(g[0]) == 'ps':
+            ps_pipes.add(pipe)
+        pg = pgrep_operands(g)
+        gp = grep_pattern_operands(g) if pg is None else None
+        for p in (pg or []):
+            patterns.append((p, kill_operand_anchored(
+                p, ctx.kill_anchor, group_cwd, group_cwd_unknown)))
+        for p in (gp or []):
+            grep_pats.append((pipe, p, kill_operand_anchored(
+                p, ctx.kill_anchor, group_cwd, group_cwd_unknown)))
         kind, arg = classify_cd(g)
         if kind is not None:
             if kind == 'arg':
@@ -2958,6 +3168,13 @@ def analyze_command(cmd, ctx, base_cwd, depth=0):
             if o is not None:
                 outside.append(o)
 
+    # A grep's pattern is a pid source only when it filters `ps` output, which is
+    # a property of the whole pipeline — resolved here so a `ps` segment counts
+    # wherever in its pipeline it sits, not only before the grep.
+    for grep_pipe, text, anchored in grep_pats:
+        if grep_pipe in ps_pipes:
+            patterns.append((text, anchored))
+
     # Recurse into command-substitution bodies — `"$(mktemp)"`, backtick
     # `` `cat /outside` ``, and the bare `$(…)` the group loop also split out
     # (harmless double-analysis, deduped by the reason builder). A guarded
@@ -2979,9 +3196,12 @@ def analyze_command(cmd, ctx, base_cwd, depth=0):
         for hd in heredocs:
             subs.extend(command_substitutions(hd, quotes=False))
         for body in subs:
-            sub_off, _ = analyze_command(body, ctx, base_cwd, depth + 1)
+            sub_off, _, sub_kf = _analyze_command(body, ctx, base_cwd, depth + 1)
             outside.extend(sub_off)
-    return outside, guarded
+            signal = signal or sub_kf.signal
+            launder = launder or sub_kf.launder
+            patterns.extend(sub_kf.patterns)
+    return outside, guarded, KillFacts(signal, launder, patterns)
 
 
 def handle_bash(data):
@@ -3000,6 +3220,10 @@ def handle_bash(data):
     # discarded by an earlier guarded-only gate (Q26). An unanchored `pkill`
     # arrives the same way — it has no file argument to guard, and an anchored
     # one deliberately leaves `guarded` False so it defers instead of allowing.
+    # For the same reason `analyze_command` clears `guarded` whenever anything in
+    # the string signals a process: `allow` speaks for the WHOLE string, so a
+    # clean `grep` must never carry an `xargs kill` past the user's own
+    # permission settings.
     if not outside and not guarded:
         return
 

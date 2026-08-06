@@ -5023,6 +5023,229 @@ class UnanchoredKillEndToEndTests(unittest.TestCase):
                        permission_mode="bypassPermissions")
 
 
+class SignalCommandTests(unittest.TestCase):
+    """Which groups signal a process, and which of those could be pattern-fed."""
+
+    def test_pattern_kill_commands_are_never_launderable(self):
+        # pkill/killall carry their own anchor rule; folding them in would let an
+        # unrelated unanchored pattern deny a correctly anchored one.
+        self.assertEqual(guard.signal_command(["pkill", "-f", "x"]),
+                         ("pkill", False))
+        self.assertEqual(guard.signal_command(["killall", "node"]),
+                         ("killall", False))
+
+    def test_literal_pid_operands_are_not_launderable(self):
+        for toks in (["kill", "1234"], ["kill", "-9", "1234", "5678"],
+                     ["kill", "-0", "4321"], ["kill", "%1"], ["kill", "%+"],
+                     ["kill", "-l"]):
+            self.assertEqual(guard.signal_command(toks), ("kill", False), toks)
+
+    def test_non_literal_operands_are_launderable(self):
+        for toks in (["kill", "$p"], ["kill", "$("], ["kill", "-9", "$pids"]):
+            self.assertEqual(guard.signal_command(toks), ("kill", True), toks)
+
+    def test_xargs_running_a_signal_is_launderable(self):
+        for toks in (["xargs", "-r", "kill"], ["xargs", "kill", "-9"],
+                     ["xargs", "-I{}", "kill", "{}"],
+                     ["xargs", "-r", "/bin/kill"]):
+            self.assertEqual(guard.signal_command(toks), ("kill", True), toks)
+
+    def test_non_signal_commands_return_none(self):
+        for toks in (["pgrep", "-f", "x"], ["xargs", "wc", "-l"],
+                     ["grep", "kill", "f.txt"], ["ps", "aux"], []):
+            self.assertIsNone(guard.signal_command(toks), toks)
+
+    def test_absolute_command_path(self):
+        self.assertEqual(guard.signal_command(["/bin/kill", "1234"]),
+                         ("kill", False))
+
+
+class PidSourcePatternTests(unittest.TestCase):
+    """Pattern extraction from the commands that produce a pid list."""
+
+    def test_pgrep_reuses_the_pkill_flag_table(self):
+        self.assertEqual(guard.pgrep_operands(["pgrep", "-f", "make check"]),
+                         ["make check"])
+        self.assertEqual(guard.pgrep_operands(["pgrep", "-u", "karl", "node"]),
+                         ["node"])
+        self.assertEqual(guard.pgrep_operands(["pgrep", "-fl", "ginkgo"]),
+                         ["ginkgo"])
+
+    def test_pgrep_only(self):
+        self.assertIsNone(guard.pgrep_operands(["pkill", "-f", "x"]))
+        self.assertIsNone(guard.pgrep_operands([]))
+
+    def test_grep_positional_pattern(self):
+        self.assertEqual(guard.grep_pattern_operands(["grep", "ginkgo"]),
+                         ["ginkgo"])
+        self.assertEqual(
+            guard.grep_pattern_operands(["egrep", "-i", "ginkgo"]), ["ginkgo"])
+
+    def test_grep_e_values_are_collected(self):
+        self.assertEqual(
+            guard.grep_pattern_operands(["grep", "-e", "a", "-e", "b"]),
+            ["a", "b"])
+        self.assertEqual(guard.grep_pattern_operands(["grep", "--regexp=a"]),
+                         ["a"])
+
+    def test_a_file_operand_is_never_read_as_a_pattern(self):
+        # The unsafe direction: a file whose path carries the root's name would
+        # otherwise anchor a pipeline it has nothing to do with.
+        self.assertEqual(
+            guard.grep_pattern_operands(["grep", "-e", "x", "wt-a/list.txt"]),
+            ["x"])
+        self.assertEqual(
+            guard.grep_pattern_operands(
+                ["grep", "-f", "pats.txt", "wt-a/list.txt"]),
+            [guard.UNREADABLE_PATTERN])
+
+    def test_flag_values_are_not_patterns(self):
+        self.assertEqual(
+            guard.grep_pattern_operands(["grep", "-m", "1", "ginkgo"]),
+            ["ginkgo"])
+        self.assertEqual(
+            guard.grep_pattern_operands(["grep", "--include", "*.py", "gink"]),
+            ["gink"])
+
+    def test_inverting_grep_contributes_no_anchorable_pattern(self):
+        # `-v` excludes rather than selects, so its pattern is not what the kill
+        # receives; counting it would let an exclusion anchor the pipeline.
+        for toks in (["grep", "-v", "wt-a/skip"], ["grep", "-iv", "wt-a/skip"],
+                     ["grep", "--invert-match", "wt-a/skip"],
+                     ["grep", "--invert", "wt-a/skip"]):
+            self.assertEqual(guard.grep_pattern_operands(toks),
+                             [guard.UNREADABLE_PATTERN], toks)
+
+    def test_non_grep_commands_return_none(self):
+        for toks in (["awk", "{print $1}"], ["ps", "aux"], ["cat", "f"]):
+            self.assertIsNone(guard.grep_pattern_operands(toks), toks)
+
+
+class PatternFedKillEndToEndTests(unittest.TestCase):
+    """A kill that derives its pids from a pattern gets the pattern's verdict.
+
+    The five laundering shapes measured against the hook at 13bb4d1, plus the
+    safe forms that must stay untouched. No process is ever signalled: the hook
+    reads the command as a JSON string and the test never invokes bash on it.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.base = os.path.realpath(self._tmp.name)
+        self.workspace = os.path.join(self.base, "wt-a")
+        os.mkdir(self.workspace)
+        with open(os.path.join(self.workspace, "in.txt"), "w") as f:
+            f.write("hello\n")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _out(self, cmd, **kw):
+        return run_hook(cmd, self.workspace, project_dir=self.workspace, **kw)
+
+    def _decision(self, cmd, expected, **kw):
+        out = self._out(cmd, **kw)
+        if expected == "defer":
+            self.assertIsNone(out, f"expected defer for {cmd!r}, got {out!r}")
+            return None
+        self.assertIsNotNone(out, f"expected a decision, got defer for: {cmd!r}")
+        got = out["hookSpecificOutput"]["permissionDecision"]
+        self.assertEqual(got, expected, f"expected {expected!r} for {cmd!r}")
+        return out["hookSpecificOutput"]["permissionDecisionReason"]
+
+    def test_the_five_measured_laundering_shapes_deny(self):
+        for cmd in (
+                'pkill -f ginkgo',
+                'kill $(pgrep -f ginkgo)',
+                'pgrep -f ginkgo | xargs -r kill',
+                "ps -eo pid,command | grep ginkgo | grep -v grep "
+                "| awk '{print $1}' | xargs -r kill",
+                'for p in $(pgrep -f ginkgo); do kill $p; done'):
+            self._decision(cmd, "deny")
+
+    def test_the_clean_guarded_pipeline_no_longer_allows(self):
+        # The worst case: `grep` and `awk` are clean guarded commands, so the
+        # whole string used to come back `allow` — the guard green-lit the
+        # laundered kill rather than merely missing it.
+        r = self._decision(
+            "ps -eo pid,command | grep ginkgo | grep -v grep "
+            "| awk '{print $1}' | xargs -r kill", "deny")
+        self.assertIn("ginkgo", r)
+        self.assertIn("pgrep -fl", r)
+
+    def test_a_clean_guarded_command_never_speaks_for_a_kill(self):
+        # Part 1 on its own: no pattern source, so no deny — but `allow` would
+        # short-circuit the user's permission settings for the kill too.
+        for cmd in ('cat ./in.txt && kill 1234',
+                    'grep foo ./in.txt; kill $pid',
+                    'cat ./in.txt && pkill -f "wt-a/.build/ginkgo"'):
+            self._decision(cmd, "defer")
+
+    def test_safe_kill_forms_stay_untouched(self):
+        for cmd in ('kill 1234', 'kill -9 1234 5678', 'kill -0 1234',
+                    'kill %1', 'kill $pid', 'sleep 5 & pid=$!; kill $pid'):
+            self._decision(cmd, "defer")
+
+    def test_a_literal_pid_kill_is_not_laundering(self):
+        # The proof the literal-pid rule buys: inspecting by pattern and then
+        # killing a pid you already know is the rewrite the deny recommends.
+        self._decision('pgrep -f ginkgo; kill 1234', "defer")
+        self._decision('ps aux | grep ginkgo; kill 1234', "defer")
+
+    def test_anchored_patterns_defer(self):
+        for cmd in ('kill $(pgrep -f "wt-a/bin/server")',
+                    'pgrep -f "wt-a/bin/server" | xargs -r kill',
+                    "ps -eo pid,command | grep 'wt-a/bin/server' "
+                    "| grep -v grep | awk '{print $1}' | xargs -r kill"):
+            self._decision(cmd, "defer")
+
+    def test_an_exclusion_cannot_anchor_the_pipeline(self):
+        # `grep -v wt-a/skip` names this workspace but *removes* those pids, so
+        # what the kill receives is every OTHER checkout's ginkgo.
+        self._decision("ps aux | grep ginkgo | grep -v 'wt-a/skip' "
+                       "| xargs kill", "deny")
+        self._decision("ps aux | grep -v foo | xargs kill", "deny")
+
+    def test_an_unreadable_pattern_cannot_clear_the_pipeline(self):
+        # `grep -f` takes its patterns from a file the hook can't read; that is
+        # the case it cannot clear, not evidence there is no pid source.
+        r = self._decision("ps aux | grep -f ./in.txt | awk '{print $1}' "
+                           "| xargs kill", "deny")
+        self.assertIn(guard.UNREADABLE_PATTERN, r)
+
+    def test_grep_not_fed_by_ps_is_not_a_pid_source(self):
+        self._decision('grep ginkgo ./in.txt; kill $pid', "defer")
+        self._decision('cat ./in.txt | grep ginkgo | xargs kill', "defer")
+
+    def test_a_ps_pipeline_with_no_kill_still_allows(self):
+        for cmd in ('ps -eo pid,command | grep ginkgo',
+                    "ps aux | grep ginkgo | awk '{print $1}'"):
+            self._decision(cmd, "allow")
+
+    def test_source_and_kill_on_opposite_sides_of_a_substitution(self):
+        # Quoting hides the body from the outer tokenizer, so neither half is an
+        # offender on its own — the facts have to cross the recursion.
+        self._decision('kill "$(pgrep -f ginkgo)"', "deny")
+
+    def test_reason_reuses_the_kill_category(self):
+        r = self._decision('pgrep -f ginkgo | xargs -r kill', "deny")
+        self.assertIn("Unanchored process kill", r)
+        self.assertIn("ginkgo", r)
+        self.assertIn(self.workspace, r)
+        self.assertIn("WORKSPACE_GUARD_OVERRIDE", r)
+
+    def test_override_downgrades_to_ask(self):
+        out = self._out('pgrep -f ginkgo | xargs -r kill',
+                        env_extra={"WORKSPACE_GUARD_OVERRIDE": "stuck harness"})
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "ask")
+        self.assertIn("stuck harness",
+                      out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_bypass_mode_still_denies(self):
+        self._decision('pgrep -f ginkgo | xargs -r kill', "deny",
+                       permission_mode="bypassPermissions")
+
+
 class SiblingSessionScratchE2ETests(unittest.TestCase):
     """#61 end-to-end: read-only guarded commands on a SAME-project sibling
     session's Claude scratch are allowed (the dispatcher-tails-worker case);

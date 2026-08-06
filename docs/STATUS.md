@@ -5,7 +5,7 @@ Single source of truth for progress and priorities in workspace-guard. Pick the 
 **Status:** 🔲 ready · 🚫 blocked
 **Size:** S = one session/PR · M = 2–3 sessions · L = needs a plan doc under `docs/plan/`
 **Labels:** `security` `tests` `docs` `infra` `bug` `parsing` `retro`
-**Next ID:** Q60
+**Next ID:** Q61
 
 **Maintaining this file:** see [`docs/development/maintaining-backlog.md`](development/maintaining-backlog.md).
 
@@ -16,7 +16,8 @@ Specific actionable items in priority order. Pick from the top; skip 🚫 items 
 | ID | Item | Labels | St | Sz | Notes |
 |---|---|---|---|---|---|
 | <a id="Q58"></a>Q58 | Guard `taskkill`, on both frontends | `security` | 🔲 | S | `taskkill /IM node.exe` is the same host-wide kill as `pkill` and `Stop-Process`, and neither frontend checks it, so it walks past the unanchored-kill deny. Recorded as a limitation in [Q57's plan](plan/q57-powershell-stop-process.md). |
-| <a id="Q59"></a>Q59 | Stop a clean guarded command from laundering an anchored kill into `allow` | `security` | 🔲 | S | Verified: `cat ./in.txt && pkill -f "wt-a/bin/x"` emits `allow`, stripping the user's own permissions from the kill. Suppress `allow` when a kill was seen; both frontends. |
+| <a id="Q59"></a>Q59 | Stop a clean guarded cmdlet from laundering a kill into `allow`, on PowerShell | `security` | 🔲 | S | Bash half landed with the pattern-fed kill deny ([plan](plan/pattern-fed-kill-deny.md)). PowerShell still allows: verified `Get-Content .\in.txt; Stop-Process -Id 1234` emits `allow`. Clear `guarded` when a statement holds a `Stop-Process`. |
+| <a id="Q60"></a>Q60 | Catch a pattern-fed kill whose filter isn't grep | `security` | 🔲 | M | `ps \| awk '/pat/ {print $1}' \| xargs kill` collects no pattern and defers; so does a kill wrapped in `sh -c '…'`. Reading an awk program as a pattern would deny every anchored pipeline, so this needs real pid provenance. See [plan](plan/pattern-fed-kill-deny.md). |
 
 ## Deferred
 
