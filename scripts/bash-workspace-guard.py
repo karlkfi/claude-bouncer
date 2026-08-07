@@ -2946,8 +2946,8 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0):
     offender on its own.
     """
     proj, cwd = ctx.proj, base_cwd
-    # Kept under its own name because the group loop below reuses `depth` as the
-    # paren-nesting counter, clobbering the parameter.
+    # Alias for readability at the two use sites far below; the group loop's own
+    # nesting counter is `paren` so that neither can shadow the other (Q63).
     subst_depth = depth
     if not cmd.strip():
         return [], False, KillFacts(None, None, [])
@@ -2987,19 +2987,19 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0):
     # pipeline the group belongs to, which is what tells a `grep` filtering `ps`
     # output apart from a `grep` reading ordinary files.
     groups, cur, cur_redir, i = [], [], [], 0
-    depth, prev_sep, pipe = 0, '', 0
+    paren, prev_sep, pipe = 0, '', 0
     while i < len(tokens):
         t = tokens[i]
         if t in SEPARATORS:
             if cur or cur_redir:
-                persists = (depth == 0 and prev_sep != '|'
+                persists = (paren == 0 and prev_sep != '|'
                             and t in (';', '\n', '&&', '||'))
                 groups.append((cur, cur_redir, persists, pipe))
                 cur, cur_redir = [], []
             if t == '(':
-                depth += 1
+                paren += 1
             elif t == ')':
-                depth = max(0, depth - 1)
+                paren = max(0, paren - 1)
             if t != '|':
                 pipe += 1
             prev_sep = t
@@ -3033,7 +3033,7 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0):
             i += 1; continue
         cur.append(t); i += 1
     if cur or cur_redir:
-        groups.append((cur, cur_redir, depth == 0 and prev_sep != '|', pipe))
+        groups.append((cur, cur_redir, paren == 0 and prev_sep != '|', pipe))
 
     def is_outside(rp):
         return path_is_outside(rp, proj)
@@ -3396,13 +3396,14 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0):
     # are scanned as their own units, with `quotes=False` — inside a heredoc
     # body bash applies no quoting, so an apostrophe there is text, not the
     # start of a quoted run that would swallow a later `$(…)`. (Q50)
-    if depth < MAX_SUBST_DEPTH:
+    if subst_depth < MAX_SUBST_DEPTH:
         heredocs = []
         subs = command_substitutions(strip_heredoc_bodies(cmd, expanded=heredocs))
         for hd in heredocs:
             subs.extend(command_substitutions(hd, quotes=False))
         for body in subs:
-            sub_off, _, sub_kf = _analyze_command(body, ctx, base_cwd, depth + 1)
+            sub_off, _, sub_kf = _analyze_command(body, ctx, base_cwd,
+                                                  subst_depth + 1)
             outside.extend(sub_off)
             signal = signal or sub_kf.signal
             launder = launder or sub_kf.launder

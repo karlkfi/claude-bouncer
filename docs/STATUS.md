@@ -5,7 +5,7 @@ Single source of truth for progress and priorities in workspace-guard. Pick the 
 **Status:** 🔲 ready · 🚫 blocked
 **Size:** S = one session/PR · M = 2–3 sessions · L = needs a plan doc under `docs/plan/`
 **Labels:** `security` `tests` `docs` `infra` `bug` `parsing` `retro`
-**Next ID:** Q64
+**Next ID:** Q65
 
 **Maintaining this file:** see [`docs/development/maintaining-backlog.md`](development/maintaining-backlog.md).
 
@@ -16,7 +16,7 @@ Specific actionable items in priority order. Pick from the top; skip 🚫 items 
 | ID | Item | Labels | St | Sz | Notes |
 |---|---|---|---|---|---|
 | <a id="Q61"></a>Q61 | Analyze the body of a shell `-c` command | `security` | 🔲 | M | The body is one opaque token, so no read, write or kill inside it is checked; Q60 only stopped the hook vouching for it. Recursing needs a container-exec exclusion first — see [plan](plan/q60-ps-pid-source.md). |
-| <a id="Q63"></a>Q63 | Restore the command-substitution recursion cap | `bug` | 🔲 | S | `MAX_SUBST_DEPTH` never fires: `_analyze_command` reuses `depth` as the paren counter before the guard reads it, so 40 nested `$(…)` still recurse. Latent — it errs toward more analysis. |
+| <a id="Q64"></a>Q64 | Stop PowerShell subexpression analysis going exponential | `bug` `security` | 🔲 | S | 2^n: `ps_subexpressions` flattens every descendant, then `_ps_analyze_command` recurses into each and re-flattens. 20 nested `$(…)` takes 11s, 25 over 20s — a stalled hook enforces nothing. |
 
 ## Deferred
 

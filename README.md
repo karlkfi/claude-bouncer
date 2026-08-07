@@ -970,7 +970,8 @@ through the same boundary rules and produce the same reasons. Symlink staging
    *offenders* bubble up: a clean guarded command inside
    a substitution never turns a deferring outer command into an `allow` — this
    step can only add friction. (The bare unquoted `$(…)` form was already caught,
-   because its `(`/`)` split the inner command into its own group.)
+   because its `(`/`)` split the inner command into its own group.) Nesting is
+   followed 25 levels deep; see Limitations for what the bound costs.
 
 ## Agent guidance: avoiding prompts
 
@@ -1270,6 +1271,13 @@ final output.
   enumerated. Enumerating it ran the hook past two minutes — and because Claude
   Code treats a failed `PreToolUse` hook as a non-blocking error, a guard that
   never answers enforces nothing at all.
+- Command substitutions nested more than 25 deep stop being recursed into, for
+  the same reason the loop cap exists: unbounded recursion exhausts the
+  interpreter stack, and a hook that dies mid-decision is one Claude Code treats
+  as a non-blocking error — enforcing nothing. The bound is on the recursion, not
+  on the analysis: the lexer does not track quote nesting through `$(…)`, so an
+  inner command past the cap generally still surfaces in an outer level's tokens
+  and is flagged there.
 - `realpath` only follows symlinks for files that already exist; nonexistent
   paths are normalized lexically (fine for read-style commands).
 - Redirect targets (`> file`) are inspected on *every* command, guarded or not —

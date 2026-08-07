@@ -3802,6 +3802,79 @@ class QuotedSubstBodyEndToEndTests(unittest.TestCase):
         self._defer('echo "$((1 + 2))"')
 
 
+class SubstDepthCapTests(unittest.TestCase):
+    """`MAX_SUBST_DEPTH` bounds the substitution recursion (Q63).
+
+    It went unenforced for as long as `_analyze_command` read the group loop's
+    paren-nesting counter — which shadowed the `depth` parameter and is 0 for
+    any balanced command — so every level recursed as depth 1 and the cap never
+    fired. Deep enough nesting then exhausted Python's own stack, and a hook
+    that dies mid-decision is a hook Claude Code treats as a non-blocking
+    error: the guard would enforce nothing at all."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = os.path.realpath(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    @staticmethod
+    def _nest(levels, inner="cat /etc/q63-fake-target"):
+        for _ in range(levels):
+            inner = 'echo "$(%s)"' % inner
+        return inner
+
+    def test_recursion_stops_at_the_cap(self):
+        # Pre-fix this maxed out at 1 for every input; the assertion below is
+        # two-sided so neither the shadowing bug nor a runaway cap slips back.
+        depths = []
+        real = guard._analyze_command
+
+        def spy(cmd, ctx, base_cwd, depth=0):
+            depths.append(depth)
+            return real(cmd, ctx, base_cwd, depth)
+
+        ctx = guard.build_context(
+            {"cwd": self.workspace, "tool_input": {}})
+        with mock.patch.object(guard, "_analyze_command", spy):
+            guard.analyze_command(self._nest(60), ctx, self.workspace)
+        self.assertEqual(max(depths), guard.MAX_SUBST_DEPTH)
+
+    def test_shallow_nesting_recurses_one_level_per_substitution(self):
+        depths = []
+        real = guard._analyze_command
+
+        def spy(cmd, ctx, base_cwd, depth=0):
+            depths.append(depth)
+            return real(cmd, ctx, base_cwd, depth)
+
+        ctx = guard.build_context(
+            {"cwd": self.workspace, "tool_input": {}})
+        with mock.patch.object(guard, "_analyze_command", spy):
+            guard.analyze_command(self._nest(5), ctx, self.workspace)
+        self.assertEqual(max(depths), 5)
+
+    def test_pathological_nesting_does_not_kill_the_hook(self):
+        # 1000 levels overflowed the interpreter stack pre-fix, so the hook
+        # exited non-zero with no decision at all. `run_hook` raises on a
+        # non-zero exit, which is what fails this test if the cap regresses.
+        out = run_hook(self._nest(1000), self.workspace,
+                       project_dir=self.workspace)
+        self.assertIsNotNone(out)
+
+    def test_capping_recursion_does_not_hide_the_inner_read(self):
+        # The cap stops the recursion, not the analysis: shlex does not track
+        # quote nesting through `$(…)`, so the innermost command still surfaces
+        # in an outer level's token stream and is flagged there.
+        out = run_hook(self._nest(60), self.workspace,
+                       project_dir=self.workspace)
+        self.assertIsNotNone(out)
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "ask")
+        self.assertIn("/etc/q63-fake-target",
+                      out["hookSpecificOutput"]["permissionDecisionReason"])
+
+
 class ExpansionRegexTests(unittest.TestCase):
     """EXPANSION_RE distinguishes a real `$`-expansion from a literal `$`."""
 
