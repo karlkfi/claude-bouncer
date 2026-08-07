@@ -16,7 +16,6 @@ Specific actionable items in priority order. Pick from the top; skip 🚫 items 
 | ID | Item | Labels | St | Sz | Notes |
 |---|---|---|---|---|---|
 | <a id="Q61"></a>Q61 | Analyze the body of a shell `-c` command | `security` | 🔲 | M | The body is one opaque token, so no read, write or kill inside it is checked; Q60 only stopped the hook vouching for it. Recursing needs a container-exec exclusion first — see [plan](plan/q60-ps-pid-source.md). |
-| <a id="Q62"></a>Q62 | Stop a `kill -0` liveness probe reading as a launderable kill | `bug` | 🔲 | S | `kill -0` sends no signal, but any non-literal operand marks it launderable, so `while kill -0 $(pgrep -f x)` denies. Exempt the `-0` flag in `signal_command`. |
 | <a id="Q63"></a>Q63 | Restore the command-substitution recursion cap | `bug` | 🔲 | S | `MAX_SUBST_DEPTH` never fires: `_analyze_command` reuses `depth` as the paren counter before the guard reads it, so 40 nested `$(…)` still recurse. Latent — it errs toward more analysis. |
 
 ## Deferred

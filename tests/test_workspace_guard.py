@@ -5208,6 +5208,22 @@ class SignalCommandTests(unittest.TestCase):
                      ["xargs", "-r", "/bin/kill"]):
             self.assertEqual(guard.signal_command(toks), ("kill", True), toks)
 
+    def test_a_signal_zero_probe_is_not_launderable(self):
+        # `kill -0` sends no signal, so its pid source doesn't matter (Q62).
+        for toks in (["kill", "-0", "$p"], ["kill", "-s", "0", "$(pgrep -f x)"],
+                     ["kill", "-n", "0", "$pids"], ["kill", "-0", "--", "$p"],
+                     ["xargs", "kill", "-0"], ["xargs", "-r", "kill", "-s", "0"]):
+            self.assertEqual(guard.signal_command(toks), ("kill", False), toks)
+
+    def test_a_second_signal_selector_forfeits_the_exemption(self):
+        # `kill -0 -s 9` really does SIGKILL; `xargs -0` is xargs' own NUL flag.
+        for toks in (["kill", "-0", "-s", "9", "$p"],
+                     ["kill", "-9", "-s", "0", "$p"],
+                     ["kill", "-0", "-9", "$p"],
+                     ["kill", "-s0", "$p"],
+                     ["xargs", "-0", "kill"]):
+            self.assertEqual(guard.signal_command(toks), ("kill", True), toks)
+
     def test_non_signal_commands_return_none(self):
         for toks in (["pgrep", "-f", "x"], ["xargs", "wc", "-l"],
                      ["grep", "kill", "f.txt"], ["ps", "aux"], []):
@@ -5380,6 +5396,23 @@ class PatternFedKillEndToEndTests(unittest.TestCase):
         # killing a pid you already know is the rewrite the deny recommends.
         self._decision('pgrep -f ginkgo; kill 1234', "defer")
         self._decision('ps aux | grep ginkgo; kill 1234', "defer")
+
+    def test_a_signal_zero_probe_is_not_laundering(self):
+        # A liveness wait sends no signal, so an unanchored pid source in it is
+        # not a kill this workspace has to answer for (Q62).
+        for cmd in ('kill -0 $(pgrep -f ginkgo)',
+                    'while kill -0 $(pgrep -f ginkgo); do sleep 1; done',
+                    'pgrep -f ginkgo | xargs kill -0',
+                    'kill -s 0 $(pgrep -f ginkgo)',
+                    "ps -eo pid,command | grep ginkgo | awk '{print $1}' "
+                    "| xargs kill -0"):
+            self._decision(cmd, "defer")
+
+    def test_a_signal_zero_probe_that_also_kills_still_denies(self):
+        # `-s 9` overrides the earlier `-0`, and `xargs -0` is xargs' own flag.
+        for cmd in ('kill -0 -s 9 $(pgrep -f ginkgo)',
+                    'pgrep -f ginkgo | xargs -0 kill'):
+            self.assertIn("ginkgo", self._decision(cmd, "deny"))
 
     def test_anchored_patterns_defer(self):
         for cmd in ('kill $(pgrep -f "wt-a/bin/server")',

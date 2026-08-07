@@ -188,12 +188,15 @@ project's scratch still asks entirely.
 | `ps -eo pid= \| xargs kill` (no filter at all) | **deny** |
 | `kill $(ps -eo pid= \| head -1)`     | **deny** |
 | `for p in $(pgrep -f ginkgo); do kill $p; done` | **deny** |
+| `kill -0 -s 9 $(pgrep -f ginkgo)` (`-s 9` overrides the `-0`) | **deny** |
+| `pgrep -f ginkgo \| xargs -0 kill` (`-0` is xargs' NUL flag) | **deny** |
 | `pgrep -f "<this-root>/bin/x" \| xargs -r kill` (anchored) | defer |
 | `taskkill //IM node.exe` · `taskkill //FI "IMAGENAME eq node.exe"` | **deny** |
 | `taskkill` (no selector at all)      | **deny** |
 | `taskkill //PID 1234` · `taskkill /?` | defer   |
 | `ps aux \| grep "<this-root>/bin/x" \| awk '{print $1}' \| xargs kill` | defer |
 | `kill 1234` · `kill -0 1234` · `kill $pid` | defer |
+| `while kill -0 $(pgrep -f ginkgo)` (sends no signal) | defer |
 | `./run.sh & p=$!; kill $p; ps -p $p` (ps consumes a pid) | defer |
 | `pgrep -fl ginkgo` · `pgrep -f ginkgo; kill 1234` | defer |
 | `cat in.txt && kill 1234` (clean read, but signals) | defer |
@@ -434,6 +437,21 @@ pgrep -f ginkgo | xargs -r kill              # -> deny
 pgrep -f "<this-root>/bin/x" | xargs kill    # anchored -> defer
 pgrep -f ginkgo; kill 1234                   # literal pid -> defer
 kill $pid                                    # no pattern in the string -> defer
+```
+
+A **`kill -0` sends no signal** — it's the liveness probe behind a wait loop — so
+where its pids came from doesn't matter either. Both spellings are exempt, `-0`
+and the POSIX `-s 0`/`-n 0`. A *second* signal selector forfeits the exemption,
+because which one wins depends on how it's spelled: a later `-s`/`-n` overrides
+an earlier bare spec, while a later bare spec is read as a pid instead. Rather
+than model that per shell, the hook takes the exemption only when there's nothing
+to arbitrate.
+
+```
+while kill -0 $(pgrep -f ginkgo); do sleep 1; done   # -> defer
+pgrep -f ginkgo | xargs kill -0                      # -> defer
+kill -0 -s 9 $(pgrep -f ginkgo)                      # -s 9 wins -> deny
+pgrep -f ginkgo | xargs -0 kill                      # xargs' NUL flag -> deny
 ```
 
 The pid sources are `pgrep`'s pattern operands and **`ps` itself** — not the

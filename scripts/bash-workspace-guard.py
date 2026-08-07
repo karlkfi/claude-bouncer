@@ -2062,15 +2062,49 @@ SHELL_C_CMDS = frozenset({'sh', 'bash', 'zsh', 'dash', 'ksh'})
 UNREADABLE_PATTERN = '(pattern the hook cannot read)'
 
 
+def signals_zero(args):
+    """True when a `kill`'s arguments `args` select signal 0 and nothing else.
+
+    Signal 0 sends no signal — it is the liveness/permission probe behind
+    `while kill -0 $(pgrep -f x)`, so however its pids were derived it can't be
+    laundering a kill. Both spellings count: the bare `-0` and the POSIX
+    `-s 0`/`-n 0`.
+
+    A second signal selector of any kind forfeits the exemption, because which
+    one bash honors depends on its spelling: a later `-s`/`-n` overrides an
+    earlier bare spec (`kill -0 -s 9` really does SIGKILL, measured), while a
+    later bare spec is read as a pid instead (`kill -0 -9 4321` signals nothing
+    and reports `-9` as no such process). Rather than model that per shell, take
+    the exemption only when there is nothing to arbitrate. (Q62)
+    """
+    selectors, i = [], 0
+    while i < len(args):
+        t = args[i]
+        if not t.startswith('-') or t in ('-', '--'):
+            break                             # first operand, or end of options
+        if t in ('-s', '-n'):                 # value form: the next token names it
+            i += 1
+            if i < len(args):
+                selectors.append(args[i])
+        elif t not in ('-l', '-L'):           # listing signals, not selecting one
+            selectors.append(t[1:])
+        i += 1
+    return bool(selectors) and all(s == '0' for s in selectors)
+
+
 def signal_command(tokens):
     """For a group that signals a process, return `(name, launderable)`; else None.
 
     `launderable` marks a kill whose target could have come from a pattern —
-    everything except a `kill` whose operands are all literal pids or job specs.
+    everything except a `kill` that sends no signal (see `signals_zero`) or whose
+    operands are all literal pids or job specs.
     `pkill`/`killall`/`taskkill` are never launderable: they carry their own
     anchor rule (`classify_pkill`, `classify_taskkill`), and folding them in here
     would let an unrelated unanchored pattern elsewhere in the string deny a
     correctly anchored one.
+
+    A signal-0 probe still returns a name, so it suppresses the blanket `allow`
+    the way every other signalling command does. Only the deny is lifted.
 
     An `xargs` group is inspected for a signal command word among its tokens
     rather than parsed for it. Both misparse directions of a real xargs option
@@ -2085,14 +2119,19 @@ def signal_command(tokens):
     if head in SIGNAL_CMDS:
         if head != 'kill':
             return (head, False)
+        if signals_zero(tokens[1:]):
+            return (head, False)
         operands = [t for t in tokens[1:] if not t.startswith('-')]
         launderable = bool(operands) and not all(
             LITERAL_PID_RE.match(t) for t in operands)
         return (head, launderable)
     if head == 'xargs':
-        for t in tokens[1:]:
-            if native_cmd_name(t) in SIGNAL_CMDS:
-                return (native_cmd_name(t), True)
+        for i, t in enumerate(tokens[1:], 1):
+            name = native_cmd_name(t)
+            if name in SIGNAL_CMDS:
+                # Only the arguments AFTER the kill are its own: `xargs -0 kill`
+                # is a real kill reading NUL-delimited pids, not a probe.
+                return (name, not (name == 'kill' and signals_zero(tokens[i+1:])))
     return None
 
 
