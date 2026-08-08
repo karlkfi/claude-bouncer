@@ -15,6 +15,12 @@ Nothing else in the repo encodes the version (no README badge, no `__version__`)
 grep -rn '"version"' .claude-plugin/
 ```
 
+## Pre-flight: the session must be able to push
+
+**Check this before drafting anything.** Steps 7 and 8 push to `main` and push a tag, and branch-guard confirms any push whose target isn't the worktree branch. Under `auto`/`dontAsk` there is nobody to answer, so both are denied outright — a release started in the wrong mode gets all the way through notes, review, and merge before it discovers it cannot finish.
+
+Run the release interactively, or plan to hand steps 7–9 to a terminal. Everything up to and including the notes pull request (PR) works in any mode; only the last three steps need the prompt.
+
 ## Steps
 
 1. **Start from a fresh `main`.** Releases must include everything merged. Rebase the worktree:
@@ -54,7 +60,7 @@ grep -rn '"version"' .claude-plugin/
    git push origin vX.Y.Z
    ```
 
-   **Both pushes need an interactive permission mode.** branch-guard confirms any push whose target isn't the worktree branch, which covers `main` *and* the tag. Under `auto`/`dontAsk` there is nobody to answer, so both are denied outright — retrying won't help. Run the session interactively, or hand the two commands over to be run in a terminal. Create the tag in its own command: chained as `git tag … && git push …`, the deny takes out the `git tag` too and the tag never gets created.
+   This push and the one in step 7 both need an interactive permission mode (see §Pre-flight); retrying under `auto` won't help. Create the tag in its own command: chained as `git tag … && git push …`, the deny takes out the `git tag` too and the tag never gets created.
 
 9. **Create the GitHub Release** on that tag, marked latest, from the notes file:
 
