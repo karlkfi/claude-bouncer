@@ -3872,7 +3872,7 @@ def _ps_scan_paren(text, start):
     return None
 
 
-def ps_subexpressions(text, depth=0):
+def ps_subexpressions(text):
     """Split `$(…)` / `@(…)` out of `text`.
 
     Returns `(masked, bodies)`. Each subexpression is replaced by a bare `$` so
@@ -3880,6 +3880,15 @@ def ps_subexpressions(text, depth=0):
     returned for analysis in its own right — the same strictly-friction-adding
     treatment bash command substitutions get, and for the same reason: a guarded
     cmdlet written inside one is invisible to the outer tokenizer.
+
+    Only the OUTERMOST subexpressions are returned, matching
+    `command_substitutions`: a nested `$(… $(…) …)` is found by re-scanning the
+    returned body, which `_ps_analyze_command` already does when it recurses.
+    Returning descendants here too made that recursion re-flatten them at every
+    level, so a body `n` deep was analyzed once per ancestor — 20 nested `$(…)`
+    cost a million analyses and about 9 seconds, and a hook that stalls is one
+    Claude Code gives up on as a non-blocking error, leaving the guard enforcing
+    nothing. (Q64)
     """
     out, bodies, i, n = [], [], 0, len(text)
     while i < n:
@@ -3901,10 +3910,7 @@ def ps_subexpressions(text, depth=0):
                 out.append(c)
                 i += 1
                 continue
-            body = text[i + 2:j - 1]
-            bodies.append(body)
-            if depth < MAX_SUBST_DEPTH:
-                bodies.extend(ps_subexpressions(body, depth + 1)[1])
+            bodies.append(text[i + 2:j - 1])
             out.append('$')
             i = j
             continue
@@ -3922,10 +3928,7 @@ def ps_subexpressions(text, depth=0):
                     k = _ps_scan_paren(text, j + 1)
                     if k is None:
                         break
-                    body = text[j + 2:k - 1]
-                    bodies.append(body)
-                    if depth < MAX_SUBST_DEPTH:
-                        bodies.extend(ps_subexpressions(body, depth + 1)[1])
+                    bodies.append(text[j + 2:k - 1])
                     seg.append('$')
                     j = k
                     continue

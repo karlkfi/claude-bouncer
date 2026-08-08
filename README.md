@@ -1316,10 +1316,13 @@ final output.
 - Command substitutions nested more than 25 deep stop being recursed into, for
   the same reason the loop cap exists: unbounded recursion exhausts the
   interpreter stack, and a hook that dies mid-decision is one Claude Code treats
-  as a non-blocking error — enforcing nothing. The bound is on the recursion, not
-  on the analysis: the lexer does not track quote nesting through `$(…)`, so an
-  inner command past the cap generally still surfaces in an outer level's tokens
-  and is flagged there.
+  as a non-blocking error — enforcing nothing. In bash the bound is on the
+  recursion, not on the analysis: the lexer does not track quote nesting through
+  `$(…)`, so an inner command past the cap generally still surfaces in an outer
+  level's tokens and is flagged there. PowerShell masks each `$(…)`/`@(…)` out of
+  the text it tokenizes, so there is no outer level to catch it: a subexpression
+  nested past the cap goes unanalyzed, and the command defers rather than
+  earning an `allow` on the strength of a body the guard never read.
 - `realpath` only follows symlinks for files that already exist; nonexistent
   paths are normalized lexically (fine for read-style commands).
 - Redirect targets (`> file`) are inspected on *every* command, guarded or not —

@@ -15,7 +15,8 @@ Specific actionable items in priority order. Pick from the top; skip 🚫 items 
 
 | ID | Item | Labels | St | Sz | Notes |
 |---|---|---|---|---|---|
-| <a id="Q64"></a>Q64 | Stop PowerShell subexpression analysis going exponential | `bug` `security` | 🔲 | S | 2^n: `ps_subexpressions` flattens every descendant, then `_ps_analyze_command` recurses into each and re-flattens. 20 nested `$(…)` takes 11s, 25 over 20s — a stalled hook enforces nothing. |
+
+_Empty._ Next work comes from a Deferred trigger firing, a friction report, or a new finding.
 
 ## Deferred
 

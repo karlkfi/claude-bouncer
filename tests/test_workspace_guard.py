@@ -7481,15 +7481,87 @@ class PowerShellSubexpressionTests(unittest.TestCase):
         _, bodies = guard.ps_subexpressions(r'$(Get-Content "a)b" C:\x)')
         self.assertEqual(bodies, [r'Get-Content "a)b" C:\x'])
 
-    def test_nested_bodies_are_extracted(self):
+    def test_only_the_outermost_body_is_returned(self):
+        # Descendants are the caller's business: it re-scans each body it
+        # recurses into. Returning them here as well made that recursion
+        # quadratic in bodies and exponential in nesting depth (Q64).
         _, bodies = guard.ps_subexpressions(r"$(a $(Get-Content C:\x))")
-        self.assertIn(r"Get-Content C:\x", bodies)
+        self.assertEqual(bodies, [r"a $(Get-Content C:\x)"])
+
+    def test_a_nested_body_is_found_by_re_scanning(self):
+        _, bodies = guard.ps_subexpressions(r"$(a $(Get-Content C:\x))")
+        self.assertEqual(guard.ps_subexpressions(bodies[0])[1],
+                         [r"Get-Content C:\x"])
 
     def test_unbalanced_quote_is_not_closed_for_the_tokenizer(self):
         # Fabricating the missing quote here would hand the tokenizer a
         # balanced string and turn a defer into a parse.
         masked, _ = guard.ps_subexpressions('Get-Content "unterminated')
         self.assertIsNone(guard.ps_tokenize(masked))
+
+
+class PowerShellSubexpressionRecursionTests(unittest.TestCase):
+    """Nested `$(…)` costs one analysis per level, not 2^n (Q64).
+
+    `ps_subexpressions` used to return every descendant body alongside the
+    outermost ones, and `_ps_analyze_command` then recursed into each and
+    re-flattened it — so a body `n` deep was analyzed once per ancestor. 20
+    levels meant 1,048,576 analyses and about 9 seconds, and a hook that stalls
+    is one Claude Code abandons as a non-blocking error, leaving the guard
+    enforcing nothing. Counting calls rather than clocking them keeps this
+    honest on a loaded CI box, where a timing assertion is either flaky or too
+    loose to catch a regression.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = os.path.realpath(self._tmp.name)
+        self.ctx = guard.build_context(
+            {"cwd": self.workspace, "tool_input": {}})
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    @staticmethod
+    def _nest(levels, inner="Get-Content /q64-fake-target"):
+        return "$(" * levels + inner + ")" * levels
+
+    def _depths(self, command):
+        depths = []
+        real = guard._ps_analyze_command
+
+        def spy(cmd, ctx, base_cwd, depth=0):
+            depths.append(depth)
+            return real(cmd, ctx, base_cwd, depth)
+
+        with mock.patch.object(guard, "_ps_analyze_command", spy):
+            guard.ps_analyze_command(command, self.ctx, self.workspace)
+        return depths
+
+    def test_each_nesting_level_is_analyzed_exactly_once(self):
+        # Pre-fix: 4096 calls for 12 levels. One per level plus the outer
+        # command is the whole budget.
+        self.assertEqual(len(self._depths(self._nest(12))), 13)
+
+    def test_recursion_stops_at_the_cap(self):
+        # Two-sided, matching the bash side's cap test: neither a cap that
+        # stopped firing nor one that runs away slips back in.
+        self.assertEqual(max(self._depths(self._nest(60))),
+                         guard.MAX_SUBST_DEPTH)
+
+    def test_an_offender_nested_at_the_cap_is_still_found(self):
+        offenders, guarded = guard.ps_analyze_command(
+            self._nest(guard.MAX_SUBST_DEPTH), self.ctx, self.workspace)
+        self.assertTrue(offenders)
+        self.assertFalse(guarded)
+
+    def test_nesting_past_the_cap_defers_rather_than_allows(self):
+        # The unanalyzed tail must never read as clean: `allow` speaks for the
+        # whole string, and past the cap the guard has not looked at it.
+        offenders, guarded = guard.ps_analyze_command(
+            self._nest(guard.MAX_SUBST_DEPTH + 1), self.ctx, self.workspace)
+        self.assertFalse(offenders)
+        self.assertFalse(guarded)
 
 
 class PowerShellBindArgsTests(unittest.TestCase):
