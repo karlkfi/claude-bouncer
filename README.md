@@ -200,7 +200,10 @@ project's scratch still asks entirely.
 | `./run.sh & p=$!; kill $p; ps -p $p` (ps consumes a pid) | defer |
 | `pgrep -fl ginkgo` · `pgrep -f ginkgo; kill 1234` | defer |
 | `cat in.txt && kill 1234` (clean read, but signals) | defer |
-| `cat in.txt; sh -c '…'` (clean read, opaque body) | defer |
+| `sh -c 'cat /etc/hosts'` · `timeout 5 bash -c 'cat /etc/hosts'` | **ask** |
+| `sh -c 'pkill -f ginkgo'` (kill inside a body) | **deny** |
+| `docker exec c sh -c 'cat /var/lib/x'` · `ssh h sh -c '…'` | defer |
+| `cat in.txt; sh -c 'cat in.txt'` (clean body, still no vouch) | defer |
 | `ps aux \| grep ginkgo` (no kill in the string) | allow |
 | `cat in.txt; bash --version` (shell, no `-c` body) | allow |
 | `ls /etc` (unguarded, no redirect)   | defer    |
@@ -493,22 +496,44 @@ dataflow: the hook doesn't prove the pids the kill receives came from the source
 it found. The literal-pid rule removes the case where that would matter, and
 `WORKSPACE_GUARD_OVERRIDE=<reason>` covers the remainder.
 
-#### `sh -c` bodies are opaque, so nothing speaks for them
+#### `sh -c` bodies
 
-A shell `-c` operand is a whole command string inside one token, and the hook
-doesn't parse it. It won't *vouch* for it either: any command carrying a shell
-`-c` suppresses the blanket `allow`, so the string defers and your own permission
-settings decide.
+A shell `-c` operand is a whole command string inside one token. Two separate
+things happen to it.
+
+**It is checked, when this host is the one that runs it.** The body goes back
+through the hook as its own command string, so it gets the same answer it would
+written unwrapped — wrapping something in `sh -c` doesn't exempt it.
 
 ```
-cat in.txt; sh -c 'pkill -f ginkgo'     # -> defer (was: allow)
-cat in.txt | xargs -I{} sh -c 'kill {}' # -> defer (was: allow)
-cat in.txt; bash --version              # allow (no -c body)
+sh -c 'cat /etc/hosts'                  # -> ask   (same as `cat /etc/hosts`)
+sh -c 'echo x > /etc/hosts'             # -> ask
+sh -c 'pkill -f ginkgo'                 # -> deny  (unanchored kill)
+cd /etc && sh -c 'cat hosts'            # -> ask   (the `cd` ran first)
 ```
 
-This covers `sh`, `bash`, `zsh`, `dash` and `ksh` wherever they appear in the
-command — `timeout 5 bash -c …`, `xargs -I{} sh -c …`, `find … -exec sh -c … \;`.
-The body itself is still unchecked; see [Limitations](#limitations).
+This covers `sh`, `bash`, `zsh`, `dash` and `ksh`, under the wrappers that
+actually appear — `timeout 5 bash -c …`, `xargs -I{} sh -c …`,
+`find … -exec sh -c … \;`, `env FOO=1 sh -c …`, `nohup`, `nice`, `stdbuf`.
+
+**It never earns the string an `allow`.** That holds whether or not the body was
+checked, because plenty of bodies don't run here at all — a path inside a
+container is not a path on this disk — and a body the hook declines to read is
+exactly the case where vouching is indefensible.
+
+```
+docker exec c sh -c 'cat /var/lib/x'    # -> defer (a container path, unchecked)
+ssh host sh -c 'cat /etc/hosts'         # -> defer (another machine)
+cat in.txt; sh -c 'cat in.txt'          # -> defer (clean body, still no vouch)
+cat in.txt; bash --version              # allow    (no -c body at all)
+```
+
+The unchecked list is everything that isn't a local wrapper: container runtimes
+(`docker`, `podman`, `kubectl exec`, …), `ssh`, `sudo`, and anything else the
+hook doesn't recognize. Naming the local wrappers rather than the remote ones is
+deliberate — a runtime nobody has heard of yet reads as remote, and its body is
+left alone rather than judged against paths it never touches. See
+[Limitations](#limitations).
 
 #### PowerShell: `Stop-Process`
 
@@ -940,9 +965,10 @@ through the same boundary rules and produce the same reasons. Symlink staging
    `taskkill`, directly or as an `xargs` command word) suppresses the blanket
    `allow` a clean guarded command would otherwise earn, so a `grep` can never
    carry an `xargs kill` past your permission settings — `allow` speaks for the
-   whole string. A shell `-c` body suppresses it the same way and for the same
-   reason: the body is one opaque token, so the hook has no basis to vouch for
-   it. A `Stop-Process` or a `taskkill` suppresses the PowerShell `allow` too,
+   whole string. A shell `-c` body suppresses it the same way: it arrives as one
+   token, and even once step 15 has read it the hook has no basis to vouch for a
+   construct it reads at one remove. A `Stop-Process` or a `taskkill` suppresses
+   the PowerShell `allow` too,
    including one this step had no cause to deny and one written inside a `$(…)`
    body. The pid *sources* then go through the anchor test above: `pgrep`'s
    pattern operands, and **`ps`** — which is the source in a pipeline, rather
@@ -962,7 +988,7 @@ through the same boundary rules and produce the same reasons. Symlink staging
    invisible. The hook scans the *raw* command for substitution bodies in
    unquoted or double-quoted context (single-quoted `'$(…)'` is a bash literal
    and is skipped; `$((…))` arithmetic has no command) and runs each body back
-   through steps 1–14. Heredoc bodies leave the command line first and are
+   through steps 1–15. Heredoc bodies leave the command line first and are
    scanned on their own: a quoted-delimiter body is literal to bash and is
    dropped, an unquoted one is scanned with quoting turned off, because bash
    applies none inside it — so the apostrophe in a `don't` there is text, not
@@ -972,6 +998,22 @@ through the same boundary rules and produce the same reasons. Symlink staging
    step can only add friction. (The bare unquoted `$(…)` form was already caught,
    because its `(`/`)` split the inner command into its own group.) Nesting is
    followed 25 levels deep; see Limitations for what the bound costs.
+15. **Recurse into shell `-c` bodies.** A body is an ordinary command string that
+   happened to arrive inside one token, so it runs back through steps 1–15 and
+   its offenders fold in — but only when this host is what executes it. The
+   group's command word has to be a shell or a local wrapper (`timeout`, `env`,
+   `xargs`, `find`, `nohup`, `nice`, `ionice`, `stdbuf`, `setsid`, `time`);
+   anything else is treated as remote and the body is left alone, because the
+   paths in `docker exec c sh -c '…'` or `ssh h sh -c '…'` are not this
+   filesystem's. The `-c` must be the shell's own option, found in the option run
+   right after the shell word — otherwise a `bash run.sh | grep -c '^FAIL'` would
+   hand the tokenizer a grep pattern and get offenders invented out of it. Each
+   body resolves against its group's cwd, so a preceding `cd` moves it; once the
+   hook has lost track of the cwd the body is skipped, since a relative path
+   would otherwise resolve against a stale directory and read as in-workspace.
+   Like step 14 this only *adds* friction: the body's own `guarded` is dropped,
+   so a body reading nothing but workspace files still leaves the string
+   deferring. The 25-level nesting bound covers these too.
 
 ## Agent guidance: avoiding prompts
 
@@ -1085,11 +1127,11 @@ flowing, avoid triggering it:
   (`cmd & pid=$!; kill $pid`, even alongside a `ps -p $pid`) are never blocked —
   those are the rewrites, and they stay out of the rule even in a string that
   also runs a `pgrep`.
-- **Don't wrap work in `sh -c '…'` to get it past the hook.** It won't be
-  analyzed, but it won't be approved either: a shell `-c` body makes the whole
-  command string defer instead of earning the silent `allow` a clean guarded
-  command gets, so you trade an allow for a prompt and gain nothing. Write the
-  command directly.
+- **Don't wrap work in `sh -c '…'` to get it past the hook.** The body is read
+  back through the same rules, so it gets the same answer it would unwrapped —
+  and a body carries the extra cost that it can never earn the silent `allow` a
+  clean guarded command gets. Wrapping trades an allow for a prompt and gains
+  nothing. Write the command directly.
 ```
 
 The plugin also ships a **`reduce-workspace-guard-prompts`** skill: ask Claude
@@ -1391,16 +1433,19 @@ final output.
   co-occurrence within one pipeline or command string rather than dataflow, so a
   string that both searches by pattern and kills an unrelated non-literal pid is
   denied though nothing was laundered; the override covers it.
-- **A shell `-c` body is never analyzed.** `sh -c '<body>'` — and the `bash`,
-  `zsh`, `dash`, `ksh` spellings, wherever they appear (`timeout 5 bash -c …`,
-  `xargs -I{} sh -c …`, `find … -exec sh -c … \;`) — puts a whole command string
-  in one token, so nothing inside is checked: not a kill, not an outside read,
-  not a redirect. What the hook does do is refuse to *vouch* for it: such a
-  command suppresses the blanket `allow`, so the string defers to your own
-  permission settings instead of being green-lit. Analyzing the body would also
-  mean judging paths in bodies that don't run on this host at all — a
-  `docker exec … sh -c 'cat /var/lib/…'` names a path inside the container — so
-  it stays unparsed for now.
+- **A shell `-c` body is only analyzed when this host runs it.** `sh -c
+  '<body>'` — and the `bash`, `zsh`, `dash`, `ksh` spellings under the local
+  wrappers (`timeout 5 bash -c …`, `xargs -I{} sh -c …`,
+  `find … -exec sh -c … \;`) — is read back through the same rules, so a kill, an
+  outside read or a redirect inside one is caught. Under anything else it is not:
+  a container runtime, `ssh`, `sudo`, or a wrapper the hook doesn't recognize
+  leaves the body unparsed, because the paths in `docker exec … sh -c 'cat
+  /var/lib/…'` are the container's rather than this disk's, and guessing wrong
+  there means blocking a path that was never touched. The body is also skipped
+  once the hook has lost track of the cwd (after a `cd -` or a `cd "$VAR"`),
+  where a relative path in it would resolve against a stale directory. In all
+  those cases the string still *defers* — a body never earns the blanket `allow`,
+  analyzed or not.
 - **The PowerShell tool is guarded for a known set of cmdlets, and only those.**
   Claude Code ships two shell tools. Which one a Windows session gets depends on
   whether Git for Windows is installed — without it there is no Bash tool and

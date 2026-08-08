@@ -3831,9 +3831,9 @@ class SubstDepthCapTests(unittest.TestCase):
         depths = []
         real = guard._analyze_command
 
-        def spy(cmd, ctx, base_cwd, depth=0):
+        def spy(cmd, ctx, base_cwd, depth=0, in_subst=False):
             depths.append(depth)
-            return real(cmd, ctx, base_cwd, depth)
+            return real(cmd, ctx, base_cwd, depth, in_subst)
 
         ctx = guard.build_context(
             {"cwd": self.workspace, "tool_input": {}})
@@ -3845,9 +3845,9 @@ class SubstDepthCapTests(unittest.TestCase):
         depths = []
         real = guard._analyze_command
 
-        def spy(cmd, ctx, base_cwd, depth=0):
+        def spy(cmd, ctx, base_cwd, depth=0, in_subst=False):
             depths.append(depth)
-            return real(cmd, ctx, base_cwd, depth)
+            return real(cmd, ctx, base_cwd, depth, in_subst)
 
         ctx = guard.build_context(
             {"cwd": self.workspace, "tool_input": {}})
@@ -5338,6 +5338,51 @@ class ShellCGroupTests(unittest.TestCase):
             self.assertFalse(guard.shell_c_group(toks), toks)
 
 
+class ShellCBodyExtractionTests(unittest.TestCase):
+    """Which bodies come back for re-analysis, and which are left alone (Q61)."""
+
+    def test_the_body_is_the_token_after_the_shells_own_c_flag(self):
+        for toks in (["sh", "-c", "cat f"], ["bash", "-lc", "cat f"],
+                     ["bash", "-euc", "cat f"], ["/bin/sh", "-c", "cat f"],
+                     ["bash", "--norc", "-c", "cat f"],
+                     ["sh", "-c", "cat f", "arg0", "arg1"]):
+            self.assertEqual(guard.shell_c_bodies(toks), ["cat f"], toks)
+
+    def test_local_wrappers_pass_the_body_through(self):
+        for toks in (["timeout", "5", "bash", "-c", "cat f"],
+                     ["xargs", "-I{}", "sh", "-c", "cat f"],
+                     ["find", ".", "-exec", "sh", "-c", "cat f", ";"],
+                     ["env", "FOO=1", "sh", "-c", "cat f"],
+                     ["/usr/bin/time", "-p", "sh", "-c", "cat f"],
+                     ["nohup", "sh", "-c", "cat f"]):
+            self.assertEqual(guard.shell_c_bodies(toks), ["cat f"], toks)
+
+    def test_a_body_that_does_not_run_on_this_host_is_left_alone(self):
+        # The paths in these bodies belong to another filesystem. Naming the
+        # local wrappers rather than the remote ones is what makes an unlisted
+        # runtime (`sudo`, a container tool nobody has heard of) safe by
+        # omission — it reads as remote and the body stays unanalyzed.
+        for toks in (["docker", "exec", "c", "sh", "-c", "cat f"],
+                     ["kubectl", "exec", "p", "--", "sh", "-c", "cat f"],
+                     ["podman", "exec", "c", "sh", "-c", "cat f"],
+                     ["ssh", "host", "sh", "-c", "cat f"],
+                     ["sudo", "sh", "-c", "cat f"]):
+            self.assertEqual(guard.shell_c_bodies(toks), [], toks)
+
+    def test_the_c_must_be_an_option_of_the_shell_itself(self):
+        # `shell_c_group` scans every token and over-reports on purpose; picking
+        # a body cannot afford that. `^FAIL` is a grep pattern, not a command,
+        # and feeding it to the tokenizer invents offenders out of text.
+        for toks in (["bash", "run.sh", "|", "grep", "-c", "^FAIL"],
+                     ["sh", "foo.sh", "-c", "cat f"],
+                     ["bash", "--version"], ["bash", "--config=x"],
+                     ["bash"], []):
+            self.assertEqual(guard.shell_c_bodies(toks), [], toks)
+
+    def test_a_c_flag_with_no_body_after_it(self):
+        self.assertEqual(guard.shell_c_bodies(["sh", "-c"]), [])
+
+
 class PidSourcePatternTests(unittest.TestCase):
     """Pattern extraction from the commands that produce a pid list."""
 
@@ -5655,12 +5700,14 @@ class PsPidSourceEndToEndTests(unittest.TestCase):
 
 
 class ShellCSuppressesAllowTests(unittest.TestCase):
-    """A shell `-c` body is opaque, so the hook must not vouch for it (Q60).
+    """A shell `-c` body never earns the string an `allow` (Q60).
 
     Measured at d076eb4: `cat in.txt; sh -c 'cat /q60-fake-target'` came back
-    `allow`, green-lighting an unreadable outside read. The body stays
-    unanalyzed — only the blanket `allow` goes away. Targets are synthetic
-    (repo rule); nothing here is ever executed.
+    `allow`, green-lighting an unreadable outside read. Q61 went on to analyze
+    the bodies the hook can read, but the suppression is what covers the ones it
+    can't — so every body here is clean or unreadable, and the assertion is that
+    none of them reaches `allow`. Targets are synthetic (repo rule); nothing here
+    is ever executed.
     """
 
     def setUp(self):
@@ -5683,19 +5730,28 @@ class ShellCSuppressesAllowTests(unittest.TestCase):
         return out["hookSpecificOutput"]["permissionDecisionReason"]
 
     def test_a_clean_guarded_command_no_longer_speaks_for_a_body(self):
-        for cmd in ("cat in.txt; sh -c 'pkill -f ginkgo'",
+        # A body with nothing to flag still costs the string its `allow`: the
+        # body's own `guarded` is discarded, so reading a workspace file inside
+        # one buys nothing.
+        for cmd in ("cat in.txt; sh -c 'cat in.txt'",
                     "grep foo in.txt && sh -c 'kill 1234'",
-                    "cat in.txt; sh -c 'cat /q60-fake-target'",
-                    "cat in.txt; sh -c 'echo x > /q60-fake-target'",
                     "cat in.txt | xargs -I{} sh -c 'kill {}'",
-                    "cat in.txt; timeout 5 bash -c 'pkill -f ginkgo'",
+                    "cat in.txt; timeout 5 bash -c 'kill 1'",
                     "cat in.txt; find . -exec sh -c 'kill 1' \\;"):
             self._decision(cmd, "defer")
 
-    def test_a_body_on_its_own_still_defers(self):
-        # No guarded command to suppress; the body remains unanalyzed.
-        for cmd in ("sh -c 'pkill -f ginkgo'", "sh -c 'cat /q60-fake-target'",
-                    "bash -c 'kill $(pgrep -f ginkgo)'"):
+    def test_a_body_the_hook_declines_to_read_is_still_suppressed(self):
+        # Q61 does not analyze these — a container path is not a host path — so
+        # the Q60 suppression is the only thing standing between the clean `cat`
+        # and a blanket `allow`.
+        for cmd in ("cat in.txt; docker exec c sh -c 'cat /q61-fake-target'",
+                    "cat in.txt; kubectl exec p -- sh -c 'pkill -f ginkgo'",
+                    "cat in.txt; ssh host sh -c 'cat /q61-fake-target'"):
+            self._decision(cmd, "defer")
+
+    def test_a_body_on_its_own_with_nothing_to_flag_defers(self):
+        for cmd in ("sh -c 'kill 1234'", "sh -c 'cat in.txt'",
+                    "sh -c 'echo hello'"):
             self._decision(cmd, "defer")
 
     def test_a_shell_without_the_c_flag_still_allows(self):
@@ -5706,6 +5762,89 @@ class ShellCSuppressesAllowTests(unittest.TestCase):
     def test_an_ordinary_guarded_command_still_allows(self):
         self._decision("cat in.txt", "allow")
         self._decision("grep -c foo in.txt", "allow")
+
+
+class ShellCBodyAnalysisTests(unittest.TestCase):
+    """A shell `-c` body the host runs is checked like any command string (Q61).
+
+    Measured at 8ebdc10, every one of these came back `defer`. The bar the
+    change was held to: each body gets exactly the decision the shipped hook
+    already gives it written unwrapped — `sh -c` buys an exemption, and this
+    takes it away. Targets are synthetic (repo rule); nothing here is executed.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = os.path.realpath(self._tmp.name)
+        with open(os.path.join(self.workspace, "in.txt"), "w") as f:
+            f.write("hello\n")
+
+    def _decision(self, cmd, expected):
+        out = run_hook(cmd, self.workspace, project_dir=self.workspace)
+        if expected == "defer":
+            self.assertIsNone(out, f"expected defer for {cmd!r}, got {out!r}")
+            return None
+        self.assertIsNotNone(out, f"expected a decision, got defer for: {cmd!r}")
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"],
+                         expected, f"expected {expected!r} for {cmd!r}")
+        return out["hookSpecificOutput"]["permissionDecisionReason"]
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_an_outside_read_inside_a_body(self):
+        for cmd in ("sh -c 'cat /q61-fake-target'",
+                    "cat in.txt; sh -c 'cat /q61-fake-target'",
+                    "timeout 5 bash -c 'cat /q61-fake-target'",
+                    "xargs -I{} sh -c 'cat /q61-fake-target'",
+                    "find . -exec sh -c 'cat /q61-fake-target' \\;",
+                    "env FOO=1 sh -c 'cat /q61-fake-target'"):
+            self._decision(cmd, "ask")
+
+    def test_an_outside_write_inside_a_body(self):
+        reason = self._decision("cat in.txt; sh -c 'echo x > /q61-fake-target'",
+                                "ask")
+        self.assertIn("q61-fake-target", reason)
+
+    def test_an_unanchored_kill_inside_a_body(self):
+        for cmd in ("sh -c 'pkill -f ginkgo'",
+                    "cat in.txt; sh -c 'pkill -f ginkgo'",
+                    "bash -c 'kill $(pgrep -f ginkgo)'",
+                    "cat in.txt; sh -c 'ps -eo pid= | xargs kill'"):
+            self._decision(cmd, "deny")
+
+    def test_an_anchored_kill_inside_a_body_is_not_an_offender(self):
+        self._decision(f"sh -c 'pkill -f {os.path.basename(self.workspace)}/x'",
+                       "defer")
+
+    def test_the_body_resolves_against_its_own_groups_cwd(self):
+        # `cd` runs before the body does, so a relative path inside it lands
+        # where the `cd` left the shell, not where the string started.
+        self._decision("cd /etc && sh -c 'cat passwd'", "ask")
+
+    def test_a_nested_body_is_reached(self):
+        self._decision("""cat in.txt; sh -c 'sh -c "cat /q61-fake-target"'""",
+                       "ask")
+
+    def test_a_body_inside_a_substitution_is_reached(self):
+        # `in_subst` carries into the body, so the enclosing `kill` still gets
+        # `ps` as its pid source.
+        self._decision("kill $(sh -c 'ps -eo pid= | head -1')", "deny")
+
+    def test_a_bare_ps_in_a_body_is_not_a_pid_source_on_its_own(self):
+        # The commonest debugging idiom there is: background a child, kill it,
+        # confirm it died. A `sh -c` body is not a pipe, so the `ps` inside one
+        # stays a CONSUMER of an already-known pid.
+        self._decision("./run.sh & p=$!; kill $p; sh -c 'ps -p $p'", "defer")
+
+    def test_a_body_the_hook_cannot_tokenize_defers(self):
+        self._decision("cat in.txt; sh -c 'cat \"unbalanced'", "defer")
+
+    def test_an_untracked_cwd_leaves_the_body_alone(self):
+        # After a `cd` the hook could not follow, a relative path in the body
+        # would resolve against a stale directory and read as in-workspace. No
+        # answer beats a wrong clean one.
+        self._decision("cd - && sh -c 'cat passwd'", "defer")
 
 
 class SiblingSessionScratchE2ETests(unittest.TestCase):

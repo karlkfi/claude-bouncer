@@ -15,7 +15,6 @@ Specific actionable items in priority order. Pick from the top; skip 🚫 items 
 
 | ID | Item | Labels | St | Sz | Notes |
 |---|---|---|---|---|---|
-| <a id="Q61"></a>Q61 | Analyze the body of a shell `-c` command | `security` | 🔲 | M | The body is one opaque token, so no read, write or kill inside it is checked; Q60 only stopped the hook vouching for it. Recursing needs a container-exec exclusion first — see [plan](plan/q60-ps-pid-source.md). |
 | <a id="Q64"></a>Q64 | Stop PowerShell subexpression analysis going exponential | `bug` `security` | 🔲 | S | 2^n: `ps_subexpressions` flattens every descendant, then `_ps_analyze_command` recurses into each and re-flattens. 20 nested `$(…)` takes 11s, 25 over 20s — a stalled hook enforces nothing. |
 
 ## Deferred
