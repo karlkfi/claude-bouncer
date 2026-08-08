@@ -5,7 +5,7 @@ Single source of truth for progress and priorities in workspace-guard. Pick the 
 **Status:** 🔲 ready · 🚫 blocked
 **Size:** S = one session/PR · M = 2–3 sessions · L = needs a plan doc under `docs/plan/`
 **Labels:** `security` `tests` `docs` `infra` `bug` `parsing` `retro`
-**Next ID:** Q65
+**Next ID:** Q69
 
 **Maintaining this file:** see [`docs/development/maintaining-backlog.md`](development/maintaining-backlog.md).
 
@@ -15,8 +15,10 @@ Specific actionable items in priority order. Pick from the top; skip 🚫 items 
 
 | ID | Item | Labels | St | Sz | Notes |
 |---|---|---|---|---|---|
-
-_Empty._ Next work comes from a Deferred trigger firing, a friction report, or a new finding.
+| <a id="Q65"></a>Q65 | Stop a plain `printf` invalidating a tracked variable | `parsing` `bug` | 🔲 | S | `printf` sits in `ARG_ASSIGNER_CMDS` for `printf -v f`, so `printf "%s" "$f"` also drops `f` and a later `docs/$f.md` prompts. Fix: treat `printf` as assigning only when `-v` is present. |
+| <a id="Q66"></a>Q66 | Resolve tracked variables inside a command substitution | `parsing` `bug` | 🔲 | M | `f=docs/STATUS.md; echo "$(grep -c X "$f")"` prompts on `$f`; the same command without the `$( )` allows. Fix: pass the assignment map into substitution analysis, keeping Q63's recursion cap. |
+| <a id="Q67"></a>Q67 | Keep variable tracking alive across a heredoc | `parsing` `bug` | 🔲 | S | A heredoc earlier in the command drops the variable map: `SP=<literal>`, a heredoc, then `$SP/x` prompts — literal paths still resolve. Fix: preserve the map across heredoc extraction. |
+| <a id="Q68"></a>Q68 | Archive the shipped plan docs | `docs` | 🔲 | S | Twelve shipped plans still sit in `docs/plan/`; only `q51-powershell-tool.md` is still referenced from the Queue. Move the rest to `docs/plan/archive/` and repair the links between them. |
 
 ## Deferred
 
