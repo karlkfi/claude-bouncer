@@ -92,6 +92,7 @@ This applies to anything you'd run through the user's `Bash` tool while developi
 - Follow the Conventional Commits standard.
 - Amending an unpushed commit is fine — fix up the message or staged changes before pushing without asking. Once a commit is pushed, prefer a follow-up commit; only amend + force-push (always `--force-with-lease`, never on `main`/`master`) when the user asks for it.
 - After pushing, check whether a PR exists (`gh pr view`). If one does, update its description with `gh pr edit` to reflect any new commits.
+- Every PR body ends with the `## Release note` block from `.github/pull_request_template.md` — one line in release-bullet voice, or `None` when nothing is user-facing. `gh pr create --body` does **not** apply the template, so copy the block in yourself. Release notes are drafted from these at tag time.
 - Always commit `docs/STATUS.md` changes in their own isolated commit, separate from code and plan-doc changes. STATUS.md is high-contention across parallel sessions; isolating it makes rebase conflicts trivial to resolve.
 - If a change doesn't belong in the current PR, open a separate PR for it. Working multiple PRs in parallel is fine and preferable to bundling unrelated concerns.
 - Act only on your own branch and PR. Never re-run, edit, or push to a PR or branch owned by another session; when CI fails on another session's PR, reproduce the failure locally instead.

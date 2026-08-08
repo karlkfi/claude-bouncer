@@ -86,7 +86,24 @@ The invariants:
 - A bullet per notable PR: `* <title> by @<author> in <PR-url>`. Curate — highlight user-facing changes; routine chores can be folded into the changelog link.
 - A trailing `**Full Changelog**: https://github.com/karlkfi/claude-workspace-guard/compare/v<PREV>...vX.Y.Z` line. It 404s until the tag is pushed; that is expected while the notes PR is in review.
 
-To enumerate what shipped since the last tag:
+### Start from the notes their authors wrote
+
+Every PR body ends with a `## Release note` block — see [`.github/pull_request_template.md`](../../.github/pull_request_template.md) — holding one line written at PR time, while the author still had the change in their head. Harvest those first. They are the notes, not raw material for them:
+
+```
+for pr in $(git log --oneline v<PREV>..HEAD | grep -oE '\(#[0-9]+\)' | grep -oE '[0-9]+'); do
+  note=$(gh pr view "$pr" --json body --jq .body \
+    | awk '/^## Release note/{f=1;next} /^## /{f=0} f' \
+    | awk '/<!--/{c=1} !c; /-->/{c=0}' | grep -v '^[[:space:]]*$')
+  printf '#%s  %s\n' "$pr" "${note:-(no release-note block)}"
+done
+```
+
+The second `awk` drops the template's instructions, which stay in the body as an HTML comment even when the author fills the section in.
+
+Read the two empty answers differently. `None` is an answer: the author weighed it and nothing is user-facing, so fold that PR into the changelog link. `(no release-note block)` is a gap — nobody was asked, or nobody answered — so reconstruct that one from its diff, the way every release before this template was written.
+
+To enumerate what shipped since the last tag, and to catch anything the harvest missed:
 
 ```
 git log --oneline v<PREV>..HEAD
