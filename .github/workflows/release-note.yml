@@ -1,0 +1,31 @@
+name: release-note
+
+# `edited` matters as much as `opened`: answering the block is a body edit,
+# and without it a corrected pull request stays red until an unrelated push.
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+jobs:
+  # The job id is the name that shows up in the checks list and in branch
+  # protection's required-checks picker, so it matches what the docs call it.
+  release-note:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Through the environment, never `${{ }}` inside `run:` -- a pull
+      # request body is attacker-controlled text and would be interpolated
+      # into the shell before it ever reached the script.
+      - env:
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          if ! printf '%s' "$BODY" | python3 scripts/release-note.py; then
+            echo
+            echo "The '## Release note' block is missing or unanswered."
+            echo "Copy it from .github/pull_request_template.md and answer it:"
+            echo "  * one line, in the voice of a release bullet, when a decision"
+            echo "    moves or an operator-visible message changes; or"
+            echo "  * None -- no bullet in the release notes, fold this pull"
+            echo "    request into the changelog link."
+            exit 1
+          fi
