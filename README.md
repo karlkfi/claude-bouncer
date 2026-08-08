@@ -769,7 +769,10 @@ through the same boundary rules and produce the same reasons. Symlink staging
    later touched by `read`/`eval`/`declare`/`unset` (or by `printf`, but only
    in its assigning `-v NAME` form), an assignment inside a
    subshell, pipeline segment, or backgrounded command — drops the variable
-   and keeps today's runtime-expanded `ask`. As a side effect, a guarded
+   and keeps today's runtime-expanded `ask`. Those rules read the command
+   stripped by step 3, so a reserved word or an inline assignment in front of
+   the mutation (`while read f`, `LC_ALL=C read f`) doesn't hide it. As a
+   side effect, a guarded
    command reached *through* a variable (`C=cat; $C file`) is now recognised
    and guarded too.
 

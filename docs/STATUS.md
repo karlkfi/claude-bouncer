@@ -13,9 +13,7 @@ Single source of truth for progress and priorities in workspace-guard. Pick the 
 
 Specific actionable items in priority order. Pick from the top; skip 🚫 items until their blocker clears.
 
-| ID | Item | Labels | St | Sz | Notes |
-|---|---|---|---|---|---|
-| <a id="Q69"></a>Q69 | Poison variables through an env-assignment prefix | `security` `parsing` `bug` | 🔲 | S | Verified on `main`: neither strips env prefixes, so `LC_ALL=C read f; cat $f/x` allows where the bare form asks; `eval` escapes too. Fix: `strip_env_prefix` after `strip_sh_keywords` in both. |
+_Empty — nothing queued._
 
 ## Deferred
 

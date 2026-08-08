@@ -6249,6 +6249,22 @@ class PoisonVarsTests(unittest.TestCase):
         guard.poison_vars(["for", "f", "in", "a", "b"], m)
         self.assertNotIn("f", m)
 
+    def test_env_prefix_skipped_before_dispatch(self):
+        # Q69: an inline env assignment must not hide the assigning command.
+        for pre in (["LC_ALL=C"], ["LC_ALL=C", "TZ=UTC"], ["while", "LC_ALL=C"]):
+            for cmd in (["read", "-r", "f"], ["printf", "-v", "f", "%s", "y"],
+                        ["unset", "f"], ["source", "lib.sh"], ["eval", "echo"]):
+                with self.subTest(prefix=pre, cmd=cmd):
+                    m = {"f": "x"}
+                    guard.poison_vars(pre + cmd, m)
+                    self.assertEqual(m, {})
+
+    def test_env_prefix_name_still_poisoned(self):
+        # A special builtin under `set -o posix` keeps the prefix assignment.
+        m = {"f": "x", "g": "y"}
+        guard.poison_vars(["f=/y", "read", "g"], m)
+        self.assertEqual(m, {})
+
     def test_prefix_assignment_poisons(self):
         m = {"f": "x"}
         guard.poison_vars(["f=/y", "cat", "z"], m)
@@ -6340,6 +6356,17 @@ class ClobbersIfsTests(unittest.TestCase):
 
     def test_keyword_prefix_skipped_before_dispatch(self):
         self.assertTrue(guard.clobbers_ifs(["while", "read", "IFS"]))
+
+    def test_env_prefix_skipped_before_dispatch(self):
+        # Q69: `LC_ALL=C read IFS` sets IFS for every later group.
+        for cmd in (["LC_ALL=C", "read", "IFS"], ["LC_ALL=C", "source", "lib.sh"],
+                    ["LC_ALL=C", "TZ=UTC", "declare", "IFS=x"],
+                    ["while", "LC_ALL=C", "read", "IFS"]):
+            self.assertTrue(guard.clobbers_ifs(cmd), cmd)
+
+    def test_ifs_env_prefix_alone_does_not_clobber(self):
+        # The assignment is scoped to `cat`, which bash splits with the old IFS.
+        self.assertFalse(guard.clobbers_ifs(["IFS=x", "cat", "y.txt"]))
 
     def test_unset_is_exempt(self):
         # bash splits on the default IFS while IFS is unset, which is the
@@ -6655,6 +6682,14 @@ class VarPropagationEndToEndTests(unittest.TestCase):
     def test_eval_clears_all(self):
         self._decision("f=in.txt; eval echo hi; cat $f", "ask")
 
+    def test_env_prefix_does_not_hide_the_poisoning_command(self):
+        # Q69: the prefix left `read`/`source` unrecognised, so `f` kept its
+        # stale in-workspace literal and the later `cat` allowed.
+        for cmd in ("read f", "read -r f", "printf -v f /etc/q69-fake",
+                    "unset f", "source lib.sh", "eval echo hi"):
+            with self.subTest(cmd=cmd):
+                self._decision(f"f=in.txt; LC_ALL=C {cmd}; cat $f", "ask")
+
     def test_unset_poisons_var(self):
         self._decision("f=in.txt; unset f; cat $f", "ask")
 
@@ -6714,6 +6749,17 @@ class VarPropagationEndToEndTests(unittest.TestCase):
         # resolves inside the workspace reads a file outside it.
         self._decision(
             "declare IFS=x; f=docs/x/opt/q49-fake-target; cat $f", "ask")
+
+    def test_env_prefixed_ifs_setter_disables_propagation(self):
+        # Q69: same setters, hidden behind an inline env assignment.
+        for setter in ("declare IFS=x", "read IFS", "eval 'IFS=x'"):
+            with self.subTest(setter=setter):
+                self._decision(f"LC_ALL=C {setter}; f=in.txt; cat $f", "ask")
+
+    def test_ifs_env_prefix_keeps_propagation(self):
+        # The assignment is scoped to `true`, and bash splits that command's
+        # own words with the old IFS, so later groups are unaffected.
+        self._decision("IFS=x true; f=in.txt; cat $f", "allow")
 
     def test_unset_ifs_keeps_propagation(self):
         # Unsetting IFS restores the default splitting the hook models.

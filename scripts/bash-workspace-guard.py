@@ -1703,10 +1703,20 @@ def poison_vars(g, varmap):
     ``f++``, or an ``f`` immediately followed by an ``=…`` token from a torn
     ``(( f = x ))``) poisons that name. Poisoning only removes entries, so
     it can only cause an `ask`, never an `allow`.
+
+    Inline env assignments come off before the dispatch too, or a prefix hides
+    the command behind it — ``LC_ALL=C read f`` matched no rule and left ``f``
+    on the map at its stale in-workspace literal, so a later ``cat $f/x``
+    allowed where the bare ``read f`` asked (Q69). The prefix names are still
+    poisoned: bash scopes such an assignment to the one command, but a special
+    builtin under ``set -o posix`` keeps it.
     """
     if not varmap:
         return
-    rest = strip_sh_keywords(g)
+    kw_g = strip_sh_keywords(g)
+    rest = strip_env_prefix(kw_g)
+    for t in kw_g[:len(kw_g) - len(rest)]:
+        varmap.pop(t.split('=', 1)[0], None)
     if rest:
         name0 = os.path.basename(rest[0])
         if name0 in POISON_ALL_CMDS:
@@ -1757,8 +1767,14 @@ def clobbers_ifs(g):
 
     ``unset`` is exempt: bash word-splits on the default IFS while IFS is
     unset, and the default is what the hook already models.
+
+    An inline env assignment is scoped to its own command and bash splits that
+    command's words with the old IFS, so an ``IFS=x cat …`` prefix leaves
+    nothing for later groups to mis-split. It still has to come off before the
+    dispatch, or it hides a command that does persist — ``LC_ALL=C read IFS``
+    (Q69).
     """
-    rest = strip_sh_keywords(g)
+    rest = strip_env_prefix(strip_sh_keywords(g))
     if not rest:
         return False
     name0 = os.path.basename(rest[0])
