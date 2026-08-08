@@ -5,7 +5,7 @@ Single source of truth for progress and priorities in workspace-guard. Pick the 
 **Status:** 🔲 ready · 🚫 blocked
 **Size:** S = one session/PR · M = 2–3 sessions · L = needs a plan doc under `docs/plan/`
 **Labels:** `security` `tests` `docs` `infra` `bug` `parsing` `retro`
-**Next ID:** Q69
+**Next ID:** Q70
 
 **Maintaining this file:** see [`docs/development/maintaining-backlog.md`](development/maintaining-backlog.md).
 
@@ -15,7 +15,7 @@ Specific actionable items in priority order. Pick from the top; skip 🚫 items 
 
 | ID | Item | Labels | St | Sz | Notes |
 |---|---|---|---|---|---|
-| <a id="Q65"></a>Q65 | Stop a plain `printf` invalidating a tracked variable | `parsing` `bug` | 🔲 | S | `printf` sits in `ARG_ASSIGNER_CMDS` for `printf -v f`, so `printf "%s" "$f"` also drops `f` and a later `docs/$f.md` prompts. Fix: treat `printf` as assigning only when `-v` is present. |
+| <a id="Q69"></a>Q69 | Poison variables through an env-assignment prefix | `security` `parsing` `bug` | 🔲 | S | Verified on `main`: neither strips env prefixes, so `LC_ALL=C read f; cat $f/x` allows where the bare form asks; `eval` escapes too. Fix: `strip_env_prefix` after `strip_sh_keywords` in both. |
 | <a id="Q66"></a>Q66 | Resolve tracked variables inside a command substitution | `parsing` `bug` | 🔲 | M | `f=docs/STATUS.md; echo "$(grep -c X "$f")"` prompts on `$f`; the same command without the `$( )` allows. Fix: pass the assignment map into substitution analysis, keeping Q63's recursion cap. |
 
 ## Deferred

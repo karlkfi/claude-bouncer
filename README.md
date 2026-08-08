@@ -766,7 +766,8 @@ through the same boundary rules and produce the same reasons. Symlink staging
    exactly the expansion bash will perform, using only text already inside
    the command; the substituted path still goes through every step below.
    Anything uncertain — a value built from another expansion, a variable
-   later touched by `read`/`eval`/`declare`/`unset`, an assignment inside a
+   later touched by `read`/`eval`/`declare`/`unset` (or by `printf`, but only
+   in its assigning `-v NAME` form), an assignment inside a
    subshell, pipeline segment, or backgrounded command — drops the variable
    and keeps today's runtime-expanded `ask`. As a side effect, a guarded
    command reached *through* a variable (`C=cat; $C file`) is now recognised

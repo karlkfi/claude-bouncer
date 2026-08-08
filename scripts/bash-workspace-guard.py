@@ -74,6 +74,7 @@ POISON_ALL_CMDS = frozenset({'eval', 'source', '.'})
 
 # Builtins/keywords that assign to variables named by their arguments
 # (`read f`, `for f in …`, `declare f=…`, `printf -v f …`, `unset f`, ...).
+# `printf` only assigns under `-v`, so it is gated on printf_assigns (Q65).
 ARG_ASSIGNER_CMDS = frozenset({
     'read', 'readarray', 'mapfile', 'getopts', 'declare', 'typeset',
     'local', 'readonly', 'export', 'unset', 'let', 'printf', 'for', 'select',
@@ -1654,6 +1655,40 @@ def apply_assignment_group(g, varmap, persists):
     return names
 
 
+def printf_assigns(args):
+    """True when a ``printf`` invocation could assign to a variable.
+
+    ``-v NAME`` is printf's only assigning form, and bash stops reading
+    options at the first non-option word — so ``printf "%s" "$f"`` cannot
+    assign however its arguments expand. Treating every printf as an
+    arg-assigner cost the map on any ``$`` argument, dropping ``f`` and
+    prompting on a later ``docs/$f`` (Q65).
+
+    Only the leading option region is scanned: ``--`` ends it, ``-v`` and the
+    glued ``-vNAME`` are the assigning form, and an option-region token still
+    holding a ``$`` is unresolvable — unquoted, it word-splits into ``-v
+    NAME`` and does assign — so it counts as one.
+    """
+    for t in args:
+        if t == '--':
+            return False
+        if t.startswith('-v') or '$' in t:
+            return True
+        if not t.startswith('-'):
+            return False
+    return False
+
+
+def unglue_printf_v(t):
+    """Strip a leading ``-v`` from a glued ``printf -vNAME`` argument.
+
+    bash accepts the name glued to the flag, and the assigned name is then
+    behind a ``-`` that ``IDENT_RE`` won't match past — so the name-poisoning
+    loops need it unstuck or ``printf -vf`` silently keeps ``f`` in the map.
+    """
+    return t[2:] if t.startswith('-v') and t != '-v' else t
+
+
 def poison_vars(g, varmap):
     """Conservatively drop map entries a (non-assignment) command group might
     mutate. Called on the post-substitution tokens so an expanded builtin
@@ -1677,8 +1712,12 @@ def poison_vars(g, varmap):
         if name0 in POISON_ALL_CMDS:
             varmap.clear()
             return
-        if name0 in ARG_ASSIGNER_CMDS:
-            for t in rest[1:]:
+        args = rest[1:]
+        if name0 in ARG_ASSIGNER_CMDS and (
+                name0 != 'printf' or printf_assigns(args)):
+            if name0 == 'printf':
+                args = [unglue_printf_v(t) for t in args]
+            for t in args:
                 if '$' in t:
                     varmap.clear()
                     return
@@ -1727,7 +1766,12 @@ def clobbers_ifs(g):
         return True
     if name0 == 'unset' or name0 not in ARG_ASSIGNER_CMDS:
         return False
-    for t in rest[1:]:
+    args = rest[1:]
+    if name0 == 'printf':
+        if not printf_assigns(args):
+            return False
+        args = [unglue_printf_v(t) for t in args]
+    for t in args:
         if '$' in t:
             return True
         m = IDENT_RE.match(t)

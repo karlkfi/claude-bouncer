@@ -6167,6 +6167,48 @@ class PoisonVarsTests(unittest.TestCase):
         guard.poison_vars(["grep", "PAT", "y.txt"], m)
         self.assertEqual(m, {"f": "x"})
 
+    def test_printf_without_v_leaves_map_alone(self):
+        # Q65: only `-v` assigns, and bash stops reading options at the format,
+        # so nothing after it can name a variable.
+        for args in (["%s\n", "f"], ["%s\n", "$UNSET"], ["value: %s", "$HOME"],
+                     ["--", "-v", "f"], ["%s", "-v", "f"]):
+            with self.subTest(args=args):
+                m = {"f": "x"}
+                guard.poison_vars(["printf"] + args, m)
+                self.assertEqual(m, {"f": "x"})
+
+    def test_printf_v_forms_still_poison(self):
+        for args in (["-v", "f", "%s", "y"], ["-vf", "%s", "y"]):
+            with self.subTest(args=args):
+                m = {"f": "x"}
+                guard.poison_vars(["printf"] + args, m)
+                self.assertEqual(m, {})
+
+    def test_printf_option_region_dollar_clears_map(self):
+        # Unquoted, `$fmt` word-splits into `-v f` and does assign.
+        m = {"f": "x"}
+        guard.poison_vars(["printf", "$fmt", "%s", "y"], m)
+        self.assertEqual(m, {})
+
+
+class PrintfAssignsTests(unittest.TestCase):
+    """`printf` assigns only under `-v`, read from the option region (Q65)."""
+
+    def test_assigning_forms(self):
+        for args in (["-v", "f", "%s"], ["-vf", "%s"], ["$fmt", "%s"],
+                     ["-v", "$n", "%s"]):
+            self.assertTrue(guard.printf_assigns(args), args)
+
+    def test_non_assigning_forms(self):
+        for args in ([], ["%s\n", "f"], ["%s", "$f"], ["--", "-v", "f"],
+                     ["%s", "-v", "f"]):
+            self.assertFalse(guard.printf_assigns(args), args)
+
+    def test_unglue_v(self):
+        self.assertEqual(guard.unglue_printf_v("-vf"), "f")
+        self.assertEqual(guard.unglue_printf_v("-v"), "-v")
+        self.assertEqual(guard.unglue_printf_v("%s"), "%s")
+
 
 class ClobbersIfsTests(unittest.TestCase):
     """Groups that set IFS outside the plain/`export` assignment forms (Q49)."""
@@ -6175,8 +6217,14 @@ class ClobbersIfsTests(unittest.TestCase):
         for cmd in (["declare", "IFS=x"], ["local", "IFS=x"],
                     ["typeset", "IFS=x"], ["readonly", "IFS=x"],
                     ["declare", "-x", "IFS=x"], ["read", "IFS"],
-                    ["printf", "-v", "IFS", "x"], ["for", "IFS", "in", "a"]):
+                    ["printf", "-v", "IFS", "x"], ["printf", "-vIFS", "x"],
+                    ["for", "IFS", "in", "a"]):
             self.assertTrue(guard.clobbers_ifs(cmd), cmd)
+
+    def test_printf_without_v_does_not_clobber_ifs(self):
+        # Q65: reading `$IFS` is not setting it.
+        for cmd in (["printf", "%s", "$IFS"], ["printf", "%s\n", "IFS"]):
+            self.assertFalse(guard.clobbers_ifs(cmd), cmd)
 
     def test_eval_and_source_clobber(self):
         for cmd in ("eval", "source", "."):
@@ -6511,6 +6559,22 @@ class VarPropagationEndToEndTests(unittest.TestCase):
 
     def test_printf_v_poisons(self):
         self._decision("f=in.txt; printf -v f /etc/q58-fake; cat $f", "ask")
+
+    def test_printf_v_glued_poisons(self):
+        # bash accepts the name glued to the flag: `printf -vf x` sets f.
+        self._decision("f=in.txt; printf -vf /etc/q58-fake; cat $f", "ask")
+
+    def test_printf_without_v_keeps_var(self):
+        # Q65: a plain printf assigns nothing, so the map survives it.
+        for pf in ('printf "%s\\n" f', 'printf "%s\\n" "$q65_unset"',
+                   'printf "value: %s" "$HOME"', "printf -- -v f",
+                   'printf "%s" -v f'):
+            with self.subTest(pf=pf):
+                self._decision(f"f=in.txt; {pf}; cat $f", "allow")
+
+    def test_printf_unresolvable_format_still_poisons(self):
+        # Unquoted, `$fmt` word-splits into `-v f` and does assign.
+        self._decision('f=in.txt; printf $fmt "%s" y; cat $f', "ask")
 
     def test_array_element_assignment_poisons(self):
         # `f[0]=…` mutates f (a scalar f is f[0]).
