@@ -17,6 +17,20 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      - run: python3 scripts/run-tests.py
+
+  # Q70 sharded the matrix above, which runs each test in a worker holding only
+  # a slice of the suite. That hides an order dependence between two tests as
+  # surely as a serial run hides a race between them, so one job keeps running
+  # the suite the plain way -- also the fallback to reach for when the runner
+  # itself is what's suspect.
+  unittest-serial:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
       - run: python3 -m unittest discover tests
 
   # An ordinary gate since Q39: the suite passes on Windows. A few tests skip
@@ -41,7 +55,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - run: python scripts/skip-ceiling.py --max-skips 5
+      - run: python scripts/run-tests.py --max-skips 5
 
   # The same suite under Git Bash, which is what Claude Code's Bash tool runs on
   # native Windows (Q44). Not redundant with the job above: the two differ in
@@ -57,5 +71,5 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - run: python scripts/skip-ceiling.py --max-skips 3
+      - run: python scripts/run-tests.py --max-skips 3
         shell: bash

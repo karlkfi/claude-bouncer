@@ -15,7 +15,6 @@ Specific actionable items in priority order. Pick from the top; skip 🚫 items 
 
 | ID | Item | Labels | St | Sz | Notes |
 |---|---|---|---|---|---|
-| <a id="Q70"></a>Q70 | Cut the test suite's wall-clock time | `tests` `retro` | 🔲 | M | The suite takes 5m18s for 1194 tests, most spawning a subprocess per case — the wait that makes a release feel expensive. Measure where the time goes, then parallelize the end-to-end cases. |
 
 ## Deferred
 

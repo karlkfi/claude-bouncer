@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests for scripts/friction-report.py.
 
-Run with: python3 -m unittest discover tests
+Run with: python3 scripts/run-tests.py
 
 Covers the pure parsing/normalization helpers and an end-to-end pass over a
 synthetic transcript so the attachment-parsing and toolUseID join are pinned.

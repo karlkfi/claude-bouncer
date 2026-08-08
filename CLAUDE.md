@@ -67,10 +67,12 @@ When in doubt, ask before shipping. The hook's job is to add friction at the sec
 Tests live in `tests/test_workspace_guard.py` (stdlib `unittest`, no third-party deps). Run with:
 
 ```
-python3 -m unittest discover tests
+python3 scripts/run-tests.py
 ```
 
-CI also runs the suite on Windows through `scripts/skip-ceiling.py`, an ordinary gate that additionally caps how many tests may skip (a skip reads as `OK` otherwise). Some skip there for want of `$HOME` (Q43); never widen a skip to get green, and tighten `--max-skips` in `.github/workflows/tests.yml` when the job says `IMPROVED`. Windows fixtures must quote interpolated native paths — `sh()` for bash fixtures, `ps()` for PowerShell ones (`sh()` is `shlex.quote`, POSIX quoting) — and resolve leading-slash paths against the session cwd (they are drive-relative there). **A Windows-absolute path is not absolute to `os.path` on a POSIX host**, so a fixture that lets one resolve cwd-relative lands it *inside* the project root and passes while asserting the silent allow it meant to catch.
+That shards the suite across processes — a serial run is ~10x slower, since it is almost entirely hook subprocess spawns (Q70). `python3 -m unittest discover tests` runs the same tests serially and is the fallback when the runner itself is suspect. **A test must not depend on process-global state a sibling could also be writing** — fixtures planting anything under the real Claude temp root need `os.getpid()` in every name the hook keys on, not just the outermost one.
+
+The Windows jobs add `--max-skips`, an ordinary gate that additionally caps how many tests may skip (a skip reads as `OK` otherwise). Some skip there for want of `$HOME` (Q43); never widen a skip to get green, and tighten `--max-skips` in `.github/workflows/tests.yml` when the job says `IMPROVED`. Windows fixtures must quote interpolated native paths — `sh()` for bash fixtures, `ps()` for PowerShell ones (`sh()` is `shlex.quote`, POSIX quoting) — and resolve leading-slash paths against the session cwd (they are drive-relative there). **A Windows-absolute path is not absolute to `os.path` on a POSIX host**, so a fixture that lets one resolve cwd-relative lands it *inside* the project root and passes while asserting the silent allow it meant to catch.
 
 Two layers:
 - **Unit tests** import `files_in_command` from the script and exercise per-`SPEC`-row parsing, `prog_suppressed_by`, `--opt=val`, end-of-options `--`, and aliases.

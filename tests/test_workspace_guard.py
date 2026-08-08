@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests for scripts/bash-workspace-guard.py.
 
-Run with: python3 -m unittest discover tests
+Run with: python3 scripts/run-tests.py
      or:  python3 tests/test_workspace_guard.py
 
 Three layers:
@@ -5958,9 +5958,9 @@ class SiblingSessionScratchE2ETests(unittest.TestCase):
 
     Creates a synthetic ``<tmp_root>/<slug>/<session>/`` layout under the real
     Claude temp root so the hook's directory scan (claude_session_project_dir)
-    can anchor on the current session; cleaned up in tearDown. The slug carries
-    os.getpid() to avoid colliding with real session dirs or parallel runs. No
-    real outside paths are used as targets (repo rule)."""
+    can anchor on the current session; cleaned up in tearDown. The slug and both
+    session ids carry os.getpid() to avoid colliding with real session dirs or
+    parallel runs. No real outside paths are used as targets (repo rule)."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -5970,8 +5970,12 @@ class SiblingSessionScratchE2ETests(unittest.TestCase):
         self.root = guard.claude_tmp_root()
         self.slug = "-guardtest-sibling-%d" % os.getpid()
         self.proj_dir = os.path.join(self.root, self.slug)
-        self.current = "cccccccc-1111-2222-3333-444444444444"
-        self.worker = "wwwwwwww-1111-2222-3333-444444444444"
+        # The scan anchors on the session id, not on the slug, so a sharded run
+        # where two workers plant the same id under their own slugs resolves to
+        # whichever listdir returns first. Both ids carry the pid for that.
+        tag = "%012x" % os.getpid()
+        self.current = "cccccccc-1111-2222-3333-" + tag
+        self.worker = "wwwwwwww-1111-2222-3333-" + tag
         # The current session's own scratch dir (scan anchor) and a sibling
         # worker session's dir, both under the same project slug.
         os.makedirs(os.path.join(self.proj_dir, self.current, "tasks"),
@@ -7270,12 +7274,12 @@ class CIWiringTests(unittest.TestCase):
     The job runs through the skip ceiling instead."""
 
     def test_windows_job_runs_the_suite_through_the_skip_ceiling(self):
-        self.assertTrue((REPO / "scripts" / "skip-ceiling.py").is_file(),
-                        "missing scripts/skip-ceiling.py")
+        self.assertTrue((REPO / "scripts" / "run-tests.py").is_file(),
+                        "missing scripts/run-tests.py")
         workflow = (REPO / ".github" / "workflows" / "tests.yml").read_text()
         self.assertRegex(
-            workflow, r"skip-ceiling\.py --max-skips \d+",
-            "the Windows job must run the suite through skip-ceiling.py",
+            workflow, r"run-tests\.py --max-skips \d+",
+            "the Windows job must run the suite through --max-skips",
         )
 
     def test_windows_suite_also_runs_under_git_bash(self):
@@ -7287,7 +7291,7 @@ class CIWiringTests(unittest.TestCase):
         # Windows environments it has to be right in.
         workflow = (REPO / ".github" / "workflows" / "tests.yml").read_text()
         self.assertRegex(
-            workflow, r"skip-ceiling\.py --max-skips \d+\n\s+shell: bash",
+            workflow, r"run-tests\.py --max-skips \d+\n\s+shell: bash",
             "a Windows job must run the suite under Git Bash (shell: bash)",
         )
 

@@ -32,7 +32,7 @@ Run the release interactively, or plan to hand steps 7–9 to a terminal. Everyt
 2. **Run the full test suite — it must be green.**
 
    ```
-   python3 -m unittest discover tests
+   python3 scripts/run-tests.py
    ```
 
 3. **Pick `X.Y.Z`.** Patch (`Z`) for fixes, docs, and packaging; minor (`Y`) for new guarded commands or hook surface; major (`X`) for a default-behavior change. Most releases are patch. The notes file is named after it, so the choice comes first.
