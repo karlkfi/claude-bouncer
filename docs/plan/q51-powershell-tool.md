@@ -1,7 +1,7 @@
 # Q51 — guard the PowerShell tool on Windows
 
 **Status: done.** Filed by Q44's validation pass; see
-[`q44-windows-validation.md`](q44-windows-validation.md) finding 2.
+[`q44-windows-validation.md`](archive/q44-windows-validation.md) finding 2.
 
 All acceptance criteria below are met. What shipped, beyond them:
 
