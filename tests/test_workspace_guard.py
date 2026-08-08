@@ -6551,10 +6551,31 @@ class VarPropagationEndToEndTests(unittest.TestCase):
         # Unsetting IFS restores the default splitting the hook models.
         self._decision("unset IFS; f=in.txt; cat $f", "allow")
 
-    def test_heredoc_disables_propagation(self):
-        # Heredoc bodies tokenize as commands; a body line shaped like an
-        # assignment could pollute the map, so `<<` turns the feature off.
-        self._decision('f=in.txt; cat $f <<EOF\nx\nEOF', "ask")
+    def test_heredoc_keeps_propagation(self):
+        # Q67: bodies are stripped from the raw string before shlex, so no body
+        # line reaches the group loop and the map survives the `<<`.
+        self._decision('f=in.txt; cat $f <<EOF\nx\nEOF', "allow")
+
+    def test_heredoc_before_use_keeps_propagation(self):
+        self._decision('f=in.txt\ncat <<EOF > out.txt\nx\nEOF\ncat $f', "allow")
+
+    def test_heredoc_body_assignment_does_not_seed_map(self):
+        # The body is data: `f=in.txt` written there assigns nothing, so `$f`
+        # must stay unresolved rather than being laundered into an allow.
+        self._decision('cat <<EOF > out.txt\nf=in.txt\nEOF\ncat "$f"', "ask")
+
+    def test_heredoc_keeps_outside_value_flagged(self):
+        self._decision(
+            'f=/etc/q67-fake-target\ncat <<EOF > out.txt\nx\nEOF\ncat $f', "ask")
+
+    def test_arithmetic_shift_keeps_propagation(self):
+        # `$((1<<2))` leaves a `<<` token in the stream but is a shift, not a
+        # heredoc — the old token scan turned propagation off for it too.
+        self._decision('f=in.txt; n=$((1<<2)); cat $f', "allow")
+
+    def test_heredoc_then_ifs_still_disables_propagation(self):
+        self._decision('f=in.txt\ncat <<EOF > out.txt\nx\nEOF\nIFS=,\ncat $f',
+                       "ask")
 
     def test_prefix_assignment_does_not_persist(self):
         # `F=… cat …` exports F only into cat's environment; a later $F is
@@ -6839,10 +6860,16 @@ class ForLoopPropagationEndToEndTests(unittest.TestCase):
         self._decision(
             "for ((i=0;i<3;i++))\ndo\n  cat $i\ndone", "ask")
 
-    def test_heredoc_disables_loop_propagation(self):
-        # Heredoc turns off the whole propagation feature (varmap AND loopmap).
+    def test_heredoc_keeps_loop_propagation(self):
+        # Q67: the stripped body can't pollute the maps, so loopmap survives a
+        # heredoc the same way varmap does.
         self._decision(
-            "for f in a b\ndo\n  cat $f <<EOF\nx\nEOF\ndone", "ask")
+            "for f in a b\ndo\n  cat $f <<EOF\nx\nEOF\ndone", "allow")
+
+    def test_heredoc_keeps_outside_candidate_tainting(self):
+        self._decision(
+            "for f in a ../../../etc/q67-fake\ndo\n  cat $f <<EOF\nx\nEOF\ndone",
+            "ask")
 
     def test_one_outside_candidate_taints_whole_loop(self):
         # bash visits every value, so a single outside candidate must prompt

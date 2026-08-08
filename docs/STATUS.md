@@ -17,7 +17,6 @@ Specific actionable items in priority order. Pick from the top; skip 🚫 items 
 |---|---|---|---|---|---|
 | <a id="Q65"></a>Q65 | Stop a plain `printf` invalidating a tracked variable | `parsing` `bug` | 🔲 | S | `printf` sits in `ARG_ASSIGNER_CMDS` for `printf -v f`, so `printf "%s" "$f"` also drops `f` and a later `docs/$f.md` prompts. Fix: treat `printf` as assigning only when `-v` is present. |
 | <a id="Q66"></a>Q66 | Resolve tracked variables inside a command substitution | `parsing` `bug` | 🔲 | M | `f=docs/STATUS.md; echo "$(grep -c X "$f")"` prompts on `$f`; the same command without the `$( )` allows. Fix: pass the assignment map into substitution analysis, keeping Q63's recursion cap. |
-| <a id="Q67"></a>Q67 | Keep variable tracking alive across a heredoc | `parsing` `bug` | 🔲 | S | A heredoc earlier in the command drops the variable map: `SP=<literal>`, a heredoc, then `$SP/x` prompts — literal paths still resolve. Fix: preserve the map across heredoc extraction. |
 
 ## Deferred
 

@@ -1102,10 +1102,10 @@ def strip_heredoc_bodies(cmd, expanded=None):
     Stripping the body from the RAW string up front (like ``strip_comments``)
     keeps shlex's input to shell syntax only. The `<<WORD` operator and its
     delimiter stay on the command line, so the redirect handling in
-    ``files_in_command``, the `<<`-delimiter skip there, and the
-    ``'<<' not in tokens`` propagation guard are all unchanged; a trailing
-    `<<EOF > out` redirect still parses. The body and its terminator line are
-    dropped.
+    ``files_in_command`` and the `<<`-delimiter skip there are unchanged; a
+    trailing `<<EOF > out` redirect still parses. The body and its terminator
+    line are dropped — which is what lets literal variable propagation stay live
+    across a heredoc (Q67): no body line ever reaches the group loop.
 
     Command-line quote state is tracked so a `<<` inside a quoted string is not
     mistaken for a heredoc; an unquoted `#` comment is skipped for `<<`
@@ -3222,11 +3222,14 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False):
     outside, guarded = [], False
     group_cwd, group_cwd_unknown = cwd, False
     # Literal variable propagation (issue 58): values of `NAME=literal`
-    # assignments seen so far in this command string. Heredocs disable the
-    # whole feature — their body lines tokenize as commands, so a body line
-    # shaped like an assignment could otherwise pollute the map with values
-    # bash never assigns.
-    varmap, propagate = {}, '<<' not in tokens
+    # assignments seen so far in this command string. A heredoc used to disable
+    # the whole feature, because body lines tokenized as commands and one shaped
+    # like an assignment would pollute the map with a value bash never assigns.
+    # `strip_heredoc_bodies` now drops every body from the raw string before
+    # shlex, so no body line reaches this loop and the map survives a heredoc
+    # (Q67). The `<<` left on the command line is the operator itself, or an
+    # arithmetic shift the stripper copies verbatim — neither carries data.
+    varmap, propagate = {}, True
     # Loop-variable propagation (issue 70): a `for NAME in <all-literal list>`
     # records NAME's candidate value set here instead of poisoning it, so a
     # later `$NAME` in a file arg is checked against every value bash iterates.

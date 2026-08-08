@@ -1271,10 +1271,12 @@ final output.
   built from other expansions, and variables later touched by
   `read`/`eval`/`declare`/`unset` or assigned inside a subshell,
   pipeline segment, or backgrounded command all keep the runtime-expanded
-  `ask`. A heredoc (`<<`) anywhere in the command, or anything that may set
-  `IFS`, disables propagation for that command entirely (conservative — a
-  heredoc adds redirection state, and a changed `IFS` re-splits every later
-  expansion, so a value checked as one word can reach the command as several).
+  `ask`. Anything that may set `IFS` disables propagation for that command
+  entirely (conservative — a changed `IFS` re-splits every later expansion, so
+  a value checked as one word can reach the command as several). A heredoc
+  (`<<`) does not: its body is dropped before parsing, so a body line shaped
+  like an assignment never reaches the map, and a value assigned before the
+  heredoc still resolves after it.
   Setting `IFS` counts whether it is a plain `IFS=`/`export IFS=` assignment,
   an assigning builtin naming it (`declare`, `local`, `typeset`, `readonly`,
   `read`, `printf -v`, `for IFS in …`), or an `eval`/`source` that could set it
