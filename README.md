@@ -999,6 +999,17 @@ through the same boundary rules and produce the same reasons. Symlink staging
    step can only add friction. (The bare unquoted `$(…)` form was already caught,
    because its `(`/`)` split the inner command into its own group.) Nesting is
    followed 25 levels deep; see Limitations for what the bound costs.
+
+   A body starts from the enclosing string's propagated literal variables
+   (step 4), since bash's substitution inherits them: without that,
+   `f=docs/x; grep -c p "$(echo "$f")"` would prompt on an unresolvable `$f`
+   where the same command without the `$( )` is allowed. The scan runs once for
+   the whole string, after step 4 has finished, so it has no position at which
+   to snapshot the map — it therefore gets only the names holding *one* literal
+   at every point in the string. A name reassigned to a different value, or
+   dropped anywhere by a poisoning command, is withheld for good and its `$f`
+   stays a runtime-expanded `ask`, so a value from later in the string can never
+   stand in for the one the body actually sees.
 15. **Recurse into shell `-c` bodies.** A body is an ordinary command string that
    happened to arrive inside one token, so it runs back through steps 1–15 and
    its offenders fold in — but only when this host is what executes it. The
@@ -1285,6 +1296,13 @@ final output.
   splitting the guard already assumes.
   Uncertainty always falls back to `ask` — propagation only ever adds allows for
   expansions bash performs deterministically.
+- Propagation reaches *into* a command substitution (step 14) only for names
+  holding one literal throughout the string, because that scan has no position
+  at which to snapshot the map. The residual gap is a name the environment
+  already exports and the string assigns exactly once, *after* the substitution:
+  `cat "$(cat "$f")"; f=docs/ok` checks `docs/ok` where bash reads the inherited
+  `$f`. Writing the assignment before the substitution — the order bash itself
+  requires for the value to be used — resolves it correctly.
 - `for VAR in <list>` loop resolution is equally narrow. The candidate set is
   recorded only when *every* list item is a plain literal or a glob (the
   assignment purity test minus the glob metacharacters, plus a brace `{a,b}` is
@@ -1376,7 +1394,7 @@ final output.
 - The host-temp `deny` covers guarded-command file arguments, redirect targets
   from any command (`go test > /tmp/log`), a `cd` into host temp followed by a
   relative write, `mktemp` (its default location is host temp), and — as of the
-  substitution recursion (step 13) — guarded commands inside `"$(…)"`/backtick
+  substitution recursion (step 14) — guarded commands inside `"$(…)"`/backtick
   bodies (`echo "$(mktemp -d)"`, `` x=`mktemp` ``). A literal inline
   `TMPDIR=<dir>` prefix is honored for `mktemp`'s default location
   (`TMPDIR=./scratch mktemp` → allow; a `$`-bearing value can't be trusted and
@@ -1384,7 +1402,7 @@ final output.
   (`-dp DIR`) are decoded precisely (`-d -p DIR`). One shape remains out of
   scope and still defers: an inline `TMPDIR=/tmp cmd` that only redirects a
   *non-`mktemp` tool's* own internal temp location (not a path the hook parses).
-- Command-substitution recursion (step 13) scans the raw command for
+- Command-substitution recursion (step 14) scans the raw command for
   quote-context fidelity, so single-quoted `'$(…)'` is correctly skipped. Its
   edges degrade to *defer* (never a silent allow): a substitution body resolves
   relative paths against the command's starting cwd, not a cwd set by an earlier

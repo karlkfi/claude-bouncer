@@ -3023,7 +3023,7 @@ def analyze_command(cmd, ctx, base_cwd, depth=0):
     return offenders, guarded and not kf.signal
 
 
-def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False):
+def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None):
     """Analyze one command string; returns ``(offenders, guarded, KillFacts)``.
 
     Command-substitution bodies (``"$(…)"`` and backtick ``` `…` ```, plus the
@@ -3042,6 +3042,12 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False):
     whose output the enclosing command consumes by definition. Only that gives a
     bare ``ps`` its provenance; a shell ``-c`` body inherits the flag rather than
     setting it, since running a command string is not piping its output anywhere.
+
+    ``seed_vars`` pre-loads the literal-variable map, so a ``$f`` a substitution
+    body inherits from the enclosing string resolves there too (Q66). Only the
+    substitution recursion passes it, and only the string-wide stable names
+    (see ``track_stable``); a shell ``-c`` body instead carries whatever
+    ``substitute_vars`` already put in its token, at its own position.
     """
     proj, cwd = ctx.proj, base_cwd
     # Alias for readability at the two use sites far below; the group loop's own
@@ -3273,7 +3279,28 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False):
     # shlex, so no body line reaches this loop and the map survives a heredoc
     # (Q67). The `<<` left on the command line is the operator itself, or an
     # arithmetic shift the stripper copies verbatim — neither carries data.
-    varmap, propagate = {}, True
+    varmap, propagate = dict(seed_vars) if seed_vars else {}, True
+    # The subset of `varmap` the command-substitution recursion is allowed to
+    # start from (Q66). That scan runs once for the whole string, after this
+    # loop, so it has no position at which to snapshot the live map — it gets
+    # only the names holding the same literal at every point in the string. A
+    # name reassigned to a different value, or dropped by a poisoning command,
+    # is blacklisted for good, so a stale value can never stand in for the real
+    # one: `f=/outside/x; cat "$(cat $f)"; f=docs/ok` keeps its `ask` instead of
+    # resolving `$f` to the later, in-workspace literal.
+    stable_vars, unstable_vars = {}, set()
+
+    def track_stable():
+        """Fold the live `varmap` into `stable_vars`. Called before each group
+        and once after the last, so every intermediate state is seen."""
+        for name in list(stable_vars):
+            if varmap.get(name) != stable_vars[name]:
+                del stable_vars[name]
+                unstable_vars.add(name)
+        for name, val in varmap.items():
+            if name not in unstable_vars:
+                stable_vars[name] = val
+
     # Loop-variable propagation (issue 70): a `for NAME in <all-literal list>`
     # records NAME's candidate value set here instead of poisoning it, so a
     # later `$NAME` in a file arg is checked against every value bash iterates.
@@ -3291,6 +3318,7 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False):
     # into after the loop so each resolves against the cwd of its own group.
     shell_bodies = []
     for g, g_redir, persists, pipe in groups:
+        track_stable()
         # Substitute known literals for path checking. The pre-substitution
         # tokens are kept for assignment parsing below — bash decides what is
         # an assignment before expansion.
@@ -3463,6 +3491,7 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False):
             o = check_file(f, group_cwd, group_cwd_unknown, is_read=f_is_read)
             if o is not None:
                 outside.append(o)
+    track_stable()                                # state after the last group
 
     # A grep's pattern is a pid source only when it filters `ps` output, which is
     # a property of the whole pipeline — resolved here so a `ps` segment counts
@@ -3501,6 +3530,11 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False):
     # `base_cwd`; only its OFFENDERS bubble up — its `guarded` is dropped, so a
     # clean substitution never produces an `allow`. (Q33)
     #
+    # Each body also starts from the string's stable literal variables, since a
+    # substitution inherits them: without that, `f=docs/x; echo "$(grep p "$f")"`
+    # prompts on an unresolvable `$f` where the same command without the `$( )`
+    # allows (Q66).
+    #
     # Heredoc bodies come out of the command line first: a `cat <<'EOF'` body is
     # literal data to bash, so a `$(…)` written there never runs, while a
     # `<<EOF` body is expanded and does need scanning (Q35). The expanded ones
@@ -3514,7 +3548,8 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False):
             subs.extend(command_substitutions(hd, quotes=False))
         for body in subs:
             sub_off, _, sub_kf = _analyze_command(body, ctx, base_cwd,
-                                                  subst_depth + 1, in_subst=True)
+                                                  subst_depth + 1, in_subst=True,
+                                                  seed_vars=stable_vars)
             outside.extend(sub_off)
             signal = signal or sub_kf.signal
             launder = launder or sub_kf.launder

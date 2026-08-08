@@ -3802,6 +3802,110 @@ class QuotedSubstBodyEndToEndTests(unittest.TestCase):
         self._defer('echo "$((1 + 2))"')
 
 
+class SubstBodyVarPropagationTests(unittest.TestCase):
+    """Q66: a substitution body inherits the string's literal variables.
+
+    `f=in.txt; echo "$(cat "$f")"` asked on an unresolvable `$f` where the same
+    command without the `$( )` allowed. The body scan runs once for the whole
+    string, so it gets only the names holding one literal throughout — a
+    reassigned or poisoned name stays unresolvable and keeps its `ask`.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = os.path.realpath(self._tmp.name)
+        with open(os.path.join(self.workspace, "in.txt"), "w") as f:
+            f.write("hello\n")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _defer(self, cmd):
+        out = run_hook(cmd, self.workspace, project_dir=self.workspace)
+        self.assertIsNone(out, f"expected defer for {cmd!r}, got {out!r}")
+
+    def _asks_about(self, cmd, path):
+        out = run_hook(cmd, self.workspace, project_dir=self.workspace)
+        self.assertIsNotNone(out, f"expected a decision, got defer for: {cmd!r}")
+        got = out["hookSpecificOutput"]["permissionDecision"]
+        self.assertEqual(got, "ask", f"expected ask for {cmd!r}; got {got!r}")
+        self.assertIn(path, out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    # --- the motivating shapes stop prompting --------------------------------
+
+    def test_quoted_subst_resolves_tracked_var(self):
+        self._defer('f=in.txt; echo "$(cat "$f")"')
+
+    def test_backtick_subst_resolves_tracked_var(self):
+        self._defer('f=in.txt; echo "`cat "$f"`"')
+
+    def test_var_holding_a_directory_prefix_resolves(self):
+        self._defer('d=.; echo "$(cat $d/in.txt)"')
+
+    def test_nested_subst_inherits_too(self):
+        # `allow` rather than the defer the single-level case gets: the
+        # alternating quotes of a nested substitution let shlex split the inner
+        # `cat` out as a top-level group, so its `guarded` is not the
+        # substitution recursion's to drop. Pre-fix this asked on `$f`.
+        out = run_hook('f=in.txt; echo "$(echo "$(cat "$f")")"',
+                       self.workspace, project_dir=self.workspace)
+        self.assertIsNotNone(out)
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "allow")
+
+    def test_nested_subst_outside_value_still_asks(self):
+        self._asks_about('f=/etc/q66-fake-target; echo "$(echo "$(cat "$f")")"',
+                         "/etc/q66-fake-target")
+
+    # --- an outside value still blocks ---------------------------------------
+
+    def test_outside_value_inside_subst_asks(self):
+        self._asks_about('f=/etc/q66-fake-target; echo "$(cat "$f")"',
+                         "/etc/q66-fake-target")
+
+    # --- only string-wide stable names carry in ------------------------------
+
+    def test_later_reassignment_does_not_launder_the_earlier_value(self):
+        # The body runs while `f` still holds the outside path; substituting the
+        # later in-workspace literal would drop the offender entirely. Being
+        # unstable, `f` is not substituted at all, so the block survives as the
+        # generic runtime-expanded `ask` rather than one naming the path.
+        self._asks_about('f=/etc/q66-fake-target; echo "$(cat "$f")"; f=in.txt',
+                         "$f")
+
+    def test_reassignment_leaves_the_var_unresolvable(self):
+        # Both values are in-workspace, so nothing is hidden — but the name is
+        # no longer stable, so the body keeps the runtime-expanded `ask`.
+        self._asks_about('f=in.txt; echo "$(cat "$f")"; f=other.txt', "$f")
+
+    def test_poisoned_var_stays_unresolvable(self):
+        self._asks_about('f=in.txt; read f; echo "$(cat "$f")"', "$f")
+
+    def test_ifs_clobber_stops_propagation_into_the_body(self):
+        self._asks_about('f=in.txt; IFS=:; echo "$(cat "$f")"', "$f")
+
+    def test_pipeline_segment_assignment_does_not_reach_the_body(self):
+        # `f=…` in a pipeline segment runs in a subshell, so bash never sets it
+        # for the substitution that follows.
+        self._asks_about('true | f=in.txt; echo "$(cat "$f")"', "$f")
+
+    def test_single_quoted_body_is_still_a_literal(self):
+        self._defer("f=/etc/q66-fake-target; echo '$(cat \"$f\")'")
+
+    # --- heredoc bodies get the map too, now that Q67 keeps it alive ---------
+
+    def test_expanded_heredoc_body_subst_resolves_the_var(self):
+        self._asks_about('f=/etc/q66-fake-target\ncat <<EOF\n$(cat "$f")\nEOF',
+                         "/etc/q66-fake-target")
+
+    def test_quoted_heredoc_body_stays_literal(self):
+        # A `<<'EOF'` body is data to bash, so its `$(…)` never runs and the
+        # seeded map must not conjure an offender out of it.
+        out = run_hook("f=/etc/q66-fake-target\ncat <<'EOF'\n$(cat \"$f\")\nEOF",
+                       self.workspace, project_dir=self.workspace)
+        self.assertIsNotNone(out)
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "allow")
+
+
 class SubstDepthCapTests(unittest.TestCase):
     """`MAX_SUBST_DEPTH` bounds the substitution recursion (Q63).
 
@@ -3831,9 +3935,9 @@ class SubstDepthCapTests(unittest.TestCase):
         depths = []
         real = guard._analyze_command
 
-        def spy(cmd, ctx, base_cwd, depth=0, in_subst=False):
+        def spy(cmd, ctx, base_cwd, depth=0, *a, **kw):
             depths.append(depth)
-            return real(cmd, ctx, base_cwd, depth, in_subst)
+            return real(cmd, ctx, base_cwd, depth, *a, **kw)
 
         ctx = guard.build_context(
             {"cwd": self.workspace, "tool_input": {}})
@@ -3845,9 +3949,9 @@ class SubstDepthCapTests(unittest.TestCase):
         depths = []
         real = guard._analyze_command
 
-        def spy(cmd, ctx, base_cwd, depth=0, in_subst=False):
+        def spy(cmd, ctx, base_cwd, depth=0, *a, **kw):
             depths.append(depth)
-            return real(cmd, ctx, base_cwd, depth, in_subst)
+            return real(cmd, ctx, base_cwd, depth, *a, **kw)
 
         ctx = guard.build_context(
             {"cwd": self.workspace, "tool_input": {}})

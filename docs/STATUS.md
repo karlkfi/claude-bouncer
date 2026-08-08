@@ -16,7 +16,6 @@ Specific actionable items in priority order. Pick from the top; skip 🚫 items 
 | ID | Item | Labels | St | Sz | Notes |
 |---|---|---|---|---|---|
 | <a id="Q69"></a>Q69 | Poison variables through an env-assignment prefix | `security` `parsing` `bug` | 🔲 | S | Verified on `main`: neither strips env prefixes, so `LC_ALL=C read f; cat $f/x` allows where the bare form asks; `eval` escapes too. Fix: `strip_env_prefix` after `strip_sh_keywords` in both. |
-| <a id="Q66"></a>Q66 | Resolve tracked variables inside a command substitution | `parsing` `bug` | 🔲 | M | `f=docs/STATUS.md; echo "$(grep -c X "$f")"` prompts on `$f`; the same command without the `$( )` allows. Fix: pass the assignment map into substitution analysis, keeping Q63's recursion cap. |
 
 ## Deferred
 
