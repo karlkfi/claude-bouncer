@@ -5,7 +5,7 @@ Single source of truth for progress and priorities in workspace-guard. Pick the 
 **Status:** 🔲 ready · 🚫 blocked
 **Size:** S = one session/PR · M = 2–3 sessions · L = needs a plan doc under `docs/plan/`
 **Labels:** `security` `tests` `docs` `infra` `bug` `parsing` `retro`
-**Next ID:** Q70
+**Next ID:** Q72
 
 **Maintaining this file:** see [`docs/development/maintaining-backlog.md`](development/maintaining-backlog.md).
 
@@ -13,7 +13,10 @@ Single source of truth for progress and priorities in workspace-guard. Pick the 
 
 Specific actionable items in priority order. Pick from the top; skip 🚫 items until their blocker clears.
 
-_Empty — nothing queued._
+| ID | Item | Labels | St | Sz | Notes |
+|---|---|---|---|---|---|
+| <a id="Q70"></a>Q70 | Cut the test suite's wall-clock time | `tests` `retro` | 🔲 | M | The suite takes 5m18s for 1194 tests, most spawning a subprocess per case — the wait that makes a release feel expensive. Measure where the time goes, then parallelize the end-to-end cases. |
+| <a id="Q71"></a>Q71 | Record the user-facing note at pull request (PR) time | `docs` `retro` | 🔲 | S | Release notes are reconstructed at tag time from commit subjects and diffs. Add a "user-facing change?" block to the PR template so the author writes the note while they still have the context. |
 
 ## Deferred
 
