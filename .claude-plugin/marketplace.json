@@ -5,7 +5,7 @@
   "plugins": [
     {
       "name": "prod-guard",
-      "version": "2.5.0",
+      "version": "2.5.1",
       "description": "Block mutating kubectl/helm/terraform/gcloud/aws/az/docker commands aimed at production; prompt when they rely on clobber-prone ambient context.",
       "author": { "name": "Karl" },
       "source": {
