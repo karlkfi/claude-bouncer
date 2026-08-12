@@ -2323,6 +2323,56 @@ class HelpFlagTests(unittest.TestCase):
         self.assertEqual(decision, "deny")
 
 
+class VersionFlagTests(unittest.TestCase):
+    """A lone version flag prints the CLI's version and exits. Tools with a
+    `version` verb already deferred; the ones that resolve an ambient target
+    with no verb (ansible, gcloud, aws, az, argocd) denied instead (issue
+    #35)."""
+
+    def test_lone_version_flag_defers(self):
+        home = make_home(kubeconfig=KUBECONFIG_PROD, gcloud_project="acme-prod-us",
+                         az_subscription="acme-prod", argocd_context="prod.acme.io",
+                         aws_config="[default]\nregion = us-east-1\n")
+        for cmd in ("ansible --version",
+                    "ansible-playbook --version",
+                    "gcloud --version",
+                    "aws --version",
+                    "az --version",
+                    "argocd --version",
+                    "terraform -version",
+                    "docker -v",
+                    "ssh -V"):
+            with self.subTest(cmd=cmd):
+                decision, _ = run_hook(cmd, home=home)
+                self.assertIsNone(decision)
+
+    def test_version_as_a_value_still_judged(self):
+        # `--version <v>` on a mutating subcommand is a chart/toolkit version,
+        # not a request for the CLI's own version.
+        for cmd in ("helm install api oci://registry.prod.acme.io/api "
+                    "--version 2.0.0",
+                    "eksctl create cluster --name prod-us --version 1.29",
+                    "flux install --context gke_acme_prod-us --version=v2.0.0"):
+            with self.subTest(cmd=cmd):
+                decision, _ = run_hook(cmd)
+                self.assertEqual(decision, "deny")
+
+    def test_version_with_another_argument_is_not_a_version_invocation(self):
+        # Only the sole-argument form is exempt; anything else may carry a
+        # target, so it goes to the evaluator as usual.
+        decision, _ = run_hook("ansible-playbook -i inventories/prod site.yml "
+                               "--version")
+        self.assertEqual(decision, "deny")
+        decision, _ = run_hook("ssh deploy@prod-web-1 -V")
+        self.assertEqual(decision, "deny")
+
+    def test_version_does_not_leak_across_segments(self):
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        decision, _ = run_hook(
+            "ansible --version && kubectl delete ns payments", home=home)
+        self.assertEqual(decision, "deny")
+
+
 class AliasToolTests(unittest.TestCase):
     """Q1: oc shares kubectl's evaluator; podman/nerdctl/docker-compose share
     docker's. The alias must inherit the full decision matrix, plus the few

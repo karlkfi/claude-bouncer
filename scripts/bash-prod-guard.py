@@ -2308,6 +2308,13 @@ NO_HELP_FLAG = frozenset({'ssh'})
 # Tools where `-h` is not help: on docker/podman/nerdctl it is `--hostname`,
 # so `docker run -h box image` is an ordinary mutating run.
 NO_SHORT_HELP = frozenset({'docker', 'podman', 'nerdctl', 'docker-compose'})
+# A version flag prints the CLI's own version and exits. Unlike a help flag it
+# only counts as the *sole* argument: elsewhere `--version` takes a value on a
+# mutating subcommand (`helm install … --version 2.0.0`, `eksctl create cluster
+# --version 1.29`, `flux install --version=v2.0.0`). With nothing else in the
+# command there is no target token at all, so nothing is left to classify —
+# which is why this needs no per-tool exclusion, not even ssh.
+VERSION_FLAGS = frozenset({'--version', '-version', '-V', '-v'})
 
 
 def is_help_invocation(tool, argv):
@@ -2407,7 +2414,8 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None):
             continue  # uncovered tool: defer
         if len(argv) == 1:
             continue  # bare tool name prints help; nothing to guard
-        if is_help_invocation(tool, argv):
+        if is_help_invocation(tool, argv) or (
+                len(argv) == 2 and argv[1] in VERSION_FLAGS):
             continue
         findings += evaluator(argv, seg_inline, ctx)
     return findings, override, session_reason
