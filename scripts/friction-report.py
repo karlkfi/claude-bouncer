@@ -21,10 +21,13 @@ Usage:
     python3 scripts/friction-report.py --plugin all --top 20
     python3 scripts/friction-report.py --json           # machine-readable
 
-Each hook decision is recorded as an ``attachment`` line of type
-``hook_success`` carrying ``hookName`` (``PreToolUse:Bash``), the hook
-``command`` (which names the guard script), and ``stdout`` (the decision JSON).
-The triggering Bash command is joined back via ``toolUseID``.
+Each hook decision *that lets the call through* is recorded as an ``attachment``
+line of type ``hook_success`` carrying ``hookName`` (``PreToolUse:Bash``), the
+hook ``command`` (which names the guard script), and ``stdout`` (the decision
+JSON). The triggering Bash command is joined back via ``toolUseID``.
+
+A ``deny`` is recorded nowhere in that stream — see ``DENY_TEXT`` below — so it
+is recovered from the error tool result the blocked call handed back instead.
 """
 import argparse
 import collections
@@ -81,6 +84,21 @@ NAMED_TARGET_CATS = frozenset({'watch', 'slow-timeout'})
 # unanchored pattern reports their overrides as this guard's under --plugin all.
 OVERRIDE_SIG = re.compile(r'foreground-guard override acknowledged')
 
+# A denying hook leaves no attachment of its own. Claude Code persists hook
+# stdout only for a call it goes on to run: measured over 601 local transcripts,
+# 48k allow/ask attachments and not one deny, while the denials sat in plain
+# sight as tool results (issue #25). Counting the attachment stream alone
+# therefore reports zero friction for a guard running in a mode where asks
+# become denies — the mode where the friction is worst.
+#
+# The trace a deny does leave is the error handed back to the agent, whose text
+# is verbatim the reason the hook printed, joined to the command by
+# `tool_use_id` like any other tool result. Every reason this guard denies with
+# opens `foreground-guard: `, so that opener is the key. A guard wording its
+# reason differently is not recoverable this way and still under-counts its
+# denies under `--plugin all`; the report says so rather than showing a zero.
+DENY_TEXT = re.compile(r'^(?:Error:\s*)?([a-z0-9-]+-guard):\s')
+
 # The hook joins up to three finding reasons with ' | '.
 _JOIN = ' | '
 # foreground-guard wraps the offending command/pattern (and its fixes) in
@@ -127,11 +145,42 @@ def guard_name(command):
     return re.sub(r'^bash-', '', m.group(1))
 
 
+def deny_from_result(block):
+    """(guard, reason) if this tool_result block is a hook deny, else None.
+
+    A blocked call comes back as an error whose text is the guard's reason;
+    anything else (a failing command, a rejected prompt, another tool's error)
+    does not open with a `<name>-guard: ` reason and is left alone."""
+    if not block.get('is_error'):
+        return None
+    text = block.get('content')
+    if isinstance(text, list):
+        text = ''.join(p.get('text', '') for p in text if isinstance(p, dict))
+    if not isinstance(text, str):
+        return None
+    text = text.strip()
+    m = DENY_TEXT.match(text)
+    return (m.group(1), text) if m else None
+
+
+def scope(rec, cutoff, repo):
+    """(cwd, ts) for a record, or None if it falls outside the filters."""
+    cwd = rec.get('cwd') or ''
+    if repo and repo not in cwd:
+        return None
+    ts = parse_ts(rec)
+    if cutoff and ts and ts < cutoff:
+        return None
+    return cwd, ts
+
+
 def iter_decisions(paths, plugin, cutoff, repo):
     """Yield decision dicts from the given transcript files.
 
     Builds a per-file toolUseID -> Bash command map (ids are session-scoped)
-    so each decision can name the command that triggered it.
+    so each decision can name the command that triggered it. Reads two sources:
+    the hook attachment stream (allow/ask/defer) and the error tool results that
+    carry the denies the attachment stream omits.
     """
     for path in paths:
         cmd_by_id = {}
@@ -156,6 +205,7 @@ def iter_decisions(paths, plugin, cutoff, repo):
         except OSError:
             continue
 
+        decided = set()   # (guard, toolUseID) seen in the attachment stream
         for rec in records:
             att = rec.get('attachment')
             if not isinstance(att, dict) or att.get('hookName') != 'PreToolUse:Bash':
@@ -163,14 +213,13 @@ def iter_decisions(paths, plugin, cutoff, repo):
             name = guard_name(att.get('command'))
             if name is None:
                 continue
+            decided.add((name, att.get('toolUseID')))
             if plugin != 'all' and name != plugin:
                 continue
-            cwd = rec.get('cwd') or ''
-            if repo and repo not in cwd:
+            window = scope(rec, cutoff, repo)
+            if window is None:
                 continue
-            ts = parse_ts(rec)
-            if cutoff and ts and ts < cutoff:
-                continue
+            cwd, ts = window
 
             stdout = att.get('stdout') or ''
             decision, reason = 'defer', ''   # empty stdout => hook stayed silent
@@ -187,6 +236,32 @@ def iter_decisions(paths, plugin, cutoff, repo):
                 'cwd': cwd, 'ts': ts,
                 'command': cmd_by_id.get(att.get('toolUseID'), ''),
             }
+
+        for rec in records:
+            for block in ((rec.get('message') or {}).get('content') or []):
+                if not isinstance(block, dict) or block.get('type') != 'tool_result':
+                    continue
+                found = deny_from_result(block)
+                if found is None:
+                    continue
+                name, reason = found
+                if plugin != 'all' and name != plugin:
+                    continue
+                tuid = block.get('tool_use_id')
+                # No Bash tool_use behind it means a sibling guard blocked some
+                # other tool (Edit, Write) — out of scope for a Bash report.
+                if tuid not in cmd_by_id:
+                    continue
+                if (name, tuid) in decided:
+                    continue
+                window = scope(rec, cutoff, repo)
+                if window is None:
+                    continue
+                cwd, ts = window
+                yield {
+                    'plugin': name, 'decision': 'deny', 'reason': reason,
+                    'cwd': cwd, 'ts': ts, 'command': cmd_by_id[tuid],
+                }
 
 
 def split_reasons(reason):
@@ -272,6 +347,14 @@ def print_text(r, top, plugin='foreground-guard'):
     print(f"  outcomes: {', '.join(parts)}")
     pct = (100 * asks / total) if total else 0
     print(f"  friction (ask+deny): {asks} ({pct:.0f}% of decisions)")
+    # Under one guard the deny recovery is complete, so the count stands on its
+    # own. Across guards it is not, and an unqualified zero would read as "this
+    # one never blocks" — the exact misreading issue #25 was about.
+    if plugin == 'all':
+        print("  note: denies are read from tool-result text, the only place "
+              "Claude Code records")
+        print("        them — a guard whose reason does not open "
+              "`<name>-guard:` under-reports")
     # Only foreground-guard's own overrides are counted, so the line has no
     # place under a header covering every guard — omit it rather than show one
     # guard's statistic as if it summarized the set.

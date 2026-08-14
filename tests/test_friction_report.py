@@ -79,6 +79,34 @@ REASON_SIBLING_OVERRIDE = ('prod-guard override acknowledged '
                            'production pattern')
 
 
+# What a deny actually looks like in a transcript. Claude Code writes no
+# attachment for it (issue #25) — the reason reaches the transcript only as the
+# error tool result handed back to the agent, so the fixture carries the guard's
+# real deny wording: the reason plus the tail main() appends to a deny.
+REASON_DENY = REASON_LOOP + " " + guard.deny_tail("auto")
+
+
+def _deny_record(tooluseid, command, reason=REASON_DENY, cwd="/home/u/proj",
+                 ts=None, is_error=True, as_blocks=False):
+    """The two records a denied Bash call leaves: the assistant's tool_use and
+    the error tool_result carrying the guard's reason. No attachment record —
+    that is the bug this recovery exists for."""
+    content = ([{"type": "text", "text": reason}] if as_blocks else reason)
+    use = {
+        "message": {"content": [
+            {"type": "tool_use", "name": "Bash", "id": tooluseid,
+             "input": {"command": command}}]},
+    }
+    result = {
+        "timestamp": ts or "2026-07-01T12:00:00Z",
+        "cwd": cwd,
+        "message": {"content": [
+            {"type": "tool_result", "tool_use_id": tooluseid,
+             "is_error": is_error, "content": content}]},
+    }
+    return use, result
+
+
 def _decision_record(tooluseid, command, stdout, cwd="/home/u/proj", ts=None,
                      hook_cmd='python3 "/x/scripts/bash-foreground-guard.py"'):
     """A transcript attachment record for one hook decision, plus the assistant
@@ -213,6 +241,63 @@ class TargetExtractionTests(unittest.TestCase):
             self.assertIsNone(fr.tool_of(reason))
 
 
+class DenyFromResultTests(unittest.TestCase):
+    def _block(self, **kw):
+        b = {"type": "tool_result", "tool_use_id": "toolu_1", "is_error": True,
+             "content": REASON_DENY}
+        b.update(kw)
+        return b
+
+    def test_recognizes_this_guard(self):
+        got = fr.deny_from_result(self._block())
+        self.assertEqual(got[0], "foreground-guard")
+        self.assertEqual(got[1], REASON_DENY)
+
+    def test_recognizes_a_sibling_guard(self):
+        got = fr.deny_from_result(
+            self._block(content="prod-guard: matches a production pattern"))
+        self.assertEqual(got[0], "prod-guard")
+
+    def test_error_prefix_tolerated(self):
+        # The same text appears with an `Error: ` lead in some result shapes.
+        got = fr.deny_from_result(self._block(content="Error: " + REASON_DENY))
+        self.assertEqual(got[0], "foreground-guard")
+
+    def test_content_as_text_blocks(self):
+        got = fr.deny_from_result(
+            self._block(content=[{"type": "text", "text": REASON_DENY}]))
+        self.assertEqual(got[0], "foreground-guard")
+
+    def test_successful_result_is_not_a_deny(self):
+        self.assertIsNone(fr.deny_from_result(self._block(is_error=False)))
+        self.assertIsNone(fr.deny_from_result(self._block(is_error=None)))
+
+    def test_ordinary_failures_are_not_denies(self):
+        for text in ("Exit code 1", "Exit code 143 Command timed out",
+                     "The user doesn't want to proceed with this tool use.",
+                     "Permission for this action was denied by the Claude Code "
+                     "auto mode classifier"):
+            self.assertIsNone(fr.deny_from_result(self._block(content=text)),
+                              text)
+
+    def test_reason_must_open_the_result(self):
+        # A guard reason quoted mid-message is not this call's own verdict.
+        self.assertIsNone(fr.deny_from_result(
+            self._block(content="the tool failed: " + REASON_DENY)))
+
+    def test_deny_tail_does_not_disturb_categorization(self):
+        # The tail rides on the last segment and only ever appears on denies,
+        # so it is the one reason text the category regexes never saw.
+        self.assertEqual(fr.category_of(REASON_DENY), "loop-sleep")
+        hits = [c for c, rx in fr.CATEGORY_PATTERNS.items()
+                if rx.search(REASON_DENY)]
+        self.assertEqual(hits, ["loop-sleep"])
+
+    def test_deny_tail_does_not_invent_a_target(self):
+        watch_deny = REASON_WATCH + " " + guard.deny_tail("auto")
+        self.assertEqual(fr.named_target(watch_deny), "gh run watch 456")
+
+
 class BuildReportTests(unittest.TestCase):
     def _report(self, decisions):
         return fr.build_report(decisions)
@@ -331,6 +416,62 @@ class IterDecisionsTests(unittest.TestCase):
         self.assertEqual(len(got), 1)
         self.assertEqual(got[0]["decision"], "defer")
 
+    def test_deny_recovered_from_the_tool_result(self):
+        # The whole point of issue #25: no attachment, and the decision must
+        # still land — with its command joined.
+        use, result = _deny_record(
+            "toolu_1", "while :; do gh pr checks 1; sleep 5; done")
+        root = write_transcript([use, result])
+        paths = [str(p) for p in Path(root).rglob("*.jsonl")]
+        got = list(fr.iter_decisions(paths, "foreground-guard", None, ""))
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["decision"], "deny")
+        self.assertEqual(got[0]["command"],
+                         "while :; do gh pr checks 1; sleep 5; done")
+        self.assertEqual(got[0]["reason"], REASON_DENY)
+
+    def test_deny_honors_plugin_and_scope_filters(self):
+        use1, res1 = _deny_record("toolu_1", "sleep 300",
+                                  reason="prod-guard: production pattern")
+        use2, res2 = _deny_record("toolu_2", "sleep 400", cwd="/home/u/gateway")
+        use3, res3 = _deny_record("toolu_3", "sleep 500",
+                                  ts="2020-01-01T00:00:00Z")
+        root = write_transcript([use1, res1, use2, res2, use3, res3])
+        paths = [str(p) for p in Path(root).rglob("*.jsonl")]
+
+        ours = list(fr.iter_decisions(paths, "foreground-guard", None, ""))
+        self.assertEqual([d["command"] for d in ours], ["sleep 400", "sleep 500"])
+        self.assertEqual(len(list(fr.iter_decisions(paths, "all", None, ""))), 3)
+        self.assertEqual(
+            [d["command"] for d in
+             fr.iter_decisions(paths, "foreground-guard", None, "gateway")],
+            ["sleep 400"])
+        cutoff = dt.datetime(2025, 1, 1, tzinfo=dt.timezone.utc)
+        self.assertEqual(
+            [d["command"] for d in
+             fr.iter_decisions(paths, "foreground-guard", cutoff, "")],
+            ["sleep 400"])
+
+    def test_deny_not_double_counted_with_an_attachment(self):
+        # Defensive: a call this guard already decided in the attachment stream
+        # is counted once, whatever text its result carries.
+        use, att = _decision_record(
+            "toolu_1", "gh run watch 456", _stdout("ask", REASON_WATCH))
+        _, result = _deny_record("toolu_1", "gh run watch 456")
+        root = write_transcript([use, att, result])
+        paths = [str(p) for p in Path(root).rglob("*.jsonl")]
+        got = list(fr.iter_decisions(paths, "foreground-guard", None, ""))
+        self.assertEqual([d["decision"] for d in got], ["ask"])
+
+    def test_deny_on_a_non_bash_call_ignored(self):
+        # A sibling guard blocking an Edit has no Bash tool_use to join to, and
+        # does not belong in a PreToolUse:Bash report.
+        _, result = _deny_record("toolu_edit", "unused",
+                                 reason="workspace-guard: outside the workspace")
+        root = write_transcript([result])
+        paths = [str(p) for p in Path(root).rglob("*.jsonl")]
+        self.assertEqual(len(list(fr.iter_decisions(paths, "all", None, ""))), 0)
+
     def test_malformed_line_skipped(self):
         root = tempfile.mkdtemp(prefix="fg-guard-friction-bad-")
         with open(os.path.join(root, "s.jsonl"), "w", encoding="utf-8") as f:
@@ -433,6 +574,32 @@ class EndToEndTests(unittest.TestCase):
         out = self._run(root, "--plugin", "all")
         self.assertIn("guard decisions analyzed: 2", out)
         self.assertNotIn("FOREGROUND_GUARD_OVERRIDE", out)
+
+    def test_denying_guard_reports_its_friction(self):
+        # An unattended-mode session: every prompt became a deny, so the
+        # attachment stream holds nothing but the defers. Before the recovery
+        # this reported 0% friction.
+        use1, res1 = _deny_record("toolu_1", "sleep 300")
+        use2, att2 = _decision_record("toolu_2", "gh run view 456", "")
+        root = write_transcript([use1, res1, use2, att2])
+
+        data = json.loads(self._run(root, "--json"))
+        self.assertEqual(data["total"], 2)
+        self.assertEqual(data["decisions"]["deny"], 1)
+        self.assertEqual(data["categories"]["loop-sleep"], 1)
+
+        out = self._run(root)
+        self.assertIn("deny 1", out)
+        self.assertIn("friction (ask+deny): 1 (50% of decisions)", out)
+        self.assertIn("loop-sleep", out)
+        self.assertIn("sleep 300", out)
+        # The caveat belongs to the cross-guard view only.
+        self.assertNotIn("tool-result text", out)
+
+    def test_plugin_all_states_the_recovery_limit(self):
+        use, res = _deny_record("toolu_1", "sleep 300")
+        root = write_transcript([use, res])
+        self.assertIn("tool-result text", self._run(root, "--plugin", "all"))
 
     def test_no_transcripts_errors(self):
         empty = tempfile.mkdtemp(prefix="fg-guard-friction-empty-")

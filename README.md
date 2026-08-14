@@ -344,9 +344,19 @@ Prompts are grouped into a stable category taxonomy, each mapping to one fix:
 | `bare-sleep` | A | skip the wait; do the follow-up check now |
 | `slow-timeout` | B | set an adequate `timeout:` on the call, or background it |
 
-The script runs standalone too:
+Denies take a second route into the report. Claude Code records a hook's stdout
+only for a call it goes on to run, so a `deny` leaves no decision record at all
+— counting that stream alone reports zero friction for a guard running in an
+[unattended mode](#unattended-permission-modes), where every ask becomes a deny
+and the friction is at its worst. The report recovers them from the error the
+blocked call handed back, whose text is the reason the hook printed.
+
+That recovery keys on the `foreground-guard: ` opener every reason here carries,
+which makes it complete for this guard and partial across guards.
 `python3 scripts/friction-report.py --plugin all` reports every sibling guard's
-decisions found in the transcripts. The `FOREGROUND_GUARD_OVERRIDE downgrades`
+decisions found in the transcripts, and says so in a note: a guard wording its
+reason differently still under-counts its denies, so a low deny count there is
+not evidence that guard rarely blocks. The `FOREGROUND_GUARD_OVERRIDE downgrades`
 count is this guard's alone, so `--plugin all` omits it (and its `overrides` JSON
 key) rather than show one guard's statistic under an all-guards header.
 
