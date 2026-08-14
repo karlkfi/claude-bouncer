@@ -51,7 +51,10 @@ adjustments:
 - `--plugin all` — include the sibling guards' decisions too (prod-guard,
   workspace-guard, branch-guard), if the user wants the whole picture. The
   override-downgrade count is foreground-guard's own, so it is omitted in this
-  mode; read it from the default single-guard report instead.
+  mode; read it from the default single-guard report instead. Denies are
+  recovered from tool-result text, so a sibling whose reason does not open
+  `<name>-guard:` under-counts them — don't read a low deny count for another
+  guard as that guard rarely blocking.
 - `--json` — machine-readable, if you'd rather parse it than read the table.
 
 **Fall back gracefully.** If the script can't be found (`$CLAUDE_PLUGIN_ROOT`
