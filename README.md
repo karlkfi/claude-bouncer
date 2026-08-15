@@ -1242,6 +1242,42 @@ that lands the change on the wrong branch, or kills the wrong process. Scope the
 override to the moment you actually need it (e.g. one command), not the whole
 session.
 
+### Setting these variables
+
+The hook reads its environment on every invocation, so `export`ing a variable in
+your shell takes effect on the next command. To make one stick, put it in the
+`env` block of a Claude Code `settings.json`; the edit applies to sessions
+started after it.
+
+```json
+{
+  "env": {
+    "WORKSPACE_GUARD_READ_ALLOW_PREFIXES": "/Users/me/.claude/skills"
+  }
+}
+```
+
+**Scope it to the narrowest file that covers the work.** A project's
+`.claude/settings.json` (or `.claude/settings.local.json`, if it shouldn't be
+checked in) applies only to sessions in that project; `~/.claude/settings.json`
+applies to every session on the machine.
+
+That difference decides the two cases people reach for a read-exempt prefix on
+`~/.claude/skills/`:
+
+- **Authoring a skill** — verifying an install, or diffing the installed copy
+  against the source (`diff ~/.claude/skills/x/SKILL.md x/SKILL.md`). This scopes
+  cleanly: the work sits in one repo, so a project-level `settings.json` there
+  covers it and changes nothing elsewhere. Weigh it against what the prompts are
+  telling you, though — those commands exist to reach *outside* the workspace, so
+  exempting the prefix silences the very check you're running.
+- **Reading a skill's rules mid-task** — this happens in whatever repo you're
+  working in, so no project-level setting covers it and only
+  `~/.claude/settings.json` does. That leaves the exemption on in every session
+  on the machine, permanently — a much wider surface than the handful of prompts
+  it saves. Invoke the skill instead of reading its `SKILL.md`: the harness loads
+  skills itself, and that path never reaches this hook.
+
 ### Outside-workspace ask vs. deny
 
 For outside-workspace paths the hook returns `ask` so you get a confirmation
