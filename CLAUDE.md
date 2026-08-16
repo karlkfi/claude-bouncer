@@ -95,7 +95,8 @@ When working on specific tasks, read the relevant doc before starting:
 | Task | Reference |
 |---|---|
 | Picking the next task, tracking progress, adding new items | `docs/STATUS.md` — also run `gh pr list` and skip any Queue item already covered by an open PR |
-| Editing `docs/STATUS.md` (any change to the Queue or header) | Invoke the `backlog` skill; repo wiring in `docs/development/maintaining-backlog.md` |
+| Editing `docs/STATUS.md` (any change to the Queue or header) | Invoke the `session-backlog` skill; repo wiring in `docs/development/maintaining-backlog.md` |
+| Naming or linking a globally installed skill from a doc | `docs/development/skills.md` — link that page's anchor, never a `~/.claude/skills/...` path |
 | Changing decision semantics, verb tables, or covered tools | `scripts/bash-prod-guard.py` + `README.md` decision table + `docs/design.md` |
 | Plugin packaging / marketplace listing | `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` |
 | Cutting a release (version bump, tag, GitHub Release) | `docs/development/release-process.md` |

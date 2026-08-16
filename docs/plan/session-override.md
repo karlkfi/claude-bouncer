@@ -92,5 +92,5 @@ Grant scope rules (all must hold for a finding to be suppressed):
       wiring (PostToolUse entry).
 - [x] Docs: README decision table + override section + configuration,
       `docs/design.md` rationale, PRIVACY.md (local state file).
-- [x] `docs/STATUS.md`: revive Q12 → complete it (isolated commit, backlog
-      skill).
+- [x] `docs/STATUS.md`: revive Q12 → complete it (isolated commit,
+      `session-backlog` skill).

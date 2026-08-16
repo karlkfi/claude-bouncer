@@ -1,6 +1,6 @@
 # Agent reference: Maintaining the backlog
 
-The canonical rules for `docs/STATUS.md` — format, ID allocation, adding/completing/deferring items, grooming, parallel dispatch, and commit discipline — live in the globally installed **`backlog` skill** (`~/.claude/skills/backlog/SKILL.md`). Invoke that skill for any change to the Queue or header, and follow it rather than a copy of its rules here; this doc stays a pointer so the two cannot drift.
+The canonical rules for `docs/STATUS.md` — format, ID allocation, adding/completing/deferring items, grooming, parallel dispatch, and commit discipline — live in the globally installed [**`session-backlog` skill**](skills.md#session-backlog), which is installed on the workstation rather than committed here. Invoke that skill for any change to the Queue or header, and follow it rather than a copy of its rules here; this doc stays a pointer so the two cannot drift.
 
 Repo-specific wiring:
 
