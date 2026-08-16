@@ -177,6 +177,10 @@ project's scratch still asks entirely.
 | `mktemp -dp ./scratch x.XXXX` (clustered `-d -p`) | allow |
 | `cat /tmpfoo/x` (not under `/tmp`)   | **ask**  |
 | `ls > /etc/out.txt` (unguarded redirect, outside) | **ask** |
+| `rm <sibling-worktree>/main.go` (in a worktree) | **deny** |
+| `rm -rf <sibling-worktree>` (the whole checkout) | **deny** |
+| `rm ~/.claude/skills/x` (a symlink into a sibling) | **ask** |
+| `rm <link-to-sibling>/main.go` (real file inside) | **deny** |
 | `pkill -f ginkgo` · `pkill -f "make check"` | **deny** |
 | `pkill -f "<sibling-worktree>/bin/x"` | **deny** |
 | `pkill -u karl` (no pattern at all)  | **deny** |
@@ -355,6 +359,16 @@ a worktree, and a path in an *unrelated* git repo is never treated as a sibling
 (it shares no git common-dir with your repo). For deliberate cross-checkout work,
 `WORKSPACE_GUARD_OVERRIDE=<reason>` downgrades the deny to `ask`; see
 [Configuration](#configuration).
+
+**An operand that is itself a symlink is judged by the link, not its target**,
+for the commands that act on the name rather than the contents: `rm`'s operands
+and `mv`'s sources. `rm link` unlinks the link and cannot write what it points
+at, so `rm ~/.claude/skills/<name>`, where that name is a symlink into a repo
+you have a worktree of, is an ordinary outside-workspace `ask` rather than a
+sibling deny. Everything above the last component still resolves, so
+`rm <link-to-checkout>/main.go` is a real file inside the sibling and still
+denies. `mv`'s **destination** keeps resolving too, because `mv x <link>` writes
+into the directory the link names.
 
 ### Unanchored process-kill deny
 
@@ -844,7 +858,11 @@ through the same boundary rules and produce the same reasons. Symlink staging
    hook time, so a naive `realpath` would otherwise place `LINK` lexically
    inside the workspace and let it through.
 8. **Resolve** every file argument against `$CLAUDE_PROJECT_DIR` with
-   `realpath`, collapsing `../` and following symlinks. Anything that resolves
+   `realpath`, collapsing `../` and following symlinks. The exception is an
+   operand naming a directory *entry* rather than file contents — `rm`'s
+   operands and `mv`'s sources, which unlink or rename the name they are given
+   and never write through it. Those resolve every component but the last, so
+   the link rather than its target is what gets checked. Anything that resolves
    outside the root yields `ask`; otherwise `allow`. A leading `~` or `~/…` is
    expanded to your home directory first (bash does this deterministically), so
    a home path inside the root is allowed instead of needlessly prompted. The
@@ -936,11 +954,15 @@ through the same boundary rules and produce the same reasons. Symlink staging
    [Configuration](#configuration).
 12. **Deny** writes into a sibling checkout of the same repo. When the session
    root is inside a git worktree, the hook resolves the enclosing git checkout of
-   each *write* path (walking up to the nearest `.git`, reading only tiny git
-   metadata) and compares its shared `--git-common-dir` to the session's. A path
-   inside a *different* checkout of the *same* repo (same common-dir, different
-   root) is reclassified to `deny`, naming the checkout, its branch, and the
-   corrected in-session path. Only writes upgrade — reads keep step 8's `ask`.
+   each *write* path (walking up from the path itself to the nearest `.git`,
+   reading only tiny git metadata) and compares its shared `--git-common-dir` to
+   the session's. A path
+   inside *or equal to* a *different* checkout of the *same* repo (same
+   common-dir, different root) is reclassified to `deny`, naming the checkout,
+   its branch, and the
+   corrected in-session path. Removing a whole sibling worktree is therefore the
+   same decision as removing one file inside it. Only writes upgrade — reads
+   keep step 8's `ask`.
    A path in an unrelated repo has a different common-dir and stays a generic
    outside `ask`. The same rule is the sole active check on the `Edit`, `Write`,
    `MultiEdit`, and `NotebookEdit` tools. `WORKSPACE_GUARD_OVERRIDE=<reason>`
@@ -1429,7 +1451,12 @@ final output.
   nested past the cap goes unanalyzed, and the command defers rather than
   earning an `allow` on the strength of a body the guard never read.
 - `realpath` only follows symlinks for files that already exist; nonexistent
-  paths are normalized lexically (fine for read-style commands).
+  paths are normalized lexically (fine for read-style commands). A *dangling*
+  link is not that case: the link itself exists, so it is followed and the
+  missing target is what gets checked.
+- Entry-operand resolution covers `rm` and `mv` on the Bash frontend only.
+  PowerShell's `Remove-Item`/`Move-Item` bind through their own spec and still
+  resolve every component, so removing a symlink there is judged by its target.
 - Redirect targets (`> file`) are inspected on *every* command, guarded or not —
   a redirect is a write the shell performs regardless of the command word, so
   `echo secret > /tmp/out` (host temp → deny) and `ls > /etc/out.txt` (outside →

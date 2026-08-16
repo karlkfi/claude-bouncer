@@ -5,7 +5,7 @@ Single source of truth for progress and priorities in workspace-guard. Pick the 
 **Status:** 🔲 ready · 🚫 blocked
 **Size:** S = one session/PR · M = 2–3 sessions · L = needs a plan doc under `docs/plan/`
 **Labels:** `security` `tests` `docs` `infra` `bug` `parsing` `retro`
-**Next ID:** Q76
+**Next ID:** Q78
 
 **Maintaining this file:** see [`docs/development/maintaining-backlog.md`](development/maintaining-backlog.md).
 
@@ -18,6 +18,8 @@ Specific actionable items in priority order. Pick from the top; skip 🚫 items 
 | <a id="Q74"></a>Q74 | Escalate suppression in modes that pre-approve, so declining to vouch protects there | `security` | 🔲 | M | A withheld `allow` still runs under `auto`/`acceptEdits`/`bypassPermissions` ([matrix](permission-modes.md)). Escalating to `ask`/`deny` would block ~1,657 commands in `auto`, most routine heredocs — needs a narrower signal first. |
 | <a id="Q75"></a>Q75 | Guard `cut` and `base64`, which read outside the root under an `allow` | `security` | 🔲 | S | Measured: `cat in.txt && cut -f1 /outside` returns `allow`, while `xxd`/`od`/`strings`/`wc` already ask. `cut` appears 1,090 times in the corpus. Add the two `SPEC` rows. |
 | <a id="Q73"></a>Q73 | Extend the interpreter allow-suppression to the PowerShell tool | `security` | 🔲 | S | PowerShell still lets a clean guarded command vouch for interpreter code, unlike Bash since Q72: `Get-Content .\README.md; python3 -c '…'` returns `allow`. Port `interp_code_source` over. |
+| <a id="Q76"></a>Q76 | Extend entry-operand resolution to the PowerShell tool | `parsing` | 🔲 | S | `Remove-Item`/`Move-Item` have a read/write `role` but no entry role, so removing a symlink is still judged by its target, unlike Bash. Port `ENTRY_OPERANDS` over ([plan](plan/entry-operands.md)). |
+| <a id="Q77"></a>Q77 | Guard `unlink`, which is unchecked on any path | `security` | 🔲 | S | Measured: `unlink <outside>/x` defers, because `unlink` has no `SPEC` row while `rm` does. Same shape as `rm` (positional operands, no value-taking flags), so it is one `ALIASES` entry plus a fixture. |
 
 ## Deferred
 

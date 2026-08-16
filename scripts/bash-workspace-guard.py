@@ -537,6 +537,25 @@ def _resolve_literal(base, raw):
         return None
 
 
+def entry_realpath(p):
+    """``realpath`` with the final component left unresolved.
+
+    An entry operand (see ENTRY_OPERANDS) names a directory entry, so following
+    its last component reports a file the command never touches. Everything
+    above it still resolves, which is what keeps a *directory* symlink in the
+    middle of the path honest: `rm links/dirlink/root.txt` resolves `dirlink`
+    and lands on the real file inside the checkout it names.
+
+    Identical to ``realpath`` whenever the final component is not a symlink, so
+    no ordinary path moves. A trailing slash, ``.`` and ``..`` all name a
+    directory rather than an entry within one, and fall back to ``realpath``.
+    """
+    head, tail = os.path.split(p)
+    if not tail or tail in (os.curdir, os.pardir):
+        return os.path.realpath(p)
+    return os.path.join(os.path.realpath(head or os.curdir), tail)
+
+
 def host_temp_roots(base):
     """Resolved set of host-temp roots: the defaults, any extra roots from
     ``WORKSPACE_GUARD_TMP_ROOTS`` (additive — never replaces the defaults, so the
@@ -811,10 +830,21 @@ def sibling_checkout_for(rp, session):
     ``session`` is the ``resolve_session_worktree`` dict. Self-gates: returns
     None unless the session is itself a linked worktree, so callers can invoke
     it unconditionally.
+
+    The walk starts at ``rp`` itself so a path that IS a checkout root finds its
+    own ``.git``: starting at ``dirname`` looked one level too high, and
+    ``rm -rf <sibling worktree>`` escaped the rule entirely while removing one
+    file inside it was denied. For a file the two are the same walk, since
+    ``<file>/.git`` matches neither test and the next iteration is the parent.
+
+    A symlink ``rp`` is the exception, and only an entry operand produces one
+    (:func:`entry_realpath` leaves the final component alone). Walking from it
+    would follow the link into the checkout it names, which is exactly the file
+    an unlink does not touch — so those walk from the parent.
     """
     if not session or not session.get('in_worktree'):
         return None
-    co = _resolve_checkout(os.path.dirname(rp))
+    co = _resolve_checkout(os.path.dirname(rp) if os.path.islink(rp) else rp)
     if co is None:
         return None
     if co['common'] != session['common']:
@@ -1022,6 +1052,21 @@ ALIASES = {'egrep':'grep','fgrep':'grep','gawk':'awk','mawk':'awk',
 # file_flags and prog 0, where files_in_command() returns exactly the
 # positional operands in order (a unit test pins this row shape).
 OUTPUT_POSITIONALS = {'uniq': 1, 'xxd': 1}
+# Commands whose file operands name a directory ENTRY rather than the contents
+# of what it points at. `rm` unlinks the name it is given and `mv` renames it,
+# so neither writes through a symlink operand — the link is what the command
+# touches, and its target is a file the command never opens. Resolving such an
+# operand to its target is what made `rm <link into a sibling checkout>` deny a
+# removal that lands nothing on the wrong branch.
+#   'all'     — every file operand (rm).
+#   'sources' — every operand but the destination (mv). `mv src dirlink` moves
+#               INTO the directory the link names, so a destination keeps
+#               following links; under `-t DIR` the destination is the flag's
+#               value and every positional is a source.
+# Read commands are deliberately absent: `cat link` does follow the link, and
+# exempting a final component on a read path would let a symlink launder itself
+# into the claude_code_dirs() read exemption.
+ENTRY_OPERANDS = {'rm': 'all', 'mv': 'sources'}
 
 
 def strip_env_prefix(tokens):
@@ -2739,13 +2784,14 @@ def resolve_subst_prefix(tok, group_cwd):
     return base + tok[end:]
 
 
-def files_in_command(tokens):
-    """Return list of file-arg tokens for a simple command, or None if unguarded."""
-    name = ALIASES.get(os.path.basename(tokens[0]), os.path.basename(tokens[0]))
-    spec = SPEC.get(name)
-    if spec is None:
-        return None
+def _split_args(tokens, spec):
+    """Walk a simple command's arguments once against `spec`.
 
+    Returns `(flag_files, flags_seen, positionals)`. Split out so
+    `entry_operand_mask` can see where flag values end and the positional list
+    begins without re-deriving it — the two must agree, or the mask stops
+    lining up with `files_in_command`'s return.
+    """
     files, flags_seen, positionals = [], set(), []
     i, n, end_opts = 1, len(tokens), False
     while i < n:
@@ -2767,7 +2813,17 @@ def files_in_command(tokens):
                 i += 1 + (0 if inlineval is not None else spec['consume'][key]); continue
             i += 1; continue                      # unknown flag -> assume no arg
         positionals.append(tok); i += 1
+    return files, flags_seen, positionals
 
+
+def files_in_command(tokens):
+    """Return list of file-arg tokens for a simple command, or None if unguarded."""
+    name = ALIASES.get(os.path.basename(tokens[0]), os.path.basename(tokens[0]))
+    spec = SPEC.get(name)
+    if spec is None:
+        return None
+
+    files, flags_seen, positionals = _split_args(tokens, spec)
     prog = 0 if any(f in flags_seen for f in spec.get('prog_suppressed_by', [])) \
              else spec.get('prog', 0)
     file_positionals = positionals[prog:]
@@ -2776,6 +2832,31 @@ def files_in_command(tokens):
                             if '=' not in p.split('/')[0]]
     files += file_positionals
     return files
+
+
+def entry_operand_mask(tokens):
+    """Booleans parallel to `files_in_command(tokens)`: True where the operand
+    names a directory ENTRY rather than the contents of what it points at.
+
+    All-False for a command outside ENTRY_OPERANDS, and `[]` for an unguarded
+    one, so a caller that gets a length it doesn't expect can fall back to
+    today's resolve-everything rule.
+    """
+    name = ALIASES.get(os.path.basename(tokens[0]), os.path.basename(tokens[0]))
+    spec = SPEC.get(name)
+    if spec is None:
+        return []
+    flag_files, _, positionals = _split_args(tokens, spec)
+    mode = ENTRY_OPERANDS.get(name)
+    if mode is None:
+        return [False] * (len(flag_files) + len(positionals))
+    # Both ENTRY_OPERANDS rows have prog 0 and no skip_assignments, so every
+    # positional survives into `files` and the two lists line up one-to-one.
+    # A flag-named file is the destination in both (`-t DIR`), never a source.
+    mask = [False] * len(flag_files) + [True] * len(positionals)
+    if mode == 'sources' and not flag_files and mask:
+        mask[-1] = False                          # positional destination
+    return mask
 
 
 def build_sibling_hint(siblings, override=None):
@@ -3270,7 +3351,7 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
     def is_outside(rp):
         return path_is_outside(rp, proj)
 
-    def resolve_token(f, group_cwd, group_cwd_unknown):
+    def resolve_token(f, group_cwd, group_cwd_unknown, entry=False):
         """Resolve a file token. Returns one of:
           ('skip', None)         — '-', flag, or allowlisted device
           ('expand', None)       — runtime-expanded (`~`/`$`); shlex can't
@@ -3286,7 +3367,12 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
         Both 'expand' and 'untracked' are treated identically to a resolved
         outside path by the decision logic — they only differ in the advice
         the reason string surfaces.
+
+        `entry=True` marks an operand that names a directory entry rather than
+        the contents of what it points at (see ENTRY_OPERANDS), and resolves it
+        with :func:`entry_realpath` so its final component isn't followed.
         """
+        realpath = entry_realpath if entry else os.path.realpath
         if not f or f == '-' or f.startswith('-'):
             return ('skip', None)
         if is_allowed_device(f):
@@ -3312,10 +3398,10 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
         # read a leading-slash path the way Git Bash will (a no-op elsewhere).
         f = msys_to_native(f)
         if os.path.isabs(f):
-            return ('path', os.path.realpath(f))
+            return ('path', realpath(f))
         if group_cwd_unknown:
             return ('untracked', None)
-        return ('path', os.path.realpath(os.path.join(group_cwd, f)))
+        return ('path', realpath(os.path.join(group_cwd, f)))
 
     # Symlinks and hard links staged by an earlier `ln OUTSIDE LINK` in the
     # same chain (with or without `-s`). Tracks the resolved abspath of each
@@ -3324,7 +3410,7 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
     # lexical-realpath check (Q8 + Q17).
     staged_outside_paths = set()
 
-    def check_file(f, group_cwd, group_cwd_unknown, is_read=False):
+    def check_file(f, group_cwd, group_cwd_unknown, is_read=False, entry=False):
         """Return `(token, category, detail)` if the file resolves outside the
         workspace (directly, or via a link staged by an earlier `ln` —
         symbolic or hard — in this chain), else None.
@@ -3339,6 +3425,10 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
         commands that only read files (see WRITE_COMMANDS). Redirect
         targets and write commands pass is_read=False.
 
+        `entry=True` is set per operand from ENTRY_OPERANDS and stops the final
+        component being followed. Never set on a read path: doing so would let
+        a symlink launder itself into the claude_code_dirs() read exemption.
+
         A `$VAR` bound to a `for VAR in <literal list>` loop expands to one
         concrete path per candidate (issue 70); every candidate is checked and
         the first that lands outside is returned (naming that resolved
@@ -3351,7 +3441,7 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
         if cands is None:
             return (f, 'expand', None)
         for cand in cands:
-            kind, rp = resolve_token(cand, group_cwd, group_cwd_unknown)
+            kind, rp = resolve_token(cand, group_cwd, group_cwd_unknown, entry)
             if kind == 'skip':
                 continue
             if kind in ('expand', 'untracked'):
@@ -3646,9 +3736,16 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
         # no file_flags and prog 0 (files_in_command appends flag-files first,
         # which would otherwise shift indices).
         out_from = OUTPUT_POSITIONALS.get(cmd_name)
+        # ENTRY_OPERANDS marks the operands `rm`/`mv` act on by name rather than
+        # by content. A mask that doesn't line up with `fs` is not one to guess
+        # at: fall back to resolving everything, which is the stricter rule.
+        entry_mask = entry_operand_mask(g)
+        if len(entry_mask) != len(fs):
+            entry_mask = [False] * len(fs)
         for i, f in enumerate(fs):
             f_is_read = is_read and (out_from is None or i < out_from)
-            o = check_file(f, group_cwd, group_cwd_unknown, is_read=f_is_read)
+            o = check_file(f, group_cwd, group_cwd_unknown, is_read=f_is_read,
+                           entry=entry_mask[i])
             if o is not None:
                 outside.append(o)
     track_stable()                                # state after the last group

@@ -4792,6 +4792,18 @@ class SiblingCheckoutTests(unittest.TestCase):
         self.main = os.path.realpath(self.main)
         self.wt = os.path.realpath(self.wt)
         self.other = os.path.realpath(self.other)
+        # Links living OUTSIDE every checkout, standing in for the documented
+        # `~/.claude/skills/<name> -> <repo>/<name>` install layout.
+        self.links = os.path.join(self.base, "links")
+        os.mkdir(self.links)
+        os.symlink(os.path.join(self.main, "root.txt"),
+                   os.path.join(self.links, "live"))
+        os.symlink(os.path.join(self.main, "gone.txt"),
+                   os.path.join(self.links, "dangling"))
+        os.symlink(self.main, os.path.join(self.links, "dirlink"))
+        # And one inside the session's own checkout, pointing at the sibling.
+        os.symlink(os.path.join(self.main, "root.txt"),
+                   os.path.join(self.wt, "inlink"))
 
     def tearDown(self):
         # Worktrees hold no locks once the subprocesses exit; plain cleanup is
@@ -4906,6 +4918,80 @@ class SiblingCheckoutTests(unittest.TestCase):
         out = self._bash(f"rm -f {sh(os.path.join(self.main, 'root.txt'))}")
         self.assertEqual(self._decision(out), "deny")
 
+    # --- Bash: an operand that IS a link is judged by the link ---------------
+    # `rm link` unlinks the link and never writes the target, so resolving the
+    # operand through to a sibling checkout denied a removal that lands nothing
+    # on the wrong branch.
+
+    def test_bash_rm_of_link_into_sibling_is_not_denied(self):
+        out = self._bash(f"rm {sh(os.path.join(self.links, 'live'))}")
+        self.assertEqual(self._decision(out), "ask")
+        self.assertNotIn("Sibling-checkout", self._reason(out))
+
+    def test_bash_rm_of_dangling_link_into_sibling_is_not_denied(self):
+        # The target does not exist, so there is nothing there to protect.
+        out = self._bash(f"rm {sh(os.path.join(self.links, 'dangling'))}")
+        self.assertEqual(self._decision(out), "ask")
+        self.assertNotIn("Sibling-checkout", self._reason(out))
+
+    def test_bash_rm_of_link_to_sibling_checkout_root_is_not_denied(self):
+        out = self._bash(f"rm {sh(os.path.join(self.links, 'dirlink'))}")
+        self.assertEqual(self._decision(out), "ask")
+        self.assertNotIn("Sibling-checkout", self._reason(out))
+
+    def test_bash_mv_of_link_source_into_sibling_is_not_denied(self):
+        src = os.path.join(self.links, "live")
+        dst = os.path.join(self.links, "renamed")
+        out = self._bash(f"mv {sh(src)} {sh(dst)}")
+        self.assertEqual(self._decision(out), "ask")
+        self.assertNotIn("Sibling-checkout", self._reason(out))
+
+    def test_bash_rm_of_link_inside_own_checkout_is_allowed(self):
+        # The link lives in this session's worktree; unlinking it is an
+        # in-workspace write however far its target points.
+        out = self._bash("rm ./inlink")
+        self.assertEqual(self._decision(out), "allow")
+
+    # The protection this must not weaken: a *directory* link in the path, with
+    # a real file inside the sibling as the operand.
+    def test_bash_rm_through_directory_link_still_denies(self):
+        target = os.path.join(self.links, "dirlink", "root.txt")
+        out = self._bash(f"rm {sh(target)}")
+        self.assertEqual(self._decision(out), "deny")
+        self.assertIn("Sibling-checkout", self._reason(out))
+
+    def test_bash_mv_destination_still_follows_link_into_sibling(self):
+        # `mv src dirlink/x` writes INTO the checkout the link names, so the
+        # destination keeps resolving. Only `mv`'s sources are entry operands.
+        dst = os.path.join(self.links, "dirlink", "copy.txt")
+        out = self._bash(f"mv root.txt {sh(dst)}")
+        self.assertEqual(self._decision(out), "deny")
+        self.assertIn("Sibling-checkout", self._reason(out))
+
+    # --- Bash: a checkout ROOT is inside its own checkout -------------------
+    # The walk used to start at dirname(), which for a checkout root is one
+    # level too high, so removing a whole sibling escaped the rule while
+    # removing one file inside it was denied.
+
+    def test_bash_rm_of_sibling_worktree_root_denies(self):
+        out = self._bash(f"rm -rf {sh(self.other)}")
+        self.assertEqual(self._decision(out), "deny")
+        r = self._reason(out)
+        self.assertIn("Sibling-checkout", r)
+        self.assertIn("feat-b", r)
+
+    def test_bash_rm_of_primary_checkout_root_denies(self):
+        out = self._bash(f"rm -rf {sh(self.main)}")
+        self.assertEqual(self._decision(out), "deny")
+        self.assertIn(self.main_branch, self._reason(out))
+
+    def test_bash_cp_into_sibling_checkout_root_denies(self):
+        # Same walk change, reached by a content operand: the destination names
+        # the checkout directory itself.
+        out = self._bash(f"cp root.txt {sh(self.other)}")
+        self.assertEqual(self._decision(out), "deny")
+        self.assertIn("feat-b", self._reason(out))
+
     # --- Bash: reads keep today's behavior (ask, not deny) ------------------
 
     def test_bash_read_of_sibling_asks_not_deny(self):
@@ -4994,6 +5080,89 @@ class SiblingCheckoutTests(unittest.TestCase):
         # shell-expand) -> defer to builtin permissions.
         out = self._edit("Write", "$HOME/somewhere/x.txt")
         self.assertIsNone(out, f"expected defer, got {out!r}")
+
+
+class EntryOperandMaskTests(unittest.TestCase):
+    """Which file operands name a directory entry rather than file contents."""
+
+    def _mask(self, cmd):
+        toks = shlex.split(cmd)
+        mask = guard.entry_operand_mask(toks)
+        # The mask is only usable if it lines up with the file list it labels.
+        self.assertEqual(len(mask), len(guard.files_in_command(toks) or []),
+                         f"mask does not line up with files for {cmd!r}")
+        return mask
+
+    def test_rm_marks_every_operand(self):
+        self.assertEqual(self._mask("rm a b c"), [True, True, True])
+
+    def test_rm_flags_do_not_shift_the_mask(self):
+        self.assertEqual(self._mask("rm -rf -- a b"), [True, True])
+
+    def test_mv_marks_sources_but_not_the_destination(self):
+        self.assertEqual(self._mask("mv a b"), [True, False])
+        self.assertEqual(self._mask("mv a b destdir"), [True, True, False])
+
+    def test_mv_target_directory_flag_makes_every_positional_a_source(self):
+        # `-t DIR` is a file_flag, so DIR leads the file list and there is no
+        # positional destination to exclude.
+        self.assertEqual(self._mask("mv -t destdir a b"), [False, True, True])
+        self.assertEqual(self._mask("mv --target-directory=destdir a b"),
+                         [False, True, True])
+
+    def test_content_commands_mark_nothing(self):
+        self.assertEqual(self._mask("cat a b"), [False, False])
+        self.assertEqual(self._mask("cp a b"), [False, False])
+        self.assertEqual(self._mask("tee a"), [False])
+
+    def test_unguarded_command_has_no_mask(self):
+        self.assertEqual(guard.entry_operand_mask(["ls", "a"]), [])
+
+
+class EntryRealpathTests(unittest.TestCase):
+    """`realpath` with the final component left alone."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.base = os.path.realpath(self._tmp.name)
+        self.real = os.path.join(self.base, "real")
+        os.mkdir(self.real)
+        with open(os.path.join(self.real, "f.txt"), "w") as f:
+            f.write("x\n")
+        os.symlink(os.path.join(self.real, "f.txt"),
+                   os.path.join(self.base, "link"))
+        os.symlink(os.path.join(self.base, "nope"),
+                   os.path.join(self.base, "dangling"))
+        os.symlink(self.real, os.path.join(self.base, "dirlink"))
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_final_symlink_is_not_followed(self):
+        p = os.path.join(self.base, "link")
+        self.assertEqual(guard.entry_realpath(p), p)
+        self.assertEqual(os.path.realpath(p), os.path.join(self.real, "f.txt"))
+
+    def test_dangling_final_symlink_is_not_followed(self):
+        p = os.path.join(self.base, "dangling")
+        self.assertEqual(guard.entry_realpath(p), p)
+
+    def test_directory_symlink_in_the_middle_still_resolves(self):
+        p = os.path.join(self.base, "dirlink", "f.txt")
+        self.assertEqual(guard.entry_realpath(p),
+                         os.path.join(self.real, "f.txt"))
+
+    def test_plain_path_matches_realpath(self):
+        p = os.path.join(self.real, "f.txt")
+        self.assertEqual(guard.entry_realpath(p), os.path.realpath(p))
+
+    def test_trailing_slash_dot_and_dotdot_fall_back_to_realpath(self):
+        # None of these name an entry within a directory.
+        for raw in (os.path.join(self.base, "dirlink") + os.sep,
+                    os.path.join(self.base, "dirlink", os.curdir),
+                    os.path.join(self.base, "dirlink", os.pardir)):
+            self.assertEqual(guard.entry_realpath(raw), os.path.realpath(raw),
+                             f"diverged from realpath for {raw!r}")
 
 
 class ClassifyPkillTests(unittest.TestCase):
