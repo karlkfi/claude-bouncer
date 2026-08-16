@@ -2,7 +2,7 @@
 #
 # lint-backlog.sh — format checks for a repo-local backlog file (docs/STATUS.md).
 #
-# Content rules (see the session-backlog skill's SKILL.md):
+# Content rules (from the session-backlog skill; see docs/development/skills.md):
 #   1. Exactly one `**Next ID:** QN` line, and N is strictly greater than every
 #      ID used anywhere in the file (IDs are never reused; the counter is the
 #      allocator).
