@@ -5,7 +5,7 @@ Single source of truth for progress and priorities in workspace-guard. Pick the 
 **Status:** 🔲 ready · 🚫 blocked
 **Size:** S = one session/PR · M = 2–3 sessions · L = needs a plan doc under `docs/plan/`
 **Labels:** `security` `tests` `docs` `infra` `bug` `parsing` `retro`
-**Next ID:** Q78
+**Next ID:** Q79
 
 **Maintaining this file:** see [`docs/development/maintaining-backlog.md`](development/maintaining-backlog.md).
 
@@ -20,6 +20,7 @@ Specific actionable items in priority order. Pick from the top; skip 🚫 items 
 | <a id="Q73"></a>Q73 | Extend the interpreter allow-suppression to the PowerShell tool | `security` | 🔲 | S | PowerShell still lets a clean guarded command vouch for interpreter code, unlike Bash since Q72: `Get-Content .\README.md; python3 -c '…'` returns `allow`. Port `interp_code_source` over. |
 | <a id="Q76"></a>Q76 | Extend entry-operand resolution to the PowerShell tool | `parsing` | 🔲 | S | `Remove-Item`/`Move-Item` have a read/write `role` but no entry role, so removing a symlink is still judged by its target, unlike Bash. Port `ENTRY_OPERANDS` over ([plan](plan/entry-operands.md)). |
 | <a id="Q77"></a>Q77 | Guard `unlink`, which is unchecked on any path | `security` | 🔲 | S | Measured: `unlink <outside>/x` defers, because `unlink` has no `SPEC` row while `rm` does. Same shape as `rm` (positional operands, no value-taking flags), so it is one `ALIASES` entry plus a fixture. |
+| <a id="Q78"></a>Q78 | Carry the `session-backlog` rename into two stale code comments | `docs` | 🔲 | S | Both name the `backlog` skill. `tests/test_shell_scripts.py:9` is repo-local, fix here. `scripts/lint-backlog.sh:5` is vendored from `karlkfi/claude-skills`, so fix it there first. |
 
 ## Deferred
 

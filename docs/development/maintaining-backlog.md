@@ -1,6 +1,6 @@
 # Agent reference: Maintaining the backlog
 
-`docs/STATUS.md` is the single source of truth for project progress and priorities. Its format and maintenance process are defined by the globally-installed **`backlog` skill** — invoke it (e.g. "groom the backlog", "add this to the backlog", "what's next") rather than following rules copied here; a local copy would drift.
+`docs/STATUS.md` is the single source of truth for project progress and priorities. Its format and maintenance process are defined by the globally-installed **[`session-backlog` skill](skills.md#session-backlog)** — invoke it for any change to the Queue or header rather than following rules copied here; a local copy would drift.
 
 The load-bearing invariants, for sessions without the skill available:
 
