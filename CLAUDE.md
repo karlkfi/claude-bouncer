@@ -13,6 +13,7 @@ behind an `echo`, or sequenced before a state change with `;`.
 | `scripts/run-python-hook.cmd` | Cross-platform launcher. Do not "simplify" it. |
 | `scripts/friction-report.py` | Read-only transcript analyzer. |
 | `tests/test_pipe_guard.py` | Table-driven suite. Both directions asserted. |
+| `tests/launcher_check.py` | Drives the hook through the launcher. Not in `discover`. |
 | `hooks/hooks.json` | Wires the PreToolUse matcher on `Bash`. |
 
 ## Rules that are not negotiable
@@ -57,6 +58,14 @@ that matches too much denies ordinary work on every Bash call.
 and asserts it denies, so an all-green run cannot mean "the guard never loaded".
 Its companion asserts the same command goes silent with an empty registry — the
 suite has to be able to tell a real deny from a rule that fires on everything.
+
+The suite invokes the guard with `sys.executable`, which skips
+`run-python-hook.cmd` entirely. That launcher gets its own check, run by CI on
+all three OSes and locally with:
+
+```bash
+python3 tests/launcher_check.py
+```
 
 **Before trusting a green run, break something and confirm it goes red.** Copy
 the tree to a scratch dir, disable one rule, and check the count of failures.
