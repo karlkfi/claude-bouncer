@@ -4,10 +4,6 @@ A Claude Code plugin that adds a `PreToolUse` hook for `Bash`. When a guarded co
 
 The load-bearing piece is `scripts/bash-workspace-guard.py` — a stdlib-only Python script that tokenizes the command with `shlex`, classifies tokens against a per-command `SPEC` table, resolves file arguments with `realpath`, and emits a `PreToolUse` decision.
 
-## Model selection
-
-Use the `model-advisor` skill to assess the right model and thinking level at session start and whenever the task type shifts significantly (e.g. moving from a small `SPEC` row addition to redesigning the tokenizer).
-
 ## Development philosophy
 
 Build the right thing AND build it well. Before writing any code, state the goal in one sentence and the approach in two or three. If the goal is unclear, ask one focused question rather than guessing.
