@@ -64,7 +64,7 @@ When in doubt, ask before shipping. The hook's job is to add friction at the sec
 
 ## Testing
 
-Tests live in `tests/test_workspace_guard.py` (stdlib `unittest`, no third-party deps). Run with:
+Tests live in `tests/` (stdlib `unittest`, no third-party deps) — `test_workspace_guard.py` for the hook, and one file per helper script alongside it, including `test_shell_scripts.py` for the `scripts/*.sh` helpers. Everything is picked up by discovery, so a new `tests/test_*.py` runs in CI with no workflow change. Run with:
 
 ```
 python3 scripts/run-tests.py
