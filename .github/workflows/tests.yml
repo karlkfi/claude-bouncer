@@ -1,0 +1,54 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ['3.9', '3.13']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+
+  # The suite asserts both directions, so a harness that silently stopped
+  # loading the guard would still report OK. This job breaks one rule and
+  # requires the suite to go red -- if it stays green, the tests are not
+  # testing the thing.
+  mutation-control:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Disable the pipe rule
+        run: |
+          python - <<'PY'
+          import pathlib
+          p = pathlib.Path('scripts/bash-pipe-guard.py')
+          s = p.read_text()
+          old = "        if next_op(seg.post_ops) not in PIPE_OPS:\n            continue"
+          new = "        if True:\n            continue"
+          assert old in s, "mutation target not found -- update this job"
+          p.write_text(s.replace(old, new, 1))
+          PY
+      - name: The suite must fail
+        run: |
+          python -m unittest discover -s tests > mutant.log 2>&1 && rc=0 || rc=$?
+          echo "suite exit: $rc"
+          tail -5 mutant.log
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::the suite passed with the pipe rule disabled" >&2
+            exit 1
+          fi
