@@ -971,7 +971,16 @@ through the same boundary rules and produce the same reasons. Symlink staging
    carry an `xargs kill` past your permission settings — `allow` speaks for the
    whole string. A shell `-c` body suppresses it the same way: it arrives as one
    token, and even once step 15 has read it the hook has no basis to vouch for a
-   construct it reads at one remove. A `Stop-Process` or a `taskkill` suppresses
+   construct it reads at one remove. **Interpreter code suppresses it on the same
+   grounds** — `python3 -c`, `perl -e`, a heredoc fed to `python3`, or a script
+   resolving outside the root, in the Bash tool. Interpreters are not guarded
+   commands and a bare `python3 x.py` still defers to your own permission rules;
+   what the hook withdraws is only its willingness to *vouch* for them, so
+   `cat README.md && python3 -c '…'` no longer runs silently. A script path that
+   resolves **inside** the workspace is exempt — that is repo-resident code the
+   boundary already trusts — as is an interpreter run on another filesystem
+   (`ssh`, `docker exec`, `kubectl exec`) and a `--version`/`--help` query.
+   A `Stop-Process` or a `taskkill` suppresses
    the PowerShell `allow` too,
    including one this step had no cause to deny and one written inside a `$(…)`
    body. The pid *sources* then go through the anchor test above: `pgrep`'s
@@ -1204,8 +1213,21 @@ A set of path prefixes are always allowed for **read-only** guarded commands
 write-mode flag (`sed -i`, gawk `-i inplace`, `yq -i`, `sort -o`), and the
 positional output file of `uniq IN OUT` / `xxd IN OUT` are never exempt.
 
-The built-in default is `~/.claude/projects/` (Claude Code's own session and
-sub-agent data). You can extend it with additional prefixes:
+The built-in defaults are `~/.claude/projects/` (Claude Code's own session and
+sub-agent data) and `~/.claude/plugins/` + `~/.claude/skills/` (installed
+extension code). The extension dirs rest on the same trust boundary as the
+plugin itself — that code is installed by the user, deliberately — and they are
+load-bearing rather than a convenience: a hook or skill routinely launches its
+own scripts by absolute path, so without the exemption every such launch would
+prompt.
+
+The exemption keys on where a file **really** is, because file arguments are
+compared after `realpath`. A skill symlinked out to a working repo
+(`~/.claude/skills/foo -> ~/workspace/skills/foo`, a common layout) resolves to
+the repo and is *not* exempt — correctly, since that is an ordinary cross-repo
+read, and an exempt directory must never launder a symlink into one.
+
+You can extend the defaults with additional prefixes:
 
 | Env var | Default | Effect |
 | --- | --- | --- |
@@ -1290,6 +1312,29 @@ final output.
 
 ## Limitations
 
+- **An interpreter's own file access is invisible to the hook.** `python3`,
+  `node`, `perl`, `ruby` and friends are not guarded commands: a `PreToolUse`
+  hook on the shell sees the command line, and whatever the interpreter then
+  opens happens inside its own process. So `python3 -c 'open("/etc/passwd")'`
+  is not checked against the boundary, and neither is any file a script it runs
+  touches. This is the [documented threat model](docs/design.md) rather than an
+  oversight — the plugin closes a granularity gap in *pre-approved file
+  readers*, and it does not try to model every program that can open a file.
+  What the hook *does* check is the **script path** an interpreter is told to
+  run — `python3 <path>` reads that file, so it is checked like any other read
+  and an outside-workspace script gets the usual `ask`. Installed extension code
+  is read-exempt (see [Allowed read prefixes](#allowed-read-prefixes)), which is
+  what keeps a hook launching its own script quiet.
+  Separately, interpreter code suppresses the blanket `allow` a clean guarded
+  command in the same string would otherwise earn, so the hook never vouches for
+  code it cannot read. Note the asymmetry: the path check produces a real
+  decision that blocks in every permission mode, while the suppression only
+  withholds `allow` and so protects nothing under `auto`, `acceptEdits`, or
+  `bypassPermissions` — see
+  [`docs/permission-modes.md`](docs/permission-modes.md).
+  Residuals, all erring toward silence: inline code (`python3 -c`, a heredoc)
+  carries no path to check, `python3 -m <module>` is not treated as inline, and
+  the PowerShell tool does not yet apply the suppression.
 - A leading `~`/`~/…` is expanded to your home directory (bash does this
   deterministically), so a home path inside the root is allowed. Tokens that
   bash would expand *unpredictably* at runtime — `~user`/`~+`/`~-`, or a `$`
@@ -1425,11 +1470,21 @@ final output.
   never widens the boundary). A session with no `session_id` (older CLIs)
   disables both allows entirely.
 - In non-interactive / headless runs there is no one to answer an `ask` prompt,
-  so an `ask` still **blocks** the command (verified on CLI 2.1.159 — it does
-  not silently allow). Under `--dangerously-skip-permissions`
-  (`bypassPermissions`) the hook emits `deny` rather than `ask` for
-  outside-workspace paths: equally blocking, but the agent receives the reason
-  and can recover instead of stalling. See [Configuration](#configuration).
+  so an `ask` still **blocks** the command (re-verified on CLI 2.1.220 across
+  all six permission modes — it does not silently allow). Under
+  `--dangerously-skip-permissions` (`bypassPermissions`) the hook emits `deny`
+  rather than `ask` for outside-workspace paths: equally blocking, but the agent
+  receives the reason and can recover instead of stalling. See
+  [Configuration](#configuration).
+- **How much the hook protects you depends on your permission mode.** `ask` and
+  `deny` block in every mode, but a *deferred* command — one the hook declines
+  to judge — runs silently under `auto`, `acceptEdits`, and `bypassPermissions`,
+  and is blocked only under `manual`, `dontAsk`, and `plan`. So the mechanisms
+  that work by declining to vouch (the suppressions described in step 16) add
+  protection only in the latter group; in a pre-approving mode they hand the
+  decision back to rules that already said yes. The measured matrix, and which
+  decision is the right one per mode, are in
+  [`docs/permission-modes.md`](docs/permission-modes.md).
 - The host-temp `deny` covers guarded-command file arguments, redirect targets
   from any command (`go test > /tmp/log`), a `cd` into host temp followed by a
   relative write, `mktemp` (its default location is host temp), and — as of the

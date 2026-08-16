@@ -5868,6 +5868,177 @@ class ShellCSuppressesAllowTests(unittest.TestCase):
         self._decision("grep -c foo in.txt", "allow")
 
 
+class InterpreterSuppressesAllowTests(unittest.TestCase):
+    """A clean guarded command never speaks for interpreter code (Q72).
+
+    `shell_c_group`'s rule one layer out. Measured at 0219b04:
+    `cat README.md && python3 -c '…'` came back `allow`, so the hook was
+    short-circuiting the user's own permission settings on arbitrary code — the
+    same defect Q60 fixed for `sh -c`, in a spelling `SHELL_C_CMDS` misses.
+
+    Interpreters stay out of `SPEC`: deferring on a bare `python3 x.py` is the
+    documented threat model. Only the blanket `allow` is withdrawn, and only for
+    code the hook cannot read — a script resolving *inside* the workspace is
+    repo-resident and still allows. Targets are synthetic (repo rule); nothing
+    here is ever executed.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = os.path.realpath(self._tmp.name)
+        with open(os.path.join(self.workspace, "in.txt"), "w") as f:
+            f.write("hello\n")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _decision(self, cmd, expected):
+        out = run_hook(cmd, self.workspace, project_dir=self.workspace)
+        if expected == "defer":
+            self.assertIsNone(out, f"expected defer for {cmd!r}, got {out!r}")
+            return
+        self.assertIsNotNone(out, f"expected a decision, got defer for: {cmd!r}")
+        got = out["hookSpecificOutput"]["permissionDecision"]
+        self.assertEqual(got, expected, f"expected {expected!r} for {cmd!r}")
+
+    def test_inline_code_suppresses_the_allow(self):
+        # `-c` for python, `-e` for the perl/ruby/node family, and both read off
+        # short-option clusters so `perl -pe` and `perl -0pi -e` fire too.
+        for cmd in ("cat in.txt && python3 -c 'import os'",
+                    "cat in.txt && perl -e 'print 1'",
+                    "cat in.txt && perl -pe 's/a/b/' in.txt",
+                    "cat in.txt && perl -0pi -e 's/a/b/' in.txt",
+                    "cat in.txt && ruby -e 'puts 1'",
+                    "cat in.txt && node -e 'console.log(1)'"):
+            self._decision(cmd, "defer")
+
+    def test_stdin_and_heredoc_bodies_suppress_the_allow(self):
+        # The heredoc body is stripped before shlex, so the hook has nothing to
+        # read — the same blind spot as a `-c` operand, and far more common.
+        for cmd in ("cat in.txt && python3 - <<'PY'\nimport os\nPY",
+                    "cat in.txt && python3 <<'PY'\nimport os\nPY",
+                    "cat in.txt && python3"):
+            self._decision(cmd, "defer")
+
+    # An outside script is no longer merely suppressed — it is a real offender.
+    # See test_a_script_outside_the_workspace_is_a_real_offender below.
+
+    def test_a_workspace_resident_script_still_allows(self):
+        # Repo-resident code is what the boundary already trusts; exempting it
+        # is what keeps this rule from costing far more friction than it buys.
+        for cmd in ("cat in.txt && python3 ./scripts/run.py",
+                    "cat in.txt && bash ./script.sh",
+                    "cat in.txt && node subdir/app.js"):
+            self._decision(cmd, "allow")
+
+    def test_an_interpreter_on_another_filesystem_still_allows(self):
+        # Locality is decided the way `shell_c_bodies` decides it: the code runs
+        # on another host, so this workspace's boundary has nothing to say.
+        for cmd in ("cat in.txt && kubectl exec p -- python3 -c 'import os'",
+                    "cat in.txt && ssh host python3 /q72-fake-target/x.py",
+                    "cat in.txt && docker exec c ruby -e 'puts 1'"):
+            self._decision(cmd, "allow")
+
+    def test_a_local_wrapper_still_reaches_the_interpreter(self):
+        for cmd in ("cat in.txt && timeout 5 python3 -c 'import os'",
+                    "cat in.txt && env python3 -c 'import os'",
+                    "cat in.txt && nohup perl -e 'print 1'"):
+            self._decision(cmd, "defer")
+
+    def test_a_query_flag_runs_no_code_and_still_allows(self):
+        for cmd in ("cat in.txt; python3 --version", "cat in.txt; node --version",
+                    "cat in.txt; perl --help", "cat in.txt; python3 -V"):
+            self._decision(cmd, "allow")
+
+    def test_an_interpreter_name_in_a_pattern_does_not_suppress(self):
+        # The rule keys on the group's command word. A loose token scan would
+        # read these as interpreter invocations and defer a clean grep.
+        for cmd in ("grep -n 'kindest/node' in.txt",
+                    "grep -rn python3 in.txt",
+                    "cat in.txt | grep -c perl"):
+            self._decision(cmd, "allow")
+
+    def test_inline_code_on_its_own_still_defers(self):
+        # No guarded command, so there was never an `allow` to suppress, and
+        # inline code carries no path to check. Interpreters remain outside
+        # `SPEC`; only a script operand is treated as a file argument.
+        for cmd in ("python3 -c 'import os'", "perl -e 'print 1'",
+                    "python3 ./scripts/run.py"):
+            self._decision(cmd, "defer")
+
+    def test_an_outside_read_still_asks(self):
+        # The suppression withdraws `allow`; it must not mask a real offender.
+        self._decision("cat in.txt && cat /q72-fake-target/secret", "ask")
+
+    def test_a_script_outside_the_workspace_is_a_real_offender(self):
+        # Not merely suppressed: a script operand is a file the interpreter
+        # reads, so it is checked like any other read and yields `ask`. That is
+        # the part that survives the permission-mode matrix — a suppression only
+        # withholds `allow`, which still runs under `auto`/`acceptEdits`/
+        # `bypassPermissions` (docs/permission-modes.md).
+        for cmd in ("python3 /q72-fake-target/x.py",
+                    "bash /q72-fake-target/x.sh",
+                    "cat in.txt && ruby /q72-fake-target/x.rb"):
+            self._decision(cmd, "ask")
+
+    def test_an_outside_script_denies_under_bypass(self):
+        out = run_hook("python3 /q72-fake-target/x.py", self.workspace,
+                       project_dir=self.workspace,
+                       permission_mode="bypassPermissions")
+        self.assertIsNotNone(out)
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_a_remote_interpreter_script_is_not_an_offender(self):
+        # The path names another filesystem, so checking it here would block a
+        # file this host never touches.
+        self._decision("cat in.txt && ssh host python3 /q72-fake-target/x.py",
+                       "allow")
+
+
+class InstalledExtensionReadExemptionTests(unittest.TestCase):
+    """Installed plugin/skill code is read-exempt (Q72).
+
+    82% of outside-root interpreter script arguments in a measured corpus were
+    plugin scripts launched by a hook or skill, so without this the interpreter
+    check would prompt on the extension ecosystem and be turned off. Reads only.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = os.path.realpath(self._tmp.name)
+        self._home = tempfile.TemporaryDirectory()
+        self.home = os.path.realpath(self._home.name)
+        self.env = {"HOME": self.home, "USERPROFILE": self.home}
+        for name in ("plugins", "skills"):
+            os.makedirs(os.path.join(self.home, ".claude", name), exist_ok=True)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+        self._home.cleanup()
+
+    def _decision(self, cmd):
+        out = run_hook(cmd, self.workspace, project_dir=self.workspace,
+                       env_extra=self.env)
+        return None if out is None else \
+            out["hookSpecificOutput"]["permissionDecision"]
+
+    # The exempt case is tier-stable: `classify_outside` consults the read
+    # prefixes before the host-temp rule, so it answers the same on a platform
+    # where this fixture's temp home is itself host-temp. The two negative cases
+    # are not, so they assert only that SOME blocking tier was reached.
+    def test_reading_installed_plugin_code_is_exempt(self):
+        p = os.path.join(self.home, ".claude", "plugins", "p", "run.sh")
+        self.assertNotIn(self._decision(f"bash {sh(p)}"), ("ask", "deny"))
+
+    def test_writing_installed_plugin_code_is_not_exempt(self):
+        p = os.path.join(self.home, ".claude", "plugins", "p", "run.sh")
+        self.assertIn(self._decision(f"cp ./in.txt {sh(p)}"), ("ask", "deny"))
+
+    def test_an_unrelated_outside_script_is_not_exempt(self):
+        p = os.path.join(self.home, "elsewhere", "run.sh")
+        self.assertIn(self._decision(f"bash {sh(p)}"), ("ask", "deny"))
+
+
 class ShellCBodyAnalysisTests(unittest.TestCase):
     """A shell `-c` body the host runs is checked like any command string (Q61).
 

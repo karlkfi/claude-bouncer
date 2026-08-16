@@ -329,6 +329,40 @@ def claude_projects_dir():
         return None
 
 
+def claude_code_dirs():
+    """Realpaths of Claude Code's installed-extension dirs, ``~/.claude/plugins/``
+    and ``~/.claude/skills/``.
+
+    Exempt from the workspace check for **reads** on the same trust boundary the
+    plugin itself rests on: this code is installed by the user, deliberately, and
+    a user who can rewrite it has already won (see `docs/security-notes.md`,
+    "Hook input trust"). The exemption is load-bearing rather than a convenience
+    — 82% of all outside-root interpreter script arguments in a measured corpus
+    were plugin scripts a hook or skill launched (`pr-sentinel-watch.sh` and the
+    like), so without it the interpreter check would prompt on the extension
+    ecosystem constantly and be turned off.
+
+    Reads only: a *write* into installed plugin code is not routine and keeps
+    its prompt. Returns the dirs that resolve; an unresolvable home yields none.
+
+    The exemption keys on where a file REALLY is, because every file argument is
+    compared after ``realpath``. A skill symlinked out to a working repo (a
+    common layout: ``~/.claude/skills/foo -> ~/workspace/skills/foo``) therefore
+    resolves to the repo and is NOT exempt — correctly, since that is an ordinary
+    cross-repo read, and an exempt directory must not launder a symlink into one.
+    """
+    home = resolved_home()
+    if home is None:
+        return []
+    out = []
+    for name in ('plugins', 'skills'):
+        try:
+            out.append(os.path.realpath(os.path.join(home, '.claude', name)))
+        except OSError:
+            pass
+    return out
+
+
 def allowed_read_prefixes(base):
     """Resolved list of absolute path prefixes exempt from the workspace check
     for **read-only** guarded commands (see WRITE_COMMANDS for exclusions).
@@ -346,6 +380,7 @@ def allowed_read_prefixes(base):
     cpd = claude_projects_dir()
     if cpd:
         defaults.append(cpd)
+    defaults.extend(claude_code_dirs())
     extras = _split_pathlist(os.environ.get('WORKSPACE_GUARD_READ_ALLOW_PREFIXES', ''))
     out = []
     for p in defaults + extras:
@@ -2114,6 +2149,22 @@ GREP_LIKE = frozenset({'grep', 'rg'})
 # group runs it on this host; see `shell_c_bodies` (Q61).
 SHELL_C_CMDS = frozenset({'sh', 'bash', 'zsh', 'dash', 'ksh'})
 
+# Interpreters that run code the hook cannot read. They are deliberately NOT in
+# SPEC — guarding an interpreter's file arguments is the documented non-goal
+# (`docs/design.md`), and a bare `python3 x.py` still defers to normal
+# permission rules. They are listed here for the narrower question of whether a
+# clean guarded command elsewhere in the string may speak for them; see
+# `interp_code_source`.
+INTERP_CMDS = frozenset({
+    'python', 'python2', 'python3', 'node', 'ruby', 'perl', 'php',
+    'deno', 'bun', 'Rscript', 'osascript',
+})
+
+# Flags that make an interpreter print and exit rather than run anything. Only
+# unambiguous spellings are listed: `-h` is bash's `hashall` and `-v` is
+# Python's verbose, and both still run code.
+INTERP_QUERY_FLAGS = frozenset({'--version', '--help', '-V'})
+
 # Command words that run a shell `-c` body in THIS filesystem. The body is only
 # re-analyzed under one of these, because a path in it means nothing unless the
 # shell it names is the host's: `docker exec c sh -c 'cat /var/lib/…'` and
@@ -2261,6 +2312,67 @@ def shell_c_bodies(tokens):
                 break
             j += 1
     return out
+
+
+def interp_code_source(tokens):
+    """What an interpreter group runs, when `allow` must not speak for it.
+
+    Returns None when the group runs no interpreter, or is not running one on
+    this host. Otherwise ``('inline', None)`` for code the hook can never read —
+    a `-c`/`-e` operand, a heredoc, a bare stdin `-`, or a REPL — or
+    ``('script', tok)`` for a script path the caller resolves, since a script
+    *inside* the workspace is repo-resident code the boundary already trusts
+    (`docs/design.md`, "Sandboxing the workspace from itself" is a non-goal).
+
+    This is `shell_c_group`'s rule one layer out. A shell's `-c` body is not the
+    only opaque token a clean guarded command can end up vouching for:
+    `cat README.md && python3 -c '…'` returned `allow`, and `allow` speaks for
+    the WHOLE string, so the hook was short-circuiting the user's own permission
+    settings on arbitrary code. Interpreters are not in `SPEC` and deferring on
+    them is the documented threat model; *vouching* for them never was.
+
+    Locality is decided the same way `shell_c_bodies` decides it, and for the
+    same reason: the group's command word must be the interpreter itself or a
+    LOCAL_SHELL_WRAPPERS entry, so `kubectl exec p -- python3 -c …` and
+    `ssh h python3 …` — whose code runs on another filesystem — are left alone.
+    """
+    if not tokens:
+        return None
+    head = os.path.basename(tokens[0])
+    if head not in INTERP_CMDS and head not in SHELL_C_CMDS \
+            and head not in LOCAL_SHELL_WRAPPERS:
+        return None
+    for i, t in enumerate(tokens):
+        base = os.path.basename(t)
+        if base not in INTERP_CMDS and base not in SHELL_C_CMDS:
+            continue
+        # An interpreter takes its code from `-e`/`-c`; a shell only from `-c`
+        # (`bash -e` is errexit). Both are read off short-option clusters, so
+        # `perl -pe`, `perl -0pi -e` and `sh -lc` all fire. Over-reporting here
+        # costs a defer rather than a silent allow, which is the safe direction.
+        inline = 'ce' if base in INTERP_CMDS else 'c'
+        operand = None
+        for u in tokens[i+1:]:
+            if u == '-' or not u.startswith('-'):
+                operand = u
+                break
+            if u == '--':
+                continue
+            # A query flag runs no code at all, so there is nothing to vouch
+            # for. It has to be named: after heredoc stripping `bash --version`
+            # and `python3 <<'PY'` both reduce to a bare command word, and the
+            # operand-less case below has to keep reading the second as stdin.
+            if u in INTERP_QUERY_FLAGS:
+                return None
+            if not u.startswith('--') and any(ch in u[1:] for ch in inline):
+                return ('inline', None)
+        # No operand is a REPL or a `python3 <<'PY'` heredoc, whose body was
+        # stripped from the string before shlex ever saw it; `-` is an explicit
+        # read-from-stdin. Neither leaves the hook anything to read.
+        if operand is None or operand == '-':
+            return ('inline', None)
+        return ('script', operand)
+    return None
 
 
 def pgrep_operands(tokens):
@@ -3400,6 +3512,38 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
             # signalling command does. Checked in the `elif` so a group that is
             # BOTH (`xargs sh -c 'kill …'`) keeps its signal classification.
             signal = signal or 'sh -c'
+        # Same suppression for an interpreter, which is opaque for the same
+        # reason a `-c` body is. A script operand is exempt while it resolves
+        # inside the workspace: that is repo-resident code, which the boundary
+        # already trusts, and exempting it is what keeps this from costing an
+        # order of magnitude more friction than it buys. An unresolvable operand
+        # (untracked cwd, a runtime-expanded token) cannot be shown to be
+        # in-workspace, so it suppresses.
+        src = interp_code_source(g)
+        if src is not None:
+            kind, tok = src
+            if kind == 'inline':
+                signal = signal or 'interpreter'
+            else:
+                # A script operand is a file the interpreter reads, so it is
+                # checked like any other read. That matters far more than the
+                # suppression beside it: an offender emits `ask`/`deny`, which
+                # block in EVERY permission mode, while a suppression only
+                # withholds `allow` — and a withheld `allow` still runs under
+                # `auto`, `acceptEdits`, and `bypassPermissions`
+                # (`docs/permission-modes.md`). Read exemptions apply, which is
+                # what keeps installed plugin and skill code quiet.
+                o = check_file(tok, group_cwd, group_cwd_unknown, is_read=True)
+                if o is not None:
+                    outside.append(o)
+                    signal = signal or 'interpreter'
+                else:
+                    # Exempt or in-workspace. Vouch only for the workspace case:
+                    # an exempt prefix earns silence, not the hook's word for
+                    # everything else in the string.
+                    k, rp = resolve_token(tok, group_cwd, group_cwd_unknown)
+                    if k != 'path' or path_is_outside(rp, ctx.proj):
+                        signal = signal or 'interpreter'
         # The body is readable after all when it is a command string this host
         # runs — queued whatever the classification above landed on, since the
         # two answer different questions. Skipped once the cwd is untracked: the

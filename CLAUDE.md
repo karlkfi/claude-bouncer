@@ -117,6 +117,7 @@ When working on specific tasks, read the relevant doc before starting:
 | Picking the next task, tracking progress, adding new items | `docs/STATUS.md` — also run `gh pr list` and skip any Queue item already covered by an open PR |
 | Editing `docs/STATUS.md` (any change to the Queue or header) | `docs/development/maintaining-backlog.md` |
 | Changing parsing behavior or the `SPEC` table | `scripts/bash-workspace-guard.py` + `README.md` decision table |
+| Choosing or changing a decision (`allow`/`ask`/`deny`/defer) | `docs/permission-modes.md` — defer is a no-op in `auto`/`acceptEdits`/`bypassPermissions`, so "declines to vouch" protects nothing there |
 | Plugin packaging / marketplace listing | `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` |
 | Cutting a release (version bump, notes file, tag, GitHub Release) | `docs/development/release-process.md` |
 | Measuring where prompts accumulate (friction review) | `docs/development/measuring-friction.md` + `scripts/friction-report.py` |
