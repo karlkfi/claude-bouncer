@@ -56,8 +56,15 @@ go test ./... | grep FAIL       # denied
 The fix is to redirect, then reconcile status against output separately:
 
 ```bash
-make check > tmp/check.log 2>&1; echo "EXIT=$?"; grep -E 'FAILED|Error' tmp/check.log
+make check > <scratchpad>/check.log 2>&1; echo "EXIT=$?"; grep -E 'FAILED|Error' <scratchpad>/check.log
 ```
+
+`<scratchpad>` is the per-session scratchpad directory Claude Code creates under
+`/tmp/claude-<uid>/`. The deny message resolves it to a literal path, so the
+rewrite is copy-pasteable and the redirect cannot fail before the gate runs — a
+build-output directory like `tmp/` is commonly gitignored, and so absent from a
+fresh checkout. Where there is no scratchpad to name, the suggestion carries its
+own `mkdir -p tmp &&` instead.
 
 `set -o pipefail` earlier in the same command suppresses this, and so does
 reading zsh's `$pipestatus` (lowercase, 1-indexed). Reading `$PIPESTATUS`
@@ -68,7 +75,7 @@ it expands to empty and every test against it reads as success.
 
 ```bash
 # with run_in_background: true
-make check > tmp/c.log 2>&1; echo "EXIT=$?"    # denied
+make check > <scratchpad>/c.log 2>&1; echo "EXIT=$?"    # denied
 ```
 
 A `;`-list yields its **last** statement's status. The log says `EXIT=1` and
@@ -76,7 +83,7 @@ Claude Code's task notification says `completed (exit code 0)`, because the chai
 ended with an `echo`. Capture the status and re-raise it:
 
 ```bash
-make check > tmp/c.log 2>&1; rc=$?; echo "EXIT=$rc"; exit $rc
+make check > <scratchpad>/c.log 2>&1; rc=$?; echo "EXIT=$rc"; exit $rc
 ```
 
 A literal `exit 0` at the end is treated as a deliberate discard, and is the way
@@ -180,8 +187,8 @@ After installing with either method:
 
 To verify, ask Claude to run `make check | tail -5` — the call should be denied
 with a reason naming the filter. Then ask it to run
-`make check > tmp/c.log 2>&1; echo "EXIT=$?"` in the foreground; that is the
-documented correct form and should run without comment.
+`make check > <scratchpad>/c.log 2>&1; echo "EXIT=$?"` in the foreground; that
+is the documented correct form and should run without comment.
 
 ## Upgrade
 

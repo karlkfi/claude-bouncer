@@ -953,6 +953,74 @@ def sequenced_mutation(segs, reg):
 
 # --- Reasons ----------------------------------------------------------------
 
+# Each suggested rewrite names a log file, and a suggestion that does not run is
+# worse than none: the session reading it has just been denied and is copying
+# verbatim. `tmp/` is a build-output name -- commonly gitignored, so absent from
+# a fresh checkout or a new worktree -- and the redirect then fails before the
+# gate ever runs. So the path is resolved per call: the session's scratchpad
+# when it is really there, and otherwise a form that creates its own directory.
+LOG_PLACEHOLDER = '<LOG>'
+MKDIR_PLACEHOLDER = '<MKDIR>'
+
+SCRATCH_ROOT = '/tmp/claude-%d'
+SESSION_ID_RE = re.compile(r'[A-Za-z0-9_-]+')
+
+
+def scratch_root():
+    """The per-user root Claude Code puts session directories under, or ''.
+
+    POSIX only. Windows has no `os.getuid()` and puts the root under the
+    per-user temp dir, whose backslashes would need converting before they could
+    go in a bash redirect -- so the mkdir form is the answer there instead.
+    `hasattr` is the discriminator rather than `os.name` because the missing
+    call is the actual condition.
+    """
+    return SCRATCH_ROOT % os.getuid() if hasattr(os, 'getuid') else ''
+
+
+def scratch_dir(session_id, root=None):
+    """This session's scratchpad directory, or '' when it is not found.
+
+    Claude Code lays it out as `<root>/<project-slug>/<session id>/scratchpad`.
+    The slug encoding is undocumented and differs between a worktree and the
+    main checkout, so the project dir is located by scanning ``root`` for the
+    child that already holds this session -- ground truth from the filesystem,
+    the way workspace-guard's `claude_session_project_dir` does it. A listdir
+    and isdir scan only; nothing is read, and a layout that moves underneath
+    this returns '' rather than a path that is not there.
+    """
+    if root is None:
+        root = scratch_root()
+    if not root or not SESSION_ID_RE.fullmatch(session_id or ''):
+        return ''
+    try:
+        slugs = os.listdir(root)
+    except OSError:
+        return ''
+    for slug in slugs:
+        path = os.path.join(root, slug, session_id, 'scratchpad')
+        try:
+            if os.path.isdir(path):
+                return path
+        except OSError:
+            continue
+    return ''
+
+
+def with_log_path(reason, scratch):
+    """Fill a reason's log placeholders with a path the redirect can write.
+
+    Joined with `/` rather than `os.path.join`, because the result is a bash
+    command line: a backslash separator there is an escape character, not a
+    path.
+    """
+    if scratch:
+        return reason.replace(MKDIR_PLACEHOLDER, '').replace(
+            LOG_PLACEHOLDER, scratch + '/out.log')
+    return reason.replace(MKDIR_PLACEHOLDER, 'mkdir -p tmp && ').replace(
+        LOG_PLACEHOLDER, 'tmp/out.log')
+
+
 OVERRIDE_HINT = (
     " If the status genuinely does not matter here, re-run prefixed with "
     + OVERRIDE_VAR + "=<reason>. If this call is not the mistake the rule "
@@ -965,21 +1033,21 @@ PIPESTATUS_REASON = (
     "tool runs. It expands to empty, so the test against it reads as success "
     "whatever the pipeline did. zsh spells it $pipestatus (lowercase, "
     "1-indexed); better still, redirect and read the status directly: "
-    'cmd > tmp/out.log 2>&1; echo "EXIT=$?".' + OVERRIDE_HINT)
+    '<MKDIR>cmd > <LOG> 2>&1; echo "EXIT=$?".' + OVERRIDE_HINT)
 
 PIPED_REASON = (
     " is piped into a filter, so this call's exit status is the filter's, not "
     "the gate's -- a failure reads exactly like a pass, and zsh (the shell the "
     "Bash tool runs) has no PIPESTATUS to recover it. Redirect instead, then "
     "reconcile status against output: "
-    "cmd > tmp/out.log 2>&1; echo \"EXIT=$?\"; grep -E 'FAILED|Error [0-9]|^make:' "
-    "tmp/out.log." + OVERRIDE_HINT)
+    "<MKDIR>cmd > <LOG> 2>&1; echo \"EXIT=$?\"; "
+    "grep -E 'FAILED|Error [0-9]|^make:' <LOG>." + OVERRIDE_HINT)
 
 LOST_STATUS_REASON = (
     " runs in the background, but this call's exit status is its LAST "
     "statement's -- an echo exits 0 whatever the gate did, so the task "
     "notification reports success for a failed gate. Capture the status and "
-    're-raise it: cmd > tmp/out.log 2>&1; rc=$?; echo "EXIT=$rc"; exit $rc.'
+    're-raise it: <MKDIR>cmd > <LOG> 2>&1; rc=$?; echo "EXIT=$rc"; exit $rc.'
     + OVERRIDE_HINT)
 
 SEQUENCED_REASON_HEAD = "` is sequenced before `"
@@ -990,8 +1058,11 @@ SEQUENCED_REASON = (
     "check passing." + OVERRIDE_HINT)
 
 
-def decide(cmd, background, reg, depth=0):
+def decide(cmd, background, reg, scratch='', depth=0):
     """The deny reason for a Bash command, or '' to stay silent.
+
+    ``scratch`` is the session scratchpad the suggested rewrites should redirect
+    into; empty means they carry their own `mkdir` instead.
 
     Every failure path returns '': a hook that cannot parse a command has
     nothing to say about it.
@@ -1011,7 +1082,7 @@ def decide(cmd, background, reg, depth=0):
     # so the same text there is a note about the bug rather than the bug.
     if reads_var(cleaned, 'PIPESTATUS') or any(
             reads_var(body, 'PIPESTATUS', quotes=False) for body in heredocs):
-        return PIPESTATUS_REASON
+        return with_log_path(PIPESTATUS_REASON, scratch)
 
     # `pipefail` propagates the failure and zsh's `$pipestatus` recovers each
     # stage's status. Neither mitigates a status the last statement discarded,
@@ -1019,11 +1090,13 @@ def decide(cmd, background, reg, depth=0):
     if not sets_pipefail(segs) and not reads_var(cleaned, 'pipestatus'):
         gate = piped_gate(segs, reg)
         if gate:
-            return '`' + truncate(gate) + '`' + PIPED_REASON
+            return with_log_path(
+                '`' + truncate(gate) + '`' + PIPED_REASON, scratch)
 
     gate = lost_background_status(segs, background, reg)
     if gate:
-        return '`' + truncate(gate) + '`' + LOST_STATUS_REASON
+        return with_log_path(
+            '`' + truncate(gate) + '`' + LOST_STATUS_REASON, scratch)
 
     gate, mutator = sequenced_mutation(segs, reg)
     if gate:
@@ -1039,7 +1112,7 @@ def decide(cmd, background, reg, depth=0):
         for body in heredocs:
             bodies.extend(command_substitutions(body, quotes=False))
         for body in bodies:
-            reason = decide(body, False, reg, depth + 1)
+            reason = decide(body, False, reg, scratch, depth + 1)
             if reason:
                 return reason
     return ''
@@ -1067,7 +1140,8 @@ def main():
     if not cmd.strip():
         return
     reason = decide(cmd, bool(ti.get('run_in_background')),
-                    load_registry(data.get('cwd') or ''))
+                    load_registry(data.get('cwd') or ''),
+                    scratch_dir(data.get('session_id') or ''))
     if reason:
         # Always `deny`, never `ask`. The reason reaches the model, so the fix
         # lands where the command is rewritten; an `ask` goes to the user and

@@ -39,6 +39,13 @@ a change has you writing quote-state tracking or bracket counting from scratch,
 stop — that is the documented failure mode for this class of tool, and it fails
 silently in both directions. Port from workspace-guard or change the question.
 
+**A suggested rewrite has to run.** The reason strings are copied verbatim by a
+session that has just been denied, so a path one names must exist by the time
+the command does. `tmp/` does not: it is a build-output name, commonly
+gitignored and so absent from a fresh checkout. `with_log_path` resolves the
+path per call — the session scratchpad when it is confirmed on disk, otherwise a
+form carrying its own `mkdir`. Never name a path not known to exist.
+
 **Match against the segment head, never the raw string.** A pattern matched
 against the whole command also fires on every `git show`, `grep`, and commit
 message that names the command. This is the single most important design
