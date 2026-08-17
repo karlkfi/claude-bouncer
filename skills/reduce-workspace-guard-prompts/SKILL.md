@@ -98,12 +98,14 @@ Tell the user the cause(s) you found, then apply the habits that prevent them:
   drop tracking.) A literal `cd` outside the root keeps tracking, but every
   relative path after it is then genuinely outside the workspace and prompts
   deliberately.
-- **Write temp files inside the root** (`./.tmp/out.txt`), not `/tmp` — or, for
-  a throwaway that shouldn't outlive the session, into this session's own
-  Claude-managed tree under `/tmp/claude-<uid>/…/<session>/…` (the `scratchpad/`
-  dir Claude Code points the session at), which is exempt for reads and writes
-  both. Redirects to `/dev/null`, `/dev/stdout`, `/dev/stderr`, and `/dev/fd/N`
-  are exempt too.
+- **Write temp files to this session's own scratchpad**, not `/tmp` — the
+  `scratchpad/` dir Claude Code points the session at, under its Claude-managed
+  tree at `/tmp/claude-<uid>/…/<session>/…`. That tree is exempt for reads and
+  writes both, and Claude Code cleans it up. A repo-local scratch dir
+  (`./tmp/out.txt`) is the fallback for output that must outlive the session —
+  keep it gitignored, or the throwaway rides along into the next commit.
+  Redirects to `/dev/null`, `/dev/stdout`, `/dev/stderr`, and `/dev/fd/N` are
+  exempt too.
 
 ## Make it stick
 

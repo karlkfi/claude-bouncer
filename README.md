@@ -1115,15 +1115,16 @@ flowing, avoid triggering it:
   outside-workspace, naming the absolute path they land on — deliberate
   prompts, not lost tracking. Stay inside the root unless you mean to work
   outside it.
-- **Write temp files inside the project root, not `/tmp`.** Host-wide temp
-  (`/tmp`, `/var/tmp`, `$TMPDIR`, and `%TMP%` on Windows) is **denied** by
+- **Write temp files to this session's own scratchpad, not `/tmp`.** Host-wide
+  temp (`/tmp`, `/var/tmp`, `$TMPDIR`, and `%TMP%` on Windows) is **denied** by
   default — not just prompted —
   because it's shared across sessions and worktrees and lives outside the root.
-  Use a repo-local gitignored scratch dir like `./tmp/out.txt` instead — or, for
-  a throwaway that shouldn't outlive the session, this session's *own*
-  Claude-managed tree under `/tmp/claude-<uid>/…/<session>/…`, including the
-  `scratchpad/` dir Claude Code points you at. That tree is exempt for **reads
-  and writes both** — Claude Code chose the path and cleans it up. (Redirects
+  Use this session's *own* Claude-managed tree under
+  `/tmp/claude-<uid>/…/<session>/…`, including the `scratchpad/` dir Claude Code
+  points you at: that tree is exempt for **reads and writes both** — Claude Code
+  chose the path and cleans it up. For output that must outlive the session, use
+  a repo-local scratch dir like `./tmp/out.txt` instead, and keep it gitignored
+  so the throwaway doesn't ride along into the next commit. (Redirects
   and command output to `/dev/null`, `/dev/stdout`, `/dev/stderr`, and `/dev/fd/N`
   are exempt and never prompt. Only *read-only* access extends to a sibling
   session's output under the same project's scratch dir; writing there still
