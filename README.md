@@ -153,23 +153,10 @@ the same marketplace and plugin.
 3. Find **pipe-guard** in that marketplace, install it, and make sure it's
    enabled.
 
-**Turn on auto-update while you're here (recommended).** This is a third-party
-git marketplace, so Claude Code won't refresh it on its own — an install pins its
-version until you act (see [Upgrade](#upgrade)). Install time is the decision
-point: add the marketplace to `~/.claude/settings.json` with `autoUpdate: true`
-so new releases reach you automatically.
-
-```json
-"extraKnownMarketplaces": {
-  "pipe-guard": {
-    "source": { "source": "git", "url": "https://github.com/karlkfi/claude-pipe-guard.git" },
-    "autoUpdate": true
-  }
-}
-```
-
-Without this you're on the manual update path documented under
-[Upgrade](#upgrade).
+**Plan to update by hand.** This is a third-party git marketplace, so an install
+pins its version until you act, and `autoUpdate: true` does not currently change
+that. [Upgrade](#upgrade) has the commands that work, and the measurement behind
+that claim.
 
 After installing with either method:
 
@@ -194,34 +181,14 @@ is the documented correct form and should run without comment.
 
 pipe-guard installs from a GitHub marketplace, which Claude Code tracks at the
 repository's default branch (`main`). Claude Code auto-updates **official
-Anthropic marketplaces only** — a third-party git marketplace like this one does
-**not** refresh on its own, so an install pins its version until you either turn
-on auto-update or update manually. Concretely: a registry fix that stops a rule
-denying your ordinary work is invisible to anyone still pinned to the version
-they first installed.
+Anthropic marketplaces only**, so an install pins its version until you update
+it yourself. Concretely: a registry fix that stops a rule denying your ordinary
+work is invisible to anyone still pinned to the version they first installed.
 
-### Recommended: turn on auto-update (set-and-forget)
+### Update manually
 
-Add the marketplace to `~/.claude/settings.json` with `autoUpdate: true`, then
-restart Claude Code:
-
-```json
-"extraKnownMarketplaces": {
-  "pipe-guard": {
-    "source": { "source": "git", "url": "https://github.com/karlkfi/claude-pipe-guard.git" },
-    "autoUpdate": true
-  }
-}
-```
-
-From then on Claude Code refreshes the marketplace and updates the plugin for
-you — no per-release action. This is the same block shown under
-[Install](#install); set it once at install time and you're done.
-
-### Manual update
-
-If you'd rather update on demand, refresh the marketplace and update the plugin
-yourself.
+This is the path that works today. Refresh the marketplace, then update the
+plugin.
 
 **Claude Code (CLI or IDE extension)** — run the slash commands:
 
@@ -254,6 +221,32 @@ After upgrading either way:
 - Confirm the new version is live: the `/plugin` menu lists the installed
   version — compare it against the
   [latest release](https://github.com/karlkfi/claude-pipe-guard/releases).
+
+### `autoUpdate` does not fire yet
+
+Add the marketplace to `~/.claude/settings.json` with `autoUpdate: true` if you
+like — it costs nothing and starts working whenever Claude Code begins honoring
+it:
+
+```json
+"extraKnownMarketplaces": {
+  "pipe-guard": {
+    "source": { "source": "git", "url": "https://github.com/karlkfi/claude-pipe-guard.git" },
+    "autoUpdate": true
+  }
+}
+```
+
+As of Claude Code 2.1.220 the setting is persisted and nothing acts on it: the
+marketplace clone is never fetched. Measured against this repo's own
+marketplace — installed with `autoUpdate: true`, `main` advanced 28 minutes
+later, and a day and a half on the clone still had no `.git/FETCH_HEAD`. Git
+writes that file on every fetch, including one that finds nothing new, so its
+absence means no fetch has ever run. Tracked upstream as
+[anthropics/claude-code#73673](https://github.com/anthropics/claude-code/issues/73673).
+
+Until that lands, treat the manual commands above as the only way a fix reaches
+you.
 
 ## Soundness: deny, never ask
 
