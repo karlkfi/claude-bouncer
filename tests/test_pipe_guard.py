@@ -9,6 +9,7 @@ this runs on every Bash call.
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -42,6 +43,19 @@ def shipped_registry():
     assert not reg.errors, 'registry patterns do not compile: %s' % reg.errors
     assert reg.gates, 'registry lists no gates'
     return reg
+
+
+def make_scratchpad(root, session):
+    """Build Claude Code's session layout under ``root`` and return the leaf.
+
+    Spelled out here rather than borrowed from the guard, so the layout the
+    suggested rewrites depend on is pinned by the suite rather than asserted
+    against itself.
+    """
+    path = os.path.join(root, '-Users-someone-workspace-proj', session,
+                        'scratchpad')
+    os.makedirs(path)
+    return path
 
 
 # (name, command, run_in_background, expect_deny, reason_substring)
@@ -429,6 +443,92 @@ class TestPrecedence(unittest.TestCase):
                               pg.decide(cmd, bg, reg))
 
 
+class TestSuggestedLogPath(unittest.TestCase):
+    """The rewrite a denied session copies has to be a command that runs.
+
+    `tmp/` is a build-output name, commonly gitignored and so absent from a
+    fresh checkout. A redirect into a directory that is not there fails before
+    the gate runs, and reports a status that cannot be told apart from a gate
+    that ran and failed -- handed to a session at the moment it is copying the
+    text verbatim.
+    """
+
+    # One denial per reason that names a log file. The sequenced-mutation reason
+    # suggests `&&` and names none.
+    DENIALS = (('make check | tail -5', False),
+               ('make check > c.log 2>&1; echo "EXIT=$?"', True),
+               ('echo $PIPESTATUS', False))
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = shipped_registry()
+
+    def test_every_template_carries_both_placeholders(self):
+        """A template that loses one names no path, or names one uncreated."""
+        for name in ('PIPESTATUS_REASON', 'PIPED_REASON', 'LOST_STATUS_REASON'):
+            with self.subTest(name):
+                template = getattr(pg, name)
+                self.assertIn(pg.LOG_PLACEHOLDER, template)
+                self.assertIn(pg.MKDIR_PLACEHOLDER, template)
+
+    def test_no_placeholder_reaches_the_model(self):
+        for cmd, bg in self.DENIALS:
+            for scratch in ('', '/scratch'):
+                with self.subTest(cmd=cmd, scratch=scratch):
+                    reason = pg.decide(cmd, bg, self.reg, scratch)
+                    self.assertNotIn(pg.LOG_PLACEHOLDER, reason)
+                    self.assertNotIn(pg.MKDIR_PLACEHOLDER, reason)
+
+    def test_scratchpad_is_named_when_there_is_one(self):
+        for cmd, bg in self.DENIALS:
+            with self.subTest(cmd):
+                reason = pg.decide(cmd, bg, self.reg, '/scratch')
+                self.assertIn('/scratch/out.log', reason)
+                self.assertNotIn('tmp/out.log', reason)
+                self.assertNotIn('mkdir', reason)
+
+    def test_the_fallback_creates_the_directory_it_names(self):
+        """With no scratchpad to name, the suggestion carries its own mkdir."""
+        for cmd, bg in self.DENIALS:
+            with self.subTest(cmd):
+                self.assertIn('mkdir -p tmp && cmd > tmp/out.log',
+                              pg.decide(cmd, bg, self.reg))
+
+
+class TestScratchDir(unittest.TestCase):
+    """Resolving the session scratchpad, whose layout is Claude Code's own."""
+
+    SESSION = '2d9352ff-105f-4c53-b2a2-9c13f8ce5cae'
+
+    def test_found_by_scanning_for_the_session(self):
+        """Found without knowing the slug, which is undocumented and varies."""
+        with tempfile.TemporaryDirectory() as root:
+            os.makedirs(os.path.join(root, '-Users-someone-other-project',
+                                     'a-different-session', 'scratchpad'))
+            want = make_scratchpad(root, self.SESSION)
+            self.assertEqual(want, pg.scratch_dir(self.SESSION, root))
+
+    def test_a_path_that_is_not_there_is_never_named(self):
+        """A layout that moved underneath this degrades to the mkdir form.
+
+        The root holds another session, so returning '' means the directory was
+        confirmed rather than merely assembled.
+        """
+        with tempfile.TemporaryDirectory() as root:
+            make_scratchpad(root, 'a-different-session')
+            self.assertEqual('', pg.scratch_dir(self.SESSION, root))
+
+    def test_junk_session_id_builds_no_path(self):
+        with tempfile.TemporaryDirectory() as root:
+            make_scratchpad(root, self.SESSION)
+            for session in ('', '../../etc', 'a/b', self.SESSION + '\n'):
+                with self.subTest(session=session):
+                    self.assertEqual('', pg.scratch_dir(session, root))
+
+    def test_a_root_that_cannot_be_listed_is_silent(self):
+        self.assertEqual('', pg.scratch_dir(self.SESSION, '/no/such/root'))
+
+
 class TestHookEndToEnd(unittest.TestCase):
     """Invoke the hook the way Claude Code does: JSON on stdin, JSON on stdout."""
 
@@ -479,6 +579,38 @@ class TestHookEndToEnd(unittest.TestCase):
                               capture_output=True, text=True, timeout=30)
         self.assertEqual(0, proc.returncode)
         self.assertEqual('', proc.stdout.strip())
+
+    def test_scratchpad_is_read_from_the_payload(self):
+        """The wiring main() does: the payload's session id resolves to a path.
+
+        Asserted through the process rather than against `scratch_dir`, because
+        a payload field read under the wrong name would leave every unit test
+        green and every suggested rewrite pointing at `tmp/`.
+        """
+        root = pg.scratch_root()
+        if not root:
+            self.skipTest('no per-user scratch root on this platform')
+        made_root = not os.path.isdir(root)
+        session = 'pipe-guard-suite-%d' % os.getpid()
+        project = os.path.join(root, 'pipe-guard-suite-project')
+        path = os.path.join(project, session, 'scratchpad')
+        os.makedirs(path, mode=0o700)     # Claude Code's root is per-UID private
+        try:
+            out = self.run_hook({
+                'tool_name': 'Bash', 'cwd': REPO, 'session_id': session,
+                'tool_input': {'command': 'make check | tail -5'}})
+        finally:
+            shutil.rmtree(root if made_root else project)
+        reason = json.loads(out)['hookSpecificOutput']['permissionDecisionReason']
+        self.assertIn(os.path.join(path, 'out.log'), reason)
+
+    def test_suggested_rewrite_needs_no_directory_that_may_not_exist(self):
+        """No scratchpad in the payload, so the rewrite has to make its own."""
+        out = self.run_hook({
+            'tool_name': 'Bash', 'cwd': REPO,
+            'tool_input': {'command': 'make check | tail -5'}})
+        reason = json.loads(out)['hookSpecificOutput']['permissionDecisionReason']
+        self.assertIn('mkdir -p tmp && cmd > tmp/out.log', reason)
 
     def test_background_flag_is_read_from_the_payload(self):
         cmd = 'make check > tmp/c.log 2>&1; echo "EXIT=$?"'
