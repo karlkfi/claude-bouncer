@@ -24,6 +24,7 @@ import subprocess
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+HOOKS_JSON = os.path.join(REPO, 'hooks', 'hooks.json')
 LAUNCHER = os.path.join('scripts', 'run-python-hook.cmd')
 HOOK_SCRIPT = 'bash-pipe-guard.py'
 
@@ -32,12 +33,26 @@ CLEAN_COMMAND = 'make check > tmp/c.log 2>&1; echo "EXIT=$?"'
 DENY_REASON = "exit status is the filter's"
 
 
+def wired_command():
+    """The command line hooks.json wires up, with the plugin root filled in."""
+    with open(HOOKS_JSON, encoding='utf-8') as fh:
+        hook = json.load(fh)['hooks']['PreToolUse'][0]['hooks'][0]
+    return hook['command'].replace('${CLAUDE_PLUGIN_ROOT}', REPO)
+
+
 def run_launcher(command):
-    """Invoke the launcher as hooks.json does, with a hook payload on stdin."""
+    """Invoke the launcher as hooks.json does, with a hook payload on stdin.
+
+    POSIX runs the wired command line through `sh -c`, not `sh <launcher>`.
+    The two differ on exactly one thing: `sh <launcher>` reads the file as a
+    script and never needs its execute bit, so it passes on a mode-644 launcher
+    that Claude Code cannot run at all -- which is how 1.0.0 shipped a guard
+    that had never fired.
+    """
     if os.name == 'nt':
         argv = ['cmd', '/c', LAUNCHER, HOOK_SCRIPT]
     else:
-        argv = ['sh', LAUNCHER, HOOK_SCRIPT]
+        argv = ['sh', '-c', wired_command()]
     payload = {'tool_name': 'Bash', 'cwd': REPO,
                'tool_input': {'command': command}}
     return subprocess.run(argv, cwd=REPO, input=json.dumps(payload),

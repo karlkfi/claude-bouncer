@@ -13,6 +13,7 @@ behind an `echo`, or sequenced before a state change with `;`.
 | `scripts/run-python-hook.cmd` | Cross-platform launcher. Do not "simplify" it. |
 | `scripts/friction-report.py` | Read-only transcript analyzer. |
 | `tests/test_pipe_guard.py` | Table-driven suite. Both directions asserted. |
+| `tests/test_packaging.py` | Asserts the wired-up files ship runnable. |
 | `tests/launcher_check.py` | Drives the hook through the launcher. Not in `discover`. |
 | `hooks/hooks.json` | Wires the PreToolUse matcher on `Bash`. |
 
@@ -43,6 +44,14 @@ silently in both directions. Port from workspace-guard or change the question.
 against the whole command also fires on every `git show`, `grep`, and commit
 message that names the command. This is the single most important design
 property here and the easiest one to regress.
+
+**Anything `hooks.json` invokes ships executable.** 1.0.0 shipped the launcher
+at mode 644: the shell refused it, the hook exited 126 with nothing on stdout,
+and Claude Code read that as no objection, so the guard never fired once
+([#3](https://github.com/karlkfi/claude-pipe-guard/issues/3)). Modes live in
+the git index — set them with `git update-index --chmod=+x`, not `chmod` alone,
+and never invoke a launcher as `sh <file>` in a test, which reads the file as a
+script and cannot see the bit at all.
 
 ## Testing
 
