@@ -102,3 +102,33 @@ jobs:
             echo "::error::the launcher check passed with no working interpreter" >&2
             exit 1
           fi
+
+  # The 1.0.0 bug: the launcher shipped mode 644, the shell refused it, and the
+  # hook exited 126 with nothing on stdout -- which Claude Code reads as no
+  # objection. Both checks that cover it have to go red when it comes back.
+  packaging-mutation-control:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Ship the launcher non-executable
+        run: |
+          chmod -x scripts/run-python-hook.cmd
+          git update-index --chmod=-x scripts/run-python-hook.cmd
+      - name: The suite and the launcher check must fail
+        run: |
+          python -m unittest discover -s tests > suite.log 2>&1 && suite=0 || suite=$?
+          python tests/launcher_check.py > launcher.log 2>&1 && launcher=0 || launcher=$?
+          echo "suite exit: $suite, launcher exit: $launcher"
+          tail -5 suite.log
+          cat launcher.log
+          if [ "$suite" -eq 0 ]; then
+            echo "::error::the suite passed with the launcher shipped non-executable" >&2
+            exit 1
+          fi
+          if [ "$launcher" -eq 0 ]; then
+            echo "::error::the launcher check passed with the launcher non-executable" >&2
+            exit 1
+          fi
