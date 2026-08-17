@@ -74,45 +74,39 @@ biggest reduction.
 
 ## Fix
 
-Tell the user the cause(s) you found, then apply the habits that prevent them:
+Tell the user the cause(s) you found, then walk them through the habits that
+prevent them. Those habits are specified **once**, in the README's *Agent
+guidance* section — read the playbook there and work from it rather than
+reciting from memory:
 
-- **Use the Read, Grep, and Glob tools instead of bash** `cat`/`grep`/`sed`/
-  `head`/`tail`/`awk` for inspecting files. Their literal single-path inputs
-  can't trigger the `expand`/`untracked`/heredoc false positives. They are
-  still guarded (since 1.5.0): a genuinely outside-workspace read prompts
-  either way — that prompt is the boundary working as intended, so approve
-  it rather than working around it.
-- **Keep guarded file arguments inside the project root** — write the literal
-  in-root path (`cat ./config/app.json`), not a `$VAR`/`~`/`$(...)` form. (A
-  variable assigned a literal earlier in the same command is resolved, as is a
-  `for` loop over a literal list, over an in-root glob (`for f in docs/*.md`),
-  or over a nested list built from the outer variable (`for d in docs/*; do
-  for f in "$d"/*.md`). Where the body sits — on the same line as `do` or the
-  next — makes no difference. A `$(...)` list such as `for f in $(ls docs)`
-  is not resolved and does prompt.)
-- **Give `cd` a literal target, and stay in the project root** — avoid bare
-  `cd`, `cd -`, `cd $HOME`, and `popd`; `cd` into a subdirectory with a
-  literal path if you must.
-  (`cd "$(git rev-parse --show-toplevel)"` and `cd "$(pwd)"` are fine — the
-  hook resolves these two substitutions itself; other `$(...)` targets still
-  drop tracking.) A literal `cd` outside the root keeps tracking, but every
-  relative path after it is then genuinely outside the workspace and prompts
-  deliberately.
-- **Write temp files to this session's own scratchpad**, not `/tmp` — the
-  `scratchpad/` dir Claude Code points the session at, under its Claude-managed
-  tree at `/tmp/claude-<uid>/…/<session>/…`. That tree is exempt for reads and
-  writes both, and Claude Code cleans it up. A repo-local scratch dir
-  (`./tmp/out.txt`) is the fallback for output that must outlive the session —
-  keep it gitignored, or the throwaway rides along into the next commit.
-  Redirects to `/dev/null`, `/dev/stdout`, `/dev/stderr`, and `/dev/fd/N` are
-  exempt too.
+```
+${CLAUDE_PLUGIN_ROOT}/README.md
+```
+
+`~/.claude/plugins/` is exempt from the workspace check for reads, so opening
+that file costs no prompt. (In a checkout of the plugin itself it's just
+`README.md`. If neither resolves — `$CLAUDE_PLUGIN_ROOT` unset and no local
+copy — give the causes and their one-line fixes from the Diagnose section
+above, and tell the user the specifics are unverified.)
+
+Which bullets to walk through, by category:
+
+- `expand` — the bullets on `$VAR`/`$(...)`/`~` in a guarded file argument, and
+  on preferring the Read, Grep, and Glob tools to bash `cat`/`grep`/`sed`.
+- `untracked` — the bullet on giving `cd` a literal target.
+- `outside` — the bullets on temp files, on out-of-tree dependency caches, and
+  on editing through this session's own worktree checkout.
+
+Quote those bullets rather than summarizing them. They carry exact paths,
+preconditions, and exemption lists that a paraphrase drops — which is how this
+file's own copy of the temp-file advice drifted into naming a scratch dir that
+matched neither the README nor the hook's deny message (issue 160).
 
 ## Make it stick
 
-Offer to paste the **"Avoiding workspace-guard permission prompts"** playbook
-from the project README's *Agent guidance* section into the user's `CLAUDE.md`
-(or `AGENTS.md`) so future sessions follow these habits from the start. Only do
-so with the user's go-ahead.
+Offer to paste that same **"Avoiding workspace-guard permission prompts"**
+playbook into the user's `CLAUDE.md` (or `AGENTS.md`) so future sessions follow
+these habits from the start. Only do so with the user's go-ahead.
 
 If a recurring command genuinely needs a file outside the root, that prompt is
 working as intended — the user should approve it (or, for full-auto runs, see
