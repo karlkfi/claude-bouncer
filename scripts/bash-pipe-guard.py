@@ -1008,10 +1008,15 @@ def scratch_dir(session_id, root=None):
 
 
 def with_log_path(reason, scratch):
-    """Fill a reason's log placeholders with a path the redirect can write."""
+    """Fill a reason's log placeholders with a path the redirect can write.
+
+    Joined with `/` rather than `os.path.join`, because the result is a bash
+    command line: a backslash separator there is an escape character, not a
+    path.
+    """
     if scratch:
         return reason.replace(MKDIR_PLACEHOLDER, '').replace(
-            LOG_PLACEHOLDER, os.path.join(scratch, 'out.log'))
+            LOG_PLACEHOLDER, scratch + '/out.log')
     return reason.replace(MKDIR_PLACEHOLDER, 'mkdir -p tmp && ').replace(
         LOG_PLACEHOLDER, 'tmp/out.log')
 

@@ -602,7 +602,7 @@ class TestHookEndToEnd(unittest.TestCase):
         finally:
             shutil.rmtree(root if made_root else project)
         reason = json.loads(out)['hookSpecificOutput']['permissionDecisionReason']
-        self.assertIn(os.path.join(path, 'out.log'), reason)
+        self.assertIn(path + '/out.log', reason)
 
     def test_suggested_rewrite_needs_no_directory_that_may_not_exist(self):
         """No scratchpad in the payload, so the rewrite has to make its own."""
