@@ -110,20 +110,29 @@ def _deny_record(tooluseid, command, reason=REASON_DENY, cwd="/home/u/proj",
 
 
 def _decision_record(tooluseid, command, stdout, cwd="/home/u/proj", ts=None,
-                     hook_cmd='python3 "/x/scripts/bash-foreground-guard.py"'):
+                     hook_cmd='python3 "/x/scripts/bash-foreground-guard.py"',
+                     **att_extra):
     """A transcript attachment record for one hook decision, plus the assistant
     tool_use record that command is joined from. Both carry cwd and timestamp,
     as real records do — the tool_use records are the report's denominator, so
-    they meet the same scope filters."""
+    they meet the same scope filters.
+
+    `type` is `hook_success` unless overridden: every real attachment carries
+    one, and only that value means the hook produced a verdict (issue #29)."""
+    att = {
+        "type": "hook_success",
+        "hookName": "PreToolUse:Bash",
+        "command": hook_cmd,
+        "toolUseID": tooluseid,
+        "stdout": stdout,
+        "stderr": "",
+        "exitCode": 0,
+    }
+    att.update(att_extra)
     att = {
         "timestamp": ts or "2026-07-01T12:00:00Z",
         "cwd": cwd,
-        "attachment": {
-            "hookName": "PreToolUse:Bash",
-            "command": hook_cmd,
-            "toolUseID": tooluseid,
-            "stdout": stdout,
-        },
+        "attachment": att,
     }
     use = {
         "timestamp": ts or "2026-07-01T12:00:00Z",
@@ -133,6 +142,18 @@ def _decision_record(tooluseid, command, stdout, cwd="/home/u/proj", ts=None,
              "input": {"command": command}}]},
     }
     return use, att
+
+
+def _crashed_record(tooluseid, command, hook_cmd, **kw):
+    """A hook that never ran: Claude Code writes the attachment anyway, with an
+    empty stdout, a non-zero exitCode and the failure on stderr. Shape taken
+    from the 5,472 real ones behind issue #29 (exit 126, hook script left
+    non-executable)."""
+    return _decision_record(
+        tooluseid, command, "", hook_cmd=hook_cmd,
+        type="hook_non_blocking_error", exitCode=126,
+        stderr=("Failed with non-blocking status code: /bin/sh: "
+                "/x/scripts/run-python-hook.cmd: Permission denied"), **kw)
 
 
 def _bash_call(tooluseid, command, cwd="/home/u/proj", ts=None):
@@ -324,6 +345,42 @@ class DenyFromResultTests(unittest.TestCase):
         self.assertEqual(fr.named_target(watch_deny), "gh run watch 456")
 
 
+class ErrorNoteTests(unittest.TestCase):
+    def test_crash_names_code_and_first_stderr_line(self):
+        note = fr.error_note({
+            "type": "hook_non_blocking_error", "exitCode": 126,
+            "stderr": "/bin/sh: run-python-hook.cmd: Permission denied\nmore"})
+        self.assertEqual(
+            note,
+            "hook_non_blocking_error: exit 126: "
+            "/bin/sh: run-python-hook.cmd: Permission denied")
+
+    def test_timeout_without_an_exit_code(self):
+        self.assertEqual(
+            fr.error_note({"type": "hook_cancelled", "timedOut": True,
+                           "timeoutMs": 600000}),
+            "hook_cancelled: timed out after 600000ms")
+
+    def test_bare_record_still_names_the_type(self):
+        self.assertEqual(fr.error_note({"type": "hook_cancelled"}),
+                         "hook_cancelled")
+        self.assertEqual(fr.error_note({}), "unknown")
+
+    def test_long_stderr_keeps_the_failure_at_the_end(self):
+        # The path in the middle is what gets dropped, not the failure.
+        note = fr.error_note({
+            "type": "hook_non_blocking_error", "exitCode": 126,
+            "stderr": "/bin/sh: " + "/very-long-path" * 20 +
+                      "/run-python-hook.cmd: Permission denied"})
+        self.assertTrue(note.endswith("Permission denied"), note)
+        self.assertIn("/bin/sh:", note)
+        self.assertEqual(len(note.split(": exit 126: ")[-1]), 120)
+
+    def test_short_stderr_not_clipped(self):
+        self.assertEqual(fr.clip("a b  c"), "a b c")
+        self.assertNotIn("…", fr.clip("x" * 120))
+
+
 class BuildReportTests(unittest.TestCase):
     def _report(self, decisions):
         return fr.build_report(decisions)
@@ -385,6 +442,23 @@ class BuildReportTests(unittest.TestCase):
         ])
         self.assertEqual(r["overrides"], 1)
 
+    def test_error_is_counted_apart_from_friction(self):
+        r = self._report([
+            {"plugin": "pipe-guard", "decision": "error",
+             "reason": "hook_non_blocking_error: exit 126: Permission denied",
+             "command": "git status"},
+            {"plugin": "foreground-guard", "decision": "ask",
+             "reason": REASON_WATCH, "command": "gh run watch 456"},
+        ])
+        self.assertEqual(r["decisions"]["error"], 1)
+        self.assertEqual(r["decisions"].get("defer", 0), 0)
+        self.assertEqual(
+            r["errors"]["pipe-guard: hook_non_blocking_error: exit 126: "
+                        "Permission denied"], 1)
+        # It is not a prompt, so it reaches no ranking that maps to a fix.
+        self.assertEqual(sum(r["categories"].values()), 1)
+        self.assertEqual(list(r["commands"]), ["gh run watch 456"])
+
     def test_joined_reason_hits_both_categories(self):
         joined = REASON_WATCH + " | " + REASON_SLEEP
         r = self._report([
@@ -433,14 +507,53 @@ class IterDecisionsTests(unittest.TestCase):
         cutoff = dt.datetime(2025, 1, 1, tzinfo=dt.timezone.utc)
         self.assertEqual(len(list(fr.iter_decisions(paths, "foreground-guard", cutoff, ""))), 0)
 
-    def test_defer_recorded_for_empty_stdout(self):
-        # A silent (defer) decision is recorded with empty stdout.
+    def test_defer_recorded_for_empty_stdout_on_success(self):
+        # An empty stdout on a hook that *ran* is the one genuinely ambiguous
+        # record (one in 66,223 locally); reading it as a defer is fine. The
+        # type is what makes it distinguishable from the crashes below.
         use, att = _decision_record("toolu_1", "gh run view 456", "")
         root = write_transcript([use, att])
         paths = [str(p) for p in Path(root).rglob("*.jsonl")]
         got = list(fr.iter_decisions(paths, "foreground-guard", None, ""))
         self.assertEqual(len(got), 1)
         self.assertEqual(got[0]["decision"], "defer")
+
+    def test_crashed_hook_is_an_error_not_a_defer(self):
+        # Issue #29: a defer means the guard looked and let the call through; a
+        # 126 means it was never consulted, so the call went unguarded.
+        use, att = _crashed_record("toolu_1", "git status",
+                                   'python3 "/x/bash-foreground-guard.py"')
+        root = write_transcript([use, att])
+        paths = [str(p) for p in Path(root).rglob("*.jsonl")]
+        got = list(fr.iter_decisions(paths, "foreground-guard", None, ""))
+        self.assertEqual([d["decision"] for d in got], ["error"])
+        self.assertIn("exit 126", got[0]["reason"])
+        self.assertIn("Permission denied", got[0]["reason"])
+
+    def test_cancelled_hook_is_an_error(self):
+        # A cancelled hook carries neither exitCode nor stderr — only the
+        # timeout — so the note has to be built from whatever the record has.
+        use, att = _decision_record(
+            "toolu_1", "git status", "",
+            hook_cmd='python3 "/x/bash-foreground-guard.py"',
+            type="hook_cancelled", exitCode=None, stderr=None,
+            timedOut=True, timeoutMs=600000)
+        root = write_transcript([use, att])
+        paths = [str(p) for p in Path(root).rglob("*.jsonl")]
+        got = list(fr.iter_decisions(paths, "foreground-guard", None, ""))
+        self.assertEqual([d["decision"] for d in got], ["error"])
+        self.assertEqual(got[0]["reason"],
+                         "hook_cancelled: timed out after 600000ms")
+
+    def test_crashed_hook_does_not_mark_the_session_prompted(self):
+        use, att = _crashed_record("toolu_1", "git status",
+                                   'python3 "/x/bash-foreground-guard.py"')
+        root = write_transcript([use, att])
+        paths = [str(p) for p in Path(root).rglob("*.jsonl")]
+        tally = fr.new_scope()
+        list(fr.iter_decisions(paths, "foreground-guard", None, "", tally))
+        self.assertEqual(tally["sessions_prompted"], 0)
+        self.assertEqual(tally["bash_calls"], 1)
 
     def test_deny_recovered_from_the_tool_result(self):
         # The whole point of issue #25: no attachment, and the decision must
@@ -630,6 +743,31 @@ class PrintTests(unittest.TestCase):
         self.assertIn("friction (ask+deny): 1 — 5.0% of the 20 Bash calls", out)
         self.assertIn("sessions with a prompt: 1 of 4 (25%)", out)
 
+    def test_hook_failures_section(self):
+        r = fr.build_report([
+            {"plugin": "pipe-guard", "decision": "error",
+             "reason": "hook_non_blocking_error: exit 126: Permission denied",
+             "command": "git status"},
+        ])
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            fr.print_text(r, 15, "all")
+        out = buf.getvalue()
+        self.assertIn("Hook failures", out)
+        self.assertIn("pipe-guard: hook_non_blocking_error: exit 126", out)
+        self.assertIn("error 1", out)
+        self.assertNotIn("defer", out)
+
+    def test_hook_failures_section_omitted_when_clean(self):
+        r = fr.build_report([
+            {"plugin": "foreground-guard", "decision": "ask",
+             "reason": REASON_WATCH, "command": "gh run watch 456"},
+        ])
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            fr.print_text(r, 15)
+        self.assertNotIn("Hook failures", buf.getvalue())
+
     def test_override_line_shown_for_this_guard(self):
         r = fr.build_report([
             {"plugin": "foreground-guard", "decision": "ask",
@@ -743,6 +881,31 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual(data["bash_calls"], 10)
         self.assertEqual(data["sessions"], 1)
         self.assertEqual(data["sessions_prompted"], 1)
+
+    def test_plugin_all_reports_a_sibling_that_stopped_running(self):
+        # The blast radius of issue #29: under --plugin all a sibling whose hook
+        # crashed on every call was reported as `defer`, reading as a guard that
+        # looked and allowed rather than one that was never consulted.
+        use1, att1 = _crashed_record("toolu_1", "git status",
+                                     'python3 "/x/bash-pipe-guard.py"')
+        use2, att2 = _decision_record(
+            "toolu_2", "gh run watch 456", _stdout("ask", REASON_WATCH))
+        root = write_transcript([use1, att1, use2, att2])
+
+        data = json.loads(self._run(root, "--plugin", "all", "--json"))
+        self.assertEqual(data["decisions"]["error"], 1)
+        self.assertNotIn("defer", data["decisions"])
+        self.assertEqual(
+            data["hook_errors"],
+            [["pipe-guard: hook_non_blocking_error: exit 126: Failed with "
+              "non-blocking status code: /bin/sh: /x/scripts/"
+              "run-python-hook.cmd: Permission denied", 1]])
+
+        out = self._run(root, "--plugin", "all")
+        self.assertIn("Hook failures", out)
+        self.assertIn("pipe-guard: hook_non_blocking_error: exit 126", out)
+        # The crash is not friction: it neither prompted nor let the guard look.
+        self.assertIn("friction (ask+deny): 1 — 50.0% of the 2 Bash calls", out)
 
     def test_no_transcripts_errors(self):
         empty = tempfile.mkdtemp(prefix="fg-guard-friction-empty-")

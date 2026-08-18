@@ -43,8 +43,10 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/friction-report.py" --repo "$(basename "$
 This reports the prompt count and the share of the window's Bash calls it
 represents (plus how many sessions saw a prompt), a **By category** breakdown,
 **By flagged tool** and **Top flagged targets** rankings (the watch commands and
-slow patterns being hit), and the **Top triggering commands**. Useful
-adjustments:
+slow patterns being hit), and the **Top triggering commands**. A **Hook
+failures** section appears only when a hook crashed or timed out; that is a guard
+not running at all rather than friction, so report it as-is instead of tuning
+config around it. Useful adjustments:
 
 - `--since 24h` / `--since 2026-06-01` / `--since all` — widen or narrow the
   window (default `7d`).
