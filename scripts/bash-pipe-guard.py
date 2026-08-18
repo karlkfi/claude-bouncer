@@ -686,21 +686,34 @@ class Registry(object):
     def _any(compiled, text):
         return any(r.search(text) for r in compiled)
 
-    def is_gate(self, words):
-        """Whether these words are a registered gate whose status is the answer:
-        registered, not exempted, and not a capability probe."""
+    def _matches(self, patterns, words):
+        """Whether ``words`` are a registered, non-exempt, non-probe invocation.
+
+        Both screens apply to both lists. A probe prints and exits, so it is
+        neither a run whose status is at stake nor a state change. `exempt` is
+        where a subcommand's read form is told apart from its write form:
+        `git tag -l` and `git tag -a` match the same pattern otherwise, which had
+        rule 3 casting the write as the gate and the read as the publish (#11).
+        """
         if not words:
             return False
         head = ' '.join(words)
-        if self._any(self.exempt, head) or not self._any(self.gates, head):
+        if self._any(self.exempt, head) or not self._any(patterns, head):
             return False
         # Read from the parsed words rather than the joined head, so a flag
         # spelled inside a quoted argument stays one word: `git commit -m "bump
         # --version output"` is a commit, and still a gate.
         return not any(w in PROBE_FLAGS for w in words[1:])
 
+    def is_gate(self, words):
+        """Whether these words are a registered gate whose status is the answer:
+        registered, not exempted, and not a capability probe."""
+        return self._matches(self.gates, words)
+
     def is_mutator(self, words):
-        return bool(words) and self._any(self.mutators, ' '.join(words))
+        """Whether these words are a registered state change, screened the same
+        way -- a read is not a state change, and neither is a probe."""
+        return self._matches(self.mutators, words)
 
 
 DEFAULT_REGISTRY = os.path.join(
