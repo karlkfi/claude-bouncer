@@ -21,7 +21,7 @@ jobs:
       - name: Run tests
         run: python -m unittest discover -s tests -v
 
-  # The suite runs bash-pipe-guard.py with sys.executable, so the launcher
+  # The suite runs bash-exit-status-guard.py with sys.executable, so the launcher
   # hooks.json actually invokes is never executed by it. Its cmd.exe half and
   # its POSIX tail are separate code paths, so every OS runs this. A launcher
   # that stops working does not fail loudly -- Claude Code lets the tool call
@@ -55,7 +55,7 @@ jobs:
         run: |
           python - <<'PY'
           import pathlib
-          p = pathlib.Path('scripts/bash-pipe-guard.py')
+          p = pathlib.Path('scripts/bash-exit-status-guard.py')
           s = p.read_text()
           old = "        if next_op(seg.post_ops) not in PIPE_OPS:\n            continue"
           new = "        if True:\n            continue"

@@ -1,11 +1,11 @@
 {
-  "name": "pipe-guard",
+  "name": "exit-status-guard",
   "owner": { "name": "karlkfi", "url": "https://github.com/karlkfi" },
   "description": "Guard rails for Claude Code shell commands whose exit status is the answer.",
   "plugins": [
     {
-      "name": "pipe-guard",
-      "version": "1.0.1",
+      "name": "exit-status-guard",
+      "version": "2.0.0",
       "description": "Deny a gate piped into a filter, backgrounded behind an echo, or sequenced before a state change with `;` — every shape where a failure reads as success.",
       "author": { "name": "Karl" },
       "source": {

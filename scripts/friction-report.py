@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Report where pipe-guard friction accumulates, from session transcripts.
+"""Report where exit-status-guard friction accumulates, from session transcripts.
 
 Read-only analyzer. The hook itself writes nothing to disk (see PRIVACY.md); it
 only emits a decision on stdout. Claude Code records that stdout -- plus the
@@ -11,7 +11,7 @@ what Claude was doing when it tripped.
 Nothing here changes the hook or adds telemetry: it parses data Claude Code
 already persisted locally.
 
-Every pipe-guard verdict is a `deny`, so a high count is not by itself bad --
+Every exit-status-guard verdict is a `deny`, so a high count is not by itself bad --
 each one is a false green the model was about to report as a pass. What matters
 is the shape: a rule that fires on the same command over and over is either a
 habit worth fixing upstream, or a defect in the registry.
@@ -35,7 +35,12 @@ import textwrap
 
 # The guard this script's REASON_PATTERNS describe. Other guards' decisions are
 # counted (--plugin all) but their reasons carry no tokens we can categorize.
-THIS_GUARD = 'pipe-guard'
+THIS_GUARD = 'exit-status-guard'
+
+# A label is the hook script's filename minus `bash-`, so transcripts written
+# before the 2.0.0 rename carry the 1.x one. The default filter accepts both:
+# dropping them would report friction that has not gone anywhere as absent.
+GUARD_ALIASES = {THIS_GUARD: (THIS_GUARD, 'pipe-guard')}
 
 # Each rule's reason carries a phrase no other rule uses. Matching on those
 # rather than on a prefix keeps the categories stable when the advice text is
@@ -188,8 +193,8 @@ def parse_ts(rec):
 
 
 def guard_name(command):
-    """Plugin label from a hook command, e.g. '.../bash-pipe-guard.py' ->
-    'pipe-guard'. None if the command names no *.py guard."""
+    """Plugin label from a hook command, e.g. '.../bash-exit-status-guard.py'
+    -> 'exit-status-guard'. None if the command names no *.py guard."""
     m = re.search(r'([A-Za-z0-9_-]+)\.py', command or '')
     if not m:
         return None
@@ -253,11 +258,12 @@ def scan(paths, plugin, cutoff, repo):
     filter that emptied it instead of reading like a guard with zero friction.
     """
     matched = []
+    wanted = GUARD_ALIASES.get(plugin, (plugin,))
     survey = {'labels': collections.Counter(), 'plugin_hits': 0,
               'repo_hits': 0, 'latest': None}
     for d in iter_decisions(paths):
         survey['labels'][d['plugin']] += 1
-        if plugin != 'all' and d['plugin'] != plugin:
+        if plugin != 'all' and d['plugin'] not in wanted:
             continue
         survey['plugin_hits'] += 1
         if repo and repo not in d['cwd']:
