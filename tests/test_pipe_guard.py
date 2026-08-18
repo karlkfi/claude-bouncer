@@ -294,6 +294,17 @@ CASES = [
     ('gate then an intervening command then a mutator',
      'make check; echo done; git push', False, True, ''),
     ('&& is the correct form', 'make check && git push', False, False, ''),
+    # A continuation joins one logical line, so this is the `&&` form above
+    # written across two lines -- it must read as `&&`, not as a sequence (#8).
+    ('&& across a line continuation',
+     'make check \\\n  && git push', False, False, ''),
+    ('&& across a continuation, indented and repeated',
+     'make check \\\n  && git add . \\\n  && git commit -m x',
+     False, False, ''),
+    # The other direction: a bare newline really does run the second command
+    # whatever the first returned, so the boundary itself has to keep denying.
+    ('a bare newline before a mutator is still a sequence',
+     'make check\ngit push', False, True, 'is sequenced before'),
     ('&& then a trailing mutator is still gated',
      'make check && git add . && git commit -m x', False, False, ''),
     ('two gates, no state change', 'make lint; make test', False, False, ''),
@@ -644,6 +655,21 @@ class TestSegmentation(unittest.TestCase):
         segs = self.segs('(cd sub && go test ./...) | tail')
         gate = [s for s in segs if pg.head_words(s)[:2] == ['go', 'test']][0]
         self.assertEqual('|', pg.next_op(gate.post_ops))
+
+    def test_continuation_does_not_become_a_boundary(self):
+        """The bug in #8: the `&&` was there, behind a newline that hid it."""
+        segs = self.segs('make check \\\n  && git push')
+        gate = segs[0]
+        self.assertEqual(('&&',), gate.post_ops)
+        self.assertEqual('&&', pg.next_op(gate.post_ops))
+
+    def test_a_bare_newline_is_still_a_boundary(self):
+        segs = self.segs('make check\ngit push')
+        self.assertEqual('\n', pg.next_op(segs[0].post_ops))
+
+    def test_a_continuation_in_single_quotes_stays_literal(self):
+        segs = self.segs("echo 'a\\\nb' && git push")
+        self.assertEqual(['echo', 'a\\\nb'], segs[0].tokens)
 
     def test_operator_runs_split(self):
         tokens, _, _ = pg.tokenize('(cd x); make check')
