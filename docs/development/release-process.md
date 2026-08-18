@@ -110,6 +110,8 @@ Two of the four outcomes are answers; the other two are failures, and they mean 
 
 The `release-note` CI check rejects both failure states at PR time, so a release should see only the top two rows. The bottom two are still worth handling: every PR merged before that check existed has no section, and a merge that bypassed checks can still land one. Treat either as a signal about the gate, not just about the one PR.
 
+Measured on v1.10.0, the first release cut with the check in place: of 14 pull requests, 2 carried a note line, 9 answered `None`, and 3 reported `!! NO SECTION` — all three merged before the template landed in #151. No `!! UNANSWERED`. So the harvest was assembly rather than reconstruction, which is the whole point of capturing the note at PR time; expect the `!! NO SECTION` rows to disappear once the pre-template backlog is behind you.
+
 `None` is a claim about the release notes, not about the code — it says "this PR needs no bullet." That is what keeps it checkable at tag time: a `None` sitting next to a diff that moves a decision is a mistake you can actually see, and it is the one failure CI cannot catch for you.
 
 To enumerate what shipped since the last tag, and to catch anything the harvest missed:
