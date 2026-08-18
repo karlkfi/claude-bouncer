@@ -5,7 +5,7 @@
   "plugins": [
     {
       "name": "pipe-guard",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Deny a gate piped into a filter, backgrounded behind an echo, or sequenced before a state change with `;` — every shape where a failure reads as success.",
       "author": { "name": "Karl" },
       "source": {
