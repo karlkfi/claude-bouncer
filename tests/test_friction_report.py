@@ -93,6 +93,8 @@ def _deny_record(tooluseid, command, reason=REASON_DENY, cwd="/home/u/proj",
     that is the bug this recovery exists for."""
     content = ([{"type": "text", "text": reason}] if as_blocks else reason)
     use = {
+        "timestamp": ts or "2026-07-01T12:00:00Z",
+        "cwd": cwd,
         "message": {"content": [
             {"type": "tool_use", "name": "Bash", "id": tooluseid,
              "input": {"command": command}}]},
@@ -110,7 +112,9 @@ def _deny_record(tooluseid, command, reason=REASON_DENY, cwd="/home/u/proj",
 def _decision_record(tooluseid, command, stdout, cwd="/home/u/proj", ts=None,
                      hook_cmd='python3 "/x/scripts/bash-foreground-guard.py"'):
     """A transcript attachment record for one hook decision, plus the assistant
-    tool_use record that command is joined from."""
+    tool_use record that command is joined from. Both carry cwd and timestamp,
+    as real records do — the tool_use records are the report's denominator, so
+    they meet the same scope filters."""
     att = {
         "timestamp": ts or "2026-07-01T12:00:00Z",
         "cwd": cwd,
@@ -122,11 +126,26 @@ def _decision_record(tooluseid, command, stdout, cwd="/home/u/proj", ts=None,
         },
     }
     use = {
+        "timestamp": ts or "2026-07-01T12:00:00Z",
+        "cwd": cwd,
         "message": {"content": [
             {"type": "tool_use", "name": "Bash", "id": tooluseid,
              "input": {"command": command}}]},
     }
     return use, att
+
+
+def _bash_call(tooluseid, command, cwd="/home/u/proj", ts=None):
+    """A Bash call the guard deferred on: the tool_use record and nothing else.
+    A silent defer writes no attachment (issue #27), so this is the only trace
+    such a call leaves — and the whole reason the denominator counts calls."""
+    return {
+        "timestamp": ts or "2026-07-01T12:00:00Z",
+        "cwd": cwd,
+        "message": {"content": [
+            {"type": "tool_use", "name": "Bash", "id": tooluseid,
+             "input": {"command": command}}]},
+    }
 
 
 def _stdout(decision, reason):
@@ -136,16 +155,23 @@ def _stdout(decision, reason):
         "permissionDecisionReason": reason}})
 
 
-def write_transcript(lines):
-    """Write records (dicts) as a .jsonl transcript in a fresh temp dir; return
-    the transcript root."""
+def write_transcripts(sessions):
+    """Write each session (a list of records) as its own .jsonl transcript in a
+    fresh temp dir; return the transcript root."""
     root = tempfile.mkdtemp(prefix="fg-guard-friction-")
     proj = os.path.join(root, "-home-u-proj")
     os.makedirs(proj)
-    with open(os.path.join(proj, "session.jsonl"), "w", encoding="utf-8") as f:
-        for rec in lines:
-            f.write(json.dumps(rec) + "\n")
+    for i, records in enumerate(sessions):
+        path = os.path.join(proj, "session%d.jsonl" % i)
+        with open(path, "w", encoding="utf-8") as f:
+            for rec in records:
+                f.write(json.dumps(rec) + "\n")
     return root
+
+
+def write_transcript(lines):
+    """One session's worth of records; see write_transcripts."""
+    return write_transcripts([lines])
 
 
 class ParseSinceTests(unittest.TestCase):
@@ -484,6 +510,79 @@ class IterDecisionsTests(unittest.TestCase):
         self.assertEqual(len(list(fr.iter_decisions(paths, "foreground-guard", None, ""))), 1)
 
 
+class ScopeTallyTests(unittest.TestCase):
+    """The denominator (issue #27). The guard prints nothing when it defers, so
+    a share of its own decision records is 100% by construction; the rate has to
+    divide by Bash calls, which the transcript records whatever a hook decided."""
+
+    def _tally(self, sessions, plugin="foreground-guard", cutoff=None, repo=""):
+        root = write_transcripts(sessions)
+        paths = [str(p) for p in Path(root).rglob("*.jsonl")]
+        tally = fr.new_scope()
+        decisions = list(fr.iter_decisions(paths, plugin, cutoff, repo, tally))
+        return tally, decisions
+
+    def _prompt_and_defers(self, n_defers, cwd="/home/u/proj", ts=None):
+        use, att = _decision_record("toolu_p", "gh run watch 456",
+                                    _stdout("ask", REASON_WATCH), cwd=cwd, ts=ts)
+        quiet = [_bash_call("toolu_q%d" % i, "git status", cwd=cwd, ts=ts)
+                 for i in range(n_defers)]
+        return [use, att] + quiet
+
+    def test_silent_defers_reach_the_denominator(self):
+        tally, decisions = self._tally([self._prompt_and_defers(3)])
+        # One prompt recorded, four Bash calls made.
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual(tally["bash_calls"], 4)
+        self.assertEqual(tally["sessions"], 1)
+        self.assertEqual(tally["sessions_prompted"], 1)
+
+    def test_quiet_session_counts_but_does_not_prompt(self):
+        tally, _ = self._tally([
+            self._prompt_and_defers(1),
+            [_bash_call("toolu_x", "git status")],
+        ])
+        self.assertEqual(tally["sessions"], 2)
+        self.assertEqual(tally["sessions_prompted"], 1)
+        self.assertEqual(tally["bash_calls"], 3)
+
+    def test_repo_filter_scopes_the_denominator(self):
+        sessions = [self._prompt_and_defers(2),
+                    self._prompt_and_defers(4, cwd="/home/u/gateway")]
+        tally, _ = self._tally(sessions, repo="gateway")
+        self.assertEqual(tally["bash_calls"], 5)
+        self.assertEqual(tally["sessions"], 1)
+
+    def test_cutoff_scopes_the_denominator(self):
+        sessions = [self._prompt_and_defers(2),
+                    self._prompt_and_defers(4, ts="2020-01-01T00:00:00Z")]
+        cutoff = dt.datetime(2025, 1, 1, tzinfo=dt.timezone.utc)
+        tally, _ = self._tally(sessions, cutoff=cutoff)
+        self.assertEqual(tally["bash_calls"], 3)
+        self.assertEqual(tally["sessions"], 1)
+
+    def test_denominator_does_not_depend_on_the_plugin_filter(self):
+        # A Bash call belongs to no guard, so --plugin only moves the numerator.
+        session = self._prompt_and_defers(2)
+        use, att = _decision_record(
+            "toolu_s", "kubectl delete ns x",
+            _stdout("ask", "prod-guard: matches a production pattern"),
+            hook_cmd='python3 "/x/bash-prod-guard.py"')
+        session += [use, att]
+        ours, mine = self._tally([session])
+        theirs, all_ = self._tally([session], plugin="all")
+        self.assertEqual(ours["bash_calls"], theirs["bash_calls"])
+        self.assertEqual([len(mine), len(all_)], [1, 2])
+
+    def test_deny_marks_the_session_prompted(self):
+        # A deny reaches the report through the tool result, not an attachment;
+        # the session still has to count as one this guard interrupted.
+        use, res = _deny_record("toolu_1", "sleep 300")
+        tally, _ = self._tally([[use, res, _bash_call("toolu_2", "git status")]])
+        self.assertEqual(tally["sessions_prompted"], 1)
+        self.assertEqual(tally["bash_calls"], 2)
+
+
 class PrintTests(unittest.TestCase):
     def test_empty(self):
         buf = io.StringIO()
@@ -500,10 +599,36 @@ class PrintTests(unittest.TestCase):
         with redirect_stdout(buf):
             fr.print_text(r, 15)
         out = buf.getvalue()
-        self.assertIn("decisions analyzed: 1", out)
+        self.assertIn("decisions recorded: 1", out)
         self.assertIn("By category", out)
         self.assertIn("watch", out)
         self.assertIn("gh run watch 456", out)
+
+    def test_rate_omitted_without_a_denominator(self):
+        # No tally: the count prints alone rather than borrowing the decision
+        # records as a denominator, which is what made it always 100%.
+        r = fr.build_report([
+            {"plugin": "foreground-guard", "decision": "ask", "reason": REASON_WATCH,
+             "command": "gh run watch 456"},
+        ])
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            fr.print_text(r, 15)
+        out = buf.getvalue()
+        self.assertIn("friction (ask+deny): 1\n", out)
+        self.assertNotIn("%", out)
+
+    def test_rate_is_the_share_of_bash_calls(self):
+        r = fr.build_report(
+            [{"plugin": "foreground-guard", "decision": "ask",
+              "reason": REASON_WATCH, "command": "gh run watch 456"}],
+            {"bash_calls": 20, "sessions": 4, "sessions_prompted": 1})
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            fr.print_text(r, 15)
+        out = buf.getvalue()
+        self.assertIn("friction (ask+deny): 1 — 5.0% of the 20 Bash calls", out)
+        self.assertIn("sessions with a prompt: 1 of 4 (25%)", out)
 
     def test_override_line_shown_for_this_guard(self):
         r = fr.build_report([
@@ -540,7 +665,7 @@ class EndToEndTests(unittest.TestCase):
             "toolu_1", "gh run watch 456", _stdout("ask", REASON_WATCH))
         root = write_transcript([use, att])
         out = self._run(root)
-        self.assertIn("foreground-guard decisions analyzed: 1", out)
+        self.assertIn("foreground-guard decisions recorded: 1", out)
         self.assertIn("watch", out)
         self.assertIn("gh run watch 456", out)
 
@@ -572,7 +697,7 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual(data["total"], 2)
         self.assertNotIn("overrides", data)
         out = self._run(root, "--plugin", "all")
-        self.assertIn("guard decisions analyzed: 2", out)
+        self.assertIn("guard decisions recorded: 2", out)
         self.assertNotIn("FOREGROUND_GUARD_OVERRIDE", out)
 
     def test_denying_guard_reports_its_friction(self):
@@ -590,7 +715,7 @@ class EndToEndTests(unittest.TestCase):
 
         out = self._run(root)
         self.assertIn("deny 1", out)
-        self.assertIn("friction (ask+deny): 1 (50% of decisions)", out)
+        self.assertIn("friction (ask+deny): 1 — 50.0% of the 2 Bash calls", out)
         self.assertIn("loop-sleep", out)
         self.assertIn("sleep 300", out)
         # The caveat belongs to the cross-guard view only.
@@ -600,6 +725,24 @@ class EndToEndTests(unittest.TestCase):
         use, res = _deny_record("toolu_1", "sleep 300")
         root = write_transcript([use, res])
         self.assertIn("tool-result text", self._run(root, "--plugin", "all"))
+
+    def test_friction_rate_falls_when_the_guard_stays_quiet(self):
+        # The issue #27 regression: before the denominator moved to Bash calls
+        # this read 100%, and went on reading 100% however quiet the guard got.
+        use, att = _decision_record(
+            "toolu_1", "gh run watch 456", _stdout("ask", REASON_WATCH))
+        quiet = [_bash_call("toolu_q%d" % i, "git status") for i in range(9)]
+        root = write_transcripts([[use, att] + quiet])
+
+        out = self._run(root)
+        self.assertIn("friction (ask+deny): 1 — 10.0% of the 10 Bash calls", out)
+        self.assertIn("sessions with a prompt: 1 of 1", out)
+
+        data = json.loads(self._run(root, "--json"))
+        self.assertEqual(data["total"], 1)          # decision records, as before
+        self.assertEqual(data["bash_calls"], 10)
+        self.assertEqual(data["sessions"], 1)
+        self.assertEqual(data["sessions_prompted"], 1)
 
     def test_no_transcripts_errors(self):
         empty = tempfile.mkdtemp(prefix="fg-guard-friction-empty-")

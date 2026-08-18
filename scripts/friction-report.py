@@ -28,6 +28,9 @@ JSON). The triggering Bash command is joined back via ``toolUseID``.
 
 A ``deny`` is recorded nowhere in that stream — see ``DENY_TEXT`` below — so it
 is recovered from the error tool result the blocked call handed back instead.
+
+The friction *rate* divides by Bash calls, not by decision records — see
+``SCOPE_KEYS`` for why the decision stream cannot be a denominator.
 """
 import argparse
 import collections
@@ -98,6 +101,28 @@ OVERRIDE_SIG = re.compile(r'foreground-guard override acknowledged')
 # reason differently is not recoverable this way and still under-counts its
 # denies under `--plugin all`; the report says so rather than showing a zero.
 DENY_TEXT = re.compile(r'^(?:Error:\s*)?([a-z0-9-]+-guard):\s')
+
+# The denominator, tallied alongside the decisions (issue #27).
+#
+# Decisions cannot be one. A silent defer leaves no record — Claude Code writes
+# an attachment only for a hook that produced stdout, and this guard prints
+# nothing on a defer and never prints `allow` by design — so its decision stream
+# holds exactly its own prompts and a friction share of it reads 100% however the
+# config is tuned. The siblings that do emit `allow` land their defers in the
+# stream, so the same word, "decisions", counts two different populations.
+#
+# Bash calls are recorded whatever a hook decided, so they mean the same thing
+# for every guard. Scope is every in-window call, not only those in sessions this
+# guard spoke in: restricting to prompting sessions drops the quiet sessions a
+# working config produces, so the rate climbs as friction falls. Measured over
+# 776 local transcripts, that scoping read 1.6% over all time and 3.1% over the
+# last 7 days — a week holding 3 prompts against the 257 behind the all-time
+# figure.
+#
+# The wider scope assumes what the transcripts cannot show: that the guard ran
+# for the whole window. Calls predating its install sit in the denominator, so a
+# fresh install reads low until the window catches up. The report says so.
+SCOPE_KEYS = ('bash_calls', 'sessions', 'sessions_prompted')
 
 # The hook joins up to three finding reasons with ' | '.
 _JOIN = ' | '
@@ -174,17 +199,27 @@ def scope(rec, cutoff, repo):
     return cwd, ts
 
 
-def iter_decisions(paths, plugin, cutoff, repo):
+def new_scope():
+    """A zeroed denominator tally (see SCOPE_KEYS)."""
+    return dict.fromkeys(SCOPE_KEYS, 0)
+
+
+def iter_decisions(paths, plugin, cutoff, repo, tally=None):
     """Yield decision dicts from the given transcript files.
 
     Builds a per-file toolUseID -> Bash command map (ids are session-scoped)
     so each decision can name the command that triggered it. Reads two sources:
     the hook attachment stream (allow/ask/defer) and the error tool results that
     carry the denies the attachment stream omits.
+
+    A `tally` dict from new_scope() collects the denominator as it goes — the
+    in-scope Bash calls and the sessions holding them. It is complete only once
+    the generator is exhausted.
     """
     for path in paths:
         cmd_by_id = {}
         records = []
+        calls = 0
         try:
             with open(path, encoding='utf-8') as fh:
                 for line in fh:
@@ -195,16 +230,23 @@ def iter_decisions(paths, plugin, cutoff, repo):
                         rec = json.loads(line)
                     except ValueError:
                         continue
-                    # Index Bash tool_use commands for the join.
+                    # Index Bash tool_use commands for the join. Indexing spans
+                    # the whole file (a decision may sit outside the window
+                    # while its command record does not); the tally does not.
                     msg = rec.get('message') or {}
+                    n_bash = 0
                     for b in (msg.get('content') or []):
                         if (isinstance(b, dict) and b.get('type') == 'tool_use'
                                 and b.get('name') == 'Bash' and b.get('id')):
                             cmd_by_id[b['id']] = (b.get('input') or {}).get('command', '')
+                            n_bash += 1
+                    if n_bash and tally is not None and scope(rec, cutoff, repo):
+                        calls += n_bash
                     records.append(rec)
         except OSError:
             continue
 
+        prompted = False  # this session saw at least one ask/deny in scope
         decided = set()   # (guard, toolUseID) seen in the attachment stream
         for rec in records:
             att = rec.get('attachment')
@@ -231,6 +273,7 @@ def iter_decisions(paths, plugin, cutoff, repo):
                     reason = hso.get('permissionDecisionReason', '')
                 except ValueError:
                     pass
+            prompted = prompted or decision in ('ask', 'deny')
             yield {
                 'plugin': name, 'decision': decision, 'reason': reason,
                 'cwd': cwd, 'ts': ts,
@@ -258,10 +301,16 @@ def iter_decisions(paths, plugin, cutoff, repo):
                 if window is None:
                     continue
                 cwd, ts = window
+                prompted = True
                 yield {
                     'plugin': name, 'decision': 'deny', 'reason': reason,
                     'cwd': cwd, 'ts': ts, 'command': cmd_by_id[tuid],
                 }
+
+        if tally is not None and (calls or prompted):
+            tally['bash_calls'] += calls
+            tally['sessions'] += 1
+            tally['sessions_prompted'] += 1 if prompted else 0
 
 
 def split_reasons(reason):
@@ -297,7 +346,7 @@ def tool_of(segment):
     return words[0] if words else None
 
 
-def build_report(decisions):
+def build_report(decisions, tally=None):
     decs = collections.Counter()
     plugins = collections.Counter()
     cats = collections.Counter()
@@ -329,7 +378,7 @@ def build_report(decisions):
     return {
         'total': total, 'decisions': decs, 'plugins': plugins,
         'categories': cats, 'tools': tools, 'overrides': overrides,
-        'targets': targets, 'commands': cmds,
+        'targets': targets, 'commands': cmds, 'scope': tally,
     }
 
 
@@ -340,13 +389,28 @@ def print_text(r, top, plugin='foreground-guard'):
         print(f"No {label} decisions found for the given filters.")
         return
     asks = r['decisions'].get('ask', 0) + r['decisions'].get('deny', 0)
-    print(f"{label} decisions analyzed: {total}")
+    print(f"{label} decisions recorded: {total}")
     by_plugin = ", ".join(f"{k} {v}" for k, v in r['plugins'].most_common())
     print(f"  plugins: {by_plugin}")
     parts = [f"{k} {v}" for k, v in r['decisions'].most_common()]
     print(f"  outcomes: {', '.join(parts)}")
-    pct = (100 * asks / total) if total else 0
-    print(f"  friction (ask+deny): {asks} ({pct:.0f}% of decisions)")
+    # The rate divides by Bash calls, never by the decisions above — see
+    # SCOPE_KEYS. With no tally the count prints alone rather than acquiring a
+    # denominator it does not have.
+    sc = r.get('scope') or {}
+    calls = sc.get('bash_calls', 0)
+    if not calls:
+        print(f"  friction (ask+deny): {asks}")
+    else:
+        prompted, sessions = sc['sessions_prompted'], sc['sessions']
+        print(f"  friction (ask+deny): {asks} — {100 * asks / calls:.1f}% of "
+              f"the {calls} Bash call{'' if calls == 1 else 's'} in the window")
+        print(f"  sessions with a prompt: {prompted} of {sessions} "
+              f"({100 * prompted / sessions:.0f}%)")
+        print("  note: the denominator is every Bash call in the window, so a "
+              "guard installed")
+        print("        part-way through it reads low until the window catches "
+              "up")
     # Under one guard the deny recovery is complete, so the count stands on its
     # own. Across guards it is not, and an unqualified zero would read as "this
     # one never blocks" — the exact misreading issue #25 was about.
@@ -407,12 +471,19 @@ def main():
     if not paths:
         sys.exit(f"No transcripts under {args.transcripts}")
 
-    decisions = list(iter_decisions(paths, args.plugin, cutoff, args.repo))
-    report = build_report(decisions)
+    tally = new_scope()
+    decisions = list(iter_decisions(paths, args.plugin, cutoff, args.repo,
+                                    tally))
+    report = build_report(decisions, tally)
 
     if args.json:
         out = {
+            # `total` still counts decision records; the rate's denominator is
+            # `bash_calls` (see SCOPE_KEYS), so consumers keep their key.
             'total': report['total'],
+            'bash_calls': tally['bash_calls'],
+            'sessions': tally['sessions'],
+            'sessions_prompted': tally['sessions_prompted'],
             'decisions': dict(report['decisions']),
             'plugins': dict(report['plugins']),
             'categories': dict(report['categories']),
