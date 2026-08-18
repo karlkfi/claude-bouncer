@@ -105,3 +105,12 @@ Mutators drive rule 3 only. Keep the list to genuinely state-changing,
 outward-facing operations — publish, push, apply, deploy. The rule's value is
 that `make check; git push` is unambiguously wrong; widening `mutators` to
 ordinary local commands turns it into noise.
+
+A mutator is screened the same way a gate is: `exempt` wins over it, and a
+capability probe is not a state change. So when a subcommand has both a read
+form and a write form — `git tag -l` beside `git tag -a`, `kubectl rollout
+status` beside `kubectl rollout restart` — name the write forms in `mutators`
+where the subcommand allows it, and put the read forms in `exempt` where it does
+not. Getting this wrong denies a pure read as a publish, and that denial has no
+correct rewrite: there is nothing for `&&` to gate ([#11](https://github.com/karlkfi/claude-pipe-guard/issues/11)).
+

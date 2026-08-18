@@ -314,6 +314,51 @@ CASES = [
     ('sequence nested in a subshell', '(make check; git push)', False, False, ''),
     ('sequence named in a commit message',
      'git commit -m "docs: never write make check; git push"', False, False, ''),
+
+    # --- Read forms of a subcommand that also writes -------------------------
+    # `git tag` and `kubectl rollout` each have a read form and a write form
+    # under one subcommand, so a head match alone casts the read as the publish
+    # (#11). A read changes no state, so there is nothing for `&&` to gate and
+    # the deny has no correct rewrite.
+    ('bare git tag lists', 'make check; git tag', False, False, ''),
+    ('git tag -l lists', 'make check; git tag -l sometag', False, False, ''),
+    ('git tag --list lists', 'make check; git tag --list', False, False, ''),
+    ('git tag -n lists with annotations', 'make check; git tag -n5', False, False, ''),
+    ('kubectl rollout status reads',
+     'make check; kubectl rollout status deploy/foo', False, False, ''),
+    # The roles landed exactly backwards here: the write was picked as the gate
+    # and the read as the mutator.
+    ('a write then a read of the same subcommand',
+     'git tag -a t4 -m t4 HEAD; git tag -l t4', False, False, ''),
+    # A probe changes nothing either, and `is_mutator` screened neither.
+    ('a probe is not a state change', 'make check; git push --help', False, False, ''),
+    ('a dry run publishes nothing',
+     'make check; kubectl apply --dry-run=client -f x.yaml', False, False, ''),
+    # The listing forms are reads for the pipe rule too: output is the point.
+    ('git tag piped', 'git tag | tail -5', False, False, ''),
+    ('git tag -l piped', 'git tag -l "v1.*" | head', False, False, ''),
+    ('kubectl rollout history piped',
+     'kubectl rollout history deploy/foo | tail', False, False, ''),
+
+    # The other direction, which is how an over-broad exemption would show:
+    # every write form of the same subcommand still has to classify.
+    ('git tag -a writes', 'make check; git tag -a v1.0.0 -m "release"',
+     False, True, 'is sequenced before'),
+    ('git tag -d writes', 'make check; git tag -d v1.0.0', False, True, ''),
+    ('git tag -f writes', 'make check; git tag -f v1.0.0', False, True, ''),
+    # `git tag <name>` with no flag at all creates the tag.
+    ('git tag with a name writes', 'make check; git tag v1.0.0', False, True, ''),
+    ('kubectl rollout restart writes',
+     'make check; kubectl rollout restart deploy/foo', False, True, ''),
+    ('kubectl rollout undo writes',
+     'make check; kubectl rollout undo deploy/foo', False, True, ''),
+    ('kubectl apply still writes', 'make check; kubectl apply -f x.yaml',
+     False, True, ''),
+    # `rollout status` is exempted from the mutator list, not from the gates:
+    # it waits for a condition, so a pipe still swallows the answer.
+    ('kubectl rollout status is still a gate',
+     'kubectl rollout status deploy/foo | tail -5', False, True,
+     "exit status is the filter's"),
 ]
 
 

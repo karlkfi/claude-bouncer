@@ -115,6 +115,8 @@ make --version | head -1                # a capability probe
 shellcheck --version | grep 0.11        # probes are structural, not per-tool
 git show origin/main:CLAUDE.md | grep -n "make check"
 git commit -m "fix: make check | tail was reporting EXIT=0"
+make check; git tag -l                  # a read, so there is nothing to gate
+make check; kubectl rollout status web
 ```
 
 The last two matter most. Gate patterns are matched against the **head of a
@@ -124,6 +126,12 @@ the raw command string. A pattern matched against the raw string also fires on
 every `git show`, `grep`, and commit message that merely *names* the command. A
 heredoc body is data, so a piped gate quoted in one is text; no rule handles that
 case, the parser does.
+
+The last two are the read forms of subcommands that also write. `git tag -a`
+publishes and `git tag -l` lists; `kubectl rollout restart` rolls and `kubectl
+rollout status` waits. Both classifiers screen `exempt`, so the reads are
+registry rows rather than special cases — and `kubectl rollout status` stays a
+**gate**, because a pipe still swallows the answer it waited for.
 
 Capability probes (`--version`, `--help`, `-V`, `-h`) are recognized
 structurally for every gate rather than by per-tool exemptions — a per-tool
@@ -313,7 +321,7 @@ A project extends them with its own `.claude/pipe-guard.json`:
 | Key | What it does |
 |---|---|
 | `gates` | Commands whose exit status **is** the answer. Drives all three rules. |
-| `exempt` | Wins over `gates`. For informational targets whose output, not status, is the point. |
+| `exempt` | Wins over **both** `gates` and `mutators`. For informational targets whose output, not status, is the point — including the read form of a subcommand that also writes (`git tag -l` beside `git tag -a`). |
 | `mutators` | State-changing commands. Drives rule 3 only — the `;`-before-a-state-change case. |
 | `replace` | `true` takes full control instead of extending the defaults. |
 

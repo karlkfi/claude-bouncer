@@ -84,6 +84,28 @@ stays a gate.
 `go test`, so exempting it would exempt `go test -v ./... | tail`, which is the
 canonical bug. `make -v | head` stays denied and `--version` is the way out.
 
+## Why a read is screened out of the mutator list
+
+The registry matches at subcommand granularity, and several subcommands carry a
+read form and a write form under one name: `git tag -l` beside `git tag -a`,
+`kubectl rollout status` beside `kubectl rollout restart`. A head match alone
+cannot tell them apart, so rule 3 picked the write as the gate and the read as
+the state change — exactly backwards — and denied a listing on the grounds that
+a failed check still publishes. Reading a tag publishes nothing, so that denial
+had no correct rewrite: `&&` gates a state change, and there was none.
+
+The fix is that `is_mutator` runs the two screens `is_gate` already ran —
+`exempt` wins, and a probe is not a state change — so a read form is expressed
+as a registry row rather than as code. Where the subcommand allows it, the write
+forms are named directly instead, which is how `kubectl rollout` splits: only
+`restart`, `undo`, `pause`, and `resume` are mutators. That leaves `rollout
+status` a **gate**, which it should be — it waits for a condition, so a pipe
+still swallows the answer even though the command changes nothing.
+
+This does not widen what slips through. The property rule 3 protects is that a
+gate's failure must not be ignored before a state change, and a read is not a
+state change.
+
 ## Why stdlib Python, given the prior art
 
 The Go implementation this ports from replaced a shell version that spent 175 of
