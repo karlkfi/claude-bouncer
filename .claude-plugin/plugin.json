@@ -1,6 +1,6 @@
 {
   "name": "pipe-guard",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Deny shell commands whose exit status is the answer and gets lost.",
   "author": {
     "name": "Karl",
