@@ -87,13 +87,19 @@ MAX_SUBST_DEPTH = 25
 
 
 def strip_comments(cmd):
-    """Remove unquoted `#` comments, keeping the newline that ends each one.
+    """Remove unquoted `#` comments and fold backslash-newline continuations.
 
     shlex's built-in comment handling swallows the comment AND its trailing
     newline, merging the next line into the commented line's segment; it also
     starts a comment at a mid-word `#` (`file#1`), which bash does not. So
     comments are stripped here with bash's actual rule and shlex's own comment
-    processing is disabled.
+    processing is disabled. The newline that ends a comment is kept.
+
+    A continuation is dropped outright, the way POSIX joins a continued line
+    before tokenizing. `tokenize` makes a newline a command boundary, so one
+    left in place splits an `&&` chain written across lines into two statements
+    and the chain reads as a `;` sequence (#8). This branch is the one place
+    this function diverges from workspace-guard's copy, which has no equivalent.
     """
     out = []
     in_single = in_double = False
@@ -110,6 +116,9 @@ def strip_comments(cmd):
             out.append(c); i += 1
             continue
         if c == '\\' and i + 1 < n:                # escape survives both modes
+            if cmd[i+1] == '\n':                   # continuation -> one logical line
+                i += 2
+                continue
             out.append(c); out.append(cmd[i+1]); i += 2
             continue
         if c == '"':
