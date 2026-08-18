@@ -28,6 +28,7 @@ rather than in a permission prompt you have to answer.
 
 - [What it does](#what-it-does)
 - [What it does not deny](#what-it-does-not-deny)
+- [Repo-state checks (opt-in)](#repo-state-checks-opt-in)
 - [Install](#install)
 - [Upgrade](#upgrade)
 - [Soundness: deny, never ask](#soundness-deny-never-ask)
@@ -139,6 +140,62 @@ pattern fixes the tool it was reported against and leaves the whole class. `-v`
 is deliberately **not** a probe flag: it means `--version` to `make` but verbose
 to `go test`, and exempting it would exempt `go test -v ./... | tail`, which is
 the bug this guard exists to catch.
+
+## Repo-state checks (opt-in)
+
+Two checks that are not about exit status, off unless a project asks for them.
+Both fire on commands already in `gates`, and both catch a mistake that costs a
+full CI cycle.
+
+- **`git push` onto a base that moved into this branch's own files.** A stale
+  base is benign under a merge queue. An overlap is not: the queue validates the
+  candidate merge, kicks the entry back, and the check cycle is spent. A local
+  rebase catches it in seconds.
+- **`gh pr create` where an open PR already changes the same lines.**
+  Duplicated or mutually invalidating work, found before the PR exists rather
+  than at review.
+
+Add a `repo_state` key to `.claude/pipe-guard.json` to turn them on. Presence of
+the key is the switch; every field under it has a default.
+
+```json
+{
+  "repo_state": {
+    "base_ref": "origin/main",
+    "overlap_ignore": ["docs/roadmap.md", "mk/gate-lists.mk"],
+    "release_patterns": ["^release[/-]"]
+  }
+}
+```
+
+| Key | Default | What it does |
+|---|---|---|
+| `base_ref` | `origin/main` | The ref the branch is measured against. |
+| `overlap_ignore` | none | Paths contended by construction, typically anything with a custom merge driver where nearly every branch edits the file. Shell globs. |
+| `release_patterns` | `release/`, `rel-`, `stable/`, `maint*/`, `hotfix/`, and `v1.5`-style names | Branch names the push check leaves alone. |
+
+Both checks compare **line ranges**, not paths. Two edits at opposite ends of
+one large file cannot collide, and reading that as a collision is what makes a
+check like this unusable. Each range spans the three lines of context the diff
+carries either side, so edits within six lines still meet.
+
+`overlap_ignore` is discounted outright on the PR check and conditionally on the
+push check. When an ignored path is in both change sets, `git merge-tree` is
+asked whether the merge actually succeeds — a merge driver refuses some of them,
+a row deleted on one side and edited on the other, so the file you were about to
+discount can still fail to merge.
+
+`release_patterns` exists because telling `release-1.5` to rebase onto `main`
+would publish everything merged since the tag. That is a wrong answer rather
+than a noisy one, and nothing in the commit graph separates a release branch
+from a stale topic branch: both sit behind the base and ahead of the fork point.
+The name is the only signal there is.
+
+Both probes shell out, and both fail silent. Offline, an old `git`, a
+rate-limited token, or a checkout with no `gh` costs a missed catch and never a
+blocked command — this runs on every push in every session. The PR check fetches
+at most three diffs; past that an entry rests on a shared path alone and says so
+in the denial.
 
 ## Install
 
@@ -324,6 +381,7 @@ A project extends them with its own `.claude/pipe-guard.json`:
 | `exempt` | Wins over **both** `gates` and `mutators`. For informational targets whose output, not status, is the point — including the read form of a subcommand that also writes (`git tag -l` beside `git tag -a`). |
 | `mutators` | State-changing commands. Drives rule 3 only — the `;`-before-a-state-change case. |
 | `replace` | `true` takes full control instead of extending the defaults. |
+| `repo_state` | Turns on the two [repo-state checks](#repo-state-checks-opt-in). Absent means off, and nothing shipped here carries it. |
 
 Project entries are **added** to the defaults, so naming one extra gate does not
 silently drop the rest.
@@ -390,6 +448,10 @@ python3 scripts/friction-report.py --since 30d --repo gateway --top 20
   reflex.
 - **A command the tokenizer cannot parse gets silence, not a guess.** Unbalanced
   quotes, `| |`, and similar defer to normal permissions.
+- **The PR check's line numbers are approximate.** A pull request's diff is
+  numbered from its own merge base rather than this branch's, so a long-lived
+  PR's ranges drift. Close enough to tell an edit in the same function from one
+  at the other end of the file, which is the question being asked.
 - **It cannot see what a gate does internally.** A `Makefile` target or shell
   script that swallows its own failure reports success to the shell, and the
   guard has no view into that.
