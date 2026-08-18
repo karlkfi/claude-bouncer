@@ -72,6 +72,40 @@ jobs:
             exit 1
           fi
 
+  # The repo-state checks run against a live repo, so their negative direction
+  # is the expensive one: an overlap reported where there is none sends a
+  # session to rebase a branch that did not need it. This widens the comparison
+  # from line ranges back to paths -- the mistake the original made first -- and
+  # requires the suite to catch it.
+  repo-state-mutation-control:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Widen the overlap test back to path intersection
+        run: |
+          python - <<'PY'
+          import pathlib
+          p = pathlib.Path('scripts/bash-pipe-guard.py')
+          s = p.read_text()
+          old = ("    return any(a[0] <= b[1] and b[0] <= a[1] "
+                 "for a in mine for b in theirs)")
+          new = "    return bool(mine) and bool(theirs)"
+          assert old in s, "mutation target not found -- update this job"
+          p.write_text(s.replace(old, new, 1))
+          PY
+      - name: The suite must fail
+        run: |
+          python -m unittest discover -s tests > mutant.log 2>&1 && rc=0 || rc=$?
+          echo "suite exit: $rc"
+          tail -5 mutant.log
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::the suite passed with overlap widened to whole paths" >&2
+            exit 1
+          fi
+
   # A launcher that never runs the guard produces exactly the empty stdout a
   # clean command produces, so the launcher job is only worth anything if it
   # can go red. This breaks the interpreter probe and requires it to.

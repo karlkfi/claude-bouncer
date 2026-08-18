@@ -13,6 +13,13 @@ a status goes missing, all of which turn a failure into a green:
   3. Sequenced before a state-changing command with `;`. The status is read
      correctly and then ignored: `make check; git push` pushes either way.
 
+A fourth check is optional, and off unless a project's own registry carries a
+`repo_state` key. It is not about exit status: it denies a `git push` onto a
+base that has moved into this branch's own line ranges, and a `gh pr create`
+where an open PR already changes them. Both shell out, and both fail silent --
+offline, an old git, or a rate-limited token costs a missed catch and never a
+blocked command.
+
 Every verdict is a `deny`, never an `ask`. A deny's reason is shown to the
 model, so the fix lands where the command gets rewritten; an ask goes to the
 user and the model never sees the hint. The break-glass is a command prefix,
@@ -31,7 +38,7 @@ bash-workspace-guard.py rather than written fresh. Hand-rolling a shell-grammar
 scanner is the documented way this class of tool fails: silently, in both
 directions.
 """
-import sys, os, json, re, shlex, collections
+import sys, os, json, re, shlex, collections, fnmatch, subprocess
 
 # --- Ported from claude-workspace-guard (scripts/bash-workspace-guard.py) ----
 # These carry the quote-state tracking and bracket counting. Kept structurally
@@ -672,6 +679,10 @@ class Registry(object):
         self.gates = self._compile(data.get('gates') or [])
         self.exempt = self._compile(data.get('exempt') or [])
         self.mutators = self._compile(data.get('mutators') or [])
+        # Presence turns the repo-state checks on; an empty object is presence,
+        # so `{}` runs them on the defaults.
+        cfg = data.get('repo_state')
+        self.repo_state = cfg if isinstance(cfg, dict) else None
 
     def _compile(self, patterns):
         out = []
@@ -757,6 +768,8 @@ def load_registry(cwd=''):
         merged = dict(base)
         for key in ('gates', 'exempt', 'mutators'):
             merged[key] = list(base.get(key) or []) + list(local.get(key) or [])
+        if 'repo_state' in local:
+            merged['repo_state'] = local['repo_state']
     return Registry(merged)
 
 
@@ -1043,12 +1056,22 @@ def with_log_path(reason, scratch):
         LOG_PLACEHOLDER, 'tmp/out.log')
 
 
+# The tail every reason ends with. The sentence before it names the way out,
+# and that differs by rule: three of them are about a status nobody will read,
+# and the repo-state pair is about an overlap, where "the status does not
+# matter" is an answer to a question nobody asked.
+OVERRIDE_TAIL = (
+    " If this call is not the mistake the rule describes, that is a defect in "
+    "the rule: report it at https://github.com/karlkfi/claude-pipe-guard/issues "
+    "rather than overriding it every time.")
+
 OVERRIDE_HINT = (
     " If the status genuinely does not matter here, re-run prefixed with "
-    + OVERRIDE_VAR + "=<reason>. If this call is not the mistake the rule "
-    "describes, that is a defect in the rule: report it at "
-    "https://github.com/karlkfi/claude-pipe-guard/issues rather than "
-    "overriding it every time.")
+    + OVERRIDE_VAR + "=<reason>." + OVERRIDE_TAIL)
+
+REPO_STATE_HINT = (
+    " If the overlap is known and deliberate, re-run prefixed with "
+    + OVERRIDE_VAR + "=<reason>." + OVERRIDE_TAIL)
 
 PIPESTATUS_REASON = (
     "This reads $PIPESTATUS, which does not exist in zsh -- the shell the Bash "
@@ -1080,7 +1103,319 @@ SEQUENCED_REASON = (
     "check passing." + OVERRIDE_HINT)
 
 
-def decide(cmd, background, reg, scratch='', depth=0):
+# --- Repo state -------------------------------------------------------------
+# The fourth check, and the only one not about exit status. Off unless a
+# project's own registry carries a `repo_state` key. Everything here shells
+# out, so everything here fails silent: a caller reads None or an empty list as
+# no opinion, and a missing binary, an old git, an offline machine, or a
+# rate-limited token costs a missed catch rather than a blocked push.
+
+PROBE_TIMEOUT = 5                                 # seconds, per subprocess
+CONTEXT_LINES = 3                                 # what a diff hunk carries
+MAX_OPEN_PRS = 20
+MAX_PR_DIFFS = 3
+
+DEFAULT_BASE_REF = 'origin/main'
+
+# A release branch is cut from the base and left diverged on purpose, so
+# telling it to rebase would publish everything merged since the tag -- a wrong
+# answer rather than a noisy one. Nothing in the commit graph separates it from
+# a stale topic branch: both are behind the base and ahead of the fork point.
+# The name is the only signal there is, which is why it is configuration.
+DEFAULT_RELEASE_PATTERNS = (
+    r'^(release|rel|stable|maint|maintenance|hotfix)[/-]',
+    r'^v?[0-9]+\.[0-9]+([./-]|$)',
+)
+
+# Flags that leave the base untouched: nothing lands on it, so there is no
+# overlap to have.
+PUSH_SKIP_FLAGS = frozenset({'--dry-run', '-n', '--delete', '-d'}) | PROBE_FLAGS
+
+HUNK_RE = re.compile(r'^@@ -([0-9]+)(?:,([0-9]+))? \+')
+PUSH_HEAD_RE = re.compile(r'^git\s+push(\s|$)')
+PR_CREATE_HEAD_RE = re.compile(r'^gh\s+pr\s+create(\s|$)')
+
+Repo = collections.namedtuple('Repo', 'root cfg')
+
+
+def capture(argv, cwd, timeout=PROBE_TIMEOUT):
+    """(exit status, stdout) for a subprocess, or (None, '') if it never ran."""
+    try:
+        proc = subprocess.run(argv, cwd=cwd, stdout=subprocess.PIPE,
+                              stderr=subprocess.DEVNULL, timeout=timeout)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None, ''
+    return proc.returncode, proc.stdout.decode('utf-8', 'replace')
+
+
+def git(root, *args):
+    """stdout of a successful `git` invocation, or None."""
+    status, out = capture(('git', '-C', root) + args, root)
+    return out if status == 0 else None
+
+
+def hunk_range(start, count):
+    """A hunk's pre-image span, widened by the context git carries either side.
+
+    `-a,0` is an insertion after line ``a`` and covers no pre-image line of its
+    own; it still collides with an edit beside it, so it spans that one.
+    """
+    last = start + count - 1 if count else start
+    return max(1, start - CONTEXT_LINES), last + CONTEXT_LINES
+
+
+def parse_hunks(diff):
+    """{path: [(start, end)]} from a unified diff, in pre-image line numbers.
+
+    The pre-image side is what makes two diffs comparable: taken from a shared
+    ancestor, both sides' `-` ranges are numbered in that ancestor. Post-image
+    numbers are each side's own and mean nothing to the other.
+
+    A `--- ` line only names a file inside a header run, because a removed line
+    carries a `-` of its own: an SQL comment `-- DROP` comes out of the diff as
+    `--- DROP` and is content, not a header. `@@` needs no such guard -- a
+    removed hunk header is prefixed too, and a context line starts with a space.
+    """
+    ranges, path, in_header = {}, '', False
+    for line in diff.splitlines():
+        if line.startswith('diff --git '):
+            path, in_header = '', True
+            continue
+        if in_header and line.startswith('--- '):
+            path = '' if line == '--- /dev/null' else line[6:]
+            continue
+        if not path:
+            continue
+        m = HUNK_RE.match(line)
+        if m:
+            in_header = False
+            ranges.setdefault(path, []).append(
+                hunk_range(int(m.group(1)),
+                           1 if m.group(2) is None else int(m.group(2))))
+    return ranges
+
+
+def changed_ranges(root, old, new):
+    """What changed between two revisions, or None.
+
+    `-U0` so a hunk covers only the lines that moved; the context comes back in
+    `hunk_range`, which is where its width is stated once. The prefixes are
+    pinned rather than inherited, because `diff.mnemonicPrefix` renames them
+    and the path would then be read out of the wrong column.
+    """
+    out = git(root, 'diff', '-U0', '--no-color', '--no-ext-diff',
+              '--src-prefix=a/', '--dst-prefix=b/', old, new)
+    return None if out is None else parse_hunks(out)
+
+
+def ranges_meet(mine, theirs):
+    return any(a[0] <= b[1] and b[0] <= a[1] for a in mine for b in theirs)
+
+
+def merge_conflicts(root, base):
+    """Paths git reports conflicting when ``base`` merges into HEAD.
+
+    None when git would not say -- no `--write-tree` before 2.38, a missing
+    ref, a shallow clone. The one caller discounts the path either way, since
+    an old git must not start denying pushes; the two are kept apart so the
+    suite can tell "clean" from "could not ask" and skip rather than pass.
+    """
+    status, out = capture(('git', '-C', root, 'merge-tree', '--write-tree',
+                           '--name-only', base, 'HEAD'), root)
+    if status not in (0, 1):
+        return None
+    if status == 0:
+        return frozenset()
+    paths = []
+    for line in out.splitlines()[1:]:             # line 1 is the merged tree
+        if not line:
+            break                                 # then the conflict messages
+        paths.append(line)
+    return frozenset(paths)
+
+
+def current_branch(root):
+    out = git(root, 'symbolic-ref', '--short', '--quiet', 'HEAD')
+    return out.strip() if out else ''
+
+
+def is_release_branch(branch, cfg):
+    patterns = cfg.get('release_patterns')
+    if patterns is None:
+        patterns = DEFAULT_RELEASE_PATTERNS
+    for pattern in patterns:
+        try:
+            if re.search(pattern, branch):
+                return True
+        except re.error:
+            continue                              # a bad row degrades, not breaks
+    return False
+
+
+def is_ignored(path, cfg):
+    return any(fnmatch.fnmatch(path, pat)
+               for pat in cfg.get('overlap_ignore') or [])
+
+
+def push_overlap(root, cfg):
+    """Paths where the base's own movement lands in this branch's edits, or [].
+
+    A stale base is benign under a merge queue. An overlap is not: the queue
+    validates the candidate merge, kicks the entry back, and the check cycle
+    that found it is spent. A local rebase catches it in seconds.
+    """
+    branch = current_branch(root)
+    if not branch or is_release_branch(branch, cfg):
+        return []
+    base = cfg.get('base_ref') or DEFAULT_BASE_REF
+    fork = git(root, 'merge-base', 'HEAD', base)
+    tip = git(root, 'rev-parse', '--verify', '--quiet', base + '^{commit}')
+    if fork is None or tip is None:
+        return []
+    fork, tip = fork.strip(), tip.strip()
+    if not fork or fork == tip:
+        return []                                 # the base has not moved
+    mine = changed_ranges(root, fork, 'HEAD')
+    theirs = changed_ranges(root, fork, base)
+    if mine is None or theirs is None:
+        return []
+    shared = sorted(set(mine) & set(theirs))
+    ignored = [p for p in shared if is_ignored(p, cfg)]
+    # An `overlap_ignore` path is contended by construction -- a custom merge
+    # driver owns it and nearly every branch edits it -- so counting its ranges
+    # would fire always. A driver still refuses some of them, a row deleted one
+    # side and edited the other, so the discount is conditional on asking.
+    # git declining to answer discounts the path, same as a clean merge: an
+    # old git or a shallow clone must not turn into a wall of denied pushes.
+    conflicts = merge_conflicts(root, base) if ignored else frozenset()
+    hits = []
+    for path in shared:
+        if path in ignored:
+            if conflicts and path in conflicts:
+                hits.append(path)
+        elif ranges_meet(mine[path], theirs[path]):
+            hits.append(path)
+    return hits
+
+
+def open_prs(root):
+    """Open PRs with the paths each one touches, or None."""
+    status, out = capture(
+        ('gh', 'pr', 'list', '--state', 'open', '--limit', str(MAX_OPEN_PRS),
+         '--json', 'number,title,headRefName,files'), root)
+    if status != 0:
+        return None
+    try:
+        prs = json.loads(out)
+    except ValueError:
+        return None
+    return prs if isinstance(prs, list) else None
+
+
+def pr_ranges(root, number):
+    """What an open PR changes, or None.
+
+    Numbered from that PR's own merge base rather than this branch's, so a
+    long-lived PR's ranges drift. Close enough to tell an edit in the same
+    function from one at the other end of the file, which is the question.
+    """
+    status, out = capture(('gh', 'pr', 'diff', str(number)), root)
+    return None if status != 0 else parse_hunks(out)
+
+
+def pr_overlap(root, cfg):
+    """[(number, title, paths, precise)] for open PRs on this branch's own
+    lines, or [].
+
+    ``precise`` is False when the PR's diff was not fetched -- the cap was
+    reached, or the call failed -- and the entry rests on a shared path alone.
+    Ranges need a fetch per PR that already shares a path, and this runs while
+    someone waits on a `gh pr create`.
+    """
+    branch = current_branch(root)
+    base = cfg.get('base_ref') or DEFAULT_BASE_REF
+    fork = git(root, 'merge-base', 'HEAD', base)
+    if not branch or fork is None:
+        return []
+    mine = changed_ranges(root, fork.strip(), 'HEAD')
+    if not mine:
+        return []
+    prs = open_prs(root)
+    if prs is None:
+        return []
+    hits, fetched = [], 0
+    for pr in prs:
+        if pr.get('headRefName') == branch:
+            continue
+        shared = sorted(p for p in (f.get('path')
+                                    for f in pr.get('files') or [])
+                        if p in mine and not is_ignored(p, cfg))
+        if not shared:
+            continue
+        theirs = None
+        if fetched < MAX_PR_DIFFS:
+            fetched += 1                          # a failed fetch spends it too
+            theirs = pr_ranges(root, pr.get('number'))
+        if theirs is not None:
+            shared = [p for p in shared
+                      if p in theirs and ranges_meet(mine[p], theirs[p])]
+            if not shared:
+                continue
+        hits.append((pr.get('number'), pr.get('title') or '', shared,
+                     theirs is not None))
+    return hits
+
+PUSH_OVERLAP_REASON = (
+    "`git push`: `%s` has moved since this branch left it, and its new commits "
+    "edit the same lines this branch does in %s. A merge queue validates that "
+    "candidate merge, kicks the entry back, and a whole check cycle is spent "
+    "finding what a rebase finds in seconds. Rebase first -- "
+    "`git fetch && git rebase %s` -- then push the result." + REPO_STATE_HINT)
+
+PR_OVERLAP_REASON = (
+    "`gh pr create`: this branch edits lines an open PR already changes -- %s. "
+    "That is duplicated or mutually invalidating work, and review is an "
+    "expensive place to find it. Read that diff first, then either fold this "
+    "into that branch or narrow this one to what does not overlap."
+    + REPO_STATE_HINT)
+
+
+def push_reason(cfg, paths):
+    base = cfg.get('base_ref') or DEFAULT_BASE_REF
+    return PUSH_OVERLAP_REASON % (base, ', '.join(paths), base)
+
+
+def pr_reason(prs):
+    parts = ['#%s %s (%s%s)' % (number, truncate(title, 50), ', '.join(paths),
+                                '' if precise else
+                                '; shared path only, diff not fetched')
+             for number, title, paths, precise in prs]
+    return PR_OVERLAP_REASON % '; '.join(parts)
+
+def repo_state_reason(segs, repo):
+    """The deny reason for a push or a PR the repo's own state contradicts.
+
+    Matched against the segment head like every other rule, so a `git push`
+    inside a commit message or a heredoc is not one.
+    """
+    for seg in segs:
+        words = head_words(seg)
+        if not words:
+            continue
+        head = ' '.join(words)
+        if PUSH_HEAD_RE.match(head):
+            if PUSH_SKIP_FLAGS.isdisjoint(words[1:]):
+                paths = push_overlap(repo.root, repo.cfg)
+                if paths:
+                    return push_reason(repo.cfg, paths)
+        elif PR_CREATE_HEAD_RE.match(head) and PROBE_FLAGS.isdisjoint(words[1:]):
+            prs = pr_overlap(repo.root, repo.cfg)
+            if prs:
+                return pr_reason(prs)
+    return ''
+
+
+def decide(cmd, background, reg, scratch='', depth=0, repo=None):
     """The deny reason for a Bash command, or '' to stay silent.
 
     ``scratch`` is the session scratchpad the suggested rewrites should redirect
@@ -1137,10 +1472,33 @@ def decide(cmd, background, reg, scratch='', depth=0):
             reason = decide(body, False, reg, scratch, depth + 1)
             if reason:
                 return reason
+
+    # Last, and only at the top level: a lost status is the primary job, and
+    # this one shells out. `repo` is None unless the project asked for it, and
+    # the recursion above never passes it on -- a `git push` inside a
+    # substitution is still one command's worth of repo state.
+    if repo is not None:
+        return repo_state_reason(segs, repo)
     return ''
 
 
 # --- Hook I/O ---------------------------------------------------------------
+
+def repo_state(cwd, reg):
+    """The repo the state checks should ask about, or None when they are off.
+
+    The root is resolved from the session's cwd rather than this file's own
+    location. In a worktree the hook is the launch checkout's, so reading the
+    repo around it reports overlaps the session's branch does not have.
+    """
+    if reg.repo_state is None:
+        return None
+    root = cwd or os.environ.get('CLAUDE_PROJECT_DIR') or ''
+    if not root or not os.path.isdir(root):
+        return None
+    top = git(root, 'rev-parse', '--show-toplevel')
+    return Repo(top.strip(), reg.repo_state) if top and top.strip() else None
+
 
 def emit(decision, reason):
     """Print a PreToolUse decision as the hook's stdout JSON."""
@@ -1161,9 +1519,11 @@ def main():
     cmd = ti.get('command') or ''
     if not cmd.strip():
         return
-    reason = decide(cmd, bool(ti.get('run_in_background')),
-                    load_registry(data.get('cwd') or ''),
-                    scratch_dir(data.get('session_id') or ''))
+    cwd = data.get('cwd') or ''
+    reg = load_registry(cwd)
+    reason = decide(cmd, bool(ti.get('run_in_background')), reg,
+                    scratch_dir(data.get('session_id') or ''),
+                    repo=repo_state(cwd, reg))
     if reason:
         # Always `deny`, never `ask`. The reason reaches the model, so the fix
         # lands where the command is rewritten; an `ask` goes to the user and

@@ -7,7 +7,7 @@
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/run-python-hook.cmd\" bash-pipe-guard.py",
-            "timeout": 10000
+            "timeout": 60
           }
         ]
       }

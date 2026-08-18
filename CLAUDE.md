@@ -13,15 +13,17 @@ behind an `echo`, or sequenced before a state change with `;`.
 | `scripts/run-python-hook.cmd` | Cross-platform launcher. Do not "simplify" it. |
 | `scripts/friction-report.py` | Read-only transcript analyzer. |
 | `tests/test_pipe_guard.py` | Table-driven suite. Both directions asserted. |
+| `tests/test_repo_state.py` | The opt-in repo-state checks, over real temp git repos. |
 | `tests/test_packaging.py` | Asserts the wired-up files ship runnable. |
 | `tests/launcher_check.py` | Drives the hook through the launcher. Not in `discover`. |
 | `hooks/hooks.json` | Wires the PreToolUse matcher on `Bash`. |
 
 ## Rules that are not negotiable
 
-**Stdlib only.** The guard imports `sys, os, json, re, shlex, collections` and
-nothing else. It runs on every Bash call in every session on every machine; a
-pip dependency is a machine where the guard silently does not run.
+**Stdlib only.** The guard imports `sys, os, json, re, shlex, collections,
+fnmatch, subprocess` and nothing else. It runs on every Bash call in every
+session on every machine; a pip dependency is a machine where the guard silently
+does not run.
 
 **Never `ask`, always `deny`.** An `ask` goes to the user; a `deny` goes to the
 model. Both block. Only the deny puts the explanation where the command gets
@@ -98,6 +100,34 @@ positive case is how a rule starts denying `git log`.
 Do not add per-tool `--version`/`--help` exemptions. Probes are recognized
 structurally for every gate; a per-tool pattern fixes one tool and leaves the
 class.
+
+## The repo-state checks
+
+They are the only part of the guard that shells out, and the only part that is
+off by default. Both properties are load-bearing.
+
+**Every probe fails silent.** A caller reads `None` or `[]` as no opinion. An
+old git, a shallow clone, a rate-limited token, or no `gh` on `PATH` has to cost
+a missed catch and never a blocked push — this is on the path of every push in
+every session. A subprocess call that can raise out of `capture` is a defect.
+
+**Compare line ranges, never paths.** Two edits at opposite ends of one file
+cannot collide, and a path-level answer is the version that gets uninstalled.
+Ranges are read from the diff's pre-image side, which is what makes two diffs
+from a shared ancestor comparable; widening for context happens once, in
+`hunk_range`.
+
+**A release branch is never told to rebase.** That denial has no correct
+rewrite: taking it publishes everything merged since the tag. `release_patterns`
+is the whole mechanism, since the commit graph does not distinguish one.
+
+**The root comes from the payload's `cwd`.** Never from `__file__`. In a
+worktree the hook is the launch checkout's, and reading the repo around it
+reports overlaps the branch does not have.
+
+Adding a case here means a real temp repo in `tests/test_repo_state.py`, both
+directions, plus the one that costs the most to lose: an overlap that is *not*
+one, at range distance in the same file.
 
 ## Adding a mutator
 
