@@ -370,6 +370,16 @@ not evidence that guard rarely blocks. The `FOREGROUND_GUARD_OVERRIDE downgrades
 count is this guard's alone, so `--plugin all` omits it (and its `overrides` JSON
 key) rather than show one guard's statistic under an all-guards header.
 
+Some records are neither a decision nor a deny. Claude Code writes an attachment
+for a hook that crashed or timed out as well as for one that spoke, and a crashed
+hook's stdout is empty — indistinguishable from a silent defer unless you read
+the record's `type`. The report reads it and counts those as `error`, because a
+defer means the guard looked and let the call through while an error means it was
+never consulted, so the call ran unguarded. They are listed above the prompt
+rankings, naming the exit code and the first line of stderr: a guard that stopped
+running matters more than any prompt count, and `--plugin all` is where you would
+notice a sibling has.
+
 For the "don't just show me the numbers, help me fix them" case, the
 **`reduce-foreground-guard-prompts`** skill diagnoses the friction — grounding
 itself in that same report — maps each category to its fix, and offers a

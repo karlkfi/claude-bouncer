@@ -26,6 +26,10 @@ line of type ``hook_success`` carrying ``hookName`` (``PreToolUse:Bash``), the
 hook ``command`` (which names the guard script), and ``stdout`` (the decision
 JSON). The triggering Bash command is joined back via ``toolUseID``.
 
+An attachment of any other ``type`` holds no verdict — the hook crashed or was
+cancelled, so the call ran unguarded. Those are counted as ``error``, not folded
+into ``defer``; see ``HOOK_OK``.
+
 A ``deny`` is recorded nowhere in that stream — see ``DENY_TEXT`` below — so it
 is recovered from the error tool result the blocked call handed back instead.
 
@@ -101,6 +105,20 @@ OVERRIDE_SIG = re.compile(r'foreground-guard override acknowledged')
 # reason differently is not recoverable this way and still under-counts its
 # denies under `--plugin all`; the report says so rather than showing a zero.
 DENY_TEXT = re.compile(r'^(?:Error:\s*)?([a-z0-9-]+-guard):\s')
+
+# An attachment records what became of the hook, not only what it said, and only
+# this type carries a verdict. The others mean the hook never spoke, so reading
+# their empty stdout as a silent defer claims the guard looked and let the call
+# through when it was in fact never consulted (issue #29) — and the cross-guard
+# view is where you would go to notice a sibling has stopped running at all.
+#
+# Measured over 782 local transcripts, 66,223 PreToolUse:Bash attachments:
+# 60,748 `hook_success` with stdout, 5,472 `hook_non_blocking_error` (all exit
+# 126, a sibling guard's hook script left non-executable for a day), 2
+# `hook_cancelled` (timed out; these carry no exitCode at all), and one
+# `hook_success` with empty stdout — the only genuinely silent record in the
+# tree. Every attachment carries `type`, so the check never has to guess.
+HOOK_OK = 'hook_success'
 
 # The denominator, tallied alongside the decisions (issue #27).
 #
@@ -188,6 +206,36 @@ def deny_from_result(block):
     return (m.group(1), text) if m else None
 
 
+def clip(line, cap=120):
+    """One whitespace-collapsed line, clipped from the middle. A hook failure
+    puts a long plugin path in the middle and the actual failure at the end
+    ('... Permission denied'), which end-clipping is exactly wrong for."""
+    line = ' '.join(line.split())
+    if len(line) <= cap:
+        return line
+    head = (cap - 1) * 2 // 3
+    return line[:head] + '…' + line[head - cap + 1:]
+
+
+def error_note(att):
+    """One line naming what went wrong with a hook that produced no verdict.
+
+    Built from the record's own fields, which differ by failure: a crash carries
+    `exitCode` and `stderr`, a cancellation carries `timedOut`/`timeoutMs` and
+    neither of those, so nothing is assumed present."""
+    parts = [att.get('type') or 'unknown']
+    code = att.get('exitCode')
+    if code is not None:
+        parts.append(f'exit {code}')
+    if att.get('timedOut'):
+        ms = att.get('timeoutMs')
+        parts.append(f'timed out after {ms}ms' if ms else 'timed out')
+    lines = (att.get('stderr') or '').strip().splitlines()
+    if lines:
+        parts.append(clip(lines[0]))
+    return ': '.join(parts)
+
+
 def scope(rec, cutoff, repo):
     """(cwd, ts) for a record, or None if it falls outside the filters."""
     cwd = rec.get('cwd') or ''
@@ -263,16 +311,21 @@ def iter_decisions(paths, plugin, cutoff, repo, tally=None):
                 continue
             cwd, ts = window
 
-            stdout = att.get('stdout') or ''
-            decision, reason = 'defer', ''   # empty stdout => hook stayed silent
-            if stdout.strip():
-                try:
-                    out = json.loads(stdout)
-                    hso = out.get('hookSpecificOutput') or {}
-                    decision = hso.get('permissionDecision', 'defer')
-                    reason = hso.get('permissionDecisionReason', '')
-                except ValueError:
-                    pass
+            if att.get('type') != HOOK_OK:
+                # No verdict to read: the hook never ran to completion, so the
+                # call went through unguarded rather than deferred (see HOOK_OK).
+                decision, reason = 'error', error_note(att)
+            else:
+                stdout = att.get('stdout') or ''
+                decision, reason = 'defer', ''  # empty stdout => hook was silent
+                if stdout.strip():
+                    try:
+                        out = json.loads(stdout)
+                        hso = out.get('hookSpecificOutput') or {}
+                        decision = hso.get('permissionDecision', 'defer')
+                        reason = hso.get('permissionDecisionReason', '')
+                    except ValueError:
+                        pass
             prompted = prompted or decision in ('ask', 'deny')
             yield {
                 'plugin': name, 'decision': decision, 'reason': reason,
@@ -353,12 +406,15 @@ def build_report(decisions, tally=None):
     tools = collections.Counter()
     targets = collections.Counter()
     cmds = collections.Counter()
+    errors = collections.Counter()
     overrides = 0
     total = 0
     for d in decisions:
         total += 1
         decs[d['decision']] += 1
         plugins[d['plugin']] += 1
+        if d['decision'] == 'error':
+            errors[f"{d['plugin']}: {d['reason']}"] += 1
         if d['decision'] not in ('ask', 'deny'):
             continue
         reason = d['reason']
@@ -378,7 +434,8 @@ def build_report(decisions, tally=None):
     return {
         'total': total, 'decisions': decs, 'plugins': plugins,
         'categories': cats, 'tools': tools, 'overrides': overrides,
-        'targets': targets, 'commands': cmds, 'scope': tally,
+        'targets': targets, 'commands': cmds, 'errors': errors,
+        'scope': tally,
     }
 
 
@@ -426,6 +483,15 @@ def print_text(r, top, plugin='foreground-guard'):
         print(f"  FOREGROUND_GUARD_OVERRIDE downgrades: {r['overrides']}")
     print()
 
+    # Ahead of the prompt rankings: a hook that never ran is not friction, it is
+    # a guard that stopped guarding, and it is the one thing here worth acting
+    # on before any prompt count.
+    if r.get('errors'):
+        print("Hook failures — the guard never ran, so the call went "
+              f"unguarded (top {top}):")
+        for note, n in r['errors'].most_common(top):
+            print(f"  {n:5}  {note}")
+        print()
     if r['categories']:
         print("By category (prompts) — each maps to one fix:")
         for cat, n in r['categories'].most_common():
@@ -490,6 +556,7 @@ def main():
             'tools': dict(report['tools']),
             'top_targets': report['targets'].most_common(args.top),
             'top_commands': report['commands'].most_common(args.top),
+            'hook_errors': report['errors'].most_common(args.top),
         }
         # Same reasoning as the text report: a foreground-guard-only count is
         # absent, not zero, in an all-guards document.
