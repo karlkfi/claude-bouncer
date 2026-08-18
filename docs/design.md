@@ -106,6 +106,14 @@ shlex configuration) carry all the quote-state tracking and bracket counting,
 and are kept structurally identical to their source so a fix there transfers by
 inspection.
 
+One divergence is deliberate. `strip_comments` also drops a `\`-newline pair,
+because this guard makes the newline a punctuation char and workspace-guard does
+not: unfolded, a continuation surfaces as a command boundary the shell never
+produced, and `make check \` / `&& git push` gets denied as if it were `;`
+([#8](https://github.com/karlkfi/claude-pipe-guard/issues/8)). POSIX removes
+backslash-newline before tokenizing, so the fold belongs in the walk that is
+already tracking quote state, not in a second one.
+
 What is new here is flat list bookkeeping over an already-tokenized stream:
 grouping tokens into segments, recording the operators on either side, and
 tracking paren depth. That is not grammar scanning, and it is not where this
