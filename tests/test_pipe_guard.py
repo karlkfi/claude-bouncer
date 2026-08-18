@@ -663,6 +663,13 @@ class TestSegmentation(unittest.TestCase):
         self.assertEqual(('&&',), gate.post_ops)
         self.assertEqual('&&', pg.next_op(gate.post_ops))
 
+    def test_a_continuation_before_a_pipe(self):
+        """The fold is upstream of every rule, so rule 1 sees through it too."""
+        segs = self.segs('make check \\\n  | tail -5')
+        self.assertEqual(['make check', 'tail -5'],
+                         [' '.join(pg.head_words(s)) for s in segs])
+        self.assertEqual('|', pg.next_op(segs[0].post_ops))
+
     def test_a_bare_newline_is_still_a_boundary(self):
         segs = self.segs('make check\ngit push')
         self.assertEqual('\n', pg.next_op(segs[0].post_ops))
