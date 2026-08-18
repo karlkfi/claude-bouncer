@@ -5,7 +5,7 @@
   "plugins": [
     {
       "name": "workspace-guard",
-      "version": "1.9.0",
+      "version": "1.10.0",
       "description": "Prompt before grep/sed/jq/awk/cat/head/tail touch files outside the workspace; deny blind process kills.",
       "author": { "name": "Karl" },
       "source": {
