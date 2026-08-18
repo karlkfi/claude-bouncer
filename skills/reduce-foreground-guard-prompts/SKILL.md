@@ -40,7 +40,8 @@ first so the diagnosis is grounded in the user's real prompt history:
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/friction-report.py" --repo "$(basename "$CLAUDE_PROJECT_DIR")"
 ```
 
-This reports the friction ratio (ask+deny share), a **By category** breakdown,
+This reports the prompt count and the share of the window's Bash calls it
+represents (plus how many sessions saw a prompt), a **By category** breakdown,
 **By flagged tool** and **Top flagged targets** rankings (the watch commands and
 slow patterns being hit), and the **Top triggering commands**. Useful
 adjustments:

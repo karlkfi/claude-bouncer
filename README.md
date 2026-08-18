@@ -344,6 +344,16 @@ Prompts are grouped into a stable category taxonomy, each mapping to one fix:
 | `bare-sleep` | A | skip the wait; do the follow-up check now |
 | `slow-timeout` | B | set an adequate `timeout:` on the call, or background it |
 
+The friction rate divides by Bash calls, not by the guard's own decisions. A
+silent defer leaves no record at all — Claude Code writes one only for a hook
+that produced output, and this guard prints nothing when it defers and never
+prints `allow` — so a share of its decision records reads 100% however the config
+is tuned. Bash calls are recorded whatever a hook decided, which also makes the
+single-guard rate comparable with `--plugin all`. The line under it counts
+sessions instead of calls: how often a session got interrupted at all. The
+denominator is every Bash call in the window, so a guard installed part-way
+through one reads low until the window catches up; the report says so.
+
 Denies take a second route into the report. Claude Code records a hook's stdout
 only for a call it goes on to run, so a `deny` leaves no decision record at all
 — counting that stream alone reports zero friction for a guard running in an
