@@ -247,7 +247,7 @@ class WatchFormTests(unittest.TestCase):
             decision, reason = run_hook(cmd)
             self.assertEqual(decision, "ask", "expected ask for %r" % cmd)
             self.assertIn("foreground-guard", reason)
-            self.assertIn("run_in_background", reason)
+            self.assertIn("Monitor", reason)
 
     def test_non_watch_forms_defer(self):
         for cmd in self.DEFERS:
@@ -348,16 +348,30 @@ class LoopAndSleepTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class ExemptionTests(unittest.TestCase):
+    # One command per Class A finding type.
+    POLLS = ("gh run watch 123", "tail -f x.log", "sleep 600",
+             "while true; do sleep 5; done",
+             "gh pr checks 1; sleep 5; gh pr checks 1")
+
     def test_run_in_background_does_not_exempt_class_a(self):
         # Backgrounding answers Class B, not Class A: a detached poll still
         # holds a task slot and returns output the agent cannot date.
-        for cmd in ("gh run watch 123", "tail -f x.log", "sleep 600",
-                    "while true; do sleep 5; done",
-                    "gh pr checks 1; sleep 5; gh pr checks 1"):
-            d, r = run_hook(cmd, run_in_background=True)
+        for cmd in self.POLLS:
+            d, _ = run_hook(cmd, run_in_background=True)
             self.assertEqual(d, "ask", "expected ask for backgrounded %r" % cmd)
-            # The fix it teaches must not be the one the call already applied.
-            self.assertNotIn("run_in_background", r)
+
+    def test_class_a_fixes_name_monitor_and_never_backgrounding(self):
+        # A poll prompts backgrounded or not, so no Class A reason may offer
+        # run_in_background as the way out — foreground included, where it
+        # used to send the agent straight into a second prompt. Monitor is
+        # the wait that holds no task slot and returns a dated event.
+        for cmd in self.POLLS:
+            for bg in (None, True):
+                d, r = run_hook(cmd, run_in_background=bg)
+                self.assertEqual(d, "ask",
+                                 "expected ask for %r (bg=%s)" % (cmd, bg))
+                self.assertIn("arm a Monitor", r)
+                self.assertNotIn("run_in_background", r)
 
     def test_backgrounded_reasons_use_the_detached_wording(self):
         d, r = run_hook("sleep 600", run_in_background=True)
@@ -793,8 +807,8 @@ class PermissionModeTests(unittest.TestCase):
         self.assertIn("FOREGROUND_GUARD_OVERRIDE=<reason>", r)
         self.assertIn("friction-report", r)
         self.assertIn("github.com/karlkfi/claude-foreground-guard/issues", r)
-        # The fix the guard actually wants still leads the reason.
-        self.assertIn("run_in_background", r)
+        # The deny tail is appended to the fixes, not substituted for them.
+        self.assertIn("Monitor", r)
 
     def test_ask_carries_no_deny_tail(self):
         # An answerable prompt needs neither the escape hatch nor the

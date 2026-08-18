@@ -74,7 +74,8 @@ user which categories dominate their report, then apply the matching fix:
    watch/follow mode…". Fix the behavior: take **one** non-blocking snapshot
    (`gh pr checks <pr>` without `--watch`, `gh run view <id>`, `tail -n 100`,
    `kubectl logs --tail=100`, `kubectl get` once) instead of streaming, and
-   re-check next turn. Re-running the same call with `run_in_background: true`
+   re-check next turn, or arm a Monitor that exits when the run reaches a
+   terminal state. Re-running the same call with `run_in_background: true`
    does not quiet this category — the watch still occupies a task slot and the
    guard still prompts. If the flagged command is a **false positive** — a form
    you genuinely want to run live and don't want prompted — add a
@@ -119,6 +120,9 @@ Tell the user the cause(s) you found, then apply the habits that prevent them:
 - **Don't wait on a poll at all — snapshot and re-check next turn.**
   Backgrounding a poll is not the fix: `run_in_background: true` only exempts
   Class B (a registered slow command), where it is exactly what the guard wants.
+- **When the wait is unavoidable, arm a Monitor.** A Monitor whose script exits
+  once the condition flips wakes the session with a dated event and holds no
+  Bash task slot — the wait every Class A reason points at.
 - **Take one snapshot, not a live stream.** `gh pr checks <pr>` (no `--watch`),
   `gh run view <id>`, `tail -n 100`, `kubectl logs --tail=100`, `kubectl get`
   once. Re-check on the next turn if you need fresher state.
@@ -179,6 +183,9 @@ runs a known-slow command that its timeout would kill. To keep work flowing:
   defer the recheck to the next turn.
 - **Don't block on a bare `sleep N`.** Do the follow-up check on the next turn
   instead. A short startup-grace `sleep` below the floor (default 10s) is fine.
+- **Wait on a Monitor, not a Bash call.** When you truly need to be woken by a
+  condition flipping elsewhere, arm a Monitor whose script exits at that point:
+  the event arrives dated and no Bash task slot is held for the wait.
 - **Bound a deliberate wait with `timeout N …`.** An explicit bound is exempt —
   and the Bash tool's own timeout still backstops it.
 - **Set an adequate `timeout:` on known-slow Bash calls** (test suites, e2e runs,

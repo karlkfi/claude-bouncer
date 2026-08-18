@@ -56,11 +56,12 @@ The hook produces one of three outcomes per Bash call:
 
 - **ask** — Claude Code shows its standard permission prompt, with a reason
   that teaches the three fixes: take ONE non-blocking snapshot (`gh pr
-  checks <n>` without `--watch`, `tail -n 100` instead of `tail -f`), re-run
-  the same call with `run_in_background: true`, or bound the wait explicitly
-  with `timeout N ...`. On a call that is already backgrounded the Class A
-  reason drops that middle fix and names the other two. Class B asks name the
-  exact minimum: "set `timeout: 600000` on this Bash call, or run it in the
+  checks <n>` without `--watch`, `tail -n 100` instead of `tail -f`), arm a
+  Monitor whose script exits when the condition flips, or bound the wait
+  explicitly with `timeout N ...`. Backgrounding is not among them — a
+  detached poll prompts too, so a Class A reason that offered it would be
+  routing the agent into a second prompt. Class B asks name the exact
+  minimum: "set `timeout: 600000` on this Bash call, or run it in the
   background."
 - **deny** — in an [unattended permission mode](#unattended-permission-modes)
   (`auto`, `dontAsk`, `bypassPermissions`), or when config escalates a class
@@ -256,10 +257,9 @@ These pass untouched, by design:
   moves the wait off the main thread without removing it — it holds a task
   slot for the whole run and hands back output whose freshness the agent
   can't judge. Class A still prompts on a backgrounded call, with reasons
-  worded for a detached wait (they teach the snapshot and the `timeout N`
-  bound, not the `run_in_background` the call already used). A repo that
-  wants a specific watch form quiet in every mode can list it in
-  `poll.exempt_watch_patterns`.
+  worded for a detached wait; the fixes they teach are the same either way,
+  and `run_in_background` is not one of them. A repo that wants a specific
+  watch form quiet in every mode can list it in `poll.exempt_watch_patterns`.
 - **A trailing `&`** that detaches the blocking command (including a
   backgrounded subshell or loop). A mid-command `& ` exempts just that
   segment: `sleep 30 & make build` passes.
@@ -380,10 +380,10 @@ difference is where the fix lands:
 | `bypassPermissions` | leaves the run stalled on a prompt no one can answer |
 
 A `deny` blocks the same way but returns the reason to the agent, which
-reads the fix and retries with `run_in_background: true`, one snapshot, or a
-`timeout` bound — no human in the loop. Every deny also names the override
-escape hatch and points at the [friction report](#friction-report), so a
-wrong verdict gets reported rather than worked around.
+reads the fix and retries with one snapshot, a Monitor, or a `timeout` bound
+— no human in the loop. Every deny also names the override escape hatch and
+points at the [friction report](#friction-report), so a wrong verdict gets
+reported rather than worked around.
 
 Attended modes keep prompting: there is someone there to answer, and an ask
 is the lighter interruption. This mirrors branch-guard's non-interactive
@@ -435,8 +435,9 @@ failure directions follow from the guard's job:
 - Class B matches the command text as written; a slow command constructed at
   runtime (`make $TARGET`) won't match, and neither will one reached through
   a wrapper the segmenter doesn't peel.
-- The guard cannot start a background task for you — it can only teach the
-  fix and let the agent retry with `run_in_background: true`.
+- The guard cannot take the snapshot or arm the Monitor for you — it can only
+  teach the fix and let the agent retry. Monitor is a Claude Code tool; on a
+  surface that doesn't offer it the other two fixes still stand.
 
 ## Companion plugins
 

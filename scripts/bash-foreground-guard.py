@@ -10,9 +10,9 @@ Two classes of time-wasters, kept distinct in the code:
    bare `sleep N` waits at or above a configurable floor. The main thread —
    the one the user is talking to — sits blocked the whole time. The guard
    prompts (`ask` by default; config may escalate to `deny`) and teaches the
-   three fixes: one non-blocking snapshot, `run_in_background: true`, or an
-   explicit `timeout N` bound. A call that is already backgrounded still
-   prompts, with the middle fix dropped (see Exemptions).
+   three fixes: one non-blocking snapshot, a Monitor whose script exits when
+   the condition flips, or an explicit `timeout N` bound. Backgrounding is
+   not among them — a detached poll still prompts (see Exemptions).
 
 2. **Class B — slow command with an inadequate timeout.** A command the repo
    *knows* takes longer than the Bash tool's default 2-minute timeout
@@ -583,20 +583,19 @@ def deny_tail(mode):
 
 
 # cfg['backgrounded'] is runtime state, not config — main() sets it from the
-# payload. Class A findings word themselves around it: telling a call that is
-# already backgrounded to re-run with run_in_background is a fix it can't apply.
+# payload. Class A findings word the cost around it, but not the fixes: a
+# backgrounded poll prompts too, so `run_in_background` is never one of them.
 def _where(cfg):
     return 'in the background' if cfg.get('backgrounded') else 'in the foreground'
 
 
-def _fixups(cfg, alt):
-    if cfg.get('backgrounded'):
-        return ('Instead: (1) %s; or (2) bound the wait explicitly with '
-                '`timeout <seconds> ...`.' % alt)
-    return ('Instead: (1) %s; (2) re-run this same call with '
-            'run_in_background: true and check the task result later; or '
-            '(3) bound the wait explicitly with `timeout <seconds> ...`.'
-            % alt)
+# Monitor is the sanctioned way to wait on a condition that flips elsewhere:
+# the event arrives dated and no Bash task slot is held for the wait (#22).
+def _fixups(alt):
+    return ('Instead: (1) %s; (2) arm a Monitor whose script exits when the '
+            'condition flips — it wakes the session with a dated event and '
+            'holds no Bash task slot; or (3) bound the wait explicitly with '
+            '`timeout <seconds> ...`.' % alt)
 
 
 def finding_a(cfg, what, alt):
@@ -605,7 +604,7 @@ def finding_a(cfg, what, alt):
             'cannot be dated' if cfg.get('backgrounded')
             else 'blocks the session\'s main thread for the whole wait')
     msg = ('foreground-guard: %s — this %s. %s'
-           % (what, cost, _fixups(cfg, alt)))
+           % (what, cost, _fixups(alt)))
     if cfg['hint']:
         msg += ' This repo: %s' % cfg['hint']
     msg += ' ' + CONFIG_HINT
@@ -634,15 +633,11 @@ def finding_sandwich(cfg):
 def finding_sleep(cfg, secs):
     desc = ('an unresolvable duration (treated as long)' if secs is None
             else '~%g s' % secs)
-    if cfg.get('backgrounded'):
-        parked, retry = 'a background task', 'come back next turn'
-    else:
-        parked = 'the main thread'
-        retry = 'background the wait or come back next turn'
+    parked = 'a background task' if cfg.get('backgrounded') else 'the main thread'
     return finding_a(
         cfg, '`sleep` parks %s for %s' % (parked, desc),
         'skip the wait — do the follow-up check now, and if the thing is '
-        'not ready, %s' % retry)
+        'not ready, come back next turn')
 
 
 def finding_slow(cfg, what, min_ms, timeout_ms, timeout_was_set):
@@ -937,7 +932,7 @@ def main():
     # back to the agent by hand. In `dontAsk` Claude Code turns the ask into
     # its own generic deny, losing the reason entirely; in bypassPermissions
     # no one can answer it. Deny instead: equally blocking, and the reason is
-    # fed back so the agent self-corrects (snapshot / background / timeout).
+    # fed back so the agent self-corrects (snapshot / Monitor / timeout).
     if decision == 'ask' and mode in UNATTENDED_MODES:
         decision = 'deny'
     # The override is a deliberate request for that one prompt, so it
