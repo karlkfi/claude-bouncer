@@ -114,6 +114,8 @@ Measured on v1.10.0, the first release cut with the check in place: of 14 pull r
 
 `None` is a claim about the release notes, not about the code — it says "this PR needs no bullet." That is what keeps it checkable at tag time: a `None` sitting next to a diff that moves a decision is a mistake you can actually see, and it is the one failure CI cannot catch for you.
 
+**Check every harvested number against the commit it came from.** A note or a commit message is prose someone wrote days earlier, and editing it for the release's voice is compression — which is where a statistic quietly changes population. The `release-note` check cannot catch this: it verifies a note was *answered*, not that its claims survive being shortened. Measured on v1.10.0, published and then corrected in #165: the notes claimed "82% of outside-root script arguments" where #155 had measured "82% of outside-root **interpreter** script arguments", a larger set the figure was never taken on. Re-read each figure beside its source before the notes go out, and keep the qualifier even when it costs a word.
+
 To enumerate what shipped since the last tag, and to catch anything the harvest missed:
 
 ```
@@ -128,6 +130,12 @@ gh api repos/karlkfi/claude-workspace-guard/releases/generate-notes \
 ```
 
 Then write the intro, prune the bullets, and group them. Do not reach for `gh release create --generate-notes`: it publishes an unreviewed body and leaves no file behind.
+
+### Run the prose passes before the notes PR, not after publishing
+
+The notes are the most-read prose the project ships, and they are the one artifact no CI check reads for meaning. Put the draft through `verify-claims` (every number against its source, per above), `readability` (no shorthand a reader outside this repo cannot resolve — `SPEC` and "corpus" both got through on v1.10.0), `deslop`, and `semantic-remediation` before opening the notes PR.
+
+Two of those repay the time on their own. Baseline `deslop` against a previously shipped notes file rather than reading its score as an absolute, since this repo's house style is denser than the linter's defaults. And a published body is corrected only by fixing the file, landing it, and re-publishing with `--notes-file` — three steps and a second PR, which is the cost of skipping this one.
 
 ## Anti-patterns to watch for
 
