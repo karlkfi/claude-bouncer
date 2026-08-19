@@ -346,10 +346,8 @@ def claude_code_dirs():
     its prompt. Returns the dirs that resolve; an unresolvable home yields none.
 
     The exemption keys on where a file REALLY is, because every file argument is
-    compared after ``realpath``. A skill symlinked out to a working repo (a
-    common layout: ``~/.claude/skills/foo -> ~/workspace/skills/foo``) therefore
-    resolves to the repo and is NOT exempt — correctly, since that is an ordinary
-    cross-repo read, and an exempt directory must not launder a symlink into one.
+    compared after ``realpath``, so the skills a user wrote need the extra pass
+    in :func:`installed_skill_targets` to reach it.
     """
     home = resolved_home()
     if home is None:
@@ -360,6 +358,43 @@ def claude_code_dirs():
             out.append(os.path.realpath(os.path.join(home, '.claude', name)))
         except OSError:
             pass
+    out.extend(installed_skill_targets(home))
+    return out
+
+
+def installed_skill_targets(home):
+    """Realpaths that the entries of ``~/.claude/skills/`` symlink out to.
+
+    Developing a skill in a repo and symlinking it in
+    (``~/.claude/skills/foo -> ~/workspace/skills/foo``) is how you install one
+    you wrote yourself. Because file arguments are compared after ``realpath``,
+    such a skill lands outside the dir above, so launching its own scripts
+    prompts while a bundled skill's are silent — the exemption would cover the
+    skills you got from someone else and not the ones you wrote (issue 167).
+    Resolving the entries restores the symmetry.
+
+    One level deep and resolved per invocation, so the exempt set is exactly the
+    skills installed right now: uninstalling one drops its exemption with no
+    stale state, and a link deeper inside a skill's tree widens nothing.
+
+    A target only counts when it holds a ``SKILL.md``, which is what makes a
+    directory a skill. Without that test the entry is a laundering slot — the
+    exact hazard `docs/plan/entry-operands.md` names — and ``ln -s /etc
+    ~/.claude/skills/x`` (``ln`` is unguarded, Q80) would exempt ``/etc`` for
+    reads. If Claude Code ever stops naming skills that way the targets simply
+    stop matching and revert to prompting, which is the safe direction.
+    """
+    out = []
+    try:
+        with os.scandir(os.path.join(home, '.claude', 'skills')) as entries:
+            for e in entries:
+                if not e.is_symlink():
+                    continue
+                rp = os.path.realpath(e.path)
+                if os.path.isfile(os.path.join(rp, 'SKILL.md')):
+                    out.append(rp)
+    except OSError:
+        pass
     return out
 
 

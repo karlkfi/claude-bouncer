@@ -63,9 +63,10 @@ deny   rm <main>/root.txt              deny
 ## Why the scoping is load-bearing
 
 Entry semantics must not reach reads. `claude_code_dirs()` exempts
-`~/.claude/skills/` for reads and its docstring is explicit that the exemption
-keys on where a file really is, so an exempt directory cannot launder a symlink
-into one. Stop resolving the final component for reads and
+`~/.claude/skills/` for reads, and every file argument is compared after
+`realpath`, so an entry that links elsewhere is judged by where it really points
+— issue 167 exempts a link's target only where that target is itself an
+installed skill. Stop resolving the final component for reads and
 `cat ~/.claude/skills/x`, where `x` links anywhere at all, becomes an `allow`.
 `ENTRY_OPERANDS` names two write commands, and nothing consults it on a read
 path.

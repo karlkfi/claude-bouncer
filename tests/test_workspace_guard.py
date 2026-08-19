@@ -1140,6 +1140,26 @@ class AllowedReadPrefixesUnitTests(unittest.TestCase):
         # realpath of /fake/read-allow-test on most systems = itself
         self.assertTrue(any(p.endswith("read-allow-test") for p in prefixes))
 
+    def test_installed_skill_targets_resolves_only_symlinked_skills(self):
+        # Issue 167: a skill developed in a repo and symlinked in resolves out
+        # of the exempt dir. A real entry needs nothing — the dir itself covers
+        # it — and a link to something that isn't a skill is a laundering slot.
+        with tempfile.TemporaryDirectory() as td:
+            home = os.path.realpath(td)
+            skills = os.path.join(home, ".claude", "skills")
+            repo = os.path.join(home, "workspace", "skills", "mine")
+            os.makedirs(skills)
+            os.makedirs(repo)
+            open(os.path.join(repo, "SKILL.md"), "w").close()
+            os.mkdir(os.path.join(skills, "bundled"))
+            os.symlink(repo, os.path.join(skills, "mine"))
+            os.symlink(home, os.path.join(skills, "everything"))
+            self.assertEqual(guard.installed_skill_targets(home), [repo])
+
+    def test_installed_skill_targets_without_a_skills_dir(self):
+        with tempfile.TemporaryDirectory() as td:
+            self.assertEqual(guard.installed_skill_targets(td), [])
+
     def test_claude_projects_dir_without_home_env(self):
         # Q40: the hook runs from cmd.exe on Windows, where HOME is unset. The
         # prefix must survive that — expanduser reads USERPROFILE there, and the
@@ -6206,6 +6226,41 @@ class InstalledExtensionReadExemptionTests(unittest.TestCase):
     def test_an_unrelated_outside_script_is_not_exempt(self):
         p = os.path.join(self.home, "elsewhere", "run.sh")
         self.assertIn(self._decision(f"bash {sh(p)}"), ("ask", "deny"))
+
+    # A skill you wrote yourself is installed by symlinking the repo it lives
+    # in, which resolves out of the dir above (issue 167). It gets the same
+    # read exemption a bundled one does, and nothing more.
+    def _install_symlinked_skill(self, name="mine", manifest=True):
+        repo = os.path.join(self.home, "workspace", "skills")
+        os.makedirs(os.path.join(repo, name))
+        if manifest:
+            open(os.path.join(repo, name, "SKILL.md"), "w").close()
+        os.symlink(os.path.join(repo, name),
+                   os.path.join(self.home, ".claude", "skills", name))
+        return repo
+
+    def test_reading_a_symlinked_skills_script_is_exempt(self):
+        repo = self._install_symlinked_skill()
+        p = os.path.join(repo, "mine", "lint.py")
+        self.assertNotIn(self._decision(f"python3 {sh(p)}"), ("ask", "deny"))
+        self.assertNotIn(self._decision(f"cat {sh(p)}"), ("ask", "deny"))
+
+    def test_writing_into_a_symlinked_skill_is_not_exempt(self):
+        repo = self._install_symlinked_skill()
+        p = os.path.join(repo, "mine", "lint.py")
+        self.assertIn(self._decision(f"cp ./in.txt {sh(p)}"), ("ask", "deny"))
+
+    def test_a_symlinked_skill_exempts_its_target_and_not_its_neighbours(self):
+        repo = self._install_symlinked_skill()
+        p = os.path.join(repo, "theirs", "lint.py")
+        self.assertIn(self._decision(f"cat {sh(p)}"), ("ask", "deny"))
+
+    def test_an_entry_that_is_not_a_skill_launders_nothing(self):
+        # No SKILL.md at the target, so the link is a slot someone dropped a
+        # path into rather than a skill anyone installed.
+        repo = self._install_symlinked_skill(manifest=False)
+        p = os.path.join(repo, "mine", "lint.py")
+        self.assertIn(self._decision(f"cat {sh(p)}"), ("ask", "deny"))
 
 
 class ShellCBodyAnalysisTests(unittest.TestCase):

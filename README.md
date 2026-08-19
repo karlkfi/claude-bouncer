@@ -1244,11 +1244,19 @@ load-bearing rather than a convenience: a hook or skill routinely launches its
 own scripts by absolute path, so without the exemption every such launch would
 prompt.
 
-The exemption keys on where a file **really** is, because file arguments are
-compared after `realpath`. A skill symlinked out to a working repo
-(`~/.claude/skills/foo -> ~/workspace/skills/foo`, a common layout) resolves to
-the repo and is *not* exempt — correctly, since that is an ordinary cross-repo
-read, and an exempt directory must never launder a symlink into one.
+File arguments are compared after `realpath`, so a skill you wrote yourself
+would fall outside those dirs: you install one by symlinking the repo it lives
+in (`~/.claude/skills/foo -> ~/workspace/skills/foo`, a common layout), and the
+files resolve to the repo. The entries of `~/.claude/skills/` are therefore
+resolved one level deep and their targets exempted too, so a skill you wrote is
+as quiet as one you installed from someone else.
+
+Only the directory's own entries are followed, and only to a target holding a
+`SKILL.md` — what makes a directory a skill in the first place. So the exempt
+set is exactly the skills installed right now: uninstalling one drops its
+exemption, a symlink deeper inside a skill's tree widens nothing, and an entry
+pointing at somewhere that is not a skill (`~/.claude/skills/x -> /etc`) gets
+no exemption at all.
 
 You can extend the defaults with additional prefixes:
 
@@ -1297,31 +1305,28 @@ started after it.
 ```json
 {
   "env": {
-    "WORKSPACE_GUARD_READ_ALLOW_PREFIXES": "/Users/me/.claude/skills"
+    "WORKSPACE_GUARD_READ_ALLOW_PREFIXES": "/Users/me/reference/api-specs"
   }
 }
 ```
 
+Name the directory the files **really** live in. A path that only points at one
+buys nothing: entries are resolved with `realpath` before they are compared, so
+`~/.claude/skills` as a value covers a symlinked skill no better than it covers
+a bundled one — and both are built-in defaults already.
+
 **Scope it to the narrowest file that covers the work.** A project's
 `.claude/settings.json` (or `.claude/settings.local.json`, if it shouldn't be
 checked in) applies only to sessions in that project; `~/.claude/settings.json`
-applies to every session on the machine.
+applies to every session on the machine, permanently — a much wider surface
+than the handful of prompts it usually saves.
 
-That difference decides the two cases people reach for a read-exempt prefix on
-`~/.claude/skills/`:
-
-- **Authoring a skill** — verifying an install, or diffing the installed copy
-  against the source (`diff ~/.claude/skills/x/SKILL.md x/SKILL.md`). This scopes
-  cleanly: the work sits in one repo, so a project-level `settings.json` there
-  covers it and changes nothing elsewhere. Weigh it against what the prompts are
-  telling you, though — those commands exist to reach *outside* the workspace, so
-  exempting the prefix silences the very check you're running.
-- **Reading a skill's rules mid-task** — this happens in whatever repo you're
-  working in, so no project-level setting covers it and only
-  `~/.claude/settings.json` does. That leaves the exemption on in every session
-  on the machine, permanently — a much wider surface than the handful of prompts
-  it saves. Invoke the skill instead of reading its `SKILL.md`: the harness loads
-  skills itself, and that path never reaches this hook.
+Before adding one, check that the prompts aren't telling you something. A
+command that reaches outside the workspace on purpose is what this hook exists
+to surface, so exempting its prefix silences the check you are running. And a
+skill's own rules never need a prefix: invoke the skill rather than reading its
+`SKILL.md`, since the harness loads skills itself and that path never reaches
+this hook.
 
 ### Outside-workspace ask vs. deny
 
