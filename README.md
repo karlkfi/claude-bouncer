@@ -115,6 +115,8 @@ make --version | head -1                # a capability probe
 shellcheck --version | grep 0.11        # probes are structural, not per-tool
 git show origin/main:CLAUDE.md | grep -n "make check"
 git commit -m "fix: make check | tail was reporting EXIT=0"
+git stash list | head                   # a read verb, so this is a read
+git tag --sort=-v:refname | head -5     # a listing flag, so this is a read
 make check; git tag -l                  # a read, so there is nothing to gate
 make check; kubectl rollout status web
 ```
@@ -127,11 +129,25 @@ every `git show`, `grep`, and commit message that merely *names* the command. A
 heredoc body is data, so a piped gate quoted in one is text; no rule handles that
 case, the parser does.
 
-The last two are the read forms of subcommands that also write. `git tag -a`
+The last four are the read forms of subcommands that also write. `git tag -a`
 publishes and `git tag -l` lists; `kubectl rollout restart` rolls and `kubectl
-rollout status` waits. Both classifiers screen `exempt`, so the reads are
-registry rows rather than special cases — and `kubectl rollout status` stays a
-**gate**, because a pipe still swallows the answer it waited for.
+rollout status` waits. Neither classifier can tell them apart from the
+subcommand alone, so the split is made two ways, both of which hold for gates
+added later:
+
+- **A read verb in the subcommand path** — `list`, `ls`, `show`, `view`,
+  `history` — reports state and changes none, so it is neither a gate nor a
+  publish. Recognized structurally, so `git stash list`, `git worktree list`,
+  and `kubectl rollout history` need no rows of their own. `status` is
+  deliberately not one of them: `kubectl rollout status` waits for a condition
+  and reports it as an exit code, so it stays a **gate** — a pipe still swallows
+  the answer it waited for.
+- **Where no verb splits them, the write forms are what gets registered.**
+  `git tag --sort` lists and `git tag -a` publishes, and git grows listing flags
+  every release while tag-creation flags stay put. So `gates` and `mutators`
+  name the creating and deleting forms, and everything else is a read by
+  default — enumerating the listing flags is the side that goes stale
+  ([#19](https://github.com/karlkfi/claude-pipe-guard/issues/19)).
 
 Capability probes (`--version`, `--help`, `-V`, `-h`) are recognized
 structurally for every gate rather than by per-tool exemptions — a per-tool
@@ -321,7 +337,7 @@ A project extends them with its own `.claude/pipe-guard.json`:
 | Key | What it does |
 |---|---|
 | `gates` | Commands whose exit status **is** the answer. Drives all three rules. |
-| `exempt` | Wins over **both** `gates` and `mutators`. For informational targets whose output, not status, is the point — including the read form of a subcommand that also writes (`git tag -l` beside `git tag -a`). |
+| `exempt` | Wins over **both** `gates` and `mutators`. For informational targets whose output, not status, is the point (`make print-config`). Read forms need no row when a read verb names them. |
 | `mutators` | State-changing commands. Drives rule 3 only — the `;`-before-a-state-change case. |
 | `replace` | `true` takes full control instead of extending the defaults. |
 
@@ -336,9 +352,9 @@ works unchanged.
 Point `PIPE_GUARD_REGISTRY` at a file to override the shipped defaults
 wholesale.
 
-Do not add per-tool `--version`/`--help` exemptions — probes are recognized
-structurally for every gate, so a per-tool pattern fixes one tool and leaves the
-class.
+Do not add per-tool `--version`/`--help` exemptions, or per-tool rows for a
+`list`/`show` read — both shapes are recognized structurally for every gate, so
+a per-tool pattern fixes one tool and leaves the class.
 
 ## Friction report
 

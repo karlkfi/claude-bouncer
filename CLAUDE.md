@@ -107,9 +107,9 @@ head. Then add table cases in **both** directions: the gate piped (must deny)
 and something that merely names it (must stay silent). A gate with only a
 positive case is how a rule starts denying `git log`.
 
-Do not add per-tool `--version`/`--help` exemptions. Probes are recognized
-structurally for every gate; a per-tool pattern fixes one tool and leaves the
-class.
+Do not add per-tool `--version`/`--help` exemptions, or a per-tool row for a
+`list`/`show` read. Both shapes are recognized structurally for every gate; a
+per-tool pattern fixes one tool and leaves the class.
 
 ## Adding a mutator
 
@@ -118,11 +118,18 @@ outward-facing operations — publish, push, apply, deploy. The rule's value is
 that `make check; git push` is unambiguously wrong; widening `mutators` to
 ordinary local commands turns it into noise.
 
-A mutator is screened the same way a gate is: `exempt` wins over it, and a
-capability probe is not a state change. So when a subcommand has both a read
-form and a write form — `git tag -l` beside `git tag -a`, `kubectl rollout
-status` beside `kubectl rollout restart` — name the write forms in `mutators`
-where the subcommand allows it, and put the read forms in `exempt` where it does
-not. Getting this wrong denies a pure read as a publish, and that denial has no
-correct rewrite: there is nothing for `&&` to gate ([#11](https://github.com/karlkfi/claude-pipe-guard/issues/11)).
+A mutator is screened the same way a gate is: `exempt` wins over it, a
+capability probe is not a state change, and neither is a read. Getting this
+wrong denies a pure read as a publish, and that denial has no correct rewrite:
+there is nothing for `&&` to gate ([#11](https://github.com/karlkfi/claude-pipe-guard/issues/11)).
+
+So when a subcommand has both forms — `git tag -l` beside `git tag -a`,
+`kubectl rollout status` beside `kubectl rollout restart` — name the **write**
+forms and let the rest fall through as reads. Never enumerate the read forms:
+that list is the one git lengthens every release, and the missing entries are
+denials with no rewrite ([#19](https://github.com/karlkfi/claude-pipe-guard/issues/19)).
+A read verb in the subcommand path (`list`, `ls`, `show`, `view`, `history`) is
+already screened structurally for every gate, so `git stash list` needs no row;
+`status` is deliberately not one of them, because `kubectl rollout status`
+reports its answer as an exit code and a pipe really does swallow it.
 
