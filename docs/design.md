@@ -164,66 +164,37 @@ the gate's status; `make check > log || echo failed` throws it away.
 rather than a guess, in both this rule and the parser. A guard that fabricates
 denials on shapes it does not understand gets uninstalled.
 
-## Why the repo-state checks live here
-
-1.x ruled them out of scope, on the argument that a push onto a moved base
-belongs with `claude-branch-guard` and an overlapping PR with
-`claude-pr-sentinel`. Running them that way is what settled it
-([#14](https://github.com/karlkfi/claude-pipe-guard/issues/14)). A repo-local
-hook carried both, denied the same two commands pipe-guard already denies, in
-near-identical text — and because a deny from either blocks the call, a
-break-glass needed both override variables set at once. Every documented escape
-hatch in that repo named only one of them.
-
-Two `PreToolUse` hooks on every Bash call, two override variables, and a config
-split down the middle is a worse answer than one check in the wrong conceptual
-box. Both commands are already in `gates`, the segmentation is already here, and
-deny-with-reason-to-the-model is right for both, because the fix is a rewrite of
-the command.
-
-What the Go original got wrong first, and this carries from the start:
-
-**Path intersection is too coarse.** Two edits at opposite ends of one large
-file cannot collide. Reading that as a collision cost three overrides in two
-days before the original narrowed it to line ranges. Both sides are read from
-the diff's **pre-image** side, so two diffs taken from a shared ancestor are
-numbered in that ancestor; post-image numbers are each side's own and mean
-nothing to the other.
-
-**A range spans its context.** git carries three lines either side of a hunk, so
-two edits six lines apart share one and the merge is not free. `hunk_range`
-widens by that much, in the one place the width is stated.
-
-**A merge-driver path is discounted, but not unconditionally on the push
-check.** `overlap_ignore` exists because a path with a custom merge driver is
-contended by every branch, so counting its ranges would fire always. A driver
-still refuses some merges — a row deleted on one side and edited on the other —
-so when an ignored path is in both change sets, `git merge-tree --write-tree`
-decides. git declining to answer (no `--write-tree` before 2.38, a shallow
-clone) reads as no information, and the path is discounted.
-
-**A release branch is not a stale PR branch.** Telling `release-1.5` to rebase
-onto `main` publishes everything merged since the tag: a wrong answer, not a
-false positive. Nothing in the commit graph separates the two — both sit behind
-the base and ahead of the fork point — so the branch name is the only signal
-there is, which is why it is configuration with a default list rather than a
-heuristic.
-
-**The repo root comes from the session's cwd**, not from this file's location.
-In a worktree the hook is the launch checkout's, and reading the repo around it
-reports overlaps the session's branch does not have.
-
-**Both probes fail silent, and the fetches are capped.** Offline, an old git, a
-rate-limited token: a missed catch, never a blocked command. Ranges need a `gh
-pr diff` per PR that already shares a path, so three are fetched and the rest
-fall back to a path-only finding — marked as such in the denial rather than
-passed off as a range match.
-
-This is the only place the guard shells out, which is why it is off unless a
-project's own registry carries the key. A repo that never asked for it pays
-nothing, and the three status rules stay pure.
-
 ## What is deliberately out of scope
+
+**Repo state: a moved base, and an overlapping open PR.** Two checks that read
+the repository rather than a status -- a `git push` onto a base whose new commits
+edit this branch's own line ranges, and a `gh pr create` where an open PR already
+changes them. 1.x ruled both out of scope on the argument that the first belongs
+with `claude-branch-guard` and the second with `claude-pr-sentinel`.
+[#14](https://github.com/karlkfi/claude-pipe-guard/issues/14) reversed that and
+[#16](https://github.com/karlkfi/claude-pipe-guard/issues/16) reversed it back,
+before either check appeared in a release.
+
+The reversal rested on parser reuse and hook count, and neither held. Both homes
+already parse the command the check needs: `pr-sentinel-hook.py` classifies a
+simple command as `pr_create`, `git_push`, or neither, and `branch-guard.py`
+reads `git push` down to `--force-with-lease=<dst>[:<expect>]` with
+`--no-force-with-lease` cancellation. And `Bash` already carries a `PreToolUse`
+hook from each of the three plugins, so moving a check between them adds none.
+What #14 actually established was that *duplicating* these checks is worse than
+one home -- a repo-local hook denying the same commands needed both override
+variables set at once, and every documented escape hatch named one. That is an
+argument against two owners, not against the other owner.
+
+Moving them costs something real, which is worth stating rather than
+discovering: `base_ref` and `overlap_ignore` were shared between the two checks
+and are now configured in two plugins. `overlap_ignore` is the one likelier to
+drift, being inherently project-specific. The reasoning behind the parts that
+were hard -- line ranges rather than path intersection, a hunk widened by its
+context, a merge-driver path discounted conditionally, a release branch never
+told to rebase, the root read from the session's `cwd` -- moved with the code to
+[branch-guard#91](https://github.com/karlkfi/claude-branch-guard/issues/91) and
+[pr-sentinel#71](https://github.com/karlkfi/claude-pr-sentinel/issues/71).
 
 **Gate-then-gate with `;`.** `make lint; make test` really does lose
 `make lint`'s status. Rule 3 is scoped to state-changing commands because that
