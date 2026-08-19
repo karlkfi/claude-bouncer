@@ -10,7 +10,7 @@
       "author": { "name": "Karl" },
       "source": {
         "source": "github",
-        "repo": "karlkfi/claude-pipe-guard"
+        "repo": "karlkfi/claude-exit-status-guard"
       }
     }
   ]
