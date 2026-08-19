@@ -640,6 +640,38 @@ def head_words(seg):
 # `--version` is the way out of it.
 PROBE_FLAGS = frozenset({'--version', '--help', '-V', '-h', 'version', '--usage'})
 
+# Sub-subcommands that report state without changing any: their output is the
+# point, so there is no status for a pipe to swallow and nothing for `&&` to
+# gate. Recognised structurally for every gate, the same way probes are --
+# `git stash list`, `git worktree list`, `gh release list`, and `kubectl rollout
+# history` are one shape, and a per-tool exempt row fixes one and leaves the
+# class (#19).
+#
+# `status` is deliberately absent: `kubectl rollout status` waits for a
+# condition and reports it as an exit code, so a pipe really does swallow the
+# answer. It stays a gate, and stays out of `mutators` by not being named there.
+READ_WORDS = frozenset({'list', 'ls', 'show', 'view', 'history'})
+
+
+def is_read(words):
+    """Whether the subcommand path names a read verb.
+
+    Only from the third word on: at the second, a read verb is as likely to be
+    a `make` target or a branch name as a subcommand, and `make list` belongs in
+    the registry where its Makefile can be read. The scan stops at the first
+    flag, so an operand is never mistaken for a subcommand -- `git commit -m
+    show` is a commit.
+    """
+    for i, word in enumerate(words):
+        if i < 2:
+            continue
+        if word.startswith('-'):
+            break
+        if word in READ_WORDS:
+            return True
+    return False
+
+
 # POSIX bracket classes, so a pattern copied from an ERE-based registry works
 # here. Python's `re` has no `[[:space:]]`; left untranslated it silently becomes
 # a character set of `:aceps` and the pattern matches the wrong things.
@@ -689,11 +721,12 @@ class Registry(object):
     def _matches(self, patterns, words):
         """Whether ``words`` are a registered, non-exempt, non-probe invocation.
 
-        Both screens apply to both lists. A probe prints and exits, so it is
-        neither a run whose status is at stake nor a state change. `exempt` is
-        where a subcommand's read form is told apart from its write form:
-        `git tag -l` and `git tag -a` match the same pattern otherwise, which had
-        rule 3 casting the write as the gate and the read as the publish (#11).
+        All three screens apply to both lists. A probe prints and exits, and a
+        read reports, so neither is a run whose status is at stake nor a state
+        change. Where the read verb is not in the subcommand path -- `git tag
+        --sort` lists as surely as `git stash list` does -- the split is made in
+        the registry instead, by naming the write forms and leaving the rest
+        unregistered (#11, #19).
         """
         if not words:
             return False
@@ -703,7 +736,9 @@ class Registry(object):
         # Read from the parsed words rather than the joined head, so a flag
         # spelled inside a quoted argument stays one word: `git commit -m "bump
         # --version output"` is a commit, and still a gate.
-        return not any(w in PROBE_FLAGS for w in words[1:])
+        if any(w in PROBE_FLAGS for w in words[1:]):
+            return False
+        return not is_read(words)
 
     def is_gate(self, words):
         """Whether these words are a registered gate whose status is the answer:

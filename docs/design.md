@@ -94,10 +94,9 @@ the state change — exactly backwards — and denied a listing on the grounds t
 a failed check still publishes. Reading a tag publishes nothing, so that denial
 had no correct rewrite: `&&` gates a state change, and there was none.
 
-The fix is that `is_mutator` runs the two screens `is_gate` already ran —
-`exempt` wins, and a probe is not a state change — so a read form is expressed
-as a registry row rather than as code. Where the subcommand allows it, the write
-forms are named directly instead, which is how `kubectl rollout` splits: only
+The fix is that `is_mutator` runs the screens `is_gate` already ran — `exempt`
+wins, and a probe is not a state change. Where the subcommand allows it, the
+write forms are named directly, which is how `kubectl rollout` splits: only
 `restart`, `undo`, `pause`, and `resume` are mutators. That leaves `rollout
 status` a **gate**, which it should be — it waits for a condition, so a pipe
 still swallows the answer even though the command changes nothing.
@@ -105,6 +104,32 @@ still swallows the answer even though the command changes nothing.
 This does not widen what slips through. The property rule 3 protects is that a
 gate's failure must not be ignored before a state change, and a read is not a
 state change.
+
+## Why the read/write split is not an enumeration of read forms
+
+The first version of that split listed `git tag`'s read forms in `exempt`, one
+flag at a time. The list was shorter than git's — `--sort`, `--column`, `-i`,
+`--omit-empty`, and `--format` were missing — so a tag listing was still read as
+a gate and denied for being piped, and the workaround was to add a redundant
+`--list` to a command already in list mode. `git stash list` and `git worktree
+list` had no row at all: the listing exemption next to them was `gh`-only.
+
+Enumerating reads is the wrong side to enumerate, for the same reason a per-tool
+`--version` row is: it fixes what got reported and leaves the class. Both halves
+are inverted now.
+
+- A **read verb in the subcommand path** — `list`, `ls`, `show`, `view`,
+  `history` — is recognized for every gate, the way probe flags are. It is read
+  from the third word on and the scan stops at the first flag, so `git commit -m
+  show` is a commit and a `make` target named `show` is still a gate. The cost
+  is a branch or file named `list` going unscreened after `git checkout`, which
+  is a missed catch rather than a denial with no rewrite.
+- `status` is deliberately not a read verb. `kubectl rollout status` waits for a
+  condition and reports it as an exit code, so a pipe swallows a real answer.
+- Where no verb splits the two — `git tag --sort` lists, `git tag -a` publishes
+  — the **write forms** are what `gates` and `mutators` name, and everything
+  else is a read by default. git grows listing flags every release and grows
+  tag-creation flags never, so this is the side that does not go stale.
 
 ## Why stdlib Python, given the prior art
 

@@ -359,6 +359,56 @@ CASES = [
     ('kubectl rollout status is still a gate',
      'kubectl rollout status deploy/foo | tail -5', False, True,
      "exit status is the filter's"),
+
+    # --- Read forms the enumeration missed (#19) -----------------------------
+    # `git tag`'s listing flags were named one at a time, and git has more of
+    # them than the row did: `--sort` and friends were read as gates and denied
+    # for being piped. The write forms are registered now and the rest is a
+    # read, so the side that grows every git release is the unregistered one.
+    ('git tag --sort lists', 'git tag --sort=-v:refname | head -5',
+     False, False, ''),
+    ('git tag --column lists', 'git tag --column | head', False, False, ''),
+    ('git tag -i lists', 'git tag -i | head', False, False, ''),
+    ('git tag --omit-empty lists', 'git tag --omit-empty | head',
+     False, False, ''),
+    # Quoted, which is how anyone writes it. Unquoted, `(` splits the segment
+    # and the head truncates before the gate -- silence for the wrong reason.
+    ('git tag --format lists', 'git tag --format=\'%(refname)\' | head -3',
+     False, False, ''),
+    ('git tag --sort before a state change is still a read',
+     'make check; git tag --sort=-v:refname', False, False, ''),
+    # `git stash` and `git worktree` had no read exemption at all: the `list`
+    # row was `gh`-only. A read verb in the subcommand path is structural now.
+    ('git stash list', 'git stash list | head', False, False, ''),
+    ('git stash show', 'git stash show -p | head', False, False, ''),
+    ('git worktree list', 'git worktree list | head', False, False, ''),
+    ('git worktree list before a state change',
+     'make check; git worktree list', False, False, ''),
+
+    # The other direction. Every write form of the same three subcommands, and
+    # the two shapes an over-broad read screen would swallow: a read verb in an
+    # operand, and one that is a target name rather than a subcommand.
+    ('git tag -a is still a gate', 'git tag -a v1.0.0 -m release | tee log',
+     False, True, "exit status is the filter's"),
+    ('git tag with a name is still a gate', 'git tag v1.0.0 | tee log',
+     False, True, ''),
+    ('bundled write flags write', 'make check; git tag -am release v1.0.0',
+     False, True, 'is sequenced before'),
+    ('long write flags write', 'make check; git tag --annotate v1 --message x',
+     False, True, ''),
+    ('git tag -s writes', 'make check; git tag -s v1.0.0 -m release',
+     False, True, ''),
+    ('git tag --delete writes', 'make check; git tag --delete v1.0.0',
+     False, True, ''),
+    ('git stash is still a gate', 'git stash | tee log', False, True, ''),
+    ('git stash push is still a gate', 'git stash push | tee log',
+     False, True, ''),
+    ('git worktree add is still a gate', 'git worktree add ../wt | tee log',
+     False, True, ''),
+    ('a read verb as an operand is not a read',
+     'make check; git commit -m show', False, True, 'is sequenced before'),
+    ('a make target named show is not a read', 'make show | tail',
+     False, True, "exit status is the filter's"),
 ]
 
 
