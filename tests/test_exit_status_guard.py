@@ -1,4 +1,4 @@
-"""Table-driven tests for the pipe-guard decision logic.
+"""Table-driven tests for the exit-status-guard decision logic.
 
 Both directions are asserted because both fail silently. A rule that stops
 matching lets the original bug back in: a failing gate piped into `tail` reports
@@ -16,13 +16,13 @@ import tempfile
 import unittest
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SCRIPT = os.path.join(REPO, 'scripts', 'bash-pipe-guard.py')
-REGISTRY = os.path.join(REPO, 'pipe-guard.json')
+SCRIPT = os.path.join(REPO, 'scripts', 'bash-exit-status-guard.py')
+REGISTRY = os.path.join(REPO, 'exit-status-guard.json')
 
 
 def load_module():
     """Import the hook script, whose filename is not a valid module name."""
-    spec = importlib.util.spec_from_file_location('bash_pipe_guard', SCRIPT)
+    spec = importlib.util.spec_from_file_location('bash_exit_status_guard', SCRIPT)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -154,29 +154,37 @@ CASES = [
 
     # --- The break-glass prefix ----------------------------------------------
     ('override on a piped gate',
-     'PIPE_GUARD_OVERRIDE=want-the-output-only make check | tail -30',
+     'EXIT_STATUS_GUARD_OVERRIDE=want-the-output-only make check | tail -30',
      False, False, ''),
     ('override on a lost background status',
-     'PIPE_GUARD_OVERRIDE=log-only make check > tmp/c.log 2>&1; echo "EXIT=$?"',
+     'EXIT_STATUS_GUARD_OVERRIDE=log-only make check > tmp/c.log 2>&1; echo "EXIT=$?"',
      True, False, ''),
     ('override on a PIPESTATUS read',
-     'PIPE_GUARD_OVERRIDE=demonstrating-the-bug echo $PIPESTATUS', False, False, ''),
+     'EXIT_STATUS_GUARD_OVERRIDE=demonstrating-the-bug echo $PIPESTATUS', False, False, ''),
     ('override as its own statement',
-     'PIPE_GUARD_OVERRIDE=scoped-to-this-call; make check | tail -5',
+     'EXIT_STATUS_GUARD_OVERRIDE=scoped-to-this-call; make check | tail -5',
      False, False, ''),
     ('quoted override value',
-     'PIPE_GUARD_OVERRIDE="reading output, not status" make check | tail -5',
+     'EXIT_STATUS_GUARD_OVERRIDE="reading output, not status" make check | tail -5',
      False, False, ''),
     # An empty value is the switch-it-off form, so it buys nothing.
-    ('empty override still denies', 'PIPE_GUARD_OVERRIDE= make check | tail -30',
+    ('empty override still denies', 'EXIT_STATUS_GUARD_OVERRIDE= make check | tail -30',
      False, True, ''),
     ('override named in a commit message',
-     'git commit -m "docs: PIPE_GUARD_OVERRIDE=x make check | tail is the escape"',
+     'git commit -m "docs: EXIT_STATUS_GUARD_OVERRIDE=x make check | tail is the escape"',
      False, False, ''),
     ('override quoted, gate really piped',
-     'echo "PIPE_GUARD_OVERRIDE=x" | make check | tail -5', False, True, ''),
+     'echo "EXIT_STATUS_GUARD_OVERRIDE=x" | make check | tail -5', False, True, ''),
     ('a different variable is not the override',
-     'PIPE_GUARD=x make check | tail -30', False, True, ''),
+     'EXIT_STATUS_GUARD=x make check | tail -30', False, True, ''),
+    ('the 1.x prefix still lifts a deny',
+     'PIPE_GUARD_OVERRIDE=want-the-output-only make check | tail -30',
+     False, False, ''),
+    ('empty 1.x prefix still denies',
+     'PIPE_GUARD_OVERRIDE= make check | tail -30', False, True, ''),
+    ('the 1.x prefix named in a commit message',
+     'git commit -m "docs: PIPE_GUARD_OVERRIDE=x was the 1.x escape hatch"',
+     False, False, ''),
 
     # --- Non-gate commands piped into filters --------------------------------
     ('git log', 'git log --oneline | head -5', False, False, ''),
@@ -494,7 +502,7 @@ class TestRegistry(unittest.TestCase):
     def test_project_file_extends_the_defaults(self):
         with tempfile.TemporaryDirectory() as root:
             os.makedirs(os.path.join(root, '.claude'))
-            with open(os.path.join(root, '.claude', 'pipe-guard.json'), 'w') as fh:
+            with open(os.path.join(root, '.claude', 'exit-status-guard.json'), 'w') as fh:
                 json.dump({'gates': [r'^bazelisk(\s|$)']}, fh)
             reg = pg.load_registry(root)
             self.assertTrue(pg.decide('bazelisk test //... | tail', False, reg))
@@ -504,11 +512,55 @@ class TestRegistry(unittest.TestCase):
     def test_project_file_can_replace_the_defaults(self):
         with tempfile.TemporaryDirectory() as root:
             os.makedirs(os.path.join(root, '.claude'))
-            with open(os.path.join(root, '.claude', 'pipe-guard.json'), 'w') as fh:
+            with open(os.path.join(root, '.claude', 'exit-status-guard.json'), 'w') as fh:
                 json.dump({'replace': True, 'gates': [r'^bazelisk(\s|$)']}, fh)
             reg = pg.load_registry(root)
             self.assertTrue(pg.decide('bazelisk test //... | tail', False, reg))
             self.assertFalse(pg.decide('make check | tail', False, reg))
+
+
+class TestLegacyNames(unittest.TestCase):
+    """The 1.x spellings still work, and the current ones still win.
+
+    The rename does not reach a downstream repo's `.claude/` directory or the
+    docs that tell a session which prefix to type, so both keep working. The
+    negative direction is the one that matters: a fallback that shadows the
+    current name would make a rename invisible to the repo that performed it.
+    """
+
+    def project(self, root, name, gates):
+        os.makedirs(os.path.join(root, '.claude'), exist_ok=True)
+        with open(os.path.join(root, '.claude', name), 'w') as fh:
+            json.dump({'gates': gates}, fh)
+
+    def test_the_1x_project_filename_is_still_read(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.project(root, 'pipe-guard.json', [r'^bazelisk(\s|$)'])
+            reg = pg.load_registry(root)
+            self.assertTrue(pg.decide('bazelisk test //... | tail', False, reg))
+
+    def test_the_current_filename_wins_over_the_1x_one(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.project(root, 'pipe-guard.json', [r'^bazelisk(\s|$)'])
+            self.project(root, 'exit-status-guard.json', [r'^pants(\s|$)'])
+            reg = pg.load_registry(root)
+            self.assertTrue(pg.decide('pants test :: | tail', False, reg))
+            self.assertFalse(pg.decide('bazelisk test //... | tail', False, reg),
+                             'the 1.x file must not be merged in as well')
+
+    def test_the_1x_registry_env_var_is_still_read(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, 'reg.json')
+            with open(path, 'w') as fh:
+                json.dump({'gates': [r'^pants(\s|$)']}, fh)
+            os.environ['PIPE_GUARD_REGISTRY'] = path
+            try:
+                reg = pg.load_registry()
+            finally:
+                del os.environ['PIPE_GUARD_REGISTRY']
+            self.assertTrue(pg.decide('pants test :: | tail', False, reg))
+            self.assertFalse(pg.decide('make check | tail', False, reg),
+                             'the named registry replaces the shipped one')
 
 
 class TestUnparseable(unittest.TestCase):
@@ -545,7 +597,7 @@ class TestPrecedence(unittest.TestCase):
                         ('make check; git push', False),
                         ('echo $PIPESTATUS', False)):
             with self.subTest(cmd):
-                self.assertIn('PIPE_GUARD_OVERRIDE=<reason>',
+                self.assertIn('EXIT_STATUS_GUARD_OVERRIDE=<reason>',
                               pg.decide(cmd, bg, reg))
 
 
@@ -697,8 +749,8 @@ class TestHookEndToEnd(unittest.TestCase):
         if not root:
             self.skipTest('no per-user scratch root on this platform')
         made_root = not os.path.isdir(root)
-        session = 'pipe-guard-suite-%d' % os.getpid()
-        project = os.path.join(root, 'pipe-guard-suite-project')
+        session = 'exit-status-guard-suite-%d' % os.getpid()
+        project = os.path.join(root, 'exit-status-guard-suite-project')
         path = os.path.join(project, session, 'scratchpad')
         os.makedirs(path, mode=0o700)     # Claude Code's root is per-UID private
         try:

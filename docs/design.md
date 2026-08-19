@@ -37,7 +37,7 @@ useful to whoever is holding the keyboard for the rewrite. That is the model.
 So every verdict is a deny, regardless of severity.
 
 The escape hatch has to reach the model too, which is why it is a command
-prefix (`PIPE_GUARD_OVERRIDE=<reason>`) rather than a setting: the model can
+prefix (`EXIT_STATUS_GUARD_OVERRIDE=<reason>`) rather than a setting: the model can
 apply it in the next turn without a round trip through the user.
 
 ## Why the segment head, and not the command string

@@ -1,4 +1,4 @@
-# pipe-guard
+# exit-status-guard
 
 **Guard rails for Claude Code shell commands whose exit status is the answer.**
 
@@ -20,9 +20,9 @@ reported accurately. The evidence was just incapable of showing failure. That is
 the whole class: not a wrong answer, but a check that could only ever come back
 green.
 
-pipe-guard is a `PreToolUse` hook on `Bash` that catches those shapes before the
-command runs, and tells **the model** why — so the fix lands in the rewrite
-rather than in a permission prompt you have to answer.
+exit-status-guard is a `PreToolUse` hook on `Bash` that catches those shapes
+before the command runs, and tells **the model** why — so the fix lands in the
+rewrite rather than in a permission prompt you have to answer.
 
 ## Contents
 
@@ -166,7 +166,7 @@ the same marketplace and plugin.
 
 ```
 /plugin marketplace add karlkfi/claude-pipe-guard
-/plugin install pipe-guard@pipe-guard
+/plugin install exit-status-guard@exit-status-guard
 ```
 
 **Claude Code for Claude Desktop** — use the **Customize** tab:
@@ -174,7 +174,7 @@ the same marketplace and plugin.
 1. Open the **Customize** tab and go to its plugins / marketplaces section.
 2. Add `karlkfi/claude-pipe-guard` as a marketplace (the repo at
    `https://github.com/karlkfi/claude-pipe-guard.git`).
-3. Find **pipe-guard** in that marketplace, install it, and make sure it's
+3. Find **exit-status-guard** in that marketplace, install it, and make sure it's
    enabled.
 
 **Plan to update by hand.** This is a third-party git marketplace, so an install
@@ -203,11 +203,64 @@ is the documented correct form and should run without comment.
 
 ## Upgrade
 
-pipe-guard installs from a GitHub marketplace, which Claude Code tracks at the
-repository's default branch (`main`). Claude Code auto-updates **official
-Anthropic marketplaces only**, so an install pins its version until you update
-it yourself. Concretely: a registry fix that stops a rule denying your ordinary
-work is invisible to anyone still pinned to the version they first installed.
+### 2.0.0 renamed the plugin: uninstall the old one
+
+`pipe-guard` became `exit-status-guard` in 2.0.0. `pipe` named one of the three
+always-on checks, and a gate backgrounded behind an `echo` or sequenced with `;`
+is an exit-status loss with no pipe in it.
+
+Claude Code keys an install on the plugin and marketplace names — the 1.x record
+is `pipe-guard@pipe-guard`, cached under
+`~/.claude/plugins/cache/pipe-guard/pipe-guard/1.0.1` — so the new name does not
+replace the old one. Both the plugin and the marketplace it came from changed
+name, so remove both and add them fresh.
+
+**Claude Code (CLI or IDE extension)** — run the slash commands:
+
+```
+/plugin uninstall pipe-guard@pipe-guard
+/plugin marketplace remove pipe-guard
+/plugin marketplace add karlkfi/claude-pipe-guard
+/plugin install exit-status-guard@exit-status-guard
+```
+
+**Claude Code for Claude Desktop / headless** — the same four, as CLI commands:
+
+```bash
+claude plugin uninstall pipe-guard@pipe-guard
+claude plugin marketplace remove pipe-guard
+claude plugin marketplace add karlkfi/claude-pipe-guard
+claude plugin install exit-status-guard@exit-status-guard
+```
+
+Then restart Claude Code, since the hook is registered at startup. Nothing breaks
+if you install the new one before removing the old: two `PreToolUse` hooks run,
+either can deny, and `PIPE_GUARD_OVERRIDE=` satisfies both.
+
+**Your configuration carries over, and you do not have to touch it.** The 1.x
+names all still work:
+
+| 1.x | 2.0.0 | Status |
+|---|---|---|
+| `PIPE_GUARD_OVERRIDE=` | `EXIT_STATUS_GUARD_OVERRIDE=` | Both work. The old one is undocumented and not going away. |
+| `.claude/pipe-guard.json` | `.claude/exit-status-guard.json` | Both read. The new name wins outright when both exist — they are never merged. |
+| `PIPE_GUARD_REGISTRY` | `EXIT_STATUS_GUARD_REGISTRY` | Both read, new name first. |
+
+Renaming your own files is optional. The one thing worth knowing: with both
+project registries present the 1.x one is ignored, not combined, so delete it
+once you have moved its patterns.
+
+The [friction report](#friction-report) reads both labels too, so history from
+before the rename still shows up.
+
+### Every release
+
+exit-status-guard installs from a GitHub marketplace, which Claude Code tracks
+at the repository's default branch (`main`). Claude Code auto-updates
+**official Anthropic marketplaces only**, so an install pins its version until
+you update it yourself. Concretely: a registry fix that stops a rule denying
+your ordinary work is invisible to anyone still pinned to the version they
+first installed.
 
 ### Update manually
 
@@ -217,9 +270,9 @@ plugin.
 **Claude Code (CLI or IDE extension)** — run the slash commands:
 
 ```
-/plugin marketplace update pipe-guard
-/plugin uninstall pipe-guard@pipe-guard
-/plugin install pipe-guard@pipe-guard
+/plugin marketplace update exit-status-guard
+/plugin uninstall exit-status-guard@exit-status-guard
+/plugin install exit-status-guard@exit-status-guard
 ```
 
 The first command re-fetches the marketplace manifest from the repo; the
@@ -231,8 +284,8 @@ upgrade an already-installed plugin — hence the explicit reinstall.
 Desktop's plugin state, so it works there and in any headless run:
 
 ```
-claude plugin marketplace update pipe-guard
-claude plugin update pipe-guard@pipe-guard
+claude plugin marketplace update exit-status-guard
+claude plugin update exit-status-guard@exit-status-guard
 ```
 
 `claude plugin update` updates in place (no uninstall/reinstall needed); it
@@ -254,7 +307,7 @@ it:
 
 ```json
 "extraKnownMarketplaces": {
-  "pipe-guard": {
+  "exit-status-guard": {
     "source": { "source": "git", "url": "https://github.com/karlkfi/claude-pipe-guard.git" },
     "autoUpdate": true
   }
@@ -285,8 +338,8 @@ differ only in audience:
   the command.
 
 The entire value of this guard is the explanation, and the explanation is only
-useful to whoever is holding the keyboard for the rewrite. So pipe-guard never
-asks, regardless of how minor the case looks.
+useful to whoever is holding the keyboard for the rewrite. So exit-status-guard
+never asks, regardless of how minor the case looks.
 
 The corollary is that it also never `allow`s. A command it has no objection to
 gets **silence**, which defers to your normal permission settings — the guard
@@ -300,7 +353,7 @@ Bash call must never be the reason one fails.
 ## The override escape hatch
 
 ```bash
-PIPE_GUARD_OVERRIDE=<reason> <command>
+EXIT_STATUS_GUARD_OVERRIDE=<reason> <command>
 ```
 
 An environment prefix, because that is the only form a PreToolUse hook can see:
@@ -308,9 +361,10 @@ it reads the command string, and the session cannot set a variable in the hook's
 own environment. This mirrors `WORKSPACE_GUARD_OVERRIDE` and
 `PROD_GUARD_OVERRIDE` in the sibling guards.
 
-The reason is required — a bare `PIPE_GUARD_OVERRIDE=` is the switch-it-off form
-and is ignored. The name only counts in command position: quoted in a commit
-message or echoed into a pipe it is an argument, and disables nothing.
+The reason is required — a bare `EXIT_STATUS_GUARD_OVERRIDE=` is the
+switch-it-off form and is ignored. The name only counts in command position:
+quoted in a commit message or echoed into a pipe it is an argument, and
+disables nothing.
 
 **A rule that needs an override routinely is a defect to fix in the registry,
 not to override.** Please
@@ -319,12 +373,13 @@ reaching for the prefix every time.
 
 ## Configuration
 
-Shipped defaults live in [`pipe-guard.json`](pipe-guard.json), covering make,
-npm/pnpm/yarn/bun, pytest/ruff/mypy, go, cargo, gradle/maven, dotnet, swift,
-bazel, cmake/ninja, rake/rspec, shellcheck, terraform, docker, kubectl, helm,
-`scripts/*.sh`-style repo scripts, and the `git`/`gh` verbs whose status matters.
+Shipped defaults live in [`exit-status-guard.json`](exit-status-guard.json),
+covering make, npm/pnpm/yarn/bun, pytest/ruff/mypy, go, cargo, gradle/maven,
+dotnet, swift, bazel, cmake/ninja, rake/rspec, shellcheck, terraform, docker,
+kubectl, helm, `scripts/*.sh`-style repo scripts, and the `git`/`gh` verbs
+whose status matters.
 
-A project extends them with its own `.claude/pipe-guard.json`:
+A project extends them with its own `.claude/exit-status-guard.json`:
 
 ```json
 {
@@ -349,7 +404,7 @@ suite) and matched against the segment head. POSIX bracket classes
 (`[[:space:]]`) are translated, so a pattern copied from an ERE-based registry
 works unchanged.
 
-Point `PIPE_GUARD_REGISTRY` at a file to override the shipped defaults
+Point `EXIT_STATUS_GUARD_REGISTRY` at a file to override the shipped defaults
 wholesale.
 
 Do not add per-tool `--version`/`--help` exemptions, or per-tool rows for a
@@ -361,9 +416,9 @@ a per-tool pattern fixes one tool and leaves the class.
 To see which rule fires most, and on which commands, run the friction report:
 
 ```
-/pipe-guard:friction-report              # last 7 days
-/pipe-guard:friction-report --since 24h
-/pipe-guard:friction-report --json       # machine-readable
+/exit-status-guard:friction-report              # last 7 days
+/exit-status-guard:friction-report --since 24h
+/exit-status-guard:friction-report --json       # machine-readable
 ```
 
 It is a **read-only** analyzer: it re-reads the decisions Claude Code already
@@ -373,16 +428,17 @@ recorded in your local session transcripts and adds no telemetry (see
 lost, and by triggering command.
 
 **Read the counts as false greens caught, not as a friction rate.** Unlike the
-sibling guards, pipe-guard emits nothing when it has no objection, and a hook run
-with no stdout leaves no transcript record — so there is no denominator. A high
+sibling guards, exit-status-guard emits nothing when it has no objection, and a
+hook run with no stdout leaves no transcript record — so there is no
+denominator. A high
 count is not by itself bad. What matters is the shape: the same command denied
 over and over is either a habit worth fixing upstream or a defect in the
 registry.
 
-The report also warns when your installed pipe-guard lags the version in the
+The report also warns when your installed exit-status-guard lags the version in the
 local marketplace clone. The comparison is local-only, so no warning means "no
 lag against the clone you have", not "up to date" — refresh with
-`claude plugin marketplace update pipe-guard` first if it has been a while.
+`claude plugin marketplace update exit-status-guard` first if it has been a while.
 
 You can also run the script directly:
 
@@ -416,9 +472,9 @@ python3 scripts/friction-report.py --since 30d --repo gateway --top 20
 
 ## Companion plugins
 
-pipe-guard watches the **evidence** boundary — whether a command's result can
-still be read after the shell is done with it. Sibling plugins guard different
-axes with the same secure-by-default design:
+exit-status-guard watches the **evidence** boundary — whether a command's
+result can still be read after the shell is done with it. Sibling plugins guard
+different axes with the same secure-by-default design:
 
 - [**workspace-guard**](https://github.com/karlkfi/claude-workspace-guard) — the
   **filesystem** boundary: prompts before guarded file commands
@@ -426,8 +482,8 @@ axes with the same secure-by-default design:
 - [**branch-guard**](https://github.com/karlkfi/claude-branch-guard) — the **git
   history** boundary: auto-approves safe git on feature branches, pauses commits
   and pushes to `main` and destructive git. It also owns the check for a `git
-  push` onto a base that has moved into this branch's own lines, which pipe-guard
-  carried briefly and never released.
+  push` onto a base that has moved into this branch's own lines, which
+  exit-status-guard carried briefly and never released.
 - [**prod-guard**](https://github.com/karlkfi/claude-prod-guard) — the
   **infrastructure blast-radius** boundary: denies mutations aimed at production
   contexts.

@@ -1,6 +1,6 @@
 """Drive the hook end to end through scripts/run-python-hook.cmd.
 
-The unittest suite runs bash-pipe-guard.py with sys.executable, so the launcher
+The unittest suite runs bash-exit-status-guard.py with sys.executable, so the launcher
 -- the thing hooks.json actually invokes -- is never executed. It is a
 cmd.exe/POSIX polyglot: two independent code paths, neither of them covered.
 
@@ -26,7 +26,7 @@ import sys
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOKS_JSON = os.path.join(REPO, 'hooks', 'hooks.json')
 LAUNCHER = os.path.join('scripts', 'run-python-hook.cmd')
-HOOK_SCRIPT = 'bash-pipe-guard.py'
+HOOK_SCRIPT = 'bash-exit-status-guard.py'
 
 DENY_COMMAND = 'make check 2>&1 | tail -30'
 CLEAN_COMMAND = 'make check > tmp/c.log 2>&1; echo "EXIT=$?"'

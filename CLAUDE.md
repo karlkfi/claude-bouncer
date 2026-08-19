@@ -1,18 +1,18 @@
 # Working in this repo
 
-pipe-guard is a Claude Code PreToolUse hook. It denies Bash commands whose exit
-status is the answer and gets discarded — piped into a filter, backgrounded
-behind an `echo`, or sequenced before a state change with `;`.
+exit-status-guard is a Claude Code PreToolUse hook. It denies Bash commands
+whose exit status is the answer and gets discarded — piped into a filter,
+backgrounded behind an `echo`, or sequenced before a state change with `;`.
 
 ## Layout
 
 | Path | What it is |
 |---|---|
-| `scripts/bash-pipe-guard.py` | The whole guard. Stdlib only. |
-| `pipe-guard.json` | Shipped gate registry. Data, not code. |
+| `scripts/bash-exit-status-guard.py` | The whole guard. Stdlib only. |
+| `exit-status-guard.json` | Shipped gate registry. Data, not code. |
 | `scripts/run-python-hook.cmd` | Cross-platform launcher. Do not "simplify" it. |
 | `scripts/friction-report.py` | Read-only transcript analyzer. |
-| `tests/test_pipe_guard.py` | Table-driven suite. Both directions asserted. |
+| `tests/test_exit_status_guard.py` | Table-driven suite. Both directions asserted. |
 | `tests/test_packaging.py` | Asserts the wired-up files ship runnable. |
 | `tests/launcher_check.py` | Drives the hook through the launcher. Not in `discover`. |
 | `hooks/hooks.json` | Wires the PreToolUse matcher on `Bash`. |
@@ -45,8 +45,17 @@ shipping in a release. They live in `claude-branch-guard` and
 checks need. Adding a rule here that is not about a lost exit status means
 reopening that argument, not extending the guard.
 
+**The 1.x names stay readable.** 2.0.0 renamed the plugin from `pipe-guard`, and
+`OVERRIDE_VARS`, `PROJECT_REGISTRY_NAMES`, and `REGISTRY_ENV_VARS` each carry the
+old spelling behind the current one. They are undocumented, not deprecated: the
+rename reaches this repo's docs and nothing in a downstream repo's `.claude/`
+directory or CLAUDE.md, and those name the 1.x forms. A project registry is
+resolved to one file rather than merged, so the current name wins outright and
+the fallback cannot shadow it -- `TestLegacyNames` asserts both halves, and the
+friction report reads both labels for the same reason.
+
 **Do not hand-roll shell parsing.** The segmentation layer in
-`bash-pipe-guard.py` is ported from `claude-workspace-guard` and is kept
+`bash-exit-status-guard.py` is ported from `claude-workspace-guard` and is kept
 structurally identical to its source so a fix there transfers by inspection. If
 a change has you writing quote-state tracking or bracket counting from scratch,
 stop — that is the documented failure mode for this class of tool, and it fails
@@ -102,7 +111,7 @@ that has never failed is a suite with no evidence behind it.
 
 ## Adding a gate
 
-Add the pattern to `pipe-guard.json`, anchored with `^`, matched against the
+Add the pattern to `exit-status-guard.json`, anchored with `^`, matched against the
 head. Then add table cases in **both** directions: the gate piped (must deny)
 and something that merely names it (must stay silent). A gate with only a
 positive case is how a rule starts denying `git log`.

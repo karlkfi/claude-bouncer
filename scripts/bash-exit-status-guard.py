@@ -16,7 +16,7 @@ a status goes missing, all of which turn a failure into a green:
 Every verdict is a `deny`, never an `ask`. A deny's reason is shown to the
 model, so the fix lands where the command gets rewritten; an ask goes to the
 user and the model never sees the hint. The break-glass is a command prefix,
-`PIPE_GUARD_OVERRIDE=<reason> <command>` -- an environment assignment, because
+`EXIT_STATUS_GUARD_OVERRIDE=<reason> <command>` -- an environment assignment, because
 that is the only form a PreToolUse hook can see (it reads the command string,
 and the session cannot set a variable in the hook's own environment).
 
@@ -681,7 +681,10 @@ POSIX_CLASSES = {
     '[:lower:]': 'a-z', '[:xdigit:]': '0-9A-Fa-f', '[:word:]': r'\w',
 }
 
-OVERRIDE_VAR = 'PIPE_GUARD_OVERRIDE'
+OVERRIDE_VAR = 'EXIT_STATUS_GUARD_OVERRIDE'
+# The 1.x spelling still works, undocumented. It is named in downstream repo
+# docs and CLAUDE.md files that the rename does not reach.
+OVERRIDE_VARS = (OVERRIDE_VAR, 'PIPE_GUARD_OVERRIDE')
 
 
 def translate_posix(pattern):
@@ -752,7 +755,13 @@ class Registry(object):
 
 
 DEFAULT_REGISTRY = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), '..', 'pipe-guard.json')
+    os.path.dirname(os.path.abspath(__file__)), '..', 'exit-status-guard.json')
+
+# Project registry names, newest first. A repo that still carries the 1.x name
+# keeps its patterns; naming both is cheaper than a migration nobody runs.
+PROJECT_REGISTRY_NAMES = ('exit-status-guard.json', 'pipe-guard.json')
+
+REGISTRY_ENV_VARS = ('EXIT_STATUS_GUARD_REGISTRY', 'PIPE_GUARD_REGISTRY')
 
 
 def _read_json(path):
@@ -765,16 +774,20 @@ def _read_json(path):
 
 
 def project_registry_path(cwd):
-    """`.claude/pipe-guard.json` under the project root, or None.
+    """`.claude/exit-status-guard.json` under the project root, or None.
 
     CLAUDE_PROJECT_DIR is the root Claude Code resolved; the payload's cwd is
-    the fallback for older CLIs.
+    the fallback for older CLIs. The 1.x filename is read when the current one
+    is absent, so both are never merged and the new name wins outright.
     """
     root = os.environ.get('CLAUDE_PROJECT_DIR') or cwd
     if not root:
         return None
-    path = os.path.join(root, '.claude', 'pipe-guard.json')
-    return path if os.path.isfile(path) else None
+    for name in PROJECT_REGISTRY_NAMES:
+        path = os.path.join(root, '.claude', name)
+        if os.path.isfile(path):
+            return path
+    return None
 
 
 def load_registry(cwd=''):
@@ -784,7 +797,9 @@ def load_registry(cwd=''):
     names one extra gate does not silently drop every default. `"replace": true`
     in that file opts into full control.
     """
-    base = _read_json(os.environ.get('PIPE_GUARD_REGISTRY') or DEFAULT_REGISTRY) or {}
+    override = next((os.environ[v] for v in REGISTRY_ENV_VARS
+                     if os.environ.get(v)), '')
+    base = _read_json(override or DEFAULT_REGISTRY) or {}
     local = _read_json(project_registry_path(cwd) or '') or {}
     if local.get('replace'):
         merged = local
@@ -853,21 +868,22 @@ def has_override(segs):
     """Whether a segment carries the break-glass assignment with a reason.
 
     An empty value does not count: the point of the prefix is that the caller
-    has to say why, and a bare `PIPE_GUARD_OVERRIDE= <command>` would be the
-    switch-it-off form.
+    has to say why, and a bare `EXIT_STATUS_GUARD_OVERRIDE= <command>` would be
+    the switch-it-off form.
 
     Only the LEADING assignment run of a segment is read, which is what makes
     the name asymmetric: a real assignment sits in command position, while the
     name quoted in a commit message or echoed into a pipe is an argument and
     disables nothing.
     """
-    prefix = OVERRIDE_VAR + '='
+    prefixes = tuple(name + '=' for name in OVERRIDE_VARS)
     for seg in segs:
         for tok in strip_sh_keywords(seg.tokens):
             if not ASSIGNMENT_RE.match(tok):
                 break                             # past the assignment run
-            if tok.startswith(prefix) and tok[len(prefix):].strip():
-                return True
+            for prefix in prefixes:
+                if tok.startswith(prefix) and tok[len(prefix):].strip():
+                    return True
     return False
 
 

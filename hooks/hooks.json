@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/run-python-hook.cmd\" bash-pipe-guard.py",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/run-python-hook.cmd\" bash-exit-status-guard.py",
             "timeout": 60
           }
         ]
