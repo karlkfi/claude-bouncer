@@ -2,7 +2,7 @@
 
 **Guard rails for Claude Code shell commands whose exit status is the answer.**
 
-[![release](https://img.shields.io/github/v/release/karlkfi/claude-pipe-guard)](https://github.com/karlkfi/claude-pipe-guard/releases) [![tests](https://img.shields.io/github/actions/workflow/status/karlkfi/claude-pipe-guard/tests.yml?branch=main&label=tests)](https://github.com/karlkfi/claude-pipe-guard/actions/workflows/tests.yml) [![License: MIT](https://img.shields.io/github/license/karlkfi/claude-pipe-guard.svg)](LICENSE) [![Claude Code plugin](https://img.shields.io/badge/Claude_Code-plugin-7e57c2)](#install)
+[![release](https://img.shields.io/github/v/release/karlkfi/claude-exit-status-guard)](https://github.com/karlkfi/claude-exit-status-guard/releases) [![tests](https://img.shields.io/github/actions/workflow/status/karlkfi/claude-exit-status-guard/tests.yml?branch=main&label=tests)](https://github.com/karlkfi/claude-exit-status-guard/actions/workflows/tests.yml) [![License: MIT](https://img.shields.io/github/license/karlkfi/claude-exit-status-guard.svg)](LICENSE) [![Claude Code plugin](https://img.shields.io/badge/Claude_Code-plugin-7e57c2)](#install)
 
 > The gate failed. The agent reported green. Both were telling the truth.
 
@@ -165,15 +165,15 @@ the same marketplace and plugin.
 **Claude Code (CLI or IDE extension)** — run the slash commands:
 
 ```
-/plugin marketplace add karlkfi/claude-pipe-guard
+/plugin marketplace add karlkfi/claude-exit-status-guard
 /plugin install exit-status-guard@exit-status-guard
 ```
 
 **Claude Code for Claude Desktop** — use the **Customize** tab:
 
 1. Open the **Customize** tab and go to its plugins / marketplaces section.
-2. Add `karlkfi/claude-pipe-guard` as a marketplace (the repo at
-   `https://github.com/karlkfi/claude-pipe-guard.git`).
+2. Add `karlkfi/claude-exit-status-guard` as a marketplace (the repo at
+   `https://github.com/karlkfi/claude-exit-status-guard.git`).
 3. Find **exit-status-guard** in that marketplace, install it, and make sure it's
    enabled.
 
@@ -220,7 +220,7 @@ name, so remove both and add them fresh.
 ```
 /plugin uninstall pipe-guard@pipe-guard
 /plugin marketplace remove pipe-guard
-/plugin marketplace add karlkfi/claude-pipe-guard
+/plugin marketplace add karlkfi/claude-exit-status-guard
 /plugin install exit-status-guard@exit-status-guard
 ```
 
@@ -229,7 +229,7 @@ name, so remove both and add them fresh.
 ```bash
 claude plugin uninstall pipe-guard@pipe-guard
 claude plugin marketplace remove pipe-guard
-claude plugin marketplace add karlkfi/claude-pipe-guard
+claude plugin marketplace add karlkfi/claude-exit-status-guard
 claude plugin install exit-status-guard@exit-status-guard
 ```
 
@@ -297,7 +297,7 @@ After upgrading either way:
   restart Claude Code.
 - Confirm the new version is live: the `/plugin` menu lists the installed
   version — compare it against the
-  [latest release](https://github.com/karlkfi/claude-pipe-guard/releases).
+  [latest release](https://github.com/karlkfi/claude-exit-status-guard/releases).
 
 ### `autoUpdate` does not fire yet
 
@@ -308,7 +308,7 @@ it:
 ```json
 "extraKnownMarketplaces": {
   "exit-status-guard": {
-    "source": { "source": "git", "url": "https://github.com/karlkfi/claude-pipe-guard.git" },
+    "source": { "source": "git", "url": "https://github.com/karlkfi/claude-exit-status-guard.git" },
     "autoUpdate": true
   }
 }
@@ -368,7 +368,7 @@ disables nothing.
 
 **A rule that needs an override routinely is a defect to fix in the registry,
 not to override.** Please
-[file it](https://github.com/karlkfi/claude-pipe-guard/issues) instead of
+[file it](https://github.com/karlkfi/claude-exit-status-guard/issues) instead of
 reaching for the prefix every time.
 
 ## Configuration
@@ -520,7 +520,7 @@ for the full policy.
 ## Contributing
 
 Bugs, ideas, and questions go in
-[GitHub Issues](https://github.com/karlkfi/claude-pipe-guard/issues).
+[GitHub Issues](https://github.com/karlkfi/claude-exit-status-guard/issues).
 
 A rule that denies ordinary work is a bug worth reporting — include the exact
 command and the deny text. For development conventions (stdlib only, never

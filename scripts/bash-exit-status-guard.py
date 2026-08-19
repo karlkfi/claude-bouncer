@@ -1098,7 +1098,7 @@ def with_log_path(reason, scratch):
 # will read, so the sentence before it is the same one throughout.
 OVERRIDE_TAIL = (
     " If this call is not the mistake the rule describes, that is a defect in "
-    "the rule: report it at https://github.com/karlkfi/claude-pipe-guard/issues "
+    "the rule: report it at https://github.com/karlkfi/claude-exit-status-guard/issues "
     "rather than overriding it every time.")
 
 OVERRIDE_HINT = (
