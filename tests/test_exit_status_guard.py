@@ -145,6 +145,31 @@ CASES = [
     ('PIPESTATUS inside an unquoted heredoc is a real read',
      'git commit -F - <<EOF\nnote: ${PIPESTATUS[0]} was empty\nEOF', False, True,
      'does not exist in zsh'),
+    # A heredoc opened inside `"$(…)"` -- how a multi-paragraph commit message
+    # gets written without quoting every line. Bash reopens quoting inside the
+    # substitution, so the `<<` is unquoted to the shell; read flat, the body
+    # survived and its own quotes decided where the newlines landed, which read
+    # as a `;` between two commands the author had joined with `&&` (#23).
+    ('heredoc in a quoted substitution, phrase wrapped across lines',
+     'git commit -aqF "$(cat <<\'MSG\'\nsubject\n\nhe asked "a question\n'
+     'spanning lines" here\nMSG\n)" && git push', False, False, ''),
+    ('the same message with the phrase on one line',
+     'git commit -aqF "$(cat <<\'MSG\'\nsubject\n\nhe asked "a question" here\n'
+     'MSG\n)" && git push', False, False, ''),
+    # The delimiter's quoting decides expansion, not whether the `<<` is seen,
+    # so the unquoted spelling has to go quiet too.
+    ('the same, with an unquoted delimiter',
+     'git commit -aqF "$(cat <<MSG\nsubject\n\nhe asked "a question\n'
+     'spanning lines" here\nMSG\n)" && git push', False, False, ''),
+    # The other direction: with the body now visible, an unquoted delimiter
+    # inside the substitution expands, so a real read there is a real read.
+    ('PIPESTATUS in an unquoted heredoc inside a quoted substitution',
+     'git commit -aqF "$(cat <<MSG\nnote: ${PIPESTATUS[0]} was empty\nMSG\n)"',
+     False, True, 'does not exist in zsh'),
+    ('a gate piped inside a quoted substitution',
+     'echo "$(make check | tail -30)"', False, True, 'piped into a filter'),
+    ('a shift inside a quoted substitution is not a heredoc',
+     'echo "$((1<<3))" && git push', False, False, ''),
     ('grep for the pattern in docs', 'grep -rn "make check | tail" docs/',
      False, False, ''),
     ('single-quoted PIPESTATUS is text, not a read',
@@ -792,6 +817,33 @@ class TestSegmentation(unittest.TestCase):
         segs = self.segs("cat <<'EOF'\nmake check | tail\nEOF")
         heads = [' '.join(pg.head_words(s)) for s in segs]
         self.assertNotIn('make check', heads)
+
+    def test_heredoc_inside_a_quoted_substitution_is_seen(self):
+        """The bug in #23, at the layer it happened: the body was never stripped.
+
+        Asserted on the stripped string rather than the verdict, because the
+        verdict only turned on where the body's own quotes fell -- the same
+        command went quiet or denied depending on where a line wrapped.
+        """
+        cmd = ('git commit -aqF "$(cat <<\'MSG\'\nsubject\n\n'
+               'he asked "a question\nspanning lines" here\nMSG\n)" && git push')
+        cleaned = pg.strip_heredoc_bodies(cmd)
+        self.assertNotIn('spanning lines', cleaned)
+        self.assertEqual('&&', pg.next_op(self.segs(cmd)[0].post_ops))
+
+    def test_an_unquoted_delimiter_there_still_expands(self):
+        """Seeing the heredoc is what makes its delimiter's quoting readable."""
+        expanded = []
+        pg.strip_heredoc_bodies('echo "$(cat <<MSG\nbody\nMSG\n)"', expanded)
+        self.assertEqual(['body\nMSG\n'], expanded)
+        expanded = []
+        pg.strip_heredoc_bodies("echo \"$(cat <<'MSG'\nbody\nMSG\n)\"", expanded)
+        self.assertEqual([], expanded)
+
+    def test_an_unterminated_substitution_strips_nothing(self):
+        """No balanced `)` means no body to recurse into -- quiet, not a crash."""
+        cmd = 'echo "$(cat <<EOF\nmake check | tail\nEOF'
+        self.assertEqual(cmd, pg.strip_heredoc_bodies(cmd))
 
     def test_redirect_targets_leave_the_head(self):
         segs = self.segs('make check > tmp/out.log 2>&1')
