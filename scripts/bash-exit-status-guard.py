@@ -154,7 +154,7 @@ def _consume_heredoc_body(text, i, delim, strip_tabs):
     return n
 
 
-def strip_heredoc_bodies(cmd, expanded=None):
+def strip_heredoc_bodies(cmd, expanded=None, depth=0):
     """Remove heredoc body text from the raw command string, before shlex.
 
     A body can hold anything -- apostrophes, `func(`, an odd number of quotes --
@@ -170,6 +170,15 @@ def strip_heredoc_bodies(cmd, expanded=None):
     evaluate. They come back separately rather than inline because a body is
     data: the apostrophe in a `don't` would otherwise open a quote for the rest
     of the scan.
+
+    A `$(…)` body is scanned by recursion, because bash opens a fresh quoting
+    context inside one: the `<<` in `"$(cat <<'EOF' …)"` is unquoted to the
+    shell even though the enclosing `"` is still open. Read flat, that `<<` is
+    invisible, the body survives into `tokenize`, and its own quotes then decide
+    where the newlines land -- so a commit message wrapping a quoted phrase
+    across two lines got denied as a `;` sequence (#23). This branch is the one
+    place this function diverges from workspace-guard's copy, which has the same
+    bug.
     """
     out = []
     i, n = 0, len(cmd)
@@ -184,6 +193,22 @@ def strip_heredoc_bodies(cmd, expanded=None):
                 in_single = False
             i += 1
             continue
+        # Before the in_double branch: a substitution is live inside `"…"`, and
+        # its body quotes independently of the string containing it.
+        if c == '$' and i + 1 < n and cmd[i+1] == '(':
+            if i + 2 < n and cmd[i+2] == '(':     # `$((…))` arithmetic: `<<` shifts
+                end = _skip_balanced_parens(cmd, i + 1)
+                out.append(cmd[i:end]); last = ')'; i = end
+                continue
+            body, end = _scan_dollar_paren(cmd, i + 2)
+            # Unterminated, or nested past the backstop: fall through and treat
+            # the `$` as ordinary text, which is where this stood before.
+            if body is not None and depth < MAX_SUBST_DEPTH:
+                out.append('$(')
+                out.append(strip_heredoc_bodies(body, expanded, depth + 1))
+                out.append(')')
+                last = ')'; i = end
+                continue
         if in_double:
             if c == '\\' and i + 1 < n:
                 out.append(c); out.append(cmd[i+1]); last = cmd[i+1]; i += 2
