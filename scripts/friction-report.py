@@ -84,12 +84,20 @@ CATEGORY_HINT = {
 # `while`/…), so their backtick is not a real target — use the joined command.
 NAMED_TARGET_CATS = frozenset({'watch', 'slow-timeout'})
 
-# A deny downgraded by FOREGROUND_GUARD_OVERRIDE keeps its underlying category
-# but is emitted as `ask` prefixed with this signature. Counted separately so an
-# over-used override is visible. The guard name is load-bearing: the sibling
-# guards phrase their own override prefix identically apart from it, so an
-# unanchored pattern reports their overrides as this guard's under --plugin all.
-OVERRIDE_SIG = re.compile(r'foreground-guard override acknowledged')
+# A FOREGROUND_GUARD_OVERRIDE prefix makes the guard defer silently, so there
+# is no decision record to read it off — the override is counted from the Bash
+# command itself, which the transcript records whatever any hook decided. That
+# is the more durable of the two traces and it also catches an override the
+# agent keeps pasting onto calls the guard would never have blocked, which is
+# exactly the over-use worth seeing. The variable name is the guard's own, so
+# the count cannot pick up a sibling's override under --plugin all.
+OVERRIDE_SIG = re.compile(r'\bFOREGROUND_GUARD_OVERRIDE=')
+
+# Whose variable that is. The count is taken off the commands, so it no longer
+# depends on which guard spoke — which means the report has to say so itself, or
+# `--plugin prod-guard` would print this guard's statistic under prod-guard's
+# header.
+OVERRIDE_PLUGIN = 'foreground-guard'
 
 # A denying hook leaves no attachment of its own. Claude Code persists hook
 # stdout only for a call it goes on to run: measured over 601 local transcripts,
@@ -157,6 +165,10 @@ HOOK_OK = 'hook_success'
 # for the whole window. Calls predating its install sit in the denominator, so a
 # fresh install reads low until the window catches up. The report says so.
 SCOPE_KEYS = ('bash_calls', 'sessions', 'sessions_prompted')
+
+# Tallied on the same walk as SCOPE_KEYS but not part of the denominator: the
+# guard's own overrides, read off the command string (see OVERRIDE_SIG).
+TALLY_KEYS = SCOPE_KEYS + ('overrides',)
 
 # The hook joins up to three finding reasons with ' | '.
 _JOIN = ' | '
@@ -274,8 +286,8 @@ def scope(rec, cutoff, repo):
 
 
 def new_scope():
-    """A zeroed denominator tally (see SCOPE_KEYS)."""
-    return dict.fromkeys(SCOPE_KEYS, 0)
+    """A zeroed tally: the denominator (SCOPE_KEYS) plus the override count."""
+    return dict.fromkeys(TALLY_KEYS, 0)
 
 
 def iter_decisions(paths, plugin, cutoff, repo, tally=None):
@@ -287,13 +299,15 @@ def iter_decisions(paths, plugin, cutoff, repo, tally=None):
     carry the denies the attachment stream omits.
 
     A `tally` dict from new_scope() collects the denominator as it goes — the
-    in-scope Bash calls and the sessions holding them. It is complete only once
-    the generator is exhausted.
+    in-scope Bash calls and the sessions holding them — plus the overrides,
+    which are read off the commands rather than off any decision. It is
+    complete only once the generator is exhausted.
     """
     for path in paths:
         cmd_by_id = {}
         records = []
         calls = 0
+        overrides = 0
         try:
             with open(path, encoding='utf-8') as fh:
                 for line in fh:
@@ -308,14 +322,17 @@ def iter_decisions(paths, plugin, cutoff, repo, tally=None):
                     # the whole file (a decision may sit outside the window
                     # while its command record does not); the tally does not.
                     msg = rec.get('message') or {}
-                    n_bash = 0
+                    n_bash = n_override = 0
                     for b in (msg.get('content') or []):
                         if (isinstance(b, dict) and b.get('type') == 'tool_use'
                                 and b.get('name') == 'Bash' and b.get('id')):
-                            cmd_by_id[b['id']] = (b.get('input') or {}).get('command', '')
+                            cmd = (b.get('input') or {}).get('command', '')
+                            cmd_by_id[b['id']] = cmd
                             n_bash += 1
+                            n_override += 1 if OVERRIDE_SIG.search(cmd) else 0
                     if n_bash and tally is not None and scope(rec, cutoff, repo):
                         calls += n_bash
+                        overrides += n_override
                     records.append(rec)
         except OSError:
             continue
@@ -388,6 +405,7 @@ def iter_decisions(paths, plugin, cutoff, repo, tally=None):
 
         if tally is not None and (calls or prompted):
             tally['bash_calls'] += calls
+            tally['overrides'] += overrides
             tally['sessions'] += 1
             tally['sessions_prompted'] += 1 if prompted else 0
 
@@ -433,7 +451,9 @@ def build_report(decisions, tally=None):
     targets = collections.Counter()
     cmds = collections.Counter()
     errors = collections.Counter()
-    overrides = 0
+    # Overrides are not a decision — the guard defers on one — so they come
+    # from the command walk, and a caller with no tally has not made that walk.
+    overrides = (tally or {}).get('overrides', 0)
     total = 0
     for d in decisions:
         total += 1
@@ -444,8 +464,6 @@ def build_report(decisions, tally=None):
         if d['decision'] not in ('ask', 'deny'):
             continue
         reason = d['reason']
-        if OVERRIDE_SIG.search(reason):
-            overrides += 1
         for seg in split_reasons(reason):
             cat = category_of(seg)
             cats[cat] += 1
@@ -504,9 +522,12 @@ def print_text(r, top, plugin='foreground-guard'):
               "plugin name under-reports")
     # Only foreground-guard's own overrides are counted, so the line has no
     # place under a header covering every guard — omit it rather than show one
-    # guard's statistic as if it summarized the set.
-    if r['overrides'] and plugin != 'all':
-        print(f"  FOREGROUND_GUARD_OVERRIDE downgrades: {r['overrides']}")
+    # guard's statistic as if it summarized the set. These are calls the guard
+    # deferred on rather than prompts anyone answered, so the number sits
+    # outside the friction count above rather than inside it.
+    if r['overrides'] and plugin == OVERRIDE_PLUGIN:
+        print(f"  FOREGROUND_GUARD_OVERRIDE prefixes (guard deferred): "
+              f"{r['overrides']}")
     print()
 
     # Ahead of the prompt rankings: a hook that never ran is not friction, it is
@@ -585,8 +606,8 @@ def main():
             'hook_errors': report['errors'].most_common(args.top),
         }
         # Same reasoning as the text report: a foreground-guard-only count is
-        # absent, not zero, in an all-guards document.
-        if args.plugin != 'all':
+        # absent, not zero, in any document that is not this guard's own.
+        if args.plugin == OVERRIDE_PLUGIN:
             out['overrides'] = report['overrides']
         print(json.dumps(out, indent=2))
     else:

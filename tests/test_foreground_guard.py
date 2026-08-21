@@ -99,18 +99,22 @@ def run_hook(command, config=None, timeout_ms=None, run_in_background=None,
     # permission settings and the sibling guards.
     assert decision in ("ask", "deny"), \
         "guard emitted forbidden decision %r" % decision
-    # Second invariant, same reach: every reason leads with the plugin's name,
-    # and every deny is readable by the shipped reader. Claude Code names the
+    # Second invariant, same reach: every reason opens with the plugin's name,
+    # a colon and one space — on ask and deny alike. Claude Code names the
     # plugin in neither the ask prompt nor the deny text, so the opener is the
     # only attribution a human or the agent gets. For a deny it is also the only
     # key there is — a denied call never runs, so nothing writes a hook
     # attachment and `deny_from_result` has the error text and nothing else.
-    assert reason.startswith(PLUGIN_NAME), \
-        "reason does not lead with %r: %r" % (PLUGIN_NAME, reason[:80])
-    if decision == "deny":
-        m = reader.DENY_TEXT.match(reason)
-        assert m and m.group(1) == PLUGIN_NAME, \
-            "deny reason unreadable by friction-report: %r" % reason[:80]
+    #
+    # The colon is asserted on the ask path too, and not only where the reader
+    # needs it. A guard with one exempt path has a second opener shape to keep
+    # right, and the exemption is invisible from the reason itself: a reader
+    # cannot tell an unprefixed string of this guard's from a sibling's.
+    assert reason.startswith(PLUGIN_NAME + ": "), \
+        "reason does not open %r: %r" % (PLUGIN_NAME + ": ", reason[:80])
+    m = reader.DENY_TEXT.match(reason)
+    assert m and m.group(1) == PLUGIN_NAME, \
+        "reason unreadable by friction-report: %r" % reason[:80]
     return decision, reason
 
 
@@ -225,7 +229,7 @@ class SleepSecondsTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class WatchFormTests(unittest.TestCase):
-    ASKS = [
+    BLOCKS = [
         "gh pr checks --watch",
         "gh pr checks 123 --watch --interval 5",
         "gh run watch 456",
@@ -269,10 +273,10 @@ class WatchFormTests(unittest.TestCase):
         "make watch-docs.md",
     ]
 
-    def test_watch_forms_ask(self):
-        for cmd in self.ASKS:
+    def test_watch_forms_deny(self):
+        for cmd in self.BLOCKS:
             decision, reason = run_hook(cmd)
-            self.assertEqual(decision, "ask", "expected ask for %r" % cmd)
+            self.assertEqual(decision, "deny", "expected deny for %r" % cmd)
             self.assertIn("foreground-guard", reason)
             self.assertIn("Monitor", reason)
 
@@ -287,22 +291,22 @@ class WatchFormTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class LoopAndSleepTests(unittest.TestCase):
-    def test_while_sleep_loop_asks(self):
+    def test_while_sleep_loop_denies(self):
         d, r = run_hook("while true; do gh pr checks 1; sleep 5; done")
-        self.assertEqual(d, "ask")
+        self.assertEqual(d, "deny")
         self.assertIn("loop", r)
 
-    def test_until_sleep_loop_asks(self):
+    def test_until_sleep_loop_denies(self):
         d, _ = run_hook("until gh pr checks 1; do sleep 10; done")
-        self.assertEqual(d, "ask")
+        self.assertEqual(d, "deny")
 
-    def test_for_sleep_loop_asks(self):
+    def test_for_sleep_loop_denies(self):
         d, _ = run_hook("for i in 1 2 3; do curl -s x; sleep 20; done")
-        self.assertEqual(d, "ask")
+        self.assertEqual(d, "deny")
 
-    def test_multiline_loop_asks(self):
+    def test_multiline_loop_denies(self):
         d, _ = run_hook("while true; do\n  make status\n  sleep 5\ndone")
-        self.assertEqual(d, "ask")
+        self.assertEqual(d, "deny")
 
     def test_loop_without_sleep_defers(self):
         d, _ = run_hook("for f in *.py; do python3 -m py_compile $f; done")
@@ -312,42 +316,42 @@ class LoopAndSleepTests(unittest.TestCase):
         d, _ = run_hook("while read -r line; do echo $line; done < input.txt")
         self.assertIsNone(d)
 
-    def test_chained_repeat_with_short_sleep_asks(self):
+    def test_chained_repeat_with_short_sleep_denies(self):
         d, r = run_hook("gh pr checks 1; sleep 5; gh pr checks 1")
-        self.assertEqual(d, "ask")
+        self.assertEqual(d, "deny")
         self.assertIn("repeat-with-sleep", r)
 
     def test_leading_short_sleep_then_command_defers(self):
         d, _ = run_hook("sleep 2 && curl localhost:8080/health")
         self.assertIsNone(d)
 
-    def test_bare_sleep_at_floor_asks(self):
+    def test_bare_sleep_at_floor_denies(self):
         d, r = run_hook("sleep 10")
-        self.assertEqual(d, "ask")
+        self.assertEqual(d, "deny")
         self.assertIn("sleep", r)
 
-    def test_bare_sleep_above_floor_asks(self):
+    def test_bare_sleep_above_floor_denies(self):
         d, _ = run_hook("sleep 300")
-        self.assertEqual(d, "ask")
+        self.assertEqual(d, "deny")
 
     def test_bare_sleep_below_floor_defers(self):
         d, _ = run_hook("sleep 9")
         self.assertIsNone(d)
 
-    def test_sleep_infinity_asks(self):
+    def test_sleep_infinity_denies(self):
         d, _ = run_hook("sleep infinity")
-        self.assertEqual(d, "ask")
+        self.assertEqual(d, "deny")
 
-    def test_sleep_unknown_duration_asks(self):
+    def test_sleep_unknown_duration_denies(self):
         d, _ = run_hook("sleep $DELAY")
-        self.assertEqual(d, "ask")
+        self.assertEqual(d, "deny")
 
     def test_sleep_floor_configurable(self):
         cfg = {"poll": {"sleep_floor_seconds": 60}}
         d, _ = run_hook("sleep 30", config=cfg)
         self.assertIsNone(d)
         d, _ = run_hook("sleep 60", config=cfg)
-        self.assertEqual(d, "ask")
+        self.assertEqual(d, "deny")
 
     def test_quoted_sleep_is_data_not_command(self):
         d, _ = run_hook("git commit -m 'sleep 30 fix'")
@@ -359,7 +363,7 @@ class LoopAndSleepTests(unittest.TestCase):
 
     def test_bash_dash_c_loop_recursed(self):
         d, _ = run_hook("bash -c 'while true; do sleep 5; done'")
-        self.assertEqual(d, "ask")
+        self.assertEqual(d, "deny")
 
     def test_bash_script_file_stays_opaque(self):
         d, _ = run_hook("bash poll-forever.sh")
@@ -367,7 +371,7 @@ class LoopAndSleepTests(unittest.TestCase):
 
     def test_eval_body_recursed(self):
         d, _ = run_hook("eval sleep 600")
-        self.assertEqual(d, "ask")
+        self.assertEqual(d, "deny")
 
 
 # ---------------------------------------------------------------------------
@@ -385,7 +389,7 @@ class ExemptionTests(unittest.TestCase):
         # holds a task slot and returns output the agent cannot date.
         for cmd in self.POLLS:
             d, _ = run_hook(cmd, run_in_background=True)
-            self.assertEqual(d, "ask", "expected ask for backgrounded %r" % cmd)
+            self.assertEqual(d, "deny", "expected deny for backgrounded %r" % cmd)
 
     def test_class_a_fixes_name_monitor_and_never_backgrounding(self):
         # A poll prompts backgrounded or not, so no Class A reason may offer
@@ -395,14 +399,14 @@ class ExemptionTests(unittest.TestCase):
         for cmd in self.POLLS:
             for bg in (None, True):
                 d, r = run_hook(cmd, run_in_background=bg)
-                self.assertEqual(d, "ask",
-                                 "expected ask for %r (bg=%s)" % (cmd, bg))
+                self.assertEqual(d, "deny",
+                                 "expected deny for %r (bg=%s)" % (cmd, bg))
                 self.assertIn("arm a Monitor", r)
                 self.assertNotIn("run_in_background", r)
 
     def test_backgrounded_reasons_use_the_detached_wording(self):
         d, r = run_hook("sleep 600", run_in_background=True)
-        self.assertEqual(d, "ask")
+        self.assertEqual(d, "deny")
         self.assertIn("parks a background task", r)
         self.assertIn("holds a task slot", r)
         d, r = run_hook("while true; do sleep 5; done", run_in_background=True)
@@ -446,17 +450,17 @@ class ExemptionTests(unittest.TestCase):
 
     def test_watch_after_heredoc_still_caught(self):
         d, _ = run_hook("cat <<EOF\nhello\nEOF\ngh run watch 1")
-        self.assertEqual(d, "ask")
+        self.assertEqual(d, "deny")
 
     def test_poll_after_quoted_shift_still_caught(self):
         # The `<<` in the quoted string must not over-arm and hide the poll.
         d, _ = run_hook('echo "a << b"\ngh run watch 1')
-        self.assertEqual(d, "ask")
+        self.assertEqual(d, "deny")
 
     def test_poll_after_arithmetic_shift_still_caught(self):
         # The `<<` in `$((1<<4))` must not over-arm and hide the poll.
         d, _ = run_hook("echo $((1<<4))\ngh run watch 1")
-        self.assertEqual(d, "ask")
+        self.assertEqual(d, "deny")
 
     def test_disable_env(self):
         d, _ = run_hook("gh run watch 123",
@@ -465,7 +469,7 @@ class ExemptionTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Class A config: enable flag, action escalation, extra patterns, hint
+# Class A config: enable flag, action de-escalation, extra patterns, hint
 # ---------------------------------------------------------------------------
 
 class PollConfigTests(unittest.TestCase):
@@ -474,53 +478,69 @@ class PollConfigTests(unittest.TestCase):
                         config={"poll": {"enabled": False}})
         self.assertIsNone(d)
 
-    def test_action_escalates_to_deny(self):
-        d, r = run_hook("gh run watch 123",
-                        config={"poll": {"action": "deny"}})
+    def test_default_action_denies(self):
+        d, r = run_hook("gh run watch 123")
         self.assertEqual(d, "deny")
         self.assertIn("FOREGROUND_GUARD_OVERRIDE", r)
 
-    def test_override_downgrades_deny_to_ask(self):
-        d, r = run_hook("FOREGROUND_GUARD_OVERRIDE=demo-run gh run watch 123",
-                        config={"poll": {"action": "deny"}})
-        self.assertEqual(d, "ask")
-        self.assertIn("override acknowledged", r)
-        # The reason string is echoed for the audit trail, not just its
-        # presence recorded.
-        self.assertIn("demo-run", r)
-
-    def test_override_reason_multiword_echoed(self):
-        d, r = run_hook(
-            "FOREGROUND_GUARD_OVERRIDE='needs live tail' gh run watch 123",
-            config={"poll": {"action": "deny"}})
-        self.assertEqual(d, "ask")
-        self.assertIn("needs live tail", r)
-
-    def test_override_empty_reason_still_downgrades(self):
-        # Present-but-empty override still downgrades (unchanged behavior),
-        # and emits no dangling parenthetical for the missing reason.
-        d, r = run_hook("FOREGROUND_GUARD_OVERRIDE= gh run watch 123",
-                        config={"poll": {"action": "deny"}})
-        self.assertEqual(d, "ask")
-        self.assertIn("override acknowledged", r)
-        self.assertNotIn("()", r)
-
-    def test_no_override_reason_when_absent(self):
-        # No override prefix: hard deny, and no override-acknowledged text.
+    def test_action_de_escalates_to_ask(self):
+        # The supervised posture: someone watching the guard work turns the
+        # denies back into prompts. Opt-in, because it is the setting that
+        # spends a person's attention.
         d, r = run_hook("gh run watch 123",
-                        config={"poll": {"action": "deny"}})
+                        config={"poll": {"action": "ask"}})
+        self.assertEqual(d, "ask")
+        self.assertIn("watch/follow mode", r)
+
+    def test_invalid_action_keeps_the_default_deny(self):
+        d, _ = run_hook("gh run watch 123",
+                        config={"poll": {"action": "block"}})
+        self.assertEqual(d, "deny")
+
+    def test_override_defers(self):
+        # The agent holds the missing fact and states it; a wrong assertion
+        # costs waiting, so the hook stops objecting rather than routing the
+        # question at a human who cannot answer it any better.
+        d, _ = run_hook("FOREGROUND_GUARD_OVERRIDE=demo-run gh run watch 123")
+        self.assertIsNone(d)
+
+    def test_override_defers_with_a_multiword_reason(self):
+        d, _ = run_hook(
+            "FOREGROUND_GUARD_OVERRIDE='needs live tail' gh run watch 123")
+        self.assertIsNone(d)
+
+    def test_override_empty_reason_still_defers(self):
+        d, _ = run_hook("FOREGROUND_GUARD_OVERRIDE= gh run watch 123")
+        self.assertIsNone(d)
+
+    def test_override_defers_in_every_permission_mode(self):
+        # Unlike the old downgrade-to-a-prompt, deferring needs no one to be
+        # there, so the escape hatch works where no prompt can be answered.
+        for mode in ("default", "auto", "dontAsk", "bypassPermissions"):
+            d, _ = run_hook("FOREGROUND_GUARD_OVERRIDE=demo gh run watch 123",
+                            permission_mode=mode)
+            self.assertIsNone(d, "expected defer in %s mode" % mode)
+
+    def test_override_does_not_reach_an_exempt_command(self):
+        # The prefix is not a blanket pass: a command with no finding was
+        # already deferring, and one that keeps a finding still needs it.
+        d, _ = run_hook("FOREGROUND_GUARD_OVERRIDE=demo tail -n 50 app.log")
+        self.assertIsNone(d)
+
+    def test_no_override_denies(self):
+        d, r = run_hook("gh run watch 123")
         self.assertEqual(d, "deny")
         self.assertNotIn("override acknowledged", r)
 
     def test_extra_watch_pattern(self):
         cfg = {"poll": {"extra_watch_patterns": [r"^mytool\s+follow\b"]}}
         d, _ = run_hook("mytool follow --id 7", config=cfg)
-        self.assertEqual(d, "ask")
+        self.assertEqual(d, "deny")
         d, _ = run_hook("mytool status", config=cfg)
         self.assertIsNone(d)
 
     def test_exempt_watch_pattern_silences_builtin(self):
-        # A built-in watch that would normally ask is quieted when its
+        # A built-in watch that would normally block is quieted when its
         # segment matches an exempt allowlist entry.
         cfg = {"poll": {"exempt_watch_patterns": [r"^gh\s+run\s+watch\b"]}}
         d, _ = run_hook("gh run watch 456", config=cfg)
@@ -528,15 +548,15 @@ class PollConfigTests(unittest.TestCase):
 
     def test_exempt_watch_pattern_does_not_silence_others(self):
         # The allowlist wins only for matching segments; unlisted watches
-        # still prompt.
+        # still block.
         cfg = {"poll": {"exempt_watch_patterns": [r"^gh\s+run\s+watch\b"]}}
         d, _ = run_hook("tail -f app.log", config=cfg)
-        self.assertEqual(d, "ask")
+        self.assertEqual(d, "deny")
 
     def test_hint_appended(self):
         d, r = run_hook("gh run watch 123",
                         config={"hint": "pr-sentinel watches PRs here"})
-        self.assertEqual(d, "ask")
+        self.assertEqual(d, "deny")
         self.assertIn("pr-sentinel watches PRs here", r)
 
 
@@ -553,16 +573,16 @@ class SlowCommandTests(unittest.TestCase):
         d, _ = run_hook("make test-race")
         self.assertIsNone(d)
 
-    def test_slow_command_default_timeout_asks(self):
+    def test_slow_command_default_timeout_denies(self):
         d, r = run_hook("make test-race", config=SLOW_CFG)
-        self.assertEqual(d, "ask")
+        self.assertEqual(d, "deny")
         self.assertIn("600000", r)
         self.assertIn("default 120000 ms timeout", r)
         self.assertIn("run_in_background", r)
 
-    def test_slow_command_low_timeout_asks(self):
+    def test_slow_command_low_timeout_denies(self):
         d, r = run_hook("make test-race", config=SLOW_CFG, timeout_ms=120000)
-        self.assertEqual(d, "ask")
+        self.assertEqual(d, "deny")
         self.assertIn("120000 ms timeout set on this call", r)
 
     def test_slow_command_adequate_timeout_defers(self):
@@ -575,11 +595,11 @@ class SlowCommandTests(unittest.TestCase):
                         run_in_background=True)
         self.assertIsNone(d)
 
-    def test_backgrounded_slow_command_that_polls_keeps_the_class_a_ask(self):
+    def test_backgrounded_slow_command_that_polls_keeps_the_class_a_block(self):
         # Backgrounding drops the Class B finding only; the poll still prompts.
         cfg = {"slow": {"commands": {r"gh run watch\b": 600000}}}
         d, r = run_hook("gh run watch 456", config=cfg, run_in_background=True)
-        self.assertEqual(d, "ask")
+        self.assertEqual(d, "deny")
         self.assertIn("watch/follow mode", r)
         self.assertNotIn("slow-command pattern", r)
 
@@ -600,7 +620,7 @@ class SlowCommandTests(unittest.TestCase):
 
     def test_pattern_anywhere_in_chain(self):
         d, _ = run_hook("cd sub && make test-race", config=SLOW_CFG)
-        self.assertEqual(d, "ask")
+        self.assertEqual(d, "deny")
 
 
 # A bare script path is the registration a repo writes on the first try, so
@@ -611,7 +631,7 @@ GATE_CFG = {"slow": {"commands": {r"scripts/gate\.sh": 3600000}}}
 class SlowCommandPositionTests(unittest.TestCase):
     def assert_runs(self, command, **kw):
         d, _ = run_hook(command, config=GATE_CFG, **kw)
-        self.assertEqual(d, "ask", "expected ask for %r" % command)
+        self.assertEqual(d, "deny", "expected deny for %r" % command)
 
     def assert_mention(self, command, **kw):
         d, r = run_hook(command, config=GATE_CFG, **kw)
@@ -643,7 +663,7 @@ class SlowCommandPositionTests(unittest.TestCase):
         # command: `.*` puts the leftmost match at the command position.
         cfg = {"slow": {"commands": {r".*-race\b": 600000}}}
         d, _ = run_hook("go test -race ./...", config=cfg)
-        self.assertEqual(d, "ask")
+        self.assertEqual(d, "deny")
 
     def test_argument_pattern_without_prefix_does_not_match(self):
         cfg = {"slow": {"commands": {r"-race\b": 600000}}}
@@ -655,7 +675,7 @@ class SlowCommandPositionTests(unittest.TestCase):
         # to keep working: it anchors at a position segmentation also finds.
         cfg = {"slow": {"commands": {r"(^|[;&|]\s*)scripts/gate\.sh": 3600000}}}
         d, _ = run_hook("git fetch && scripts/gate.sh", config=cfg)
-        self.assertEqual(d, "ask")
+        self.assertEqual(d, "deny")
 
     def test_unparseable_command_defers(self):
         # Unbalanced quotes: the segmentation can't run, so the guard defers
@@ -674,14 +694,14 @@ TARGET_CFG = {"slow": {"commands": {
 class SlowTargetTests(unittest.TestCase):
     def assert_runs(self, command, **kw):
         d, r = run_hook(command, config=TARGET_CFG, **kw)
-        self.assertEqual(d, "ask", "expected ask for %r" % command)
+        self.assertEqual(d, "deny", "expected deny for %r" % command)
         return r
 
     def assert_defer(self, command, **kw):
         d, r = run_hook(command, config=TARGET_CFG, **kw)
         self.assertIsNone(d, "expected defer for %r, got %s" % (command, r))
 
-    def test_target_invocation_asks(self):
+    def test_target_invocation_denies(self):
         r = self.assert_runs("make e2e")
         self.assertIn("slow-command target `make e2e*`", r)
         self.assertIn("1800000", r)
@@ -729,10 +749,10 @@ class SlowTargetTests(unittest.TestCase):
             "make": {"e2e*": 1800000},
             r"go test ./\.\.\..*-race": 600000}}}
         d, r = run_hook("make e2e", config=cfg)
-        self.assertEqual(d, "ask")
+        self.assertEqual(d, "deny")
         self.assertIn("slow-command target", r)
         d, r = run_hook("go test ./... -race", config=cfg)
-        self.assertEqual(d, "ask")
+        self.assertEqual(d, "deny")
         self.assertIn("slow-command pattern", r)
 
     def test_target_maps_merge_across_config_files(self):
@@ -742,94 +762,114 @@ class SlowTargetTests(unittest.TestCase):
         env = {"FOREGROUND_GUARD_CONFIG":
                os.path.join(extra, ".claude", "foreground-guard.json")}
         d, _ = run_hook("make bench-all", config=TARGET_CFG, env_extra=env)
-        self.assertEqual(d, "ask")
+        self.assertEqual(d, "deny")
         d, _ = run_hook("make e2e", config=TARGET_CFG, env_extra=env)
-        self.assertEqual(d, "ask")
+        self.assertEqual(d, "deny")
 
     def test_non_numeric_target_value_loses_itself(self):
         cfg = {"slow": {"commands": {"make": {"e2e*": "long", "test-race": 600000}}}}
         d, _ = run_hook("make e2e", config=cfg)
         self.assertIsNone(d)
         d, _ = run_hook("make test-race", config=cfg)
-        self.assertEqual(d, "ask")
+        self.assertEqual(d, "deny")
 
 
-SLOW_DENY_CFG = {"slow": {"action": "deny",
-                          "commands": {r"make test-race\b": 600000}}}
+SLOW_ASK_CFG = {"slow": {"action": "ask",
+                         "commands": {r"make test-race\b": 600000}}}
 
 
 class SlowConfigTests(unittest.TestCase):
-    def test_action_escalates_to_deny(self):
-        d, r = run_hook("make test-race", config=SLOW_DENY_CFG)
+    def test_default_action_denies(self):
+        d, r = run_hook("make test-race", config=SLOW_CFG)
         self.assertEqual(d, "deny")
         self.assertIn("FOREGROUND_GUARD_OVERRIDE", r)
 
-    def test_default_action_stays_ask(self):
-        d, r = run_hook("make test-race", config=SLOW_CFG)
+    def test_action_de_escalates_to_ask(self):
+        d, r = run_hook("make test-race", config=SLOW_ASK_CFG)
         self.assertEqual(d, "ask")
         self.assertNotIn("FOREGROUND_GUARD_OVERRIDE", r)
 
-    def test_invalid_action_stays_ask(self):
+    def test_invalid_action_keeps_the_default_deny(self):
         cfg = {"slow": {"action": "block",
                         "commands": {r"make test-race\b": 600000}}}
         d, _ = run_hook("make test-race", config=cfg)
-        self.assertEqual(d, "ask")
+        self.assertEqual(d, "deny")
 
-    def test_override_downgrades_deny_to_ask(self):
-        d, r = run_hook("FOREGROUND_GUARD_OVERRIDE=ci-debug make test-race",
-                        config=SLOW_DENY_CFG)
-        self.assertEqual(d, "ask")
-        self.assertIn("override acknowledged", r)
-        self.assertIn("ci-debug", r)
+    def test_override_defers(self):
+        d, _ = run_hook("FOREGROUND_GUARD_OVERRIDE=ci-debug make test-race",
+                        config=SLOW_CFG)
+        self.assertIsNone(d)
 
     def test_override_works_with_poll_disabled(self):
         # The override prefix is parsed by Class A analysis; it must still
-        # downgrade a Class B deny when poll is switched off entirely.
+        # clear a Class B block when poll is switched off entirely.
         cfg = {"poll": {"enabled": False},
-               "slow": {"action": "deny",
-                        "commands": {r"make test-race\b": 600000}}}
-        d, r = run_hook("FOREGROUND_GUARD_OVERRIDE=ci-debug make test-race",
+               "slow": {"commands": {r"make test-race\b": 600000}}}
+        d, _ = run_hook("FOREGROUND_GUARD_OVERRIDE=ci-debug make test-race",
                         config=cfg)
-        self.assertEqual(d, "ask")
-        self.assertIn("override acknowledged", r)
+        self.assertIsNone(d)
 
     def test_deny_with_adequate_timeout_defers(self):
-        d, _ = run_hook("make test-race", config=SLOW_DENY_CFG,
+        d, _ = run_hook("make test-race", config=SLOW_CFG,
                         timeout_ms=600000)
         self.assertIsNone(d)
 
+    def test_the_human_at_a_prompt_cannot_apply_the_class_b_fix(self):
+        # Both fixes are parameters of the Bash call, so approving a prompt
+        # runs the command unchanged and it is killed anyway. That is why the
+        # class denies: only the agent can re-issue the call.
+        d, r = run_hook("make test-race", config=SLOW_CFG)
+        self.assertEqual(d, "deny")
+        self.assertIn("set `timeout: 600000` on this Bash call", r)
+        self.assertIn("run_in_background: true", r)
+
 
 # ---------------------------------------------------------------------------
-# Permission modes: unattended runs get a deny, not an unanswerable ask
+# Permission modes: the default denies everywhere, and a supervised `ask` is
+# promoted back to a deny where nobody can answer it
 # ---------------------------------------------------------------------------
+
+POLL_ASK_CFG = {"poll": {"action": "ask"}}
+
 
 class PermissionModeTests(unittest.TestCase):
-    def test_unattended_modes_convert_ask_to_deny(self):
-        for mode in ("auto", "dontAsk", "bypassPermissions"):
+    def test_default_denies_in_every_mode(self):
+        for mode in (None, "default", "acceptEdits", "plan", "auto",
+                     "dontAsk", "bypassPermissions"):
             d, _ = run_hook("gh run watch 123", permission_mode=mode)
             self.assertEqual(d, "deny", "expected deny in %s mode" % mode)
 
-    def test_attended_modes_stay_ask(self):
+    def test_supervised_ask_survives_an_attended_mode(self):
         for mode in (None, "default", "acceptEdits", "plan"):
-            d, _ = run_hook("gh run watch 123", permission_mode=mode)
+            d, _ = run_hook("gh run watch 123", config=POLL_ASK_CFG,
+                            permission_mode=mode)
             self.assertEqual(d, "ask", "expected ask in %s mode" % mode)
 
-    def test_unattended_slow_command_converts_ask_to_deny(self):
-        d, _ = run_hook("make test-race", config=SLOW_CFG,
+    def test_supervised_ask_becomes_a_deny_where_nobody_answers(self):
+        # The prompt reaches no one: `auto` interrupts a run the user chose
+        # not to babysit, `dontAsk` replaces the reason with a generic deny,
+        # and `bypassPermissions` stalls. Deny keeps the reason.
+        for mode in ("auto", "dontAsk", "bypassPermissions"):
+            d, _ = run_hook("gh run watch 123", config=POLL_ASK_CFG,
+                            permission_mode=mode)
+            self.assertEqual(d, "deny", "expected deny in %s mode" % mode)
+
+    def test_supervised_slow_ask_becomes_a_deny_unattended(self):
+        d, _ = run_hook("make test-race", config=SLOW_ASK_CFG,
                         permission_mode="auto")
         self.assertEqual(d, "deny")
 
-    def test_unattended_backgrounded_poll_converts_ask_to_deny(self):
-        # A backgrounded poll still prompts (Class A is not exempted by
-        # run_in_background), so unattended it still denies — and the deny
-        # cannot advise the fix the call already applied.
+    def test_backgrounded_poll_deny_does_not_advise_backgrounding(self):
+        # A backgrounded poll still blocks (Class A is not exempted by
+        # run_in_background), and the deny cannot advise the fix the call
+        # already applied.
         d, r = run_hook("gh run watch 123", run_in_background=True,
                         permission_mode="auto")
         self.assertEqual(d, "deny")
         self.assertNotIn("run_in_background", r)
 
     def test_deny_names_the_override_and_the_report(self):
-        d, r = run_hook("gh run watch 123", permission_mode="auto")
+        d, r = run_hook("gh run watch 123")
         self.assertEqual(d, "deny")
         self.assertIn("FOREGROUND_GUARD_OVERRIDE=<reason>", r)
         self.assertIn("friction-report", r)
@@ -837,34 +877,20 @@ class PermissionModeTests(unittest.TestCase):
         # The deny tail is appended to the fixes, not substituted for them.
         self.assertIn("Monitor", r)
 
-    def test_ask_carries_no_deny_tail(self):
+    def test_deny_names_the_fix_before_the_override(self):
+        # An escape hatch offered ahead of the rewrite is the one a session
+        # reaches for first, so the fixes have to come first in the string.
+        _, r = run_hook("gh run watch 123")
+        self.assertLess(r.index("Instead: (1)"),
+                        r.index("FOREGROUND_GUARD_OVERRIDE"))
+
+    def test_supervised_ask_carries_no_deny_tail(self):
         # An answerable prompt needs neither the escape hatch nor the
         # report link — the human is right there.
-        d, r = run_hook("gh run watch 123")
+        d, r = run_hook("gh run watch 123", config=POLL_ASK_CFG)
         self.assertEqual(d, "ask")
         self.assertNotIn("FOREGROUND_GUARD_OVERRIDE", r)
         self.assertNotIn("issues", r)
-
-    def test_override_downgrades_auto_mode_deny(self):
-        # The mode-escalated deny is downgradable exactly like the
-        # config-escalated one: auto mode still shows the prompt.
-        d, r = run_hook("FOREGROUND_GUARD_OVERRIDE=demo-run gh run watch 123",
-                        permission_mode="auto")
-        self.assertEqual(d, "ask")
-        self.assertIn("override acknowledged", r)
-        self.assertIn("demo-run", r)
-
-    def test_override_inert_where_no_prompt_can_be_answered(self):
-        # dontAsk/bypassPermissions: Claude Code never puts the prompt in
-        # front of anyone, so the override must not claim a downgrade it
-        # cannot deliver.
-        for mode in ("dontAsk", "bypassPermissions"):
-            d, r = run_hook(
-                "FOREGROUND_GUARD_OVERRIDE=demo-run gh run watch 123",
-                config={"poll": {"action": "deny"}}, permission_mode=mode)
-            self.assertEqual(d, "deny", "expected deny in %s mode" % mode)
-            self.assertNotIn("override acknowledged", r)
-            self.assertIn("cannot downgrade this in %s mode" % mode, r)
 
 
 # ---------------------------------------------------------------------------
@@ -898,12 +924,12 @@ class RobustnessTests(unittest.TestCase):
             f.write("{not json")
         d, _ = run_hook("gh run watch 123",
                         env_extra={"CLAUDE_PROJECT_DIR": proj})
-        self.assertEqual(d, "ask")
+        self.assertEqual(d, "deny")
 
     def test_never_allow_battery(self):
         # A sweep of everything above: whatever the decision, it is never
         # "allow" (asserted inside run_hook on every call).
-        for cmd in (WatchFormTests.ASKS + WatchFormTests.DEFERS
+        for cmd in (WatchFormTests.BLOCKS + WatchFormTests.DEFERS
                     + ["sleep 600", "make test-race"]):
             run_hook(cmd, config=SLOW_CFG)
 

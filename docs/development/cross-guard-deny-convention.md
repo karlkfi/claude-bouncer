@@ -60,9 +60,11 @@ name is the signal; nothing weaker survives the noise.
 ## What it costs to skip
 
 The count reads zero, and zero is indistinguishable from a guard that never
-blocks. The gap is worst exactly where the friction is worst: in `auto`,
-`dontAsk`, and `bypassPermissions` an ask is emitted as a deny, so a guard
-running unattended reports no friction at all.
+blocks. The gap widens with every verdict a guard moves from `ask` to `deny`,
+which is the direction the routing argument pushes them: a guard that denies by
+default has almost nothing left in the decision stream, so without the opener it
+reports no friction at all. foreground-guard now denies by default in both
+classes, so it depends on this recovery for nearly its whole count.
 
 Measured 2026-08-21 over 939 local transcripts holding 2,725 error tool results.
 Denies were counted by running the shipped `deny_from_result`; the misses were
@@ -119,26 +121,28 @@ adopting it today starts its window today.
 2. The name is the plugin's own — the `name` in `.claude-plugin/plugin.json`.
    Not the hook's, not the script's, not a display title.
 3. Use the same opener on **every** deny path, including the ones added later.
-4. Lead with the name on everything else the guard emits, too — `ask` reasons,
-   `PostToolUse` nudges, `additionalContext`, `systemMessage`. Claude Code
-   attributes none of them: an ask prompt reaches the human, and a deny reaches
-   the agent, with no plugin name attached either way, so the opener is the only
-   attribution either one gets. Only denies need the *colon*, because only the
-   reader keys on it — but a guard that always leads with its name has no path
-   to get wrong.
+4. Use the same opener — name, colon, space — on everything else the guard
+   emits, too: `ask` reasons, `PostToolUse` nudges, `additionalContext`,
+   `systemMessage`. Claude Code attributes none of them: an ask prompt reaches
+   the human, and a deny reaches the agent, with no plugin name attached either
+   way, so the opener is the only attribution either one gets. Take the colon
+   everywhere rather than only where the reader needs it. A guard with one
+   exempt path has a second opener shape to keep right, the exemption is
+   invisible from the string itself, and a reader cannot tell an unprefixed
+   string of yours from a sibling's.
 
 A leading `Error: ` inserted by the harness is tolerated by the reader, so it
 does not have to be stripped.
 
-Rule 4 is satisfied by the name alone, so a string may lead with the name and no
-colon where it can never be a deny. foreground-guard's override downgrade is the
-one such path here: it opens `foreground-guard override acknowledged (…)` and
-sets the decision to `ask` by construction, so `DENY_TEXT` is never asked to read
-it. Measured 2026-08-21 over 956 local transcripts, that wording appears on 95
-lines and not once inside an error tool result. A path that can also deny takes
-the colon, and `tests/test_foreground_guard.py` asserts exactly that on every
-end-to-end call — against the shipped reader, not a copy of its regex, so the two
-halves cannot drift apart in silence.
+foreground-guard used to carve out one exception to rule 4: its override
+downgrade opened `foreground-guard override acknowledged (…)` with no colon, on
+the argument that the path set `ask` by construction and `DENY_TEXT` would never
+be asked to read it. The reasoning held and the rule was still the wrong one —
+the carve-out is invisible from the string, so a reader meeting it has no way to
+know it was deliberate. The path is gone (the override now makes the hook
+defer), and `tests/test_foreground_guard.py` asserts the full opener on
+every end-to-end call, ask and deny alike — against the shipped reader, not a
+copy of its regex, so the two halves cannot drift apart in silence.
 
 ## The hook script name has to agree
 

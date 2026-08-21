@@ -15,7 +15,7 @@ The report groups prompts by category; each category maps to one fix:
   session is waiting on a poll. Take one non-blocking snapshot now and re-check
   next turn, or arm a Monitor that exits when the condition flips;
   `run_in_background: true` does not answer these (a detached poll still holds a
-  task slot and returns undateable output, and still prompts). A repeatedly
+  task slot and returns undateable output, and still blocks). A repeatedly
   flagged command is a good candidate for a CLAUDE.md rule.
 - **slow-timeout** (Class B) — a registered slow command is about to be killed by
   an inadequate Bash-call timeout. Set an adequate `timeout:` on the call, or run
