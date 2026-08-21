@@ -1188,6 +1188,9 @@ def _sweep_stale_grant_files(dirpath, now):
 
 ASK, DENY = 1, 2
 
+# A tail fragment of the reasons below, never emitted alone, so its 'prod-guard'
+# always sits behind an opener. check-hook-attribution.py counts literals rather
+# than emit paths and flags it as naming the plugin off position 0; expected.
 CONFIG_HINT = ('Patterns: built-ins plus .claude/prod-guard.json '
                '(see the prod-guard README).')
 
