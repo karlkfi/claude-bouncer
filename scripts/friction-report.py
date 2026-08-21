@@ -22,6 +22,9 @@ Each hook decision is recorded as an ``attachment`` line of type
 ``hook_success`` carrying ``hookName`` (``PreToolUse:Bash``), the hook
 ``command`` (which names the guard script), and ``stdout`` (the decision JSON).
 The triggering Bash command is joined back via ``toolUseID``.
+
+A ``deny`` is recorded nowhere in that stream — see ``DENY_TEXT`` below — so it
+is recovered from the error tool result the blocked call handed back instead.
 """
 import argparse
 import collections
@@ -37,13 +40,45 @@ import textwrap
 # counted (--plugin all) but their reasons carry no tokens we can categorize.
 THIS_GUARD = 'workspace-guard'
 
-# The reason strings emitted by build_reason() in bash-workspace-guard.py.
-# Each category prefixes a comma-joined token list and ends before ". Fix:".
+# The reason strings emitted by build_reason() in bash-workspace-guard.py. A
+# pattern with a capture group prefixes a comma-joined token list, which feeds
+# the path ranking; the last two carry their targets inline (a backticked path,
+# a kill pattern) and are detection-only, so they count without adding tokens.
+#
+# The last three are deny-only in the default configuration — host-temp denies
+# unless WORKSPACE_GUARD_TMP_ACTION says otherwise, and a sibling-checkout write
+# or an unanchored kill denies unless WORKSPACE_GUARD_OVERRIDE is set. They were
+# absent while the report read the attachment stream alone, because that stream
+# carries no deny (see DENY_TEXT); without them every recovered deny would land
+# in 'other' and the category table would say nothing about the blocks that
+# dominate it.
 REASON_PATTERNS = {
     'outside':   re.compile(r"Outside-workspace path\(s\): (.*?)\. Fix:"),
     'expand':    re.compile(r"Runtime-expanded arg\(s\)[^:]*: (.*?)\. Fix:"),
     'untracked': re.compile(r"Relative path\(s\) after an untracked cd: (.*?)\. Fix:"),
+    'hosttemp':  re.compile(r"Host-wide temp path\(s\): (.*?)\. "
+                            r"Host-wide temp is shared"),
+    'sibling':   re.compile(r"Sibling-checkout write\(s\)"),
+    'kill':      re.compile(r"Unanchored process kill\(s\)"),
 }
+
+# A denying hook leaves no attachment of its own: Claude Code persists hook
+# stdout only for a call it goes on to run. Measured 2026-08-21 over 1,034 local
+# transcripts, 60,858 workspace-guard decisions carried allow and ask and not
+# one deny — while 80 denials sat in plain sight as tool results. Reading the
+# attachment stream alone therefore reports zero for the host-temp deny that is
+# this guard's default, which is the friction worth seeing most.
+#
+# The trace a deny does leave is the error handed back to the agent, whose text
+# is verbatim the reason the hook printed, joined to the command by
+# `tool_use_id` like any other tool result. Two keys read it: this opener, a
+# cross-guard convention that recovers a sibling's denies under --plugin all
+# too, and this guard's own REASON_PATTERNS, the only key a deny recorded before
+# the opener has. The opener arrived after v1.10.0, so all 80 above are of that
+# vintage. A companion guard that words its opener differently is reachable by
+# neither key and still under-counts its denies; the coverage line says so
+# rather than showing a zero.
+DENY_TEXT = re.compile(r'^(?:Error:\s*)?([a-z0-9-]+-guard):\s')
 
 # Volatile path segments to collapse so near-identical paths group together in
 # the "top paths" ranking (e.g. every per-session /tmp/claude-NNN/... folds to
@@ -215,6 +250,34 @@ def guard_name(command):
     return base
 
 
+def deny_from_result(block):
+    """(guard, reason) if this tool_result block carries a guard's block text,
+    else None. Whether that block was a deny is the caller's call — see
+    iter_decisions, where the attachment stream settles it.
+
+    A blocked call comes back as an error whose text is verbatim the reason the
+    hook printed. Two keys read it (see DENY_TEXT): the `<name>-guard: ` opener,
+    which names the guard itself, and this guard's own reason wording, for a
+    block emitted before that opener existed. Anything else — a failing command,
+    a rejected prompt on an unguarded call, another tool's error — matches
+    neither and is left alone.
+    """
+    if not block.get('is_error'):
+        return None
+    text = block.get('content')
+    if isinstance(text, list):
+        text = ''.join(b.get('text', '') for b in text if isinstance(b, dict))
+    if not isinstance(text, str):
+        return None
+    text = text.strip()
+    m = DENY_TEXT.match(text)
+    if m:
+        return m.group(1), text
+    if any(pat.search(text) for pat in REASON_PATTERNS.values()):
+        return THIS_GUARD, text
+    return None
+
+
 def iter_decisions(paths):
     """Yield every guard decision found in the given transcript files.
 
@@ -222,6 +285,9 @@ def iter_decisions(paths):
     so each decision can name the command that triggered it. Filtering is the
     caller's job (see scan), which keeps the labels this pass saw available
     for diagnosing an empty result.
+
+    Two passes per file: the attachment stream, which carries allow and ask,
+    then the tool results, which are where a deny survives (see DENY_TEXT).
     """
     for path in paths:
         cmd_by_id = {}
@@ -246,6 +312,7 @@ def iter_decisions(paths):
         except OSError:
             continue
 
+        decided = set()   # (guard, toolUseID) that the decision stream carries
         for rec in records:
             att = rec.get('attachment')
             if not isinstance(att, dict) or att.get('hookName') != 'PreToolUse:Bash':
@@ -253,6 +320,7 @@ def iter_decisions(paths):
             name = guard_name(att.get('command'))
             if name is None:
                 continue
+            decided.add((name, att.get('toolUseID')))
             cwd = rec.get('cwd') or ''
             ts = parse_ts(rec)
 
@@ -271,6 +339,33 @@ def iter_decisions(paths):
                 'cwd': cwd, 'ts': ts,
                 'command': cmd_by_id.get(att.get('toolUseID'), ''),
             }
+
+        # Second pass: the denies the first one structurally cannot see. A
+        # block's text alone cannot say `deny` — an `ask` reason is worded
+        # identically, and a prompt the operator declines hands the same text
+        # back as an error (measured 2026-08-21: one `~/.zshrc` ask did exactly
+        # that). What separates them is the attachment: the ask left one, the
+        # deny left none, so a result already in `decided` is dropped rather
+        # than counted twice.
+        for rec in records:
+            for block in ((rec.get('message') or {}).get('content') or []):
+                if not isinstance(block, dict) or block.get('type') != 'tool_result':
+                    continue
+                found = deny_from_result(block)
+                if found is None:
+                    continue
+                name, reason = found
+                tuid = block.get('tool_use_id')
+                # No Bash tool_use behind it means the guard blocked a native
+                # tool (Edit, Write, Read) — out of scope for a Bash report,
+                # whose attachment pass filters on PreToolUse:Bash too.
+                if tuid not in cmd_by_id or (name, tuid) in decided:
+                    continue
+                yield {
+                    'plugin': name, 'decision': 'deny', 'reason': reason,
+                    'cwd': rec.get('cwd') or '', 'ts': parse_ts(rec),
+                    'command': cmd_by_id[tuid],
+                }
 
 
 def scan(paths, plugin, cutoff, repo):
@@ -338,13 +433,22 @@ def coverage_note(plugin):
     before it analyzes anything — leaves nothing to count. Every total is
     therefore a floor, and a guard whose unreached path hides traffic reads the
     same as a guard that saw that traffic and stayed quiet (issue 96).
+
+    A deny is absent from that stream for a different reason and is recovered
+    from the tool result instead (see DENY_TEXT), which bounds it differently:
+    to Bash calls, and to a block text one of the two keys can name.
     """
     note = ["Emitted decisions only — a silent hook run (a defer, or an early "
             "return on a payload the guard skips before analyzing it) leaves "
-            "no transcript record, so these totals are floors."]
+            "no transcript record, so these totals are floors.",
+            "A deny leaves no decision record either and is read back off the "
+            "error the blocked call handed back, so it is counted only for a "
+            "Bash call, never for a blocked Edit/Write/Read."]
     if plugin == 'all':
         note.append("Guards emit on different terms, so the plugins: counts "
-                    "are not a like-for-like ranking.")
+                    "are not a like-for-like ranking, and a sibling whose "
+                    "block text opens with something other than "
+                    "'<name>-guard: ' under-counts its denies here.")
     return note
 
 
@@ -360,7 +464,8 @@ def categorize(reason):
     for cat, pat in REASON_PATTERNS.items():
         m = pat.search(reason)
         if m:
-            out[cat] = [t.strip() for t in m.group(1).split(',') if t.strip()]
+            toks = m.group(1) if pat.groups else ''
+            out[cat] = [t.strip() for t in toks.split(',') if t.strip()]
     return out or {'other': []}
 
 

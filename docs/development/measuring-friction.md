@@ -14,6 +14,28 @@ as an `attachment` record (`type: hook_success`) whose `command` names the guard
 script and whose `stdout` carries the decision JSON; the triggering Bash command
 is joined back via `toolUseID`.
 
+**A deny is not in that stream.** Claude Code persists hook stdout only for a
+call it then runs, so a blocked call records no decision at all. Measured
+2026-08-21 over 1,034 local transcripts: 60,858 workspace-guard decisions, every
+one of them `allow` or `ask`, while 80 denials sat in plain sight as tool
+results. The report reads those back instead — the error a blocked call hands
+the agent is verbatim the reason the hook printed, joined to the command by
+`tool_use_id` like any other tool result. Two keys find it:
+
+- the `<name>-guard: ` opener every reason now carries, a cross-guard
+  convention, so a companion guard's denies are recovered under `--plugin all`
+  too;
+- this guard's own reason wording, which is the only key a deny recorded before
+  the opener has. The opener arrived after v1.10.0, so all 80 above are of that
+  vintage.
+
+Neither key alone says *deny*, because an `ask` is worded identically and a
+prompt the operator declines comes back as an error carrying the same text
+(measured on one `~/.zshrc` ask that did exactly that). What separates them is
+the attachment: the ask left one, the deny left none. So a result whose
+`(guard, toolUseID)` already appears in the decision stream is dropped rather
+than counted twice.
+
 The report only **reads** that already-persisted local data. It adds no logging
 and no telemetry — keep it that way (hook-side logging would be a privacy
 regression for no added signal).
@@ -35,9 +57,15 @@ So the scan cannot see:
   invisible ([foreground-guard
   #15](https://github.com/karlkfi/claude-foreground-guard/issues/15)).
 - **A guard that never ran** — misconfigured, crashed, or not installed.
+- **A block of a native tool.** The scan is scoped to `PreToolUse:Bash` on both
+  passes, so a guard's deny of an `Edit`, `Write`, or `Read` is out of frame.
+- **A deny neither key finds.** Under `--plugin all`, a companion guard whose
+  block text opens with something other than `<name>-guard: ` under-counts its
+  denies — pr-sentinel leads with `pr-sentinel: `, for instance. The coverage
+  line says so rather than showing a zero.
 
-Every total is therefore a **floor**, and the three cases above are
-indistinguishable from a guard that saw the traffic and stayed quiet. The report
+Every total is therefore a **floor**, and each case above is indistinguishable
+from a guard that saw the traffic and stayed quiet. The report
 prints a `coverage:` line under the header saying so, and `--json` carries the
 same sentences in a `coverage` field.
 
@@ -104,12 +132,15 @@ no recorded decisions at all: those are real answers of zero.
   report cannot see](#what-the-report-cannot-see)). A `defer` bucket exists for
   an attachment with empty stdout, but silent runs aren't recorded at all, so in
   practice it stays at zero.
-- **By category** — `outside` / `expand` / `untracked`, the buckets
-  `build_reason()` emits in `scripts/bash-workspace-guard.py`, plus `other` for
-  any prompt whose reason matches none of them. Under `--plugin all` that's
-  where the companion guards' prompts land, so the table still sums to the
-  friction count in the header (a reason can match more than one bucket, so the
-  sum can exceed it).
+- **By category** — `outside` / `expand` / `untracked` / `hosttemp` /
+  `sibling` / `kill`, the buckets `build_reason()` emits in
+  `scripts/bash-workspace-guard.py`, plus `other` for any prompt whose reason
+  matches none of them. The last three are denies in the default configuration,
+  so they appear only once the denies above are counted; `sibling` and `kill`
+  carry their targets inline rather than as a token list, so they add no rows to
+  the path ranking. Under `--plugin all` `other` is where the companion guards'
+  prompts land, so the table still sums to the friction count in the header (a
+  reason can match more than one bucket, so the sum can exceed it).
 - **Top offending paths** — only `outside`/`expand`/`untracked` reasons carry
   path tokens, so this ranking is workspace-guard-only even under
   `--plugin all`, where its heading says so (`--json` carries the same signal in

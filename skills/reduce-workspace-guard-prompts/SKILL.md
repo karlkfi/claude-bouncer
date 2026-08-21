@@ -104,6 +104,15 @@ Which bullets to walk through, by category:
 - `untracked` — the bullet on giving `cd` a literal target.
 - `outside` — the bullets on temp files, on out-of-tree dependency caches, and
   on editing through this session's own worktree checkout.
+- `hosttemp` — the bullet on writing temp files to this session's own
+  scratchpad rather than `/tmp`.
+- `sibling` — the bullet on editing through this session's own checkout.
+- `kill` — the bullet on never killing a process by an unanchored pattern.
+
+The last three are denies rather than prompts in the default configuration, so
+they surface a command that was blocked outright — say so when you quote the
+bullet, and name the env var that softens it (`WORKSPACE_GUARD_TMP_ACTION`,
+`WORKSPACE_GUARD_OVERRIDE`) rather than presenting the fix as the only route.
 
 Quote those bullets rather than summarizing them. They carry exact paths,
 preconditions, and exemption lists that a paraphrase drops — which is how this

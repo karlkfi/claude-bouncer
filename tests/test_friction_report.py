@@ -65,6 +65,29 @@ class CategorizeTests(unittest.TestCase):
                  "Fix: z.", {'untracked': ['c']})):
             self.assertEqual(fr.categorize(prefixed), expected)
 
+    def test_deny_only_categories(self):
+        # host-temp, sibling-checkout and unanchored-kill reasons are denies in
+        # the default configuration, so they were invisible while the report
+        # read the attachment stream alone. Each has to bucket by name rather
+        # than fall into 'other', or the deny count says nothing about what was
+        # blocked.
+        for reason, expected in (
+                ("workspace-guard: Host-wide temp path(s): /tmp/q83-fake, "
+                 "/var/tmp/x. Host-wide temp is shared across every session "
+                 "and worktree. Use ./tmp/ instead.",
+                 {'hosttemp': ['/tmp/q83-fake', '/var/tmp/x']}),
+                ("workspace-guard: Sibling-checkout write(s) blocked: writing "
+                 "into a different checkout of this repo lands your change on "
+                 "the wrong branch. `../other/a.txt` is inside another "
+                 "checkout of this repo (/r, on branch main).",
+                 {'sibling': []}),
+                ("workspace-guard: Unanchored process kill(s) blocked: a "
+                 "pattern that names no path in this workspace matches the "
+                 "same process in every checkout on this host. `pkill` "
+                 "pattern `node` names no path in this workspace.",
+                 {'kill': []})):
+            self.assertEqual(fr.categorize(reason), expected)
+
     def test_unrecognized_reason_buckets_as_other(self):
         self.assertEqual(fr.categorize("Guarded commands target workspace/pipe only"),
                          {'other': []})
@@ -72,6 +95,51 @@ class CategorizeTests(unittest.TestCase):
     def test_another_guards_reason_buckets_as_other(self):
         self.assertEqual(fr.categorize("Command runs against the production cluster."),
                          {'other': []})
+
+
+class DenyFromResultTests(unittest.TestCase):
+    """A deny survives only as the error text handed back to the agent."""
+
+    def _block(self, text, is_error=True, **kw):
+        return dict({'type': 'tool_result', 'tool_use_id': 'toolu_D',
+                     'is_error': is_error, 'content': text}, **kw)
+
+    def test_attribution_opener_names_the_guard(self):
+        got = fr.deny_from_result(self._block(
+            "workspace-guard: Host-wide temp path(s): /tmp/q83-fake. "
+            "Host-wide temp is shared across every session and worktree."))
+        self.assertEqual(got[0], 'workspace-guard')
+
+    def test_error_prefixed_opener_still_matches(self):
+        got = fr.deny_from_result(self._block(
+            "Error: foreground-guard: `sleep` parks the main thread for ~120 s."))
+        self.assertEqual(got[0], 'foreground-guard')
+
+    def test_pre_attribution_reason_is_still_recovered(self):
+        # Every deny in the corpus this was measured on predates the
+        # `workspace-guard: ` opener, so the reason wording is the only key
+        # those records have.
+        got = fr.deny_from_result(self._block(
+            "Host-wide temp path(s): /tmp/q83-fake. Host-wide temp is shared "
+            "across every session and worktree."))
+        self.assertEqual(got, ('workspace-guard', got[1]))
+
+    def test_content_as_block_list_is_joined(self):
+        got = fr.deny_from_result(self._block(
+            [{'type': 'text', 'text': 'workspace-guard: Outside-workspace '
+                                      'path(s): /q83-fake. Fix: x.'}]))
+        self.assertEqual(got[0], 'workspace-guard')
+
+    def test_non_error_result_is_not_a_block(self):
+        # A transcript that merely quotes a reason — this repo's own hook
+        # exercises print it to stdout — is not a blocked call.
+        self.assertIsNone(fr.deny_from_result(self._block(
+            "Host-wide temp path(s): /tmp/x. Host-wide temp is shared.",
+            is_error=False)))
+
+    def test_unrelated_error_is_left_alone(self):
+        self.assertIsNone(fr.deny_from_result(
+            self._block("grep: no such file or directory")))
 
 
 class NormalizeTests(unittest.TestCase):
@@ -306,6 +374,78 @@ class EndToEndTests(unittest.TestCase):
             self.assertEqual(list(report['paths']), ['passwd'])
 
 
+def deny_records(tuid="toolu_D", reason=None, tool="Bash"):
+    """A blocked Bash call: the tool_use, and the error result it came back as.
+
+    No attachment — that is the whole point (see DENY_TEXT in the script).
+    """
+    reason = reason or ("workspace-guard: Host-wide temp path(s): "
+                        "/tmp/q83-fake-target. Host-wide temp is shared across "
+                        "every session and worktree. Use ./tmp/ instead.")
+    use = {"message": {"content": [
+        {"type": "tool_use", "name": tool, "id": tuid,
+         "input": {"command": "echo hi > /tmp/q83-fake-target"}}]}}
+    result = {"cwd": "/home/u/proj", "timestamp": "2026-06-14T12:02:00.000Z",
+              "message": {"content": [
+                  {"type": "tool_result", "tool_use_id": tuid,
+                   "is_error": True, "content": reason}]}}
+    return use, result
+
+
+class DenyRecoveryTests(unittest.TestCase):
+    """A deny reaches the report only through the tool result it produced."""
+
+    def _scan(self, tmp, *records, plugin='workspace-guard'):
+        path = Path(tmp) / "s.jsonl"
+        path.write_text("".join(json.dumps(r) + "\n" for r in records))
+        return fr.scan([str(path)], plugin, None, '')
+
+    def test_deny_is_counted_and_joined_to_its_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            decs, _ = self._scan(tmp, *deny_records())
+            self.assertEqual([d['decision'] for d in decs], ['deny'])
+            self.assertEqual(decs[0]['command'], "echo hi > /tmp/q83-fake-target")
+            self.assertEqual(decs[0]['cwd'], "/home/u/proj")
+            report = fr.build_report(decs, raw=True)
+            self.assertEqual(report['categories']['hosttemp'], 1)
+            self.assertEqual(report['paths']['/tmp/q83-fake-target'], 1)
+
+    def test_declined_ask_is_not_counted_twice(self):
+        # An `ask` the operator declines hands the same reason text back as an
+        # error, so the text alone cannot say `deny`. The attachment the ask
+        # left is what separates them — measured 2026-08-21 on one `~/.zshrc`
+        # ask that produced exactly this pair.
+        with tempfile.TemporaryDirectory() as tmp:
+            use, result = deny_records(
+                tuid="toolu_X",
+                reason="workspace-guard: Outside-workspace path(s): passwd. "
+                       "Fix: use a path inside the project root.")
+            write_transcript(tmp)   # supplies the toolu_X ask attachment
+            path = Path(tmp) / "s.jsonl"
+            with path.open("a") as fh:
+                fh.write(json.dumps(result) + "\n")
+            decs, _ = fr.scan([str(path)], 'workspace-guard', None, '')
+            self.assertEqual([d['decision'] for d in decs], ['ask'])
+
+    def test_blocked_native_tool_is_out_of_scope(self):
+        # The attachment pass filters on PreToolUse:Bash, so an Edit or Write
+        # the guard blocked would arrive as friction the rest of the report
+        # cannot account for.
+        with tempfile.TemporaryDirectory() as tmp:
+            decs, _ = self._scan(tmp, *deny_records(tool="Write"))
+            self.assertEqual(decs, [])
+
+    def test_sibling_guards_deny_needs_plugin_all(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            records = deny_records(
+                reason="prod-guard: `helm upgrade` relies on the ambient "
+                       "kube-context.")
+            self.assertEqual(self._scan(tmp, *records)[0], [])
+            decs, _ = self._scan(tmp, *records, plugin='all')
+            self.assertEqual([(d['plugin'], d['decision']) for d in decs],
+                             [('prod-guard', 'deny')])
+
+
 class EmptyResultTests(unittest.TestCase):
     """An empty result must name the filter that emptied it (issue 97), so a
     typo can't read the same as a guard with zero friction."""
@@ -394,7 +534,7 @@ class ExitCodeTests(unittest.TestCase):
             p = self._run(tmp, "--since", "all", "--plugin", "all", "--json")
             self.assertEqual(p.returncode, 0)
             out = json.loads(p.stdout)
-            self.assertEqual(len(out['coverage']), 2)
+            self.assertEqual(len(out['coverage']), 3)
             self.assertIn("floors", out['coverage'][0])
 
 
