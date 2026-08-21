@@ -9,47 +9,71 @@ Two classes of time-wasters, kept distinct in the code:
    `sleep`, chained repeat-with-sleep sequences (`cmd; sleep N; cmd`), and
    bare `sleep N` waits at or above a configurable floor. The main thread —
    the one the user is talking to — sits blocked the whole time. The guard
-   prompts (`ask` by default; config may escalate to `deny`) and teaches the
-   three fixes: one non-blocking snapshot, a Monitor whose script exits when
-   the condition flips, or an explicit `timeout N` bound. Backgrounding is
-   not among them — a detached poll still prompts (see Exemptions).
+   denies (config may de-escalate to `ask`) and teaches the three fixes: one
+   non-blocking snapshot, a Monitor whose script exits when the condition
+   flips, or an explicit `timeout N` bound. Backgrounding is not among them
+   — a detached poll still blocks (see Exemptions).
 
 2. **Class B — slow command with an inadequate timeout.** A command the repo
    *knows* takes longer than the Bash tool's default 2-minute timeout
    (envtest suites, e2e runs, `-race` builds), about to run in the foreground
    with that default (or any timeout below the registered minimum). The tool
    will kill it before it finishes and the entire run is wasted. The guard
-   prompts (`ask` by default; config may escalate to `deny`), naming the
-   exact fix: `timeout: <min>` on the Bash call, or
-   `run_in_background: true`. The default registry is EMPTY — slow-command
-   knowledge is per-repo and lives in `.claude/foreground-guard.json`.
+   denies (config may de-escalate to `ask`), naming the exact fix:
+   `timeout: <min>` on the Bash call, or `run_in_background: true`. Both are
+   parameters of the Bash call, so the agent is the only party that can
+   apply either — a human answering a prompt can only let the doomed run
+   proceed. The default registry is EMPTY — slow-command knowledge is
+   per-repo and lives in `.claude/foreground-guard.json`.
 
 Exemptions: `run_in_background: true` exempts Class B only — it is the fix
 that class teaches. It is not a fix for a poll: a detached `gh run watch` or
 `sleep`-loop holds a task slot for the whole wait and hands back output the
-agent cannot date, so Class A still prompts (with the backgrounded wording).
+agent cannot date, so Class A still blocks (with the backgrounded wording).
 A trailing `&` detaches the blocking command (per-segment `&` exempts just
 that segment); a `timeout N ...` wrap exempts the wrapped segment from
 Class A — an explicit bound is exactly the fix the guard teaches, and the
-Bash tool's own timeout still backstops it (allow-through, by design).
+Bash tool's own timeout still backstops it (a silent defer, by design).
 
-Decision semantics: the hook ONLY returns `ask`/`deny` or passes through
+Decision semantics: the hook ONLY returns `deny`/`ask` or passes through
 silently (defer). It NEVER emits `permissionDecision: "allow"` — an allow
-would bypass the user's permission settings and the sibling guards. In an
-unattended permission mode (`auto`, `dontAsk`, `bypassPermissions`) an `ask`
-is emitted as `deny` instead: equally blocking, but the reason reaches the
-agent so it self-corrects rather than parking on a prompt nobody is there to
-answer. A `FOREGROUND_GUARD_OVERRIDE=<reason>` prefix downgrades a `deny`
-back to a confirmation prompt (mirroring prod-guard's override semantics),
-wherever a prompt can still be answered.
+would bypass the user's permission settings and the sibling guards.
+
+Both classes deny by default. The verdict picks who resolves the
+uncertainty, and the resource at stake here is the session's own main
+thread: there is no blast radius, no credential, and no third party, so a
+human at the prompt holds no fact the agent lacks. Every finding ships a
+rewrite the agent can apply — a snapshot command, a Monitor, a `timeout`
+bound, a `timeout:` on the call — so a deny resolves in the agent's own loop
+while an ask spends a context switch to learn nothing. Class B is the sharp
+case: its fixes are parameters of the Bash call, so approving the prompt
+produces exactly the killed run the class exists to prevent.
+
+`"action": "ask"` on either class de-escalates it back to a prompt. That is
+the supervised posture — for someone who wants to watch the guard work —
+and it is opt-in, because it is the setting that spends a person's
+attention. In an unattended permission mode (`auto`, `dontAsk`,
+`bypassPermissions`) a de-escalated `ask` is emitted as `deny` again: the
+reason reaches the agent rather than parking on a prompt nobody answers.
+
+A `FOREGROUND_GUARD_OVERRIDE=<reason>` prefix makes the hook defer silently,
+in every permission mode. The agent holds the missing fact — this wait is
+genuinely wanted — and states it; a wrong assertion costs waiting and
+nothing else, so it is not worth a person's time to confirm. Deferring is
+not allowing: normal permissions and the sibling guards still see the call.
+The stated reason survives in the transcript on the command string itself,
+which is the audit record (and the one `friction-report.py` counts).
 
 Fail modes: fail OPEN on infrastructure errors (unparseable input, bad
 config, unexpected exception — the hook stays silent and never breaks the
 session). Within Class A, unknown durations lean toward friction (`sleep $N`
-prompts: an unresolvable wait is treated as a long one — a false positive
-costs one prompt, a false negative parks the main thread). This is a
-productivity guard, not a security boundary: on *parsing* uncertainty
-(unbalanced quotes, heredoc oddities) it defers rather than guessing.
+blocks: an unresolvable wait is treated as a long one — a false positive
+costs the agent one retry, a false negative parks the main thread). An
+argument the hook cannot expand is never routed to a human: they see the
+same unexpanded `$N` and can resolve it no better, so the reason asks for
+the literal instead. This is a productivity guard, not a security boundary:
+on *parsing* uncertainty (unbalanced quotes, heredoc oddities) it defers
+rather than guessing.
 
 Parsing rules inherited from the sibling guards:
   * Heredoc bodies are stripped textually BEFORE tokenization, so body text
@@ -96,12 +120,12 @@ def load_config():
     applies, so a typo never silently disables the guard."""
     cfg = {
         'poll_enabled': True,
-        'poll_action': 'ask',          # 'ask' | 'deny' (config may escalate)
+        'poll_action': 'deny',         # 'deny' | 'ask' (config may supervise)
         'extra_watch_patterns': [],    # additive regexes over a segment string
         'exempt_watch_patterns': [],   # additive allowlist; suppresses matches
         'sleep_floor_seconds': DEFAULT_SLEEP_FLOOR_SECONDS,
         'slow_enabled': True,
-        'slow_action': 'ask',          # 'ask' | 'deny' (config may escalate)
+        'slow_action': 'deny',         # 'deny' | 'ask' (config may supervise)
         'slow_commands': {},           # {regex: ms} | {cmd: {glob: ms}}, additive
         'hint': '',                    # per-repo watcher-machinery hint
     }
@@ -552,39 +576,30 @@ CONFIG_HINT = ('Config: .claude/foreground-guard.json '
 ISSUES_URL = 'https://github.com/karlkfi/claude-foreground-guard/issues'
 
 # Permission modes in which nobody is expected to be watching the prompt
-# stream, so an `ask` buys friction and no answer. Matches branch-guard's
-# NON_INTERACTIVE_MODES.
+# stream, so a config-de-escalated `ask` buys friction and no answer. Only
+# reachable via `"action": "ask"` — the defaults deny in every mode.
 UNATTENDED_MODES = frozenset({'auto', 'dontAsk', 'bypassPermissions'})
 
-# The subset where an `ask` reaches no human at all: Claude Code converts it
-# to its own generic deny (`dontAsk`) or leaves the run stalled on a prompt
-# with no one to answer it (`bypassPermissions`). An override cannot buy a
-# confirmation there, so it must not claim to.
-NO_PROMPT_MODES = frozenset({'dontAsk', 'bypassPermissions'})
 
-
-def deny_tail(mode):
+def deny_tail():
     """The tail appended once to a deny: how to get through it when the
     foreground wait is genuinely wanted, and where to report a wrong verdict.
     Built at the emit site rather than per finding — up to three findings are
-    joined into one reason, and the escape hatch belongs to the decision."""
-    if mode in NO_PROMPT_MODES:
-        hatch = ('A FOREGROUND_GUARD_OVERRIDE=<reason> prefix cannot '
-                 'downgrade this in %s mode — there is no prompt for anyone '
-                 'to answer, so take one of the fixes above instead.' % mode)
-    else:
-        hatch = ('If the wait is genuinely required, re-run the same command '
-                 'with a FOREGROUND_GUARD_OVERRIDE=<reason> prefix to '
-                 'downgrade this block to one confirmation prompt.')
-    return ('%s If this verdict looks wrong, say so to the user rather than '
-            'working around it: `/foreground-guard:friction-report` shows '
-            'how often the pattern lands, and it can be filed at %s.'
-            % (hatch, ISSUES_URL))
+    joined into one reason, and the escape hatch belongs to the decision.
+
+    Ordered after the fixes, never before them: an escape hatch offered
+    first is the one the agent reaches for first."""
+    return ('If the wait is genuinely required, re-run the same command with '
+            'a FOREGROUND_GUARD_OVERRIDE=<reason> prefix and this guard '
+            'stands aside. If this verdict looks wrong, say so to the user '
+            'rather than working '
+            'around it: `/foreground-guard:friction-report` shows how often '
+            'the pattern lands, and it can be filed at %s.' % ISSUES_URL)
 
 
 # cfg['backgrounded'] is runtime state, not config — main() sets it from the
 # payload. Class A findings word the cost around it, but not the fixes: a
-# backgrounded poll prompts too, so `run_in_background` is never one of them.
+# backgrounded poll blocks too, so `run_in_background` is never one of them.
 def _where(cfg):
     return 'in the background' if cfg.get('backgrounded') else 'in the foreground'
 
@@ -620,24 +635,34 @@ def finding_watch(cfg, seg_str, label, alt):
 def finding_loop(cfg):
     return finding_a(
         cfg, 'a `while`/`until`/`for` loop with `sleep` polls %s' % _where(cfg),
-        'take ONE non-blocking status check now and check again next turn')
+        'run the loop body ONCE now, dropping the loop and the `sleep`, and '
+        'check again next turn if it is not ready')
 
 
 def finding_sandwich(cfg):
     return finding_a(
         cfg, 'a repeat-with-sleep chain (`cmd; sleep N; cmd; ...`) polls %s'
              % _where(cfg),
-        'take ONE non-blocking status check now and check again next turn')
+        'run the check ONCE now, dropping the `sleep` and the repeat, and '
+        'check again next turn if it is not ready')
 
 
 def finding_sleep(cfg, secs):
-    desc = ('an unresolvable duration (treated as long)' if secs is None
-            else '~%g s' % secs)
+    """The bare-sleep finding. An unresolvable duration gets its own first
+    fix: the hook cannot expand `$DELAY` and neither can a reader, so the
+    rewrite is to write the literal rather than to route the question at
+    anyone."""
     parked = 'a background task' if cfg.get('backgrounded') else 'the main thread'
-    return finding_a(
-        cfg, '`sleep` parks %s for %s' % (parked, desc),
-        'skip the wait — do the follow-up check now, and if the thing is '
-        'not ready, come back next turn')
+    if secs is None:
+        desc = 'an unresolvable duration (treated as long)'
+        alt = ('write the literal duration — the hook cannot expand it, and '
+               'anything under the %g s floor never lands here'
+               % cfg['sleep_floor_seconds'])
+    else:
+        desc = '~%g s' % secs
+        alt = ('skip the wait — do the follow-up check now, and if the thing '
+               'is not ready, come back next turn')
+    return finding_a(cfg, '`sleep` parks %s for %s' % (parked, desc), alt)
 
 
 def finding_slow(cfg, what, min_ms, timeout_ms, timeout_was_set):
@@ -890,8 +915,16 @@ def main():
     cfg['backgrounded'] = tool_input.get('run_in_background') is True
     # Class A analysis always runs: it is also the only place the
     # FOREGROUND_GUARD_OVERRIDE=<reason> prefix is parsed, and the override
-    # must still downgrade a Class B deny when poll is disabled.
+    # must still clear a Class B block when poll is disabled.
     findings, override = analyze_class_a(command, cfg)
+    # The agent has asserted the wait is wanted, and a wrong assertion costs
+    # waiting and nothing else. Defer rather than route it at a human: an
+    # approved prompt would add a context switch and no information. Not an
+    # allow — normal permissions and the sibling guards still see the call —
+    # and the stated reason is on the command string, which the transcript
+    # keeps whether or not this hook says anything.
+    if override is not None:
+        return
     if not cfg['poll_enabled']:
         findings = []
 
@@ -926,28 +959,16 @@ def main():
 
     mode = data.get('permission_mode') or ''
     decision = 'deny' if severity == DENY else 'ask'
-    # Unattended modes: an ask costs the user a prompt and returns nothing.
-    # In `auto` they are deliberately not babysitting the run, and rejecting
-    # the prompt drops the guard's fix on the floor — they end up pasting it
-    # back to the agent by hand. In `dontAsk` Claude Code turns the ask into
-    # its own generic deny, losing the reason entirely; in bypassPermissions
-    # no one can answer it. Deny instead: equally blocking, and the reason is
-    # fed back so the agent self-corrects (snapshot / Monitor / timeout).
+    # Only a config-de-escalated `ask` reaches here, and an unattended mode is
+    # where it cannot be answered: in `auto` the prompt interrupts a run the
+    # user chose not to babysit, in `dontAsk` Claude Code turns it into its own
+    # generic deny and the reason is lost, and in `bypassPermissions` it stalls
+    # on a prompt with no one there. Deny instead: equally blocking, and the
+    # reason is fed back so the agent self-corrects.
     if decision == 'ask' and mode in UNATTENDED_MODES:
         decision = 'deny'
-    # The override is a deliberate request for that one prompt, so it
-    # downgrades any deny — config-escalated or mode-escalated — wherever a
-    # prompt can still be answered.
-    if decision == 'deny' and override is not None \
-            and mode not in NO_PROMPT_MODES:
-        decision = 'ask'
-        shown = override.strip()
-        note = ' (%s)' % shown if shown else ''
-        reason = ('foreground-guard override acknowledged '
-                  '(FOREGROUND_GUARD_OVERRIDE is set%s) — downgraded from deny '
-                  'to a confirmation prompt. ' % note + reason)
     if decision == 'deny':
-        reason += ' ' + deny_tail(mode)
+        reason += ' ' + deny_tail()
     print(json.dumps({'hookSpecificOutput': {
         'hookEventName': 'PreToolUse',
         'permissionDecision': decision,
