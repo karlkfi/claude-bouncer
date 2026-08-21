@@ -54,6 +54,11 @@ The hook produces one of four outcomes:
   **process kill that names no path in this workspace** — whether the pattern is
   the kill's own (`pkill -f`) or reached it through a `pgrep` or a `ps` pipeline
   (all below). Configurable down to `ask`; see [Configuration](#configuration).
+  It is also the default for an argument the hook **could not read** — a
+  `$VAR`/`$(…)`/`~user` token, or a relative path after a `cd` it couldn't
+  follow. That is the hook failing to parse rather than a boundary question, so
+  the reason carries the literal-path rewrite and the agent applies it without
+  anyone being prompted (see [Unreadable arguments deny](#unreadable-arguments-deny)).
   Both blocking reasons — `ask` and `deny` — open with `workspace-guard: `, so
   either one names the hook that produced it. Claude Code names the plugin in
   neither the prompt nor the text handed back from a refusal, so without the
@@ -144,8 +149,6 @@ project's scratch still asks entirely.
 | `less /var/log/syslog`               | **ask**  |
 | `cat ../../etc/passwd`               | **ask**  |
 | `cat ~/.aws/credentials`             | **ask**  |
-| `cat ~user/notes.md`                 | **ask**  |
-| `cat $HOME/.ssh/id_rsa`              | **ask**  |
 | `cd /etc && cat passwd`              | **ask**  |
 | `echo "$(cat /etc/passwd)"` (quoted subst read) | **ask** |
 | `cat > doc.md <<EOF` … `$(cat /etc/x)` … `EOF` (expanded body) | **ask** |
@@ -154,7 +157,6 @@ project's scratch still asks entirely.
 | `until grep -q x /etc/passwd; do :; done` | **ask** |
 | `if cat /etc/passwd; then :; fi`     | **ask**  |
 | `f=/etc/passwd; cat $f`              | **ask**  |
-| `f=$HOME/x; cat $f` (non-literal value) | **ask** |
 | `C=cat; $C /etc/passwd`              | **ask**  |
 | `ln -s /etc/passwd link && cat link` | **ask**  |
 | `ln /etc/passwd link && cat link`    | **ask**  |
@@ -183,6 +185,12 @@ project's scratch still asks entirely.
 | `cat /tmpfoo/x` (not under `/tmp`)   | **ask**  |
 | `ls > /etc/out.txt` (unguarded redirect, outside) | **ask** |
 | `rm <sibling-worktree>/main.go` (in a worktree) | **deny** |
+| `cat $HOME/.ssh/id_rsa`              | **deny** |
+| `cat ~user/notes.md`                 | **deny** |
+| `f=$HOME/x; cat $f` (non-literal value) | **deny** |
+| `cat $TMPDIR/out.log`                | **deny** |
+| `cd $HOME && cat notes.md` (untracked `cd`) | **deny** |
+| `cat $f /etc/hosts` (also names an outside path) | **ask** |
 | `rm -rf <sibling-worktree>` (the whole checkout) | **deny** |
 | `rm ~/.claude/skills/x` (a symlink into a sibling) | **ask** |
 | `rm <link-to-sibling>/main.go` (real file inside) | **deny** |
@@ -237,6 +245,11 @@ shapes reach host temp and are covered: a **redirect** target from *any* command
 (a bare `mktemp`, `mktemp -d`, or `mktemp -t`/`-p /tmp` all write there) — an
 explicit in-workspace target (`mktemp -p ./scratch …`) is allowed like any other
 in-root write.
+
+The **ask** rows are the ones that ask a *person* something: this path resolves
+outside the root — is that intended? The rows that deny on an unreadable
+argument ask nobody, because the operator at a prompt sees the same unexpanded
+string the agent does.
 
 The **ask** rows assume an interactive or `default`-mode session. In full-auto
 `bypassPermissions` mode (`--dangerously-skip-permissions`) those same paths
@@ -783,7 +796,7 @@ through the same boundary rules and produce the same reasons. Symlink staging
    backticks, glob characters, whitespace, or `:` — is remembered, and later
    plain `$NAME`/`${NAME}` uses in the *same* command string are substituted
    before the workspace check. So `SP=./out; tail -5 $SP/run.csv` resolves
-   and allows instead of prompting as runtime-expanded, and
+   and allows instead of blocking as runtime-expanded, and
    `f=/etc/passwd; cat $f` prompts on the *resolved* path. This evaluates
    exactly the expansion bash will perform, using only text already inside
    the command; the substituted path still goes through every step below.
@@ -791,7 +804,7 @@ through the same boundary rules and produce the same reasons. Symlink staging
    later touched by `read`/`eval`/`declare`/`unset` (or by `printf`, but only
    in its assigning `-v NAME` form), an assignment inside a
    subshell, pipeline segment, or backgrounded command — drops the variable
-   and keeps today's runtime-expanded `ask`. Those rules read the command
+   and keeps the runtime-expanded `deny`. Those rules read the command
    stripped by step 3, so a reserved word or an inline assignment in front of
    the mutation (`while read f`, `LC_ALL=C read f`) doesn't hide it. As a
    side effect, a guarded
@@ -822,7 +835,7 @@ through the same boundary rules and produce the same reasons. Symlink staging
    naming the resolved path. Two limits keep the work bounded as depth
    multiplies: a variable is poisoned rather than bound when its candidate set
    would exceed 256 values, and a file argument naming several loop variables
-   keeps its runtime-expanded prompt when their cross product would. Both
+   keeps its runtime-expanded `deny` when their cross product would. Both
    poison rather than truncate — a checked prefix would say nothing about the
    candidates past it.
 
@@ -859,7 +872,8 @@ through the same boundary rules and produce the same reasons. Symlink staging
    whitelist is closed and matched on the exact whitespace-normalized token —
    there is no general `$( )` evaluation. When the new cwd can't be resolved at
    hook time — bare `cd`, `cd -`, `cd $HOME`, `popd`, any other substitution —
-   later relative paths short-circuit to `ask`.
+   later relative paths short-circuit to `deny`, naming the literal-target
+   rewrite (the hook couldn't read the `cd`, and neither could you).
 7. **Stage** symlinks *and* hard links created by an earlier `ln OUTSIDE LINK`
    in the chain (with or without `-s`). `LINK`'s resolved path is recorded so
    a later `cat LINK` is flagged — bash hasn't materialised the link yet at
@@ -871,7 +885,8 @@ through the same boundary rules and produce the same reasons. Symlink staging
    operands and `mv`'s sources, which unlink or rename the name they are given
    and never write through it. Those resolve every component but the last, so
    the link rather than its target is what gets checked. Anything that resolves
-   outside the root yields `ask`; otherwise `allow`. A leading `~` or `~/…` is
+   outside the root yields `ask`; otherwise `allow`. A token the hook cannot
+   resolve at all yields `deny` with the rewrite instead. A leading `~` or `~/…` is
    expanded to your home directory first (bash does this deterministically), so
    a home path inside the root is allowed instead of needlessly prompted. The
    home comes from the same lookup Claude Code itself uses, not from `$HOME`,
@@ -1050,7 +1065,7 @@ through the same boundary rules and produce the same reasons. Symlink staging
    to snapshot the map — it therefore gets only the names holding *one* literal
    at every point in the string. A name reassigned to a different value, or
    dropped anywhere by a poisoning command, is withheld for good and its `$f`
-   stays a runtime-expanded `ask`, so a value from later in the string can never
+   stays a runtime-expanded `deny`, so a value from later in the string can never
    stand in for the one the body actually sees.
 15. **Recurse into shell `-c` bodies.** A body is an ordinary command string that
    happened to arrive inside one token, so it runs back through steps 1–15 and
@@ -1336,6 +1351,30 @@ skill's own rules never need a prefix: invoke the skill rather than reading its
 `SKILL.md`, since the harness loads skills itself and that path never reaches
 this hook.
 
+### Unreadable arguments deny
+
+A blocked command splits two ways, and only one of them is a question for a
+person.
+
+When a file argument **resolves** to a path outside the project root, the hook
+knows exactly where it lands and you don't: whether that file is legitimately
+yours to read is a fact about your intent, so it prompts.
+
+When the hook **cannot read the argument at all** — `cat $TMPDIR/out.log`,
+`grep foo $f`, `cat ~someuser/notes.md`, or a relative path after a `cd` it
+couldn't follow — it has no idea where the command lands. Nor does the operator
+staring at the prompt, who is shown the same unexpanded `$f` the agent wrote.
+Prompting there spends a person's attention and returns no information, so the
+hook denies and puts the fix in the reason: write the literal path, bind the
+variable to a literal earlier in the same command, or use the Read/Grep tools.
+The agent applies that in its own loop and nobody is interrupted.
+
+This does not move the boundary — it moves the question to where it can be
+answered. A rewritten literal that turns out to land outside the root comes
+back as an ordinary outside-workspace `ask`, now naming a path you can actually
+judge. A command carrying both an unreadable argument *and* a resolved outside
+path keeps its `ask`, since the second half is still owed a human.
+
 ### Outside-workspace ask vs. deny
 
 For outside-workspace paths the hook returns `ask` so you get a confirmation
@@ -1375,7 +1414,8 @@ final output.
   deterministically), so a home path inside the root is allowed. Tokens that
   bash would expand *unpredictably* at runtime — `~user`/`~+`/`~-`, or a `$`
   that introduces an expansion (`$VAR`, `${VAR}`, `$(...)`, `$1`, `$?`) — are
-  still treated as outside-workspace. A `$` bash keeps literal (trailing, or
+  still blocked, as a `deny` carrying the literal-path rewrite rather than a
+  prompt nobody can answer. A `$` bash keeps literal (trailing, or
   before a non-name char like `.`/`/`) is part of the filename and resolved
   normally, so a `price$` or `a$.b` argument no longer prompts spuriously.
 - Heredoc body lines are dropped from the raw command string before parsing, so
@@ -1407,7 +1447,7 @@ final output.
   built from other expansions, and variables later touched by
   `read`/`eval`/`declare`/`unset` or assigned inside a subshell,
   pipeline segment, or backgrounded command all keep the runtime-expanded
-  `ask`. Anything that may set `IFS` disables propagation for that command
+  `deny`. Anything that may set `IFS` disables propagation for that command
   entirely (conservative — a changed `IFS` re-splits every later expansion, so
   a value checked as one word can reach the command as several). A heredoc
   (`<<`) does not: its body is dropped before parsing, so a body line shaped
@@ -1418,7 +1458,7 @@ final output.
   `read`, `printf -v`, `for IFS in …`), or an `eval`/`source` that could set it
   out of sight. Only `unset IFS` is exempt: bash falls back to the default
   splitting the guard already assumes.
-  Uncertainty always falls back to `ask` — propagation only ever adds allows for
+  Uncertainty always falls back to blocking — propagation only ever adds allows for
   expansions bash performs deterministically.
 - Propagation reaches *into* a command substitution (step 14) only for names
   holding one literal throughout the string, because that scan has no position
@@ -1454,7 +1494,7 @@ final output.
   instead, so a loop over very long literal lists keeps today's prompt. The
   same 256 cap applies to a file argument that names several loop variables at
   once: under three nested loops of 256 literals, `cat $a/$b/$c` stands for
-  16.7 million paths, so it keeps the runtime-expanded prompt rather than being
+  16.7 million paths, so it keeps the runtime-expanded `deny` rather than being
   enumerated. Enumerating it ran the hook past two minutes — and because Claude
   Code treats a failed `PreToolUse` hook as a non-blocking error, a guard that
   never answers enforces nothing at all.

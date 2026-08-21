@@ -1470,6 +1470,36 @@ class HookEndToEndTests(unittest.TestCase):
     def test_pipe_chain_workspace_allow(self):
         self._decision("cat in.txt | grep PAT", "allow")
 
+    # --- the hook's own parse failures deny, boundary questions ask ----------
+    # A token the hook can't expand is not a security decision: the operator at
+    # a prompt sees the same unexpanded string and can't resolve it either. It
+    # denies with the literal rewrite so the agent fixes it in its own loop. A
+    # path that genuinely resolves outside the root keeps its `ask` — including
+    # when the same command carries both.
+
+    def test_unresolvable_arg_denies_with_the_rewrite(self):
+        out = self._decision("cat $TMPDIR/out.log", "deny")
+        reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertTrue(reason.startswith("workspace-guard: "), reason)
+        self.assertIn("$TMPDIR/out.log", reason)
+        self.assertIn("write the literal path", reason)
+
+    def test_untracked_relative_denies_with_the_rewrite(self):
+        out = self._decision("cd $HOME && cat notes.md", "deny")
+        reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertTrue(reason.startswith("workspace-guard: "), reason)
+        self.assertIn("give cd a literal target", reason)
+
+    def test_resolved_outside_path_still_asks(self):
+        # The half that must not move: a person is the only one who can answer
+        # whether this file is legitimately outside the root.
+        self._decision("cat /q84-fake-outside/x", "ask")
+
+    def test_unresolvable_mixed_with_outside_still_asks(self):
+        # `$f` alone would deny, but the command also names a genuinely outside
+        # path, and that question is still owed a human.
+        self._decision("cat $f /q84-fake-outside/x", "ask")
+
     # --- outside-workspace ask ----------------------------------------------
 
     def test_cat_outside_ask(self):
@@ -1672,30 +1702,31 @@ class HookEndToEndTests(unittest.TestCase):
             out["hookSpecificOutput"]["permissionDecisionReason"],
         )
 
-    def test_tilde_user_path_outside_ask(self):
-        # `~user` can't be expanded here (needs a pwd lookup) — still ask.
-        self._decision("cat ~someuser/.ssh/id_rsa", "ask")
+    def test_tilde_user_path_outside_deny(self):
+        # `~user` can't be expanded here (needs a pwd lookup) — still blocked,
+        # as a deny naming the rewrite.
+        self._decision("cat ~someuser/.ssh/id_rsa", "deny")
 
-    def test_dollar_var_path_outside_ask(self):
-        out = self._decision("cat $HOME/.aws/credentials", "ask")
+    def test_dollar_var_path_outside_deny(self):
+        out = self._decision("cat $HOME/.aws/credentials", "deny")
         self.assertIn(
             "$HOME/.aws/credentials",
             out["hookSpecificOutput"]["permissionDecisionReason"],
         )
 
-    def test_quoted_dollar_var_outside_ask(self):
+    def test_quoted_dollar_var_outside_deny(self):
         # Double quotes preserve `$` expansion in bash; shlex strips the
-        # quotes but the literal `$HOME` remains in the token. Still ask.
-        self._decision('cat "$HOME/secret"', "ask")
+        # quotes but the literal `$HOME` remains in the token. Still blocked.
+        self._decision('cat "$HOME/secret"', "deny")
 
-    def test_curly_dollar_var_outside_ask(self):
-        self._decision("cat ${HOME}/secret", "ask")
+    def test_curly_dollar_var_outside_deny(self):
+        self._decision("cat ${HOME}/secret", "deny")
 
     def test_redirect_to_tilde_outside_ask(self):
         self._decision("cat in.txt > ~/evil", "ask")
 
-    def test_redirect_to_dollar_var_outside_ask(self):
-        self._decision("cat in.txt > $LOG/evil", "ask")
+    def test_redirect_to_dollar_var_outside_deny(self):
+        self._decision("cat in.txt > $LOG/evil", "deny")
 
     def test_tilde_in_middle_of_token_allowed(self):
         # `~` only triggers when it's the leading character — bash only
@@ -1769,32 +1800,32 @@ class HookEndToEndTests(unittest.TestCase):
             f.write("hi\n")
         self._decision(f"cd {sh(nested)} && cat x.txt", "allow")
 
-    def test_popd_taints_subsequent_relative_outside_ask(self):
+    def test_popd_taints_subsequent_relative_outside_deny(self):
         # popd's effect can't be tracked; any subsequent relative path in a
         # guarded group is treated as outside.
-        self._decision("popd && cat in.txt", "ask")
+        self._decision("popd && cat in.txt", "deny")
 
-    def test_bare_cd_taints_subsequent_relative_outside_ask(self):
+    def test_bare_cd_taints_subsequent_relative_outside_deny(self):
         # `cd` with no arg goes to $HOME — we can't track precisely.
-        self._decision("cd && cat in.txt", "ask")
+        self._decision("cd && cat in.txt", "deny")
 
-    def test_cd_dash_taints_subsequent_relative_outside_ask(self):
+    def test_cd_dash_taints_subsequent_relative_outside_deny(self):
         # `cd -` toggles to OLDPWD — same untracked situation.
-        self._decision("cd - && cat in.txt", "ask")
+        self._decision("cd - && cat in.txt", "deny")
 
-    def test_cd_dollar_var_taints_subsequent_relative_outside_ask(self):
+    def test_cd_dollar_var_taints_subsequent_relative_outside_deny(self):
         # cd target with `$` can't be resolved at hook time.
-        self._decision("cd $HOME && cat in.txt", "ask")
+        self._decision("cd $HOME && cat in.txt", "deny")
 
     def test_cd_tilde_to_home_relative_outside_ask(self):
         # Q19: `cd ~` now tracks to $HOME (no longer untracked), so `in.txt`
         # resolves to $HOME/in.txt — outside this tempdir workspace — and asks.
         self._decision("cd ~ && cat in.txt", "ask")
 
-    def test_cd_tilde_user_taints_subsequent_relative_outside_ask(self):
+    def test_cd_tilde_user_taints_subsequent_relative_outside_deny(self):
         # `~user` stays unresolvable, so the cd is untracked and the relative
         # read is treated as outside.
-        self._decision("cd ~user && cat in.txt", "ask")
+        self._decision("cd ~user && cat in.txt", "deny")
 
     def test_cd_does_not_taint_absolute_paths(self):
         # `cd /etc && cat /etc/passwd` already had `/etc/passwd` flagged via
@@ -2006,12 +2037,12 @@ class HookEndToEndTests(unittest.TestCase):
         self._decision(
             'cd "$( git  rev-parse --show-toplevel )" && cat in.txt', "allow")
 
-    def test_cd_git_toplevel_subst_no_repo_stays_untracked_ask(self):
+    def test_cd_git_toplevel_subst_no_repo_stays_untracked_deny(self):
         # No `.git` boundary above the workspace tempdir -> the substitution
         # can't be resolved, so the cd stays untracked and the relative read
-        # asks (unchanged secure default).
+        # denies (unchanged secure default; the hook can't read the token).
         self._decision(
-            'cd "$(git rev-parse --show-toplevel)" && cat in.txt', "ask")
+            'cd "$(git rev-parse --show-toplevel)" && cat in.txt', "deny")
 
     def test_cd_git_toplevel_subst_outside_file_still_ask(self):
         # Resolving the cd must not weaken the boundary: an outside path
@@ -2044,13 +2075,13 @@ class HookEndToEndTests(unittest.TestCase):
                 "data.txt",
                 out["hookSpecificOutput"]["permissionDecisionReason"])
 
-    def test_cd_git_toplevel_subst_after_untracked_cd_stays_ask(self):
+    def test_cd_git_toplevel_subst_after_untracked_cd_stays_deny(self):
         # An already-untracked cwd can't seed the walk-up — the substitution
         # must not "re-track" from a wrong starting point.
         self._make_git_workspace()
         self._decision(
             'cd - && cd "$(git rev-parse --show-toplevel)" && cat in.txt',
-            "ask")
+            "deny")
 
     def test_cd_pwd_subst_relative_allow(self):
         # `$(pwd)` is the identity on the tracked cwd — no `.git` needed.
@@ -2060,17 +2091,17 @@ class HookEndToEndTests(unittest.TestCase):
         # Identity on a tracked *outside* cwd: relative reads still ask.
         self._decision('cd /etc && cd "$(pwd)" && cat passwd', "ask")
 
-    def test_cd_subst_with_suffix_stays_untracked_ask(self):
+    def test_cd_subst_with_suffix_stays_untracked_deny(self):
         # `$(...)/sub` is not the exact canonical token — still untracked.
         self._make_git_workspace()
         self._decision(
-            'cd "$(git rev-parse --show-toplevel)/sub" && cat in.txt', "ask")
+            'cd "$(git rev-parse --show-toplevel)/sub" && cat in.txt', "deny")
 
-    def test_cd_non_whitelisted_subst_stays_untracked_ask(self):
+    def test_cd_non_whitelisted_subst_stays_untracked_deny(self):
         # A non-whitelisted cd substitution whose body is an UNGUARDED command
-        # (readlink) leaves the cwd untracked, so the relative read asks. Body
+        # (readlink) leaves the cwd untracked, so the relative read denies. Body
         # has no guarded command, so substitution recursion adds nothing.
-        self._decision('cd "$(readlink foo)" && cat in.txt', "ask")
+        self._decision('cd "$(readlink foo)" && cat in.txt', "deny")
 
     def test_cd_mktemp_subst_inner_host_temp_deny(self):
         # The inner `mktemp -d` genuinely creates a host-temp dir; substitution
@@ -2078,7 +2109,7 @@ class HookEndToEndTests(unittest.TestCase):
         # untracked-cd `ask` for the relative read. (Q33)
         self._decision('cd "$(mktemp -d)" && cat in.txt', "deny")
 
-    def test_cd_git_toplevel_subst_git_dir_env_stays_untracked_ask(self):
+    def test_cd_git_toplevel_subst_git_dir_env_stays_untracked_deny(self):
         # GIT_DIR in the environment can change git's answer, so the
         # substitution is not resolved and the cd stays untracked.
         self._make_git_workspace()
@@ -2089,7 +2120,7 @@ class HookEndToEndTests(unittest.TestCase):
         )
         self.assertIsNotNone(out)
         self.assertEqual(
-            out["hookSpecificOutput"]["permissionDecision"], "ask")
+            out["hookSpecificOutput"]["permissionDecision"], "deny")
 
     # --- whitelisted pure substitutions in file operands (issue 84) ----------
     # The issue-59 cd-target registry (CD_SUBST) also resolves when a
@@ -2186,21 +2217,21 @@ class HookEndToEndTests(unittest.TestCase):
             "$(pwd)/../q84-fake-target",
             out["hookSpecificOutput"]["permissionDecisionReason"])
 
-    def test_subst_file_operand_remainder_var_still_ask(self):
-        # A `$VAR` left in the remainder is not resolvable -> still asks, naming
+    def test_subst_file_operand_remainder_var_still_deny(self):
+        # A `$VAR` left in the remainder is not resolvable -> still blocked, naming
         # the original token.
-        out = self._decision('cat "$(pwd)/$OTHER"', "ask")
+        out = self._decision('cat "$(pwd)/$OTHER"', "deny")
         self.assertIn(
             "$(pwd)/$OTHER",
             out["hookSpecificOutput"]["permissionDecisionReason"])
 
-    def test_non_whitelisted_subst_file_operand_still_ask(self):
-        self._decision('cat "$(whoami)/x"', "ask")
+    def test_non_whitelisted_subst_file_operand_still_deny(self):
+        self._decision('cat "$(whoami)/x"', "deny")
 
-    def test_subst_file_operand_after_untracked_cd_stays_ask(self):
+    def test_subst_file_operand_after_untracked_cd_stays_deny(self):
         # `$(pwd)` after an untracked cd can't be resolved from a known cwd, so
-        # it stays runtime-expanded and asks.
-        self._decision('cd - && cat "$(pwd)/in.txt"', "ask")
+        # it stays runtime-expanded and denies.
+        self._decision('cd - && cat "$(pwd)/in.txt"', "deny")
 
     # --- ln -s symlink staging (Q8) -----------------------------------------
 
@@ -2293,11 +2324,11 @@ class HookEndToEndTests(unittest.TestCase):
             "ln -s $HOME/secret link && cat link", "ask",
         )
 
-    def test_ln_dollar_link_not_staged_but_cat_asks_anyway(self):
+    def test_ln_dollar_link_not_staged_but_cat_denies_anyway(self):
         # `link` with `$` is unresolvable — staging can't pin it down. The
-        # later `cat $X` still asks via the existing $/~ rule.
+        # later `cat $X` still blocks via the existing $/~ rule.
         self._decision(
-            "ln -s /tmp/q8-fake-target $LINK && cat $LINK", "ask",
+            "ln -s /tmp/q8-fake-target $LINK && cat $LINK", "deny",
         )
 
     def test_ln_only_command_defers(self):
@@ -3893,11 +3924,15 @@ class SubstBodyVarPropagationTests(unittest.TestCase):
         out = run_hook(cmd, self.workspace, project_dir=self.workspace)
         self.assertIsNone(out, f"expected defer for {cmd!r}, got {out!r}")
 
-    def _asks_about(self, cmd, path):
+    def _blocks_about(self, cmd, path, expected):
+        # `expected` is explicit because the two shapes here now diverge: a
+        # resolved outside value is an `ask`, while a name the hook could not
+        # resolve is a `deny` carrying the literal-path rewrite.
         out = run_hook(cmd, self.workspace, project_dir=self.workspace)
         self.assertIsNotNone(out, f"expected a decision, got defer for: {cmd!r}")
         got = out["hookSpecificOutput"]["permissionDecision"]
-        self.assertEqual(got, "ask", f"expected ask for {cmd!r}; got {got!r}")
+        self.assertEqual(got, expected,
+                         f"expected {expected} for {cmd!r}; got {got!r}")
         self.assertIn(path, out["hookSpecificOutput"]["permissionDecisionReason"])
 
     # --- the motivating shapes stop prompting --------------------------------
@@ -3922,14 +3957,14 @@ class SubstBodyVarPropagationTests(unittest.TestCase):
         self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "allow")
 
     def test_nested_subst_outside_value_still_asks(self):
-        self._asks_about('f=/etc/q66-fake-target; echo "$(echo "$(cat "$f")")"',
-                         "/etc/q66-fake-target")
+        self._blocks_about('f=/etc/q66-fake-target; echo "$(echo "$(cat "$f")")"',
+                           "/etc/q66-fake-target", "ask")
 
     # --- an outside value still blocks ---------------------------------------
 
     def test_outside_value_inside_subst_asks(self):
-        self._asks_about('f=/etc/q66-fake-target; echo "$(cat "$f")"',
-                         "/etc/q66-fake-target")
+        self._blocks_about('f=/etc/q66-fake-target; echo "$(cat "$f")"',
+                           "/etc/q66-fake-target", "ask")
 
     # --- only string-wide stable names carry in ------------------------------
 
@@ -3937,25 +3972,25 @@ class SubstBodyVarPropagationTests(unittest.TestCase):
         # The body runs while `f` still holds the outside path; substituting the
         # later in-workspace literal would drop the offender entirely. Being
         # unstable, `f` is not substituted at all, so the block survives as the
-        # generic runtime-expanded `ask` rather than one naming the path.
-        self._asks_about('f=/etc/q66-fake-target; echo "$(cat "$f")"; f=in.txt',
-                         "$f")
+        # generic runtime-expanded `deny` rather than one naming the path.
+        self._blocks_about('f=/etc/q66-fake-target; echo "$(cat "$f")"; f=in.txt',
+                           "$f", "deny")
 
     def test_reassignment_leaves_the_var_unresolvable(self):
         # Both values are in-workspace, so nothing is hidden — but the name is
-        # no longer stable, so the body keeps the runtime-expanded `ask`.
-        self._asks_about('f=in.txt; echo "$(cat "$f")"; f=other.txt', "$f")
+        # no longer stable, so the body keeps the runtime-expanded `deny`.
+        self._blocks_about('f=in.txt; echo "$(cat "$f")"; f=other.txt', "$f", "deny")
 
     def test_poisoned_var_stays_unresolvable(self):
-        self._asks_about('f=in.txt; read f; echo "$(cat "$f")"', "$f")
+        self._blocks_about('f=in.txt; read f; echo "$(cat "$f")"', "$f", "deny")
 
     def test_ifs_clobber_stops_propagation_into_the_body(self):
-        self._asks_about('f=in.txt; IFS=:; echo "$(cat "$f")"', "$f")
+        self._blocks_about('f=in.txt; IFS=:; echo "$(cat "$f")"', "$f", "deny")
 
     def test_pipeline_segment_assignment_does_not_reach_the_body(self):
         # `f=…` in a pipeline segment runs in a subshell, so bash never sets it
         # for the substitution that follows.
-        self._asks_about('true | f=in.txt; echo "$(cat "$f")"', "$f")
+        self._blocks_about('true | f=in.txt; echo "$(cat "$f")"', "$f", "deny")
 
     def test_single_quoted_body_is_still_a_literal(self):
         self._defer("f=/etc/q66-fake-target; echo '$(cat \"$f\")'")
@@ -3963,8 +3998,8 @@ class SubstBodyVarPropagationTests(unittest.TestCase):
     # --- heredoc bodies get the map too, now that Q67 keeps it alive ---------
 
     def test_expanded_heredoc_body_subst_resolves_the_var(self):
-        self._asks_about('f=/etc/q66-fake-target\ncat <<EOF\n$(cat "$f")\nEOF',
-                         "/etc/q66-fake-target")
+        self._blocks_about('f=/etc/q66-fake-target\ncat <<EOF\n$(cat "$f")\nEOF',
+                           "/etc/q66-fake-target", "ask")
 
     def test_quoted_heredoc_body_stays_literal(self):
         # A `<<'EOF'` body is data to bash, so its `$(…)` never runs and the
@@ -4140,10 +4175,10 @@ class Issue60EndToEndTests(unittest.TestCase):
         self._decision(
             "cat > f.txt <<EOF\nbody\nEOF\ncat /etc/q60-fake", "ask")
 
-    def test_command_substitution_still_conservative_ask(self):
+    def test_command_substitution_still_conservative_deny(self):
         # `$(...)` is unresolvable — must stay ask, not slip through as a
         # literal `$`.
-        self._decision("cat $(echo /etc/q60-fake)", "ask")
+        self._decision("cat $(echo /etc/q60-fake)", "deny")
 
     def test_quoted_hash_pattern_outside_ask(self):
         # A `#` inside quotes is a pattern char, not a comment — the outside
@@ -7293,34 +7328,34 @@ class VarPropagationEndToEndTests(unittest.TestCase):
         self._decision("C=cat; $C /etc/q58-fake-target", "ask")
         self._decision("C=cat; $C in.txt", "allow")
 
-    # --- uncertainty keeps today's ask ----------------------------------------
+    # --- uncertainty keeps blocking ----------------------------------------
 
-    def test_unknown_var_still_ask(self):
-        self._decision("cat $q58_unset_var", "ask")
+    def test_unknown_var_still_deny(self):
+        self._decision("cat $q58_unset_var", "deny")
 
-    def test_command_substitution_value_still_ask(self):
-        self._decision('f="x$(cmd)"; cat $f', "ask")
+    def test_command_substitution_value_still_deny(self):
+        self._decision('f="x$(cmd)"; cat $f', "deny")
 
     def test_reassigned_literal_uses_last_value(self):
         self._decision("f=in.txt; f=/etc/q58-fake-target; cat $f", "ask")
 
     def test_impure_reassignment_poisons(self):
-        self._decision('f=in.txt; f="x$(cmd)"; cat $f', "ask")
+        self._decision('f=in.txt; f="x$(cmd)"; cat $f', "deny")
 
     def test_pipeline_segment_assignment_does_not_persist(self):
-        self._decision("true | f=in.txt; cat $f", "ask")
+        self._decision("true | f=in.txt; cat $f", "deny")
 
     def test_backgrounded_assignment_does_not_persist(self):
-        self._decision("f=in.txt & cat $f", "ask")
+        self._decision("f=in.txt & cat $f", "deny")
 
     def test_read_poisons_var(self):
-        self._decision("f=in.txt; read f; cat $f", "ask")
+        self._decision("f=in.txt; read f; cat $f", "deny")
 
     def test_keyword_hidden_read_poisons_var(self):
-        self._decision("f=in.txt; while read -r f; do :; done; cat $f", "ask")
+        self._decision("f=in.txt; while read -r f; do :; done; cat $f", "deny")
 
     def test_eval_clears_all(self):
-        self._decision("f=in.txt; eval echo hi; cat $f", "ask")
+        self._decision("f=in.txt; eval echo hi; cat $f", "deny")
 
     def test_env_prefix_does_not_hide_the_poisoning_command(self):
         # Q69: the prefix left `read`/`source` unrecognised, so `f` kept its
@@ -7328,20 +7363,20 @@ class VarPropagationEndToEndTests(unittest.TestCase):
         for cmd in ("read f", "read -r f", "printf -v f /etc/q69-fake",
                     "unset f", "source lib.sh", "eval echo hi"):
             with self.subTest(cmd=cmd):
-                self._decision(f"f=in.txt; LC_ALL=C {cmd}; cat $f", "ask")
+                self._decision(f"f=in.txt; LC_ALL=C {cmd}; cat $f", "deny")
 
     def test_unset_poisons_var(self):
-        self._decision("f=in.txt; unset f; cat $f", "ask")
+        self._decision("f=in.txt; unset f; cat $f", "deny")
 
     def test_declare_reassignment_poisons(self):
-        self._decision("f=in.txt; declare f=/etc/q58-fake; cat $f", "ask")
+        self._decision("f=in.txt; declare f=/etc/q58-fake; cat $f", "deny")
 
     def test_printf_v_poisons(self):
-        self._decision("f=in.txt; printf -v f /etc/q58-fake; cat $f", "ask")
+        self._decision("f=in.txt; printf -v f /etc/q58-fake; cat $f", "deny")
 
     def test_printf_v_glued_poisons(self):
         # bash accepts the name glued to the flag: `printf -vf x` sets f.
-        self._decision("f=in.txt; printf -vf /etc/q58-fake; cat $f", "ask")
+        self._decision("f=in.txt; printf -vf /etc/q58-fake; cat $f", "deny")
 
     def test_printf_without_v_keeps_var(self):
         # Q65: a plain printf assigns nothing, so the map survives it.
@@ -7353,27 +7388,27 @@ class VarPropagationEndToEndTests(unittest.TestCase):
 
     def test_printf_unresolvable_format_still_poisons(self):
         # Unquoted, `$fmt` word-splits into `-v f` and does assign.
-        self._decision('f=in.txt; printf $fmt "%s" y; cat $f', "ask")
+        self._decision('f=in.txt; printf $fmt "%s" y; cat $f', "deny")
 
     def test_array_element_assignment_poisons(self):
         # `f[0]=…` mutates f (a scalar f is f[0]).
-        self._decision("f=in.txt; f[0]=/etc/q58-fake; cat $f", "ask")
+        self._decision("f=in.txt; f[0]=/etc/q58-fake; cat $f", "deny")
 
     def test_function_body_assignment_poisons(self):
-        self._decision("f=in.txt; g() { f=/etc/q58-fake; }; g; cat $f", "ask")
+        self._decision("f=in.txt; g() { f=/etc/q58-fake; }; g; cat $f", "deny")
 
     def test_value_with_space_not_propagated(self):
         # An unquoted use would word-split into multiple paths.
-        self._decision('f="a b"; cat $f', "ask")
+        self._decision('f="a b"; cat $f', "deny")
 
     def test_value_with_glob_not_propagated(self):
-        self._decision("f=*.txt; cat $f", "ask")
+        self._decision("f=*.txt; cat $f", "deny")
 
-    def test_expansion_operator_still_ask(self):
-        self._decision("f=in.txt; cat ${f%.txt}", "ask")
+    def test_expansion_operator_still_deny(self):
+        self._decision("f=in.txt; cat ${f%.txt}", "deny")
 
     def test_ifs_reassignment_disables_propagation(self):
-        self._decision("IFS=,; f=in.txt; cat $f", "ask")
+        self._decision("IFS=,; f=in.txt; cat $f", "deny")
 
     def test_arg_assigner_setting_ifs_disables_propagation(self):
         # Q49: these reach IFS without going through apply_assignment_group.
@@ -7381,20 +7416,20 @@ class VarPropagationEndToEndTests(unittest.TestCase):
                        "readonly IFS=x", "read IFS", "printf -v IFS x",
                        "for IFS in a b; do :; done", "eval 'IFS=x'"):
             with self.subTest(setter=setter):
-                self._decision(f"{setter}; f=in.txt; cat $f", "ask")
+                self._decision(f"{setter}; f=in.txt; cat $f", "deny")
 
     def test_ifs_split_reaches_a_second_outside_word(self):
         # The reason the rule exists: bash splits `docs/x/opt/q49-fake-target`
         # into `docs/` and `/opt/q49-fake-target` under IFS=x, so a value that
         # resolves inside the workspace reads a file outside it.
         self._decision(
-            "declare IFS=x; f=docs/x/opt/q49-fake-target; cat $f", "ask")
+            "declare IFS=x; f=docs/x/opt/q49-fake-target; cat $f", "deny")
 
     def test_env_prefixed_ifs_setter_disables_propagation(self):
         # Q69: same setters, hidden behind an inline env assignment.
         for setter in ("declare IFS=x", "read IFS", "eval 'IFS=x'"):
             with self.subTest(setter=setter):
-                self._decision(f"LC_ALL=C {setter}; f=in.txt; cat $f", "ask")
+                self._decision(f"LC_ALL=C {setter}; f=in.txt; cat $f", "deny")
 
     def test_ifs_env_prefix_keeps_propagation(self):
         # The assignment is scoped to `true`, and bash splits that command's
@@ -7416,7 +7451,7 @@ class VarPropagationEndToEndTests(unittest.TestCase):
     def test_heredoc_body_assignment_does_not_seed_map(self):
         # The body is data: `f=in.txt` written there assigns nothing, so `$f`
         # must stay unresolved rather than being laundered into an allow.
-        self._decision('cat <<EOF > out.txt\nf=in.txt\nEOF\ncat "$f"', "ask")
+        self._decision('cat <<EOF > out.txt\nf=in.txt\nEOF\ncat "$f"', "deny")
 
     def test_heredoc_keeps_outside_value_flagged(self):
         self._decision(
@@ -7429,13 +7464,13 @@ class VarPropagationEndToEndTests(unittest.TestCase):
 
     def test_heredoc_then_ifs_still_disables_propagation(self):
         self._decision('f=in.txt\ncat <<EOF > out.txt\nx\nEOF\nIFS=,\ncat $f',
-                       "ask")
+                       "deny")
 
     def test_prefix_assignment_does_not_persist(self):
         # `F=… cat …` exports F only into cat's environment; a later $F is
         # NOT the assigned value (and F is poisoned, not propagated).
         self._decision(
-            "F=/etc/q58-fake cat in.txt; cat $F", "ask")
+            "F=/etc/q58-fake cat in.txt; cat $F", "deny")
 
     def test_expanded_token_cannot_form_assignment(self):
         # bash decides what is an assignment before expansion: `$g` expanding
@@ -7563,10 +7598,10 @@ class ForLoopPropagationEndToEndTests(unittest.TestCase):
             "wf/*.yml/../../../q99-fake",
             out["hookSpecificOutput"]["permissionDecisionReason"])
 
-    def test_glob_item_reassigned_in_body_ask(self):
+    def test_glob_item_reassigned_in_body_deny(self):
         # The glob binding is poisoned by the same rules as a literal one.
         self._decision(
-            "for f in wf/*.yml\ndo\n  read f\n  cat $f\ndone", "ask")
+            "for f in wf/*.yml\ndo\n  read f\n  cat $f\ndone", "deny")
 
     def test_glob_item_outside_sibling_in_list_ask(self):
         # One outside item taints the loop, glob or not.
@@ -7620,17 +7655,17 @@ class ForLoopPropagationEndToEndTests(unittest.TestCase):
             'for d in wf\ndo\n  for f in "$d"/../../../etc/q41-fake/*\n  do\n'
             '    cat "$f"\n  done\ndone', "ask")
 
-    def test_nested_poisoned_outer_poisons_inner_ask(self):
+    def test_nested_poisoned_outer_poisons_inner_deny(self):
         # `$d` is unresolvable, so `"$d"/*.yml` keeps its `$` and poisons `f`.
         self._decision(
             'for d in $x\ndo\n  for f in "$d"/*.yml\n  do\n    cat "$f"\n'
-            '  done\ndone', "ask")
+            '  done\ndone', "deny")
 
-    def test_nested_brace_in_inner_item_poisons_ask(self):
+    def test_nested_brace_in_inner_item_poisons_deny(self):
         # Brace rejection applies to the expanded item, not just a bare one.
         self._decision(
             'for d in wf\ndo\n  for f in "$d"/{a,b}.yml\n  do\n    cat "$f"\n'
-            '  done\ndone', "ask")
+            '  done\ndone', "deny")
 
     def test_nested_inner_reusing_outer_name_allow(self):
         # `for d in "$d"/*.yml` reads the OUTER d to build the list, then
@@ -7646,7 +7681,7 @@ class ForLoopPropagationEndToEndTests(unittest.TestCase):
         return tuple(" ".join("%s%d" % (p, i) for i in range(n))
                      for p in prefixes)
 
-    def test_deep_cross_product_asks_without_hanging(self):
+    def test_deep_cross_product_denies_without_hanging(self):
         # Three nested loops over the cap's worth of literals each make
         # `$a/$b/$c` stand for 16.7M paths. Enumerating them ran past two
         # minutes, and a hook that never answers is a non-blocking error — the
@@ -7654,16 +7689,16 @@ class ForLoopPropagationEndToEndTests(unittest.TestCase):
         # a hang rather than wedging the suite.
         self._decision(
             "for a in %s; do for b in %s; do for c in %s; do cat $a/$b/$c; "
-            "done; done; done" % self._cap_lists("a", "b", "c"), "ask")
+            "done; done; done" % self._cap_lists("a", "b", "c"), "deny")
 
-    def test_deep_cross_product_in_inner_list_asks(self):
+    def test_deep_cross_product_in_inner_list_denies(self):
         # The same blowup one level up, where the over-cap product is a
         # for-LIST item: the bound has to apply before the list is built, not
         # only when a file arg is checked.
         self._decision(
             "for a in %s; do for b in %s; do for c in %s; do "
             "for d in $a/$b/$c; do cat $d; done; done; done; done"
-            % self._cap_lists("a", "b", "c"), "ask")
+            % self._cap_lists("a", "b", "c"), "deny")
 
     def test_at_cap_cross_product_still_resolves_allow(self):
         # The bound is on the product, not the nesting depth: a cap-sized outer
@@ -7681,20 +7716,20 @@ class ForLoopPropagationEndToEndTests(unittest.TestCase):
         outer, = self._cap_lists("a")
         self._decision(
             "for a in %s; do for b in wf sub; do cat $b/$a; done; done" % outer,
-            "ask")
+            "deny")
 
-    # --- uncertainty keeps today's ask ---------------------------------------
+    # --- uncertainty keeps blocking ---------------------------------------
 
     def test_brace_item_poisons(self):
         # bash brace-expands a for-list item; treating `{a,b}` literally would
         # miss the real paths, so the variable is poisoned.
-        self._decision("for f in wf/{a,b}.yml\ndo\n  cat $f\ndone", "ask")
+        self._decision("for f in wf/{a,b}.yml\ndo\n  cat $f\ndone", "deny")
 
     def test_nonliteral_item_poisons(self):
-        self._decision("for f in a $x\ndo\n  cat wf/$f.yml\ndone", "ask")
+        self._decision("for f in a $x\ndo\n  cat wf/$f.yml\ndone", "deny")
 
     def test_for_name_without_in_poisons(self):
-        self._decision("for f\ndo\n  cat $f\ndone", "ask")
+        self._decision("for f\ndo\n  cat $f\ndone", "deny")
 
     def test_reassigned_loop_var_poisons(self):
         self._decision(
@@ -7702,17 +7737,17 @@ class ForLoopPropagationEndToEndTests(unittest.TestCase):
 
     def test_read_in_body_poisons_loop_var(self):
         self._decision(
-            "for f in a b\ndo\n  read f\n  cat $f\ndone", "ask")
+            "for f in a b\ndo\n  read f\n  cat $f\ndone", "deny")
 
     def test_eval_in_body_poisons_loop_var(self):
         self._decision(
-            "for f in a b\ndo\n  eval echo hi\n  cat $f\ndone", "ask")
+            "for f in a b\ndo\n  eval echo hi\n  cat $f\ndone", "deny")
 
     def test_arithmetic_for_form_poisons(self):
         # `for ((i=0;i<3;i++))` isn't a `for NAME in` list — the loop var keeps
         # today's poison behavior.
         self._decision(
-            "for ((i=0;i<3;i++))\ndo\n  cat $i\ndone", "ask")
+            "for ((i=0;i<3;i++))\ndo\n  cat $i\ndone", "deny")
 
     def test_heredoc_keeps_loop_propagation(self):
         # Q67: the stripped body can't pollute the maps, so loopmap survives a
@@ -9005,15 +9040,15 @@ class PowerShellEndToEndTests(unittest.TestCase):
         self._decide("Set-Location docs; Get-Content note.md", "allow")
 
     def test_untracked_location_flags_relative_operands(self):
-        out = self._decide("Set-Location $d; Get-Content secret.txt", "ask")
+        out = self._decide("Set-Location $d; Get-Content secret.txt", "deny")
         self.assertIn("untracked",
                       out["hookSpecificOutput"]["permissionDecisionReason"])
 
     def test_bare_cd_drops_tracking(self):
-        self._decide("cd; Get-Content secret.txt", "ask")
+        self._decide("cd; Get-Content secret.txt", "deny")
 
     def test_pop_location_drops_tracking(self):
-        self._decide("Push-Location docs; Pop-Location; Get-Content note.md", "ask")
+        self._decide("Push-Location docs; Pop-Location; Get-Content note.md", "deny")
 
     # --- deferring, and what must not defer ----------------------------------
 
@@ -9026,8 +9061,8 @@ class PowerShellEndToEndTests(unittest.TestCase):
     def test_commented_out_command_defers(self):
         self._defer(r"# Get-Content C:\q51-fake-target\x")
 
-    def test_expandable_operand_asks(self):
-        out = self._decide(r"Get-Content $env:USERPROFILE\x", "ask")
+    def test_expandable_operand_denies(self):
+        out = self._decide(r"Get-Content $env:USERPROFILE\x", "deny")
         self.assertIn("Runtime-expanded",
                       out["hookSpecificOutput"]["permissionDecisionReason"])
 
