@@ -69,6 +69,29 @@ A further 29 denies open `` `git push` — origin/main has moved `` and belong t
 branch-guard or to pr-sentinel; the wording is not in either plugin's current
 release, so they are left unattributed rather than assigned to a guess.
 
+## Coverage starts at the version that adopted the opener
+
+Transcripts are immutable, so the reader's reach is bounded by what was written
+at the time. A deny recorded by a build that predated the prefix carries no name,
+and no widening of the reader recovers it, because there is nothing there to
+match.
+
+pr-sentinel's duplicate-PR deny is the worked example. All 108 of its misses in
+the table above open like this:
+
+```
+`gh pr create` — an open PR already changes files this branch changes: #135
+```
+
+A backticked command and no name. They all fall in 2026-08, and the check itself
+is gone from pr-sentinel 0.9.0 — so whatever its successor does, those 108 stay
+unattributed for as long as the transcripts do.
+
+Read a zero accordingly: it means the guard did not deny *in a build that carried
+the opener*, which is not the same as not denying. foreground-guard has carried
+the opener since v0.1.0, so its window is the whole life of the plugin. A guard
+adopting it today starts its window today.
+
 ## The rule
 
 1. The reason **starts** with the plugin's name, then a colon and a space. A
@@ -77,11 +100,26 @@ release, so they are left unattributed rather than assigned to a guess.
 2. The name is the plugin's own — the `name` in `.claude-plugin/plugin.json`.
    Not the hook's, not the script's, not a display title.
 3. Use the same opener on **every** deny path, including the ones added later.
-4. Prefixing an `ask` too is fine and costs nothing. Only denies need it, but
-   a guard that always leads with its name has no path to get wrong.
+4. Lead with the name on everything else the guard emits, too — `ask` reasons,
+   `PostToolUse` nudges, `additionalContext`, `systemMessage`. Claude Code
+   attributes none of them: an ask prompt reaches the human, and a deny reaches
+   the agent, with no plugin name attached either way, so the opener is the only
+   attribution either one gets. Only denies need the *colon*, because only the
+   reader keys on it — but a guard that always leads with its name has no path
+   to get wrong.
 
 A leading `Error: ` inserted by the harness is tolerated by the reader, so it
 does not have to be stripped.
+
+Rule 4 is satisfied by the name alone, so a string may lead with the name and no
+colon where it can never be a deny. foreground-guard's override downgrade is the
+one such path here: it opens `foreground-guard override acknowledged (…)` and
+sets the decision to `ask` by construction, so `DENY_TEXT` is never asked to read
+it. Measured 2026-08-21 over 956 local transcripts, that wording appears on 95
+lines and not once inside an error tool result. A path that can also deny takes
+the colon, and `tests/test_foreground_guard.py` asserts exactly that on every
+end-to-end call — against the shipped reader, not a copy of its regex, so the two
+halves cannot drift apart in silence.
 
 ## The hook script name has to agree
 
