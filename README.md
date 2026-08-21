@@ -370,6 +370,14 @@ not evidence that guard rarely blocks. The `FOREGROUND_GUARD_OVERRIDE downgrades
 count is this guard's alone, so `--plugin all` omits it (and its `overrides` JSON
 key) rather than show one guard's statistic under an all-guards header.
 
+The reader takes any `*-guard` name plus the siblings named outside that shape
+(pr-sentinel), and stops there: an opener of `<any word>: ` would read `error:`
+and `Traceback:` as denies too. What the siblings have to do for `--plugin all`
+to be honest is written up in
+[cross-guard-deny-convention.md](docs/development/cross-guard-deny-convention.md),
+with the current cost: over 939 local transcripts, 243 denies were readable and
+641 were not.
+
 Some records are neither a decision nor a deny. Claude Code writes an attachment
 for a hook that crashed or timed out as well as for one that spoke, and a crashed
 hook's stdout is empty — indistinguishable from a silent defer unless you read
@@ -470,6 +478,11 @@ failure directions follow from the guard's job:
 
 All four compose: none of them ever emits `allow`, so each can only add
 friction, never remove another's.
+
+Writing a guard of your own? Open every `deny` reason with your plugin's name,
+so the cross-guard `--plugin all` friction report can count your denies —
+[cross-guard-deny-convention.md](docs/development/cross-guard-deny-convention.md)
+says why that opener is the only trace a deny leaves.
 
 ## Privacy
 
