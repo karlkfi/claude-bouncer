@@ -744,7 +744,10 @@ through the same boundary rules and produce the same reasons. Symlink staging
    `</div>`, a script, prose with apostrophes, an unbalanced quote — is never
    tokenized as commands or file arguments and can't abort the parse; the
    `<<TAG` operator and any trailing `> file` redirect on the command line are
-   kept. Unquoted `#` comments are stripped next, keeping the newline that ends
+   kept. A `$(…)` or backtick body is scanned in its own quoting context, so a
+   heredoc opened inside a substitution is dropped too even when the
+   substitution sits in double quotes. Unquoted `#` comments are stripped
+   next, keeping the newline that ends
    each one so the next line stays its own command group.
    A newline outside quotes is also a command
    separator — like `;` — so a guarded command on a line after another is
@@ -1377,7 +1380,11 @@ final output.
   The terminator is matched by an exact line (`<<-` allows leading tabs); an
   unterminated body swallows to the end of the command (matching bash). A `<<`
   inside quotes, inside a `#` comment, or produced by arithmetic (`$((x<<2))`,
-  `((x<<2))`) is not a heredoc and never arms a delimiter. Command
+  `((x<<2))`) is not a heredoc and never arms a delimiter — but a `$(…)` or
+  backtick body opens a fresh quoting context, as it does in bash, so a heredoc
+  *inside* one is found even when the substitution itself sits in double quotes
+  (`git commit -F "$(cat <<'MSG' … MSG)"`, the shape a multi-paragraph commit
+  message takes). Command
   substitutions *inside* a heredoc body follow bash's own rule: a quoted
   delimiter (`<<'EOF'`, `<<"EOF"`, `<<\EOF`, or any partly quoted word) makes
   the body literal, so a `$(…)` there is documentation and is ignored; an

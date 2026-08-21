@@ -1204,6 +1204,11 @@ def _consume_heredoc_body(text, i, delim, strip_tabs):
     return n
 
 
+# The `last` value that leaves the scanner at a command position, where a `#`
+# starts a comment — what bash sees just inside a `$(` or a backtick.
+SUBST_OPEN = '('
+
+
 def strip_heredoc_bodies(cmd, expanded=None):
     """Remove heredoc body text from the raw command string, before shlex.
 
@@ -1224,7 +1229,15 @@ def strip_heredoc_bodies(cmd, expanded=None):
     across a heredoc (Q67): no body line ever reaches the group loop.
 
     Command-line quote state is tracked so a `<<` inside a quoted string is not
-    mistaken for a heredoc; an unquoted `#` comment is skipped for `<<`
+    mistaken for a heredoc. A `$(…)` or backtick body opens a FRESH quote
+    context, as it does in bash, so a heredoc inside one is found even when the
+    substitution itself sits in double quotes — the shape a multi-paragraph
+    commit message takes (``git commit -F "$(cat <<'MSG' … MSG\n)"``). Tracked
+    flat, the enclosing `"` hid that `<<`, the body survived into shlex, and an
+    odd number of `"` in it aborted the parse of the WHOLE command, so a
+    guarded outside-workspace path later on the line went unchecked (issue 169).
+    The `(` depth of each context is counted so a subshell's `)` does not end
+    the substitution early. An unquoted `#` comment is skipped for `<<`
     detection (its text is left for ``strip_comments`` to remove). Arithmetic
     `$((a<<b))` / `((a<<b))` regions are copied verbatim — their `<<` is a shift,
     not a redirection, so they never arm a bogus delimiter. `<<<` here-strings
@@ -1247,6 +1260,8 @@ def strip_heredoc_bodies(cmd, expanded=None):
     in_single = in_double = False
     last = ''                                     # last emitted char (word start)
     pending = []                                  # (delim, strip_tabs) in order
+    depth = 0                                     # unclosed `(` in this context
+    stack = []                                    # (term, in_double, pending, depth)
     while i < n:
         c = cmd[i]
         if in_single:
@@ -1255,17 +1270,30 @@ def strip_heredoc_bodies(cmd, expanded=None):
                 in_single = False
             i += 1
             continue
-        if in_double:
-            if c == '\\' and i + 1 < n:
-                out.append(c); out.append(cmd[i+1]); last = cmd[i+1]; i += 2
+        if c == '\\' and i + 1 < n:               # escapes, quoted or not
+            out.append(c); out.append(cmd[i+1]); last = cmd[i+1]; i += 2
+            continue
+        # A substitution body is parsed in its own quote context, so these two
+        # openers are recognised whether or not a `"` is still open.
+        if c == '$' and i + 2 < n and cmd[i+1] == '(' and cmd[i+2] != '(':
+            stack.append((')', in_double, pending, depth))
+            in_double = False; pending = []; depth = 0
+            out.append('$('); last = SUBST_OPEN; i += 2
+            continue
+        if c == '`':
+            if stack and stack[-1][0] == '`':     # closes the body it opened
+                _, in_double, pending, depth = stack.pop()
+                out.append(c); last = c; i += 1
                 continue
+            stack.append(('`', in_double, pending, depth))
+            in_double = False; pending = []; depth = 0
+            out.append(c); last = SUBST_OPEN; i += 1
+            continue
+        if in_double:
             out.append(c); last = c
             if c == '"':
                 in_double = False
             i += 1
-            continue
-        if c == '\\' and i + 1 < n:
-            out.append(c); out.append(cmd[i+1]); last = cmd[i+1]; i += 2
             continue
         if c == "'":
             in_single = True; out.append(c); last = c; i += 1
@@ -1281,6 +1309,17 @@ def strip_heredoc_bodies(cmd, expanded=None):
         if c == '(' and i + 1 < n and cmd[i+1] == '(':
             end = _skip_balanced_parens(cmd, i)   # `((…))` / `$((…))` arithmetic
             out.append(cmd[i:end]); last = ')'; i = end
+            continue
+        if c == '(':
+            depth += 1                            # subshell — not our terminator
+            out.append(c); last = c; i += 1
+            continue
+        if c == ')':
+            if depth:
+                depth -= 1
+            elif stack and stack[-1][0] == ')':
+                _, in_double, pending, depth = stack.pop()
+            out.append(c); last = c; i += 1
             continue
         if c == '<' and i + 1 < n and cmd[i+1] == '<':
             if i + 2 < n and cmd[i+2] == '<':     # `<<<` here-string, not heredoc

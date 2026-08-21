@@ -3631,6 +3631,54 @@ class StripHeredocBodiesTests(unittest.TestCase):
             guard.strip_heredoc_bodies("cat <<EOF\ndon't\nEOF\ncat x"),
             "cat <<EOF\ncat x")
 
+    # --- a substitution opens a fresh quote context (issue 169) -------------
+
+    def test_heredoc_inside_quoted_substitution_stripped(self):
+        # `$(…)` re-opens quoting in bash, so this `<<` is unquoted to the
+        # shell even with the enclosing `"` still open. Tracked flat, the body
+        # survived and its lone `"` aborted the whole parse.
+        self.assertEqual(
+            guard.strip_heredoc_bodies(
+                'git commit -F "$(cat <<\'M\'\nhe said "hi\nM\n)" && cat x'),
+            'git commit -F "$(cat <<\'M\'\n)" && cat x')
+
+    def test_heredoc_inside_quoted_backticks_stripped(self):
+        self.assertEqual(
+            guard.strip_heredoc_bodies(
+                'git commit -F "`cat <<\'M\'\nhe said "hi\nM\n`" && cat x'),
+            'git commit -F "`cat <<\'M\'\n`" && cat x')
+
+    def test_subshell_paren_does_not_close_substitution(self):
+        # The inner `)` closes the subshell; only the outer one ends the body.
+        self.assertEqual(
+            guard.strip_heredoc_bodies(
+                'echo "$( (cat <<\'M\'\nbody "x\nM\n) )" && cat x'),
+            'echo "$( (cat <<\'M\'\n) )" && cat x')
+
+    def test_quoted_arithmetic_shift_still_not_heredoc(self):
+        # `"$((1<<2))"` is a shift inside quotes — the fresh context must not
+        # reach it, or the next line would be eaten as a body.
+        self.assertEqual(
+            guard.strip_heredoc_bodies('echo "$((1<<2))"\ncat x'),
+            'echo "$((1<<2))"\ncat x')
+
+    def test_single_quoted_double_less_in_substitution_not_heredoc(self):
+        self.assertEqual(
+            guard.strip_heredoc_bodies('echo "$(grep -c \'<<\' f)"\ncat x'),
+            'echo "$(grep -c \'<<\' f)"\ncat x')
+
+    def test_nested_quotes_in_substitution_not_heredoc(self):
+        self.assertEqual(
+            guard.strip_heredoc_bodies('echo "$(echo "a<<b")"\ncat x'),
+            'echo "$(echo "a<<b")"\ncat x')
+
+    def test_expanded_collects_body_inside_quoted_substitution(self):
+        # An unquoted delimiter is expanded wherever it sits, so the nested
+        # body still reaches the command-substitution scan (Q35).
+        self.assertEqual(
+            self.collect('echo "$(cat <<M\n$(id)\nM\n)"'),
+            ('echo "$(cat <<M\n)"', ["$(id)\nM\n"]))
+
 
 class GlueDollarParenTests(unittest.TestCase):
     """`glue_dollar_paren` re-attaches `(` to a preceding `$` so `$(...)`
@@ -4223,6 +4271,38 @@ class Issue83HeredocEndToEndTests(unittest.TestCase):
         # quote-inert scan must still honour the backslash.
         self._decision(
             "cat > doc.md <<EOF\ndon't run \\$(cat /etc/q50-fake)\nEOF", "allow")
+
+    # --- a heredoc in a quoted substitution hides nothing (issue 169) -------
+
+    def test_odd_quote_in_nested_body_still_checks_later_command(self):
+        # The shape of a multi-paragraph commit message. The body's lone `"`
+        # aborted shlex, so the whole command deferred and the `cp` target went
+        # unchecked — a silent pass on an outside-workspace write.
+        out = self._decision(
+            'git commit -aqF "$(cat <<\'MSG\'\nhe said "hello\nMSG\n)"'
+            " && cp notes.md /etc/q169-fake", "ask")
+        self.assertIn("/etc/q169-fake",
+                      out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_odd_quote_in_nested_backtick_body_still_checks(self):
+        self._decision(
+            'git commit -aqF "`cat <<\'MSG\'\nhe said "hello\nMSG\n`"'
+            " && cp notes.md /etc/q169-fake", "ask")
+
+    def test_odd_quote_in_nested_subshell_body_still_checks(self):
+        self._decision(
+            'echo "$( (cat <<\'MSG\'\nhe said "hello\nMSG\n) )"'
+            " && cp notes.md /etc/q169-fake", "ask")
+
+    def test_guarded_command_inside_the_substitution_still_checked(self):
+        self._decision(
+            'echo "$(cat /etc/q169-fake <<\'MSG\'\nhe said "hello\nMSG\n)"',
+            "ask")
+
+    def test_nested_heredoc_with_in_workspace_command_allow(self):
+        self._decision(
+            'git commit -aqF "$(cat <<\'MSG\'\nhe said "hello\nMSG\n)"'
+            " && cat README.md", "allow")
 
 
 class OffenderDisplayTests(unittest.TestCase):
