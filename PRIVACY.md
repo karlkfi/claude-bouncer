@@ -3,8 +3,8 @@
 _Last updated: 2026-07-18_
 
 foreground-guard is a Claude Code plugin that runs entirely on your local
-machine as a `PreToolUse` hook. Its only job is to add a confirmation prompt
-(or a configured block) before certain Bash commands waste the session's
+machine as a `PreToolUse` hook. Its only job is to block (or, where
+configured, prompt before) certain Bash commands that waste the session's
 main-thread time.
 
 ## Data we collect

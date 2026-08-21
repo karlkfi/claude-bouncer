@@ -6,9 +6,11 @@ description: Explain why foreground-guard is prompting on Bash commands and how 
 # Reducing foreground-guard prompts
 
 foreground-guard is a `PreToolUse` hook for `Bash` that guards the session's
-**main-thread time**. It prompts (`ask`, or `deny` in an unattended permission
-mode — `auto`, `dontAsk`, `bypassPermissions` — and where config escalates) in
-two classes and defers silently on everything else:
+**main-thread time**. It blocks in two classes and defers silently on
+everything else. The verdict is `deny` by default: the resource at stake is the
+session's own time, so every finding carries a rewrite the agent can apply and
+nobody has to be woken. `"action": "ask"` on either class turns the denies back
+into prompts for someone who wants to watch the guard work.
 
 - **Class A — foreground poll/watch**: a command that parks the main thread on a
   live view — watch/follow modes (`gh run watch`, `gh pr checks --watch`,
@@ -17,7 +19,7 @@ two classes and defers silently on everything else:
   `sleep`, a chained repeat-with-sleep (`cmd; sleep N; cmd`), or a bare `sleep N`
   at/above the floor (default 10s). `run_in_background: true` does **not** exempt
   Class A: a detached poll still holds a task slot for the whole wait and hands
-  back output whose freshness the agent can't judge, so it still prompts.
+  back output whose freshness the agent can't judge, so it still blocks.
 - **Class B — slow command with an inadequate timeout**: a command the repo
   registered as slow that is about to run in the foreground with the Bash call's
   `timeout` below the registered minimum — it would be killed mid-run.
@@ -53,7 +55,7 @@ config around it. Useful adjustments:
 - `--repo ''` — drop the project filter to see friction across every repo.
 - `--plugin all` — include the sibling guards' decisions too (prod-guard,
   workspace-guard, branch-guard), if the user wants the whole picture. The
-  override-downgrade count is foreground-guard's own, so it is omitted in this
+  override count is foreground-guard's own, so it is omitted in this
   mode; read it from the default single-guard report instead. Denies are
   recovered from tool-result text, so a sibling whose reason does not open
   `<name>-guard:` under-counts them — don't read a low deny count for another
@@ -112,9 +114,11 @@ user which categories dominate their report, then apply the matching fix:
 
 The **Top flagged targets / commands** rankings tell you *which* commands to
 target first — fix the highest-count rows for the biggest reduction. If the report
-shows `FOREGROUND_GUARD_OVERRIDE downgrades`, an override is being leaned on
-routinely; that command is a good candidate for a real fix (background it) rather
-than a per-run override.
+shows `FOREGROUND_GUARD_OVERRIDE prefixes`, an override is being leaned on
+routinely; that command is a good candidate for a real fix (snapshot it, or arm a
+Monitor) rather than a per-run override. The count is read off the commands
+themselves, so it includes overrides pasted onto calls the guard would never have
+blocked — a stale habit shows up here.
 
 ## Fix
 
@@ -144,15 +148,15 @@ Config lives in `.claude/foreground-guard.json` (per-repo) or
 | Quiet a specific built-in watch form that's a false positive | `poll.exempt_watch_patterns` (allowlist regexes over the command segment) |
 | Stop short startup-grace sleeps from prompting | raise `poll.sleep_floor_seconds` (default 10) |
 | Stop a slow command being flagged after it got fast | remove/lower its `slow.commands` entry |
-| Downgrade a config `deny` back to a prompt | `poll.action: "ask"` |
+| Watch the guard work instead of letting the agent self-correct | `poll.action: "ask"` / `slow.action: "ask"` — costs you a prompt per finding |
 | Add repo-specific context to Class A prompts | `hint` (e.g. name your own PR-watcher machinery) |
 
-For a genuinely-intentional one-off foreground wait when the guard denies —
-config escalated the class, or the session is in `auto` mode — prefix the
-command with `FOREGROUND_GUARD_OVERRIDE=<why> …`. It downgrades **deny → ask**
-(never a silent allow) and echoes the reason for the human reviewing it. In
-`dontAsk` and `bypassPermissions` it is inert: no one is there to answer the
-prompt it would buy, so take one of the three fixes instead.
+For a genuinely-intentional one-off foreground wait, prefix the command with
+`FOREGROUND_GUARD_OVERRIDE=<why> …` and the guard defers — in every permission
+mode, including the ones where no prompt can be answered. Deferring is not
+allowing: normal permissions and the sibling guards still see the call. The
+stated reason stays on the command in the transcript, which is what the report
+counts.
 
 **Don't suggest disabling the guard wholesale** (`poll.enabled: false`,
 `slow.enabled: false`, or `FOREGROUND_GUARD_DISABLE=1`) to silence legitimate
