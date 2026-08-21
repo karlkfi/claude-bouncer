@@ -167,11 +167,16 @@ Coverage isn't one shape — each tool's "target" is whatever it actually acts a
 
 An `allow` from one hook can ride past both the user's permission settings and the *other* guard hooks (composition order between hooks is not a documented contract). prod-guard's job is to add a boundary, not to reduce prompts, so its only outputs are `deny`, `ask`, and silence. This also means installing it can never weaken any other guard.
 
-### Why every deny reason opens with the plugin's own name
+### Why every reason opens with the plugin's own name
 
-An `ask` is attributable from the decision stream, which records the `hookName` and the hook `command` beside it. A `deny` is not: the command never runs, so no attachment records a verdict, and the only trace left anywhere is the error text handed back to the agent. Debugging a refusal therefore starts by working out *which* guard refused — and with several installed, nothing but the reason's own wording answers that. So every reason leads with `prod-guard: `, which the sibling guards parse as `^(?:Error:\s*)?([a-z0-9-]+-guard):\s`. The colon is part of the key, not punctuation: a guard that words its opener differently is not merely harder to read, it is uncountable in a cross-guard friction report and silently under-reports its own denies.
+Claude Code names the plugin in neither the permission prompt a human answers nor the error text handed back to the agent. Debugging a decision therefore starts by working out *which* guard produced it — and with several installed, nothing but the reason's own wording answers that. This is true of an `ask` and a `deny` alike, so every reason leads with `prod-guard: `, which the sibling guards parse as `^(?:Error:\s*)?([a-z0-9-]+-guard):\s` (the regex as foreground-guard 0.5.1 ships it; PR #32 has since alternated a short allowlist of sibling names that do not end in `-guard` into the same pattern, rather than widening the shape).
 
-This costs nothing on the `ask` paths, which carry the prefix anyway, and it matters most under `bypassPermissions`, where an unanswerable `ask` is re-emitted as a `deny` (see *Why the guard never emits `allow`*) — the mode with the most denies and the least context around them.
+The two verdicts arrive at that requirement from opposite directions, which is why the rule covers both rather than only the louder one:
+
+- A `deny` is recorded nowhere in the decision stream. The command never runs, so no attachment carries a verdict, and the error text handed back to the agent is the only trace that it happened — anywhere, in band or out.
+- An `ask` *is* in the decision stream: it produces a `hook_success` attachment carrying `hookName` and the hook `command`, which names the guard script. But that record is read offline, from the transcript on disk. The prompt the human is actually answering names no plugin, so at the moment the decision is made an `ask` is exactly as unattributed as a `deny`.
+
+The colon is part of the key, not punctuation: a guard that words its opener differently is not merely harder to read, it is uncountable in a cross-guard friction report and silently under-reports its own friction. It matters most under `bypassPermissions`, where an unanswerable `ask` is re-emitted as a `deny` (see *Why the guard never emits `allow`*) — the mode with the most denies and the least context around them. `ReasonAttributionTests` in `tests/test_prod_guard.py` holds the invariant over every path that can emit a decision, including a source scan that fails if a sixth reason helper is added without coverage.
 
 ### Why ambient state is read from local files, not from the tools
 
