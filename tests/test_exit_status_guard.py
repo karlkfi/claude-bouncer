@@ -170,6 +170,13 @@ CASES = [
      'echo "$(make check | tail -30)"', False, True, 'piped into a filter'),
     ('a shift inside a quoted substitution is not a heredoc',
      'echo "$((1<<3))" && git push', False, False, ''),
+    # An ODD number of quotes in the body defeats `_scan_dollar_paren`'s flat
+    # quote tracking, so no body is found to recurse into and the strip does not
+    # happen. shlex then aborts on the unbalanced quote and the whole call
+    # defers -- silence, which is the direction a hook is allowed to fail in.
+    ('an unbalanced quote in the body defers rather than denying',
+     'git commit -aqF "$(cat <<\'MSG\'\nhe said "hello there\nMSG\n)" && git push',
+     False, False, ''),
     ('grep for the pattern in docs', 'grep -rn "make check | tail" docs/',
      False, False, ''),
     ('single-quoted PIPESTATUS is text, not a read',
