@@ -745,6 +745,15 @@ class OverrideTests(unittest.TestCase):
         self.assertEqual(decision, "ask")
         self.assertIn("override acknowledged", reason)
 
+    def test_override_must_be_an_inline_prefix(self):
+        """Exported into the environment it does nothing. The reason has to be
+        restated per command, so a stray export cannot pre-arm every later one."""
+        decision, reason = run_hook(
+            "kubectl --context gke_acme_prod-us delete ns x",
+            env_extra={"PROD_GUARD_OVERRIDE": "exported-not-inline"})
+        self.assertEqual(decision, "deny")
+        self.assertNotIn("override acknowledged", reason)
+
     def test_override_does_not_touch_plain_ask(self):
         decision, reason = run_hook(
             "PROD_GUARD_OVERRIDE=x kubectl --context bluefin apply -f m.yaml")

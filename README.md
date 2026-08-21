@@ -362,6 +362,10 @@ override — with its reason on the record in the command itself — and the
 human approves or rejects the prompt. The override never turns a deny into a
 silent allow, and it has no effect on plain asks.
 
+It must be an inline prefix on the command itself. Exporting
+`PROD_GUARD_OVERRIDE` into the session environment does nothing — a deny stays
+a deny — so it cannot be armed once and left set for every command after it.
+
 ### Session-scoped override
 
 A sanctioned *batch* of production commands (an incident, a planned node-pool
