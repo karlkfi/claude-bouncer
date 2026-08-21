@@ -2521,14 +2521,20 @@ class RobustnessTests(unittest.TestCase):
         self.assertEqual(decision, "deny")
 
 
-class DenyAttributionTests(unittest.TestCase):
-    """Every deny reason names the guard that produced it.
+class ReasonAttributionTests(unittest.TestCase):
+    """Every reason names the guard that produced it, on both verdicts.
 
-    A deny leaves no verdict in the decision stream, so the error text handed
-    back to the agent is its only trace and the opener is the only key on it.
-    The regex is the one foreground-guard 0.5.1 ships (scripts/friction-report.py
-    DENY_TEXT); a reason that fails it is a deny nothing can attribute, and it
-    goes uncounted in that guard's own --plugin all view.
+    Claude Code names the plugin in neither the permission prompt a human
+    answers nor the error text handed back to the agent, so the reason's own
+    opener is the only in-band key on either — an `ask` is no more attributable
+    than a `deny`. They get there differently: a deny is recorded nowhere in the
+    decision stream at all, while an ask does leave a hook_success attachment
+    naming the guard script — read offline, from the transcript, never by the
+    human answering the prompt.
+
+    DENY_TEXT keeps the name the sibling ships it under — foreground-guard 0.5.1
+    scripts/friction-report.py — rather than one scoped to this file; a reason
+    that fails it goes uncounted in that guard's own --plugin all view.
     """
 
     DENY_TEXT = re.compile(r'^(?:Error:\s*)?([a-z0-9-]+-guard):\s')
@@ -2600,6 +2606,22 @@ class DenyAttributionTests(unittest.TestCase):
             permission_mode="bypassPermissions"))
         self.assertEqual(decision, "deny")
         self.assert_attributed(reason, "session override downgrade")
+
+    # The two ways an `ask` reaches a human as an ask — the verdict the prompt
+    # itself does not attribute. Both assert the decision as well as the opener:
+    # a reason re-denied under bypassPermissions is already covered above, and
+    # without the assertion this pair would silently become deny coverage if a
+    # policy change moved either path.
+    def test_unknown_target_ask_is_attributed(self):
+        decision, reason = run_hook(
+            "kubectl --context mystery-cluster delete ns app")
+        self.assertEqual(decision, "ask")
+        self.assert_attributed(reason, "ask-unknown")
+
+    def test_shared_state_ask_is_attributed(self):
+        decision, reason = run_hook("gcloud auth login")
+        self.assertEqual(decision, "ask")
+        self.assert_attributed(reason, "ask-switch")
 
     def test_prefix_is_not_doubled(self):
         """The override branches carry the opener themselves; nothing may add a
