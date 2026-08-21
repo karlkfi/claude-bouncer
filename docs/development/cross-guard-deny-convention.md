@@ -83,9 +83,10 @@ the table above open like this:
 `gh pr create` — an open PR already changes files this branch changes: #135
 ```
 
-A backticked command and no name. They all fall in 2026-08, and the check itself
-is gone from pr-sentinel 0.9.0 — so whatever its successor does, those 108 stay
-unattributed for as long as the transcripts do.
+A backticked command and no name. They all fall in 2026-08, and no released
+version of pr-sentinel carries the check at all — 0.6.0 through 0.9.0 have none —
+so whatever ships next, those 108 stay unattributed for as long as the
+transcripts do.
 
 Read a zero accordingly: it means the guard did not deny *in a build that carried
 the opener*, which is not the same as not denying. foreground-guard has carried
