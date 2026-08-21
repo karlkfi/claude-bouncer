@@ -25,7 +25,25 @@ attachments carrying the decision JSON, joined to the command by `toolUseID`.
 
 A deny does not. The call never runs, so nothing writes the attachment. Measured
 over 601 local transcripts for issue #25: 48k allow/ask attachments and not one
-deny.
+deny. Re-measured 2026-08-21 over 956: 77,562 `PreToolUse:Bash` attachments —
+70,215 `allow`, 1,920 `ask`, 5,427 error — and still not one `deny`.
+
+That family-wide zero is weaker evidence than it looks, because it is equally
+consistent with *no guard denied* and with *denies are unrecorded*. What tells
+the two apart is a guard whose denies are visible by the other route. Three are,
+counting attachment-stream asks against denies the shipped `deny_from_result`
+recovers from error results: foreground-guard 262 and 151, prod-guard 61 and 41,
+pr-sentinel 0 and 53. workspace-guard shows 1,448 asks and 0 recoverable denies,
+and branch-guard 140 and 0 — not because they never denied, as the table below
+shows, but because their reasons carry no opener for the reader to match.
+
+exit-status-guard is the limiting case, and it does not appear in that stream at
+all rather than appearing with a zero: its `emit` is defined once and called
+once, with a literal `'deny'` (installed 2.0.0, `bash-exit-status-guard.py:1228`),
+so it never writes an `allow` or an `ask` either. The one guard in the family that
+can only deny is the one wholly invisible to the decision stream. The corpus-wide
+zero is corroboration, not the finding: it is the figure that looks strongest
+while being weakest.
 
 The reason still reaches the transcript, by the other route. The blocked call
 hands the agent back an error whose text is verbatim what the hook printed,
@@ -69,6 +87,30 @@ A further 29 denies open `` `git push` — origin/main has moved `` and belong t
 branch-guard or to pr-sentinel; the wording is not in either plugin's current
 release, so they are left unattributed rather than assigned to a guess.
 
+## Coverage starts at the version that adopted the opener
+
+Transcripts are immutable, so the reader's reach is bounded by what was written
+at the time. A deny recorded by a build that predated the prefix carries no name,
+and no widening of the reader recovers it, because there is nothing there to
+match.
+
+pr-sentinel's duplicate-PR deny is the worked example. All 108 of its misses in
+the table above open like this:
+
+```
+`gh pr create` — an open PR already changes files this branch changes: #135
+```
+
+A backticked command and no name. They all fall in 2026-08, and no released
+version of pr-sentinel has ever carried the check — all thirteen releases, v0.1.0
+through v0.9.0, have none — so whatever ships next, those 108 stay unattributed
+for as long as the transcripts do.
+
+Read a zero accordingly: it means the guard did not deny *in a build that carried
+the opener*, which is not the same as not denying. foreground-guard has carried
+the opener since v0.1.0, so its window is the whole life of the plugin. A guard
+adopting it today starts its window today.
+
 ## The rule
 
 1. The reason **starts** with the plugin's name, then a colon and a space. A
@@ -77,11 +119,26 @@ release, so they are left unattributed rather than assigned to a guess.
 2. The name is the plugin's own — the `name` in `.claude-plugin/plugin.json`.
    Not the hook's, not the script's, not a display title.
 3. Use the same opener on **every** deny path, including the ones added later.
-4. Prefixing an `ask` too is fine and costs nothing. Only denies need it, but
-   a guard that always leads with its name has no path to get wrong.
+4. Lead with the name on everything else the guard emits, too — `ask` reasons,
+   `PostToolUse` nudges, `additionalContext`, `systemMessage`. Claude Code
+   attributes none of them: an ask prompt reaches the human, and a deny reaches
+   the agent, with no plugin name attached either way, so the opener is the only
+   attribution either one gets. Only denies need the *colon*, because only the
+   reader keys on it — but a guard that always leads with its name has no path
+   to get wrong.
 
 A leading `Error: ` inserted by the harness is tolerated by the reader, so it
 does not have to be stripped.
+
+Rule 4 is satisfied by the name alone, so a string may lead with the name and no
+colon where it can never be a deny. foreground-guard's override downgrade is the
+one such path here: it opens `foreground-guard override acknowledged (…)` and
+sets the decision to `ask` by construction, so `DENY_TEXT` is never asked to read
+it. Measured 2026-08-21 over 956 local transcripts, that wording appears on 95
+lines and not once inside an error tool result. A path that can also deny takes
+the colon, and `tests/test_foreground_guard.py` asserts exactly that on every
+end-to-end call — against the shipped reader, not a copy of its regex, so the two
+halves cannot drift apart in silence.
 
 ## The hook script name has to agree
 
