@@ -82,6 +82,11 @@ across `&&`/`|`/`;`/`$( )` chains):
   `gcloud config set`, `az account set`, `docker context use`) — regardless
   of what they switch to, since the repoint clobbers every parallel session
   and a per-command pin flag makes it unnecessary.
+
+  Every deny reason opens `prod-guard: `. A deny is blocked before it runs, so
+  it leaves no verdict in Claude Code's decision stream — the reason handed
+  back to the agent is the only record that it happened, and the opener is what
+  identifies which guard produced it when several are installed.
 - **ask** — Claude Code shows its standard permission prompt. This is the
   outcome for *mutating verb + unknown explicit target* (fail closed: unknown
   is never silently allowed), and for shared-state writers that have no

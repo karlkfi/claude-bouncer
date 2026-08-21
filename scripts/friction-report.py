@@ -65,7 +65,10 @@ CATEGORY_HINT = {
 # separately so an over-used override is visible. The 'prod-guard' prefix is
 # load-bearing: sibling guards emit 'foreground-guard override acknowledged' and
 # the like, which under --plugin all would otherwise land in this counter.
-OVERRIDE_SIG = re.compile(r'prod-guard (?:session )?override acknowledged')
+# The colon is optional because these two reasons gained it only once the deny
+# they become under bypassPermissions had to be attributable; the bare form is
+# still present in older transcripts and still counts.
+OVERRIDE_SIG = re.compile(r'prod-guard:? (?:session )?override acknowledged')
 
 # The hook joins up to three finding reasons with ' | '.
 _JOIN = ' | '
