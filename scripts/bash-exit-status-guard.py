@@ -1119,6 +1119,12 @@ def with_log_path(reason, scratch):
         LOG_PLACEHOLDER, 'tmp/out.log')
 
 
+# The opener every deny carries. What reaches the model is this string and
+# nothing else -- the hook's name is in the transcript, but never in front of
+# the thing doing the rewrite -- so the reason is the only place a verdict can
+# say who issued it. `<name>-guard: ` is the form the sibling guards use.
+REASON_PREFIX = 'exit-status-guard: '
+
 # The tail every reason ends with. Every rule here is about a status nobody
 # will read, so the sentence before it is the same one throughout.
 OVERRIDE_TAIL = (
@@ -1250,7 +1256,7 @@ def main():
         # Always `deny`, never `ask`. The reason reaches the model, so the fix
         # lands where the command is rewritten; an `ask` goes to the user and
         # the model never sees why.
-        emit('deny', reason)
+        emit('deny', REASON_PREFIX + reason)
 
 
 if __name__ == '__main__':

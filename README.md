@@ -341,6 +341,12 @@ The entire value of this guard is the explanation, and the explanation is only
 useful to whoever is holding the keyboard for the rewrite. So exit-status-guard
 never asks, regardless of how minor the case looks.
 
+That audience decides the shape of the reason too. Every one opens with
+`exit-status-guard: `, because the string is the whole of what the model
+receives — an `ask` renders a prompt naming the hook, a deny does not — and a
+session with several guards installed otherwise has to infer which one spoke
+from the advice it gave. The sibling guards use the same `<name>-guard: ` form.
+
 The corollary is that it also never `allow`s. A command it has no objection to
 gets **silence**, which defers to your normal permission settings — the guard
 speaks only about the status question and never approves anything on any other
