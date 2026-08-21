@@ -10,7 +10,9 @@ Three layers:
   * End-to-end tests invoke the script as a subprocess with a fixture $HOME
     and (optionally) a fixture $CLAUDE_PROJECT_DIR holding a
     .claude/foreground-guard.json, and assert the emitted PreToolUse
-    decision: deny / ask / defer (no output).
+    decision: deny / ask / defer (no output). Two invariants ride on every
+    one of those calls: the decision is never `allow`, and the reason leads
+    with the plugin's name — for a deny, in the form friction-report reads.
   * Wiring tests assert the plugin config (hooks.json, plugin.json,
     marketplace.json) is valid and points the hook at the real script.
 """
@@ -30,6 +32,18 @@ SCRIPT = REPO / "scripts" / "bash-foreground-guard.py"
 _spec = util.spec_from_file_location("foreground_guard", SCRIPT)
 guard = util.module_from_spec(_spec)
 _spec.loader.exec_module(guard)
+
+# The reader is imported rather than mirrored. The opener is a contract between
+# the two halves, so a regex copied here would let them drift apart in silence.
+_rspec = util.spec_from_file_location("friction_report",
+                                      REPO / "scripts" / "friction-report.py")
+reader = util.module_from_spec(_rspec)
+_rspec.loader.exec_module(reader)
+
+# Convention rule 2: the opener is the plugin's own name, read from the one
+# place that defines it.
+with open(REPO / ".claude-plugin" / "plugin.json", encoding="utf-8") as _f:
+    PLUGIN_NAME = json.load(_f)["name"]
 
 
 def make_project(config=None):
@@ -79,12 +93,25 @@ def run_hook(command, config=None, timeout_ms=None, run_in_background=None,
         return None, None
     out = json.loads(r.stdout)["hookSpecificOutput"]
     decision = out["permissionDecision"]
+    reason = out["permissionDecisionReason"]
     # Invariant enforced on EVERY end-to-end call: the guard's only outputs
     # are deny, ask, or silence. An `allow` would ride past the user's
     # permission settings and the sibling guards.
     assert decision in ("ask", "deny"), \
         "guard emitted forbidden decision %r" % decision
-    return decision, out["permissionDecisionReason"]
+    # Second invariant, same reach: every reason leads with the plugin's name,
+    # and every deny is readable by the shipped reader. Claude Code names the
+    # plugin in neither the ask prompt nor the deny text, so the opener is the
+    # only attribution a human or the agent gets. For a deny it is also the only
+    # key there is — a denied call never runs, so nothing writes a hook
+    # attachment and `deny_from_result` has the error text and nothing else.
+    assert reason.startswith(PLUGIN_NAME), \
+        "reason does not lead with %r: %r" % (PLUGIN_NAME, reason[:80])
+    if decision == "deny":
+        m = reader.DENY_TEXT.match(reason)
+        assert m and m.group(1) == PLUGIN_NAME, \
+            "deny reason unreadable by friction-report: %r" % reason[:80]
+    return decision, reason
 
 
 # ---------------------------------------------------------------------------
