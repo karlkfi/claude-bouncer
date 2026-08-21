@@ -25,7 +25,19 @@ attachments carrying the decision JSON, joined to the command by `toolUseID`.
 
 A deny does not. The call never runs, so nothing writes the attachment. Measured
 over 601 local transcripts for issue #25: 48k allow/ask attachments and not one
-deny.
+deny. Re-measured 2026-08-21 over 956: 77,562 `PreToolUse:Bash` attachments —
+70,215 `allow`, 1,920 `ask`, 5,427 error — and still not one `deny`.
+
+That family-wide zero is weaker evidence than it looks, because it is equally
+consistent with *no guard denied* and with *denies are unrecorded*. What tells
+the two apart is a guard whose denies are visible by the other route. Three are,
+counting attachment-stream asks against denies the shipped `deny_from_result`
+recovers from error results: foreground-guard 262 and 151, prod-guard 61 and 41,
+pr-sentinel 0 and 53. workspace-guard shows 1,448 asks and 0 recoverable denies,
+and branch-guard 140 and 0 — not because they never denied, as the table below
+shows, but because their reasons carry no opener for the reader to match. The
+corpus-wide zero is corroboration, not the finding: it is the figure that looks
+strongest while being weakest.
 
 The reason still reaches the transcript, by the other route. The blocked call
 hands the agent back an error whose text is verbatim what the hook printed,
@@ -84,9 +96,9 @@ the table above open like this:
 ```
 
 A backticked command and no name. They all fall in 2026-08, and no released
-version of pr-sentinel carries the check at all — 0.6.0 through 0.9.0 have none —
-so whatever ships next, those 108 stay unattributed for as long as the
-transcripts do.
+version of pr-sentinel has ever carried the check — all thirteen releases, v0.1.0
+through v0.9.0, have none — so whatever ships next, those 108 stay unattributed
+for as long as the transcripts do.
 
 Read a zero accordingly: it means the guard did not deny *in a build that carried
 the opener*, which is not the same as not denying. foreground-guard has carried
