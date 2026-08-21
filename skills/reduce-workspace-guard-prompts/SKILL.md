@@ -68,6 +68,11 @@ one-to-one with these:
    traversal, or temp files written to `/tmp`) — category `outside`. Reason
    starts with "Outside-workspace path(s)".
 
+Those openers are what a **prompt** carries. A **deny** — a host-temp path, a
+sibling-checkout write, an unanchored kill, or any outside path under
+`bypassPermissions` — puts `workspace-guard: ` in front of the same text, so
+match the category name anywhere in the reason rather than at the start.
+
 The **top offending paths** and **top triggering commands** rankings tell you
 *which* files and commands to target first — fix the highest-count rows for the
 biggest reduction.

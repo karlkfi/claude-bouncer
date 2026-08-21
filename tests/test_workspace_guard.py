@@ -14,6 +14,7 @@ Three layers:
 import contextlib
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -4456,6 +4457,134 @@ class ReasonAdviceEndToEndTests(unittest.TestCase):
         r = self._reason("popd && cat data.txt")
         self.assertIn("data.txt", r)
         self.assertIn("untracked cd", r)
+
+
+class DenyAttributionTests(unittest.TestCase):
+    """Deny reasons open with the guard's name; ask reasons stay bare.
+
+    A deny is refused before the tool runs, so the reason text is the only
+    trace of which hook blocked the command. The opener is a cross-guard
+    convention (foreground-guard's friction report keys its deny attribution on
+    it), so the contract regex is pinned here alongside the literal prefix.
+    Every deny driver is exercised through `decide`, the one place that emits
+    the pair, rather than through each handler's fixture.
+    """
+
+    # foreground-guard 0.5.1, scripts/friction-report.py: DENY_TEXT. The
+    # optional `Error: ` is Claude Code's own wrapping, not part of our string.
+    DENY_TEXT = re.compile(r'^(?:Error:\s*)?([a-z0-9-]+-guard):\s')
+
+    SIBLING = ("/repo/main/x", "sibling",
+               {"root": "/repo/main", "branch": "main",
+                "corrected": "/repo/wt/x"})
+    KILL = ("pkill", "kill",
+            {"cmd": "pkill", "pattern": "ginkgo", "root": "/repo/wt"})
+    OUTSIDE = ("/q5-fake-target", "outside", None)
+    HOSTTEMP = ("/tmp/q5-fake-target", "hosttemp", None)
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = os.path.realpath(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _decide(self, offenders, bypass=False, **ctx_kw):
+        fields = dict(
+            proj=self.workspace, cwd=self.workspace, session_id="",
+            session_tmp_root=os.path.join(self.workspace, "no-such-tmp-root"),
+            session_proj_dir=None, tmp_roots=(), tmp_allow=(),
+            tmp_action="deny", read_prefixes=(), session_wt=None,
+            override=None, kill_anchor=None)
+        fields.update(ctx_kw)
+        return guard.decide(offenders, guard.Ctx(**fields), bypass)
+
+    def _assert_attributed(self, reason):
+        m = self.DENY_TEXT.match(reason)
+        self.assertIsNotNone(
+            m, f"deny reason does not match the cross-guard opener: {reason!r}")
+        self.assertEqual(m.group(1), "workspace-guard")
+        self.assertEqual(reason.count(guard.DENY_ATTRIBUTION), 1)
+
+    def test_bypass_outside_deny_is_attributed(self):
+        decision, reason = self._decide([self.OUTSIDE], bypass=True)
+        self.assertEqual(decision, "deny")
+        self._assert_attributed(reason)
+
+    def test_host_temp_deny_is_attributed(self):
+        decision, reason = self._decide([self.HOSTTEMP])
+        self.assertEqual(decision, "deny")
+        self._assert_attributed(reason)
+
+    def test_sibling_checkout_deny_is_attributed(self):
+        decision, reason = self._decide([self.SIBLING])
+        self.assertEqual(decision, "deny")
+        self._assert_attributed(reason)
+
+    def test_unanchored_kill_deny_is_attributed(self):
+        decision, reason = self._decide([self.KILL])
+        self.assertEqual(decision, "deny")
+        self._assert_attributed(reason)
+
+    def test_advice_survives_the_prefix(self):
+        # The prefix leads; the categorized body and its fix follow unchanged.
+        _, reason = self._decide([self.OUTSIDE], bypass=True)
+        self.assertTrue(reason.startswith(
+            guard.DENY_ATTRIBUTION + "Outside-workspace path(s): "), reason)
+        self.assertIn("/q5-fake-target", reason)
+        self.assertIn("Fix:", reason)
+
+    def test_ask_reason_is_not_attributed(self):
+        decision, reason = self._decide([self.OUTSIDE])
+        self.assertEqual(decision, "ask")
+        self.assertIsNone(self.DENY_TEXT.match(reason))
+        self.assertTrue(reason.startswith("Outside-workspace path(s): "), reason)
+
+    def test_host_temp_downgraded_to_ask_is_not_attributed(self):
+        decision, reason = self._decide([self.HOSTTEMP], tmp_action="ask")
+        self.assertEqual(decision, "ask")
+        self.assertNotIn(guard.DENY_ATTRIBUTION, reason)
+
+    def test_overridden_cross_workspace_ask_is_not_attributed(self):
+        for offender in (self.SIBLING, self.KILL):
+            decision, reason = self._decide([offender], override="deliberate")
+            self.assertEqual(decision, "ask")
+            self.assertNotIn(guard.DENY_ATTRIBUTION, reason)
+
+
+class DenyAttributionEndToEndTests(unittest.TestCase):
+    """The attributed reason reaches the emitted JSON (subprocess)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = os.path.realpath(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _out(self, cmd, expected, **kw):
+        out = run_hook(cmd, self.workspace, project_dir=self.workspace, **kw)
+        self.assertIsNotNone(out, f"expected a decision, got defer for: {cmd!r}")
+        hso = out["hookSpecificOutput"]
+        self.assertEqual(hso["permissionDecision"], expected, cmd)
+        return hso["permissionDecisionReason"]
+
+    def test_bypass_outside_deny(self):
+        r = self._out("cat /q5-fake-target", "deny",
+                      permission_mode="bypassPermissions")
+        self.assertTrue(r.startswith("workspace-guard: "), r)
+
+    def test_host_temp_deny(self):
+        r = self._out("cat /tmp/q5-fake-target", "deny")
+        self.assertTrue(r.startswith("workspace-guard: "), r)
+
+    def test_unanchored_kill_deny(self):
+        r = self._out("pkill -f ginkgo", "deny")
+        self.assertTrue(r.startswith("workspace-guard: "), r)
+
+    def test_outside_ask_stays_bare(self):
+        r = self._out("cat /q5-fake-target", "ask")
+        self.assertFalse(r.startswith("workspace-guard: "), r)
 
 
 class HostTempHelperTests(unittest.TestCase):

@@ -3218,6 +3218,16 @@ def classify_outside(rp, ctx, is_read):
     return ('outside', None)
 
 
+# Deny reasons lead with the guard's own name. A deny is refused before the
+# tool runs, so it leaves no prompt for the agent to attribute — the reason text
+# handed back is the only trace of which hook blocked the command. `ask` keeps
+# the bare reason: the decision stream already carries `hookName` and the hook
+# `command` for those. The `<name>-guard: ` shape is a cross-guard convention
+# (foreground-guard's friction report parses it as `DENY_TEXT`), so a guard that
+# words its opener differently under-counts its own denies there.
+DENY_ATTRIBUTION = 'workspace-guard: '
+
+
 def decide(offenders, ctx, bypass):
     """Map a non-empty ``offenders`` list to a ``(decision, reason)`` pair.
 
@@ -3226,7 +3236,8 @@ def decide(offenders, ctx, bypass):
     hit and the configured action is ``deny``, or when a sibling-checkout write
     or an unanchored process kill is hit without an override; otherwise ``ask``.
     Both decisions block equally — this is a recoverability/steering choice, not
-    a weakening of the boundary."""
+    a weakening of the boundary. A ``deny`` reason is prefixed with
+    ``DENY_ATTRIBUTION``; an ``ask`` reason is not."""
     host_temp_hit = any(cat == 'hosttemp' for _, cat, _ in offenders)
     cross_hit = any(cat in ('sibling', 'kill') for _, cat, _ in offenders)
     cross_deny = cross_hit and ctx.override is None
@@ -3239,7 +3250,7 @@ def decide(offenders, ctx, bypass):
                               session_scratchpad(ctx.session_id,
                                                  ctx.session_proj_dir)),
                           override=ctx.override)
-    return decision, reason
+    return decision, (DENY_ATTRIBUTION + reason) if deny_now else reason
 
 
 def resolve_native_path(raw, cwd):

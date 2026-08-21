@@ -43,6 +43,14 @@ class CategorizeTests(unittest.TestCase):
         self.assertEqual(set(cats), {'outside', 'expand', 'untracked'})
         self.assertEqual(cats['expand'], ['$f'])
 
+    def test_deny_attribution_prefix_still_categorizes(self):
+        # Deny reasons lead with `workspace-guard: `. REASON_PATTERNS are
+        # applied unanchored, so the categories survive the prefix rather than
+        # falling into 'other'.
+        reason = ("workspace-guard: Outside-workspace path(s): /q5-fake. "
+                  "Fix: use a path inside the project root.")
+        self.assertEqual(fr.categorize(reason), {'outside': ['/q5-fake']})
+
     def test_unrecognized_reason_buckets_as_other(self):
         self.assertEqual(fr.categorize("Guarded commands target workspace/pipe only"),
                          {'other': []})

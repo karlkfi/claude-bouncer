@@ -54,6 +54,10 @@ The hook produces one of four outcomes:
   **process kill that names no path in this workspace** — whether the pattern is
   the kill's own (`pkill -f`) or reached it through a `pgrep` or a `ps` pipeline
   (all below). Configurable down to `ask`; see [Configuration](#configuration).
+  A deny reason opens with `workspace-guard: `, so a refusal names the hook
+  that produced it — a denied command never reaches a prompt, and the reason
+  text is the only trace the agent gets. `ask` reasons stay bare: the prompt
+  itself already names the hook.
 - **defer** — the hook stays silent; your normal permission settings apply.
 
 Guarded commands: `grep` (and `egrep`, `fgrep`), `rg`, `sed`, `awk` (and
