@@ -227,6 +227,56 @@ class GuardNameTests(unittest.TestCase):
     def test_no_py_is_none(self):
         self.assertIsNone(fr.guard_name("gh run watch 1"))
 
+    def test_a_guard_named_plugin_keeps_its_suffix(self):
+        # `-guard` is part of workspace-guard's own name, so it has to survive
+        # the fold pr-sentinel needs below.
+        self.assertEqual(
+            fr.guard_name('"/x/run-python-hook.cmd" bash-workspace-guard.py'),
+            "workspace-guard")
+
+    def test_non_guard_plugin_folds_onto_its_own_name(self):
+        # pr-sentinel calls its hook script pr-sentinel-guard.py but opens its
+        # denies `pr-sentinel: `. Taken literally that is two plugins.
+        self.assertEqual(
+            fr.guard_name('python3 "/x/scripts/pr-sentinel-guard.py"'),
+            "pr-sentinel")
+
+
+class NameAgreementTests(unittest.TestCase):
+    """The attachment stream labels a decision from the hook's script name and
+    the tool-result stream labels a deny from the reason's opener, and the two
+    are counted together — so for every installed sibling they must resolve to
+    the same word. The hook commands keep the shape each plugin's hooks.json
+    actually uses (read 2026-08-21), with the install path stubbed."""
+
+    INSTALLED = (
+        ('python3 "/x/scripts/bash-foreground-guard.py"', "foreground-guard"),
+        ('python3 "/x/scripts/bash-prod-guard.py"', "prod-guard"),
+        ('"/x/scripts/run-python-hook.cmd" bash-workspace-guard.py',
+         "workspace-guard"),
+        ('"/x/hooks/run-python-hook.cmd" branch-guard.py', "branch-guard"),
+        ('"/x/scripts/run-python-hook.cmd" bash-exit-status-guard.py',
+         "exit-status-guard"),
+        ('python3 "/x/scripts/pr-sentinel-guard.py"', "pr-sentinel"),
+    )
+
+    def test_both_streams_resolve_to_one_label(self):
+        for hook_cmd, plugin in self.INSTALLED:
+            self.assertEqual(fr.guard_name(hook_cmd), plugin, hook_cmd)
+            got = fr.deny_from_result({
+                "type": "tool_result", "tool_use_id": "toolu_1",
+                "is_error": True, "content": plugin + ": blocked"})
+            self.assertEqual(got and got[0], plugin, plugin)
+
+    def test_every_listed_non_guard_plugin_is_readable(self):
+        # The tuple is the only way a name outside the `-guard` shape becomes
+        # readable, so an entry that DENY_TEXT does not pick up is dead weight.
+        for name in fr.NON_GUARD_PLUGINS:
+            got = fr.deny_from_result({
+                "type": "tool_result", "tool_use_id": "toolu_1",
+                "is_error": True, "content": name + ": blocked"})
+            self.assertEqual(got and got[0], name, name)
+
 
 class CategoryTests(unittest.TestCase):
     def test_each_builder(self):
@@ -304,6 +354,25 @@ class DenyFromResultTests(unittest.TestCase):
         got = fr.deny_from_result(
             self._block(content="prod-guard: matches a production pattern"))
         self.assertEqual(got[0], "prod-guard")
+
+    def test_recognizes_a_sibling_that_is_not_a_guard(self):
+        got = fr.deny_from_result(
+            self._block(content="pr-sentinel: refusing to foreground-poll CI"))
+        self.assertEqual(got[0], "pr-sentinel")
+
+    def test_prose_openers_are_not_denies(self):
+        # The over-widening trap. A bare `<word>: ` opener reads every one of
+        # these as a deny and credits it to a plugin that does not exist, so
+        # unrelated failures arrive as phantom friction.
+        for text in ("Traceback: most recent call last",
+                     "error: pathspec 'nosuchref' did not match any file(s)",
+                     "warning: refname 'HEAD' is ambiguous",
+                     "note: switching to a detached HEAD",
+                     "fatal: not a git repository",
+                     "sentinel: a word ending the same way is not a plugin",
+                     "guard: nor is a bare one"):
+            self.assertIsNone(fr.deny_from_result(self._block(content=text)),
+                              text)
 
     def test_error_prefix_tolerated(self):
         # The same text appears with an `Error: ` lead in some result shapes.
@@ -863,6 +932,26 @@ class EndToEndTests(unittest.TestCase):
         use, res = _deny_record("toolu_1", "sleep 300")
         root = write_transcript([use, res])
         self.assertIn("tool-result text", self._run(root, "--plugin", "all"))
+
+    def test_a_non_guard_sibling_lands_under_one_label(self):
+        # pr-sentinel is the sibling whose name does not end in `-guard`: its
+        # denies were unreadable, and its script name (pr-sentinel-guard.py)
+        # labels its asks a word apart from the one its reasons open with. Both
+        # halves have to arrive under the plugin's own name, or --plugin all
+        # lists it twice and neither value gets the whole picture.
+        reason = "pr-sentinel: refusing to foreground-poll CI"
+        use1, att1 = _decision_record(
+            "toolu_1", "gh pr checks 1 --watch", _stdout("ask", reason),
+            hook_cmd='python3 "/x/scripts/pr-sentinel-guard.py"')
+        use2, res2 = _deny_record("toolu_2", "gh run watch 456", reason=reason)
+        root = write_transcript([use1, att1, use2, res2])
+
+        data = json.loads(self._run(root, "--plugin", "all", "--json"))
+        self.assertEqual(data["plugins"], {"pr-sentinel": 2})
+        self.assertEqual(data["decisions"], {"ask": 1, "deny": 1})
+
+        scoped = json.loads(self._run(root, "--plugin", "pr-sentinel", "--json"))
+        self.assertEqual(scoped["decisions"], {"ask": 1, "deny": 1})
 
     def test_friction_rate_falls_when_the_guard_stays_quiet(self):
         # The issue #27 regression: before the denominator moved to Bash calls
