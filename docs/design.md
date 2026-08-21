@@ -167,6 +167,12 @@ Coverage isn't one shape — each tool's "target" is whatever it actually acts a
 
 An `allow` from one hook can ride past both the user's permission settings and the *other* guard hooks (composition order between hooks is not a documented contract). prod-guard's job is to add a boundary, not to reduce prompts, so its only outputs are `deny`, `ask`, and silence. This also means installing it can never weaken any other guard.
 
+### Why every deny reason opens with the plugin's own name
+
+An `ask` is attributable from the decision stream, which records the `hookName` and the hook `command` beside it. A `deny` is not: the command never runs, so no attachment records a verdict, and the only trace left anywhere is the error text handed back to the agent. Debugging a refusal therefore starts by working out *which* guard refused — and with several installed, nothing but the reason's own wording answers that. So every reason leads with `prod-guard: `, which the sibling guards parse as `^(?:Error:\s*)?([a-z0-9-]+-guard):\s`. The colon is part of the key, not punctuation: a guard that words its opener differently is not merely harder to read, it is uncountable in a cross-guard friction report and silently under-reports its own denies.
+
+This costs nothing on the `ask` paths, which carry the prefix anyway, and it matters most under `bypassPermissions`, where an unanswerable `ask` is re-emitted as a `deny` (see *Why the guard never emits `allow`*) — the mode with the most denies and the least context around them.
+
 ### Why ambient state is read from local files, not from the tools
 
 `kubectl config current-context` or `gcloud config list` would give the same answers, but shelling out to the tools is slow (100ms–1s per invocation, per Bash command, forever), can trigger plugin/auth machinery, and in some CLIs can touch the network. The hook must run in single-digit milliseconds on every Bash call. Reading `current-context:` out of a YAML file with a regex is not full YAML parsing — it's the same trade the tools' own shell-prompt integrations (kube-ps1 and friends) make, and a wrong read fails toward a prompt, not an allow.

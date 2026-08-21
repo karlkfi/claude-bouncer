@@ -20,6 +20,7 @@ identical code paths with zero risk.
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -2518,6 +2519,109 @@ class RobustnessTests(unittest.TestCase):
                             + ["kubectl --context gke_acme_prod-us delete ns x"])
         decision, _ = run_hook(chain)
         self.assertEqual(decision, "deny")
+
+
+class DenyAttributionTests(unittest.TestCase):
+    """Every deny reason names the guard that produced it.
+
+    A deny leaves no verdict in the decision stream, so the error text handed
+    back to the agent is its only trace and the opener is the only key on it.
+    The regex is the one foreground-guard 0.5.1 ships (scripts/friction-report.py
+    DENY_TEXT); a reason that fails it is a deny nothing can attribute, and it
+    goes uncounted in that guard's own --plugin all view.
+    """
+
+    DENY_TEXT = re.compile(r'^(?:Error:\s*)?([a-z0-9-]+-guard):\s')
+
+    # Placeholder args — these tests are about the opener, not the wording.
+    HELPERS = {
+        "deny_prod": ("kubectl delete ns", "kube-context 'gke_acme_prod-us'"),
+        "ask_unknown": ("kubectl delete ns", "kube-context 'bluefin'"),
+        "deny_ambient": ("kubectl delete ns", "the ambient kube-context",
+                         "kubectl --context <ctx>"),
+        "deny_switch": ("kubectx bluefin", "the shared kubeconfig",
+                        "kubectl --context <ctx>"),
+        "ask_switch": ("gcloud auth login", "shared credentials"),
+    }
+
+    def assert_attributed(self, reason, label):
+        m = self.DENY_TEXT.match(reason)
+        self.assertIsNotNone(
+            m, "%s: reason is unattributable by the cross-guard regex: %r"
+               % (label, reason[:120]))
+        self.assertEqual(m.group(1), "prod-guard", label)
+
+    def test_every_reason_helper_is_attributed(self):
+        for name, args in self.HELPERS.items():
+            with self.subTest(helper=name):
+                _sev, reason, _grants = getattr(guard, name)(*args)
+                self.assert_attributed(reason, name)
+
+    def test_helper_inventory_is_fully_covered(self):
+        """A sixth reason helper must be added to HELPERS above, so the opener
+        is asserted for it too rather than silently going unchecked."""
+        src = SCRIPT.read_text(encoding="utf-8")
+        found = set(re.findall(r'^def ((?:deny|ask)_\w+)\(', src, re.M))
+        self.assertEqual(found, set(self.HELPERS))
+
+    # The four ways a deny reaches the agent. The last two are reasons that are
+    # asks in every other mode: bypassPermissions re-denies them because there
+    # is nobody to answer a prompt, which is exactly the mode where an
+    # unattributable refusal costs the most.
+    def test_plain_prod_deny_is_attributed(self):
+        _d, reason = run_hook(
+            "kubectl --context gke_acme_prod-us delete ns app")
+        self.assert_attributed(reason, "deny-prod")
+
+    def test_ambient_deny_is_attributed(self):
+        _d, reason = run_hook("kubectl delete ns app")
+        self.assert_attributed(reason, "deny-ambient")
+
+    def test_ask_redenied_under_bypass_is_attributed(self):
+        decision, reason = run_hook(
+            "kubectl --context mystery-cluster delete ns app",
+            permission_mode="bypassPermissions")
+        self.assertEqual(decision, "deny")
+        self.assert_attributed(reason, "ask-unknown re-denied")
+
+    def test_override_downgrade_redenied_under_bypass_is_attributed(self):
+        decision, reason = run_hook(
+            "PROD_GUARD_OVERRIDE=cleanup "
+            "kubectl --context gke_acme_prod-us delete ns app",
+            permission_mode="bypassPermissions")
+        self.assertEqual(decision, "deny")
+        self.assert_attributed(reason, "override downgrade")
+
+    def test_session_override_downgrade_redenied_under_bypass_is_attributed(self):
+        decision, reason = run_hook(None, payload=_event_payload(
+            "PROD_GUARD_SESSION_OVERRIDE=cleanup "
+            "kubectl --context gke_acme_prod-us delete ns app",
+            "PreToolUse", "attribution-session",
+            permission_mode="bypassPermissions"))
+        self.assertEqual(decision, "deny")
+        self.assert_attributed(reason, "session override downgrade")
+
+    def test_prefix_is_not_doubled(self):
+        """The override branches carry the opener themselves; nothing may add a
+        second one on top of it."""
+        _d, reason = run_hook(
+            "PROD_GUARD_OVERRIDE=cleanup "
+            "kubectl --context gke_acme_prod-us delete ns app")
+        self.assertFalse(reason.startswith("prod-guard: prod-guard"), reason[:80])
+        self.assertEqual(reason.count("prod-guard: "), 2)  # opener + the finding
+
+    def test_override_opener_survives_the_segment_join(self):
+        """friction-report splits the joined reason on ' | ' and categorizes
+        each segment; the opener lands on the first segment only, and the
+        category patterns are unanchored, so both still resolve."""
+        _d, reason = run_hook(
+            "PROD_GUARD_OVERRIDE=cleanup kubectl --context gke_acme_prod-us "
+            "delete ns app && helm --kube-context gke_acme_prod-us uninstall r")
+        segments = [p.strip() for p in reason.split(" | ") if p.strip()]
+        self.assertGreater(len(segments), 1)
+        self.assert_attributed(segments[0], "joined first segment")
+        for seg in segments:
+            self.assertIn("matches a production pattern", seg)
 
 
 def _event_payload(command, event, session_id, permission_mode=None):

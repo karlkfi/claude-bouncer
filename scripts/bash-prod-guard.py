@@ -1191,6 +1191,15 @@ ASK, DENY = 1, 2
 CONFIG_HINT = ('Patterns: built-ins plus .claude/prod-guard.json '
                '(see the prod-guard README).')
 
+# Every reason below opens 'prod-guard: ', and that opener is a cross-guard
+# contract rather than decoration: a deny leaves no verdict in the decision
+# stream, so the error text handed back to the agent is the only trace of which
+# guard refused. Sibling guards read it as `^(?:Error:\s*)?([a-z0-9-]+-guard):\s`
+# (foreground-guard 0.5.1 scripts/friction-report.py), and a reason that misses
+# it is uncountable under --plugin all. Reword a reason freely; keep the opener,
+# colon included. DenyAttributionTests in tests/test_prod_guard.py holds this
+# over every path that can emit a deny.
+
 
 def deny_prod(action, target_desc, grant_targets=None):
     """`grant_targets` (tuple of target strings) marks the finding as
@@ -2490,12 +2499,12 @@ def main():
                 'No session grant applies here — only explicit production '
                 'targets are session-grantable; ambient-context and '
                 'shared-state-switch blocks confirm every time. ')
-        reason = ('prod-guard session override acknowledged '
+        reason = ('prod-guard: session override acknowledged '
                   '(PROD_GUARD_SESSION_OVERRIDE is set) — downgraded from '
                   'deny to a confirmation prompt. ' + grant_note + reason)
     elif severity == DENY and override:
         severity = ASK
-        reason = ('prod-guard override acknowledged (PROD_GUARD_OVERRIDE is '
+        reason = ('prod-guard: override acknowledged (PROD_GUARD_OVERRIDE is '
                   'set) — downgraded from deny to a confirmation prompt. '
                   + reason)
 

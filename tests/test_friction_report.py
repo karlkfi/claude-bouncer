@@ -62,14 +62,23 @@ REASON_ASK_SWITCH = (
     "Prefer per-command pinning (--context/--project/--profile) over switching "
     "shared state.")
 REASON_OVERRIDE = (
-    "prod-guard override acknowledged (PROD_GUARD_OVERRIDE is set) — downgraded "
+    "prod-guard: override acknowledged (PROD_GUARD_OVERRIDE is set) — downgraded "
     "from deny to a confirmation prompt. " + REASON_DENY_PROD)
 REASON_SESSION_OVERRIDE = (
-    "prod-guard session override acknowledged (PROD_GUARD_SESSION_OVERRIDE is "
+    "prod-guard: session override acknowledged (PROD_GUARD_SESSION_OVERRIDE is "
     "set) — downgraded from deny to a confirmation prompt. Approving records a "
     "session grant for target(s) 'gke_acme_prod-us': further "
     "PROD_GUARD_SESSION_OVERRIDE-prefixed commands against them in this session "
     "will not re-prompt (expires after 8 h). " + REASON_DENY_PROD)
+# The pre-colon wording, as written by installs before the opener became the
+# cross-guard attribution key. Old transcripts are still in the analyzed window,
+# so both forms must land in the override counter.
+REASON_OVERRIDE_LEGACY = (
+    "prod-guard override acknowledged (PROD_GUARD_OVERRIDE is set) — downgraded "
+    "from deny to a confirmation prompt. " + REASON_DENY_PROD)
+REASON_SESSION_OVERRIDE_LEGACY = (
+    "prod-guard session override acknowledged (PROD_GUARD_SESSION_OVERRIDE is "
+    "set) — downgraded from deny to a confirmation prompt. " + REASON_DENY_PROD)
 # A sibling guard's downgrade, as seen under --plugin all. Same phrasing, other
 # owner — it must not land in prod-guard's override counter.
 REASON_FOREIGN_OVERRIDE = (
@@ -252,6 +261,18 @@ class BuildReportTests(unittest.TestCase):
              "command": "PROD_GUARD_SESSION_OVERRIDE=x kubectl delete ns y"},
         ])
         self.assertEqual(r["overrides"], 1)
+
+    def test_legacy_override_wording_still_counted(self):
+        """Transcripts predating the colon are still in the analyzed window."""
+        r = self._report([
+            {"plugin": "prod-guard", "decision": "ask",
+             "reason": REASON_OVERRIDE_LEGACY,
+             "command": "PROD_GUARD_OVERRIDE=x kubectl delete ns y"},
+            {"plugin": "prod-guard", "decision": "ask",
+             "reason": REASON_SESSION_OVERRIDE_LEGACY,
+             "command": "PROD_GUARD_SESSION_OVERRIDE=x kubectl delete ns y"},
+        ])
+        self.assertEqual(r["overrides"], 2)
 
     def test_foreign_guard_override_not_counted(self):
         r = self._report([
