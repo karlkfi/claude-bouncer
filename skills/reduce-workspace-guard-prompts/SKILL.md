@@ -55,23 +55,22 @@ one-to-one with these:
 
 1. **A `$VAR`, `$(...)`, or leading `~` in a guarded file argument** — category
    `expand`. The hook can't expand these, so it treats them as outside the root
-   and prompts — even when they'd resolve in-root. Reason starts with
+   and prompts — even when they'd resolve in-root. Reason carries
    "Runtime-expanded arg(s)".
 2. **A bare `cd` / `cd -` / `cd $HOME`, a `popd`, or an unrecognized
    `$(...)` `cd` target** — category `untracked`. These lose the hook's
    working-directory tracking, so every later relative path in the same
-   command prompts. Reason starts with "Relative path(s) after an untracked
+   command prompts. Reason carries "Relative path(s) after an untracked
    cd". (A *literal* `cd` target — even one outside the root — keeps
    tracking; relative paths after it land in category `outside` instead,
    with the resolved absolute path named in the reason.)
 3. **A path that genuinely resolves outside the root** (including `../`
    traversal, or temp files written to `/tmp`) — category `outside`. Reason
-   starts with "Outside-workspace path(s)".
+   carries "Outside-workspace path(s)".
 
-Those openers are what a **prompt** carries. A **deny** — a host-temp path, a
-sibling-checkout write, an unanchored kill, or any outside path under
-`bypassPermissions` — puts `workspace-guard: ` in front of the same text, so
-match the category name anywhere in the reason rather than at the start.
+Every blocking reason leads with `workspace-guard: ` — a **prompt** and a
+**deny** alike — and the category name follows it. So match the category name
+anywhere in the reason rather than at the start.
 
 The **top offending paths** and **top triggering commands** rankings tell you
 *which* files and commands to target first — fix the highest-count rows for the

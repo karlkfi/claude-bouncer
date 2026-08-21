@@ -54,10 +54,11 @@ The hook produces one of four outcomes:
   **process kill that names no path in this workspace** — whether the pattern is
   the kill's own (`pkill -f`) or reached it through a `pgrep` or a `ps` pipeline
   (all below). Configurable down to `ask`; see [Configuration](#configuration).
-  A deny reason opens with `workspace-guard: `, so a refusal names the hook
-  that produced it — a denied command never reaches a prompt, and the reason
-  text is the only trace the agent gets. `ask` reasons stay bare: the prompt
-  itself already names the hook.
+  Both blocking reasons — `ask` and `deny` — open with `workspace-guard: `, so
+  either one names the hook that produced it. Claude Code names the plugin in
+  neither the prompt nor the text handed back from a refusal, so without the
+  opener there is nothing to tell you which of your installed hooks stopped the
+  command. `allow` reasons stay bare: they reach neither a prompt nor the agent.
 - **defer** — the hook stays silent; your normal permission settings apply.
 
 Guarded commands: `grep` (and `egrep`, `fgrep`), `rg`, `sed`, `awk` (and

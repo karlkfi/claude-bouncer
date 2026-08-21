@@ -3218,14 +3218,16 @@ def classify_outside(rp, ctx, is_read):
     return ('outside', None)
 
 
-# Deny reasons lead with the guard's own name. A deny is refused before the
-# tool runs, so it leaves no prompt for the agent to attribute — the reason text
-# handed back is the only trace of which hook blocked the command. `ask` keeps
-# the bare reason: the decision stream already carries `hookName` and the hook
-# `command` for those. The `<name>-guard: ` shape is a cross-guard convention
+# Blocking reasons lead with the guard's own name. Claude Code names the plugin
+# in neither the `ask` prompt nor the text handed back from a `deny`, so for both
+# verdicts this opener is the only trace of which hook stopped the command — the
+# operator answering a prompt and the agent reading a refusal are in the same
+# position. `allow` keeps the bare reason: nothing is surfaced to either of them,
+# and the decision stream that does carry it also carries `hookName` and the hook
+# `command`. The `<name>-guard: ` shape is a cross-guard convention
 # (foreground-guard's friction report parses it as `DENY_TEXT`), so a guard that
-# words its opener differently under-counts its own denies there.
-DENY_ATTRIBUTION = 'workspace-guard: '
+# words its opener differently under-counts itself there.
+ATTRIBUTION = 'workspace-guard: '
 
 
 def decide(offenders, ctx, bypass):
@@ -3236,8 +3238,8 @@ def decide(offenders, ctx, bypass):
     hit and the configured action is ``deny``, or when a sibling-checkout write
     or an unanchored process kill is hit without an override; otherwise ``ask``.
     Both decisions block equally — this is a recoverability/steering choice, not
-    a weakening of the boundary. A ``deny`` reason is prefixed with
-    ``DENY_ATTRIBUTION``; an ``ask`` reason is not."""
+    a weakening of the boundary. Both are prefixed with ``ATTRIBUTION``, since
+    neither the prompt nor the refusal text names the plugin on its own."""
     host_temp_hit = any(cat == 'hosttemp' for _, cat, _ in offenders)
     cross_hit = any(cat in ('sibling', 'kill') for _, cat, _ in offenders)
     cross_deny = cross_hit and ctx.override is None
@@ -3250,7 +3252,7 @@ def decide(offenders, ctx, bypass):
                               session_scratchpad(ctx.session_id,
                                                  ctx.session_proj_dir)),
                           override=ctx.override)
-    return decision, (DENY_ATTRIBUTION + reason) if deny_now else reason
+    return decision, ATTRIBUTION + reason
 
 
 def resolve_native_path(raw, cwd):
@@ -4938,11 +4940,11 @@ def handle_powershell(data):
     """
     ti = data.get('tool_input')
     if not isinstance(ti, dict) or not isinstance(ti.get('command'), str):
-        emit("ask", "workspace-guard could not read the PowerShell tool's "
-                    "command (tool_input.command), so it checked nothing about "
-                    "this command's file access. Approve only if you have read "
-                    "the command yourself, and please report this — the guard "
-                    "is meant to check every shell command.")
+        emit("ask", ATTRIBUTION + "could not read the PowerShell tool's "
+                    "command (tool_input.command), so nothing about this "
+                    "command's file access was checked. Approve only if you "
+                    "have read the command yourself, and please report this — "
+                    "the guard is meant to check every shell command.")
         return
     cmd = ti['command']
     if not cmd.strip():

@@ -4459,15 +4459,16 @@ class ReasonAdviceEndToEndTests(unittest.TestCase):
         self.assertIn("untracked cd", r)
 
 
-class DenyAttributionTests(unittest.TestCase):
-    """Deny reasons open with the guard's name; ask reasons stay bare.
+class BlockingAttributionTests(unittest.TestCase):
+    """Both blocking verdicts open with the guard's name.
 
-    A deny is refused before the tool runs, so the reason text is the only
-    trace of which hook blocked the command. The opener is a cross-guard
-    convention (foreground-guard's friction report keys its deny attribution on
-    it), so the contract regex is pinned here alongside the literal prefix.
-    Every deny driver is exercised through `decide`, the one place that emits
-    the pair, rather than through each handler's fixture.
+    Claude Code names the plugin in neither the ask prompt nor the text handed
+    back from a deny, so the opener is the only trace of which hook stopped the
+    command either way. The opener is a cross-guard convention
+    (foreground-guard's friction report keys its attribution on it), so the
+    contract regex is pinned here alongside the literal prefix. Every driver is
+    exercised through `decide`, the one place that emits the pair, rather than
+    through each handler's fixture.
     """
 
     # foreground-guard 0.5.1, scripts/friction-report.py: DENY_TEXT. The
@@ -4502,9 +4503,9 @@ class DenyAttributionTests(unittest.TestCase):
     def _assert_attributed(self, reason):
         m = self.DENY_TEXT.match(reason)
         self.assertIsNotNone(
-            m, f"deny reason does not match the cross-guard opener: {reason!r}")
+            m, f"reason does not match the cross-guard opener: {reason!r}")
         self.assertEqual(m.group(1), "workspace-guard")
-        self.assertEqual(reason.count(guard.DENY_ATTRIBUTION), 1)
+        self.assertEqual(reason.count(guard.ATTRIBUTION), 1)
 
     def test_bypass_outside_deny_is_attributed(self):
         decision, reason = self._decide([self.OUTSIDE], bypass=True)
@@ -4528,31 +4529,43 @@ class DenyAttributionTests(unittest.TestCase):
 
     def test_advice_survives_the_prefix(self):
         # The prefix leads; the categorized body and its fix follow unchanged.
-        _, reason = self._decide([self.OUTSIDE], bypass=True)
-        self.assertTrue(reason.startswith(
-            guard.DENY_ATTRIBUTION + "Outside-workspace path(s): "), reason)
-        self.assertIn("/q5-fake-target", reason)
-        self.assertIn("Fix:", reason)
+        for bypass in (True, False):
+            _, reason = self._decide([self.OUTSIDE], bypass=bypass)
+            self.assertTrue(reason.startswith(
+                guard.ATTRIBUTION + "Outside-workspace path(s): "), reason)
+            self.assertIn("/q5-fake-target", reason)
+            self.assertIn("Fix:", reason)
 
-    def test_ask_reason_is_not_attributed(self):
+    def test_both_verdicts_are_attributed(self):
+        # The pair the same offender produces: denied under bypassPermissions,
+        # asked otherwise. Neither carries the plugin name without this opener,
+        # so a driver that attributes one verdict and not the other is the
+        # regression this pins.
+        seen = {}
+        for bypass in (True, False):
+            decision, reason = self._decide([self.OUTSIDE], bypass=bypass)
+            self._assert_attributed(reason)
+            seen[decision] = reason
+        self.assertEqual(set(seen), {"deny", "ask"})
+
+    def test_ask_reason_is_attributed(self):
         decision, reason = self._decide([self.OUTSIDE])
         self.assertEqual(decision, "ask")
-        self.assertIsNone(self.DENY_TEXT.match(reason))
-        self.assertTrue(reason.startswith("Outside-workspace path(s): "), reason)
+        self._assert_attributed(reason)
 
-    def test_host_temp_downgraded_to_ask_is_not_attributed(self):
+    def test_host_temp_downgraded_to_ask_is_attributed(self):
         decision, reason = self._decide([self.HOSTTEMP], tmp_action="ask")
         self.assertEqual(decision, "ask")
-        self.assertNotIn(guard.DENY_ATTRIBUTION, reason)
+        self._assert_attributed(reason)
 
-    def test_overridden_cross_workspace_ask_is_not_attributed(self):
+    def test_overridden_cross_workspace_ask_is_attributed(self):
         for offender in (self.SIBLING, self.KILL):
             decision, reason = self._decide([offender], override="deliberate")
             self.assertEqual(decision, "ask")
-            self.assertNotIn(guard.DENY_ATTRIBUTION, reason)
+            self._assert_attributed(reason)
 
 
-class DenyAttributionEndToEndTests(unittest.TestCase):
+class BlockingAttributionEndToEndTests(unittest.TestCase):
     """The attributed reason reaches the emitted JSON (subprocess)."""
 
     def setUp(self):
@@ -4582,9 +4595,28 @@ class DenyAttributionEndToEndTests(unittest.TestCase):
         r = self._out("pkill -f ginkgo", "deny")
         self.assertTrue(r.startswith("workspace-guard: "), r)
 
-    def test_outside_ask_stays_bare(self):
+    def test_outside_ask_is_attributed(self):
         r = self._out("cat /q5-fake-target", "ask")
+        self.assertTrue(r.startswith("workspace-guard: "), r)
+
+    def test_allow_reason_stays_bare(self):
+        # `allow` surfaces to neither the operator nor the agent — no prompt and
+        # no refusal text — so the opener would only add noise to the decision
+        # stream, which already carries `hookName`.
+        r = self._out("cat ./in-workspace.txt", "allow")
         self.assertFalse(r.startswith("workspace-guard: "), r)
+
+    def test_attribution_appears_once(self):
+        # A reason that already named the guard in prose would read
+        # "workspace-guard: workspace-guard ..." once the prefix went on
+        # unconditionally.
+        for cmd, expected, kw in (
+                ("cat /q5-fake-target", "ask", {}),
+                ("cat /tmp/q5-fake-target", "deny", {}),
+                ("cat /q5-fake-target", "deny",
+                 {"permission_mode": "bypassPermissions"})):
+            r = self._out(cmd, expected, **kw)
+            self.assertEqual(r.count("workspace-guard"), 1, r)
 
 
 class HostTempHelperTests(unittest.TestCase):
@@ -8916,8 +8948,13 @@ class PowerShellEndToEndTests(unittest.TestCase):
         out = self._run(None, tool_input={"timeout": 5})
         self.assertIsNotNone(out, "a PowerShell call with no command must not defer")
         self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "ask")
-        self.assertIn("tool_input.command",
-                      out["hookSpecificOutput"]["permissionDecisionReason"])
+        reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("tool_input.command", reason)
+        # This ask is emitted directly rather than through `decide`, and it used
+        # to name the guard in prose. It carries the same opener as every other
+        # blocking reason, and names the guard exactly once.
+        self.assertTrue(reason.startswith(guard.ATTRIBUTION), reason)
+        self.assertEqual(reason.count("workspace-guard"), 1, reason)
 
     def test_absent_tool_input_asks(self):
         out = self._run(None, tool_input=None)

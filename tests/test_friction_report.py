@@ -43,13 +43,27 @@ class CategorizeTests(unittest.TestCase):
         self.assertEqual(set(cats), {'outside', 'expand', 'untracked'})
         self.assertEqual(cats['expand'], ['$f'])
 
-    def test_deny_attribution_prefix_still_categorizes(self):
-        # Deny reasons lead with `workspace-guard: `. REASON_PATTERNS are
-        # applied unanchored, so the categories survive the prefix rather than
-        # falling into 'other'.
+    def test_attribution_prefix_still_categorizes(self):
+        # Every blocking reason — ask and deny alike — leads with
+        # `workspace-guard: `. REASON_PATTERNS are applied unanchored, so the
+        # categories survive the prefix rather than falling into 'other'.
         reason = ("workspace-guard: Outside-workspace path(s): /q5-fake. "
                   "Fix: use a path inside the project root.")
         self.assertEqual(fr.categorize(reason), {'outside': ['/q5-fake']})
+
+    def test_every_category_survives_the_prefix(self):
+        # `ask` is the dominant verdict in a real corpus, so the prefix now
+        # lands on nearly every reason the report sees. Each category is
+        # checked with the prefix on, including that the leading token is not
+        # captured into the token list.
+        for prefixed, expected in (
+                ("workspace-guard: Outside-workspace path(s): a, ../b. Fix: x.",
+                 {'outside': ['a', '../b']}),
+                ("workspace-guard: Runtime-expanded arg(s) bash resolves but "
+                 "the hook can't: $f. Fix: y.", {'expand': ['$f']}),
+                ("workspace-guard: Relative path(s) after an untracked cd: c. "
+                 "Fix: z.", {'untracked': ['c']})):
+            self.assertEqual(fr.categorize(prefixed), expected)
 
     def test_unrecognized_reason_buckets_as_other(self):
         self.assertEqual(fr.categorize("Guarded commands target workspace/pipe only"),
