@@ -738,6 +738,22 @@ class TestHookEndToEnd(unittest.TestCase):
         self.assertIn("exit status is the filter's",
                       payload['permissionDecisionReason'])
 
+    def test_every_deny_names_the_guard_first(self):
+        """The reason is all the model gets, so it is the only place a verdict
+        can say which of several installed guards spoke."""
+        for cmd, bg in (('make check | tail -5', False),
+                        ('make check | tail -5; exit ${PIPESTATUS[0]}', False),
+                        ('make check > c.log 2>&1; echo "EXIT=$?"', True),
+                        ('make check; git push', False)):
+            with self.subTest(cmd):
+                out = self.run_hook({'tool_name': 'Bash', 'cwd': REPO,
+                                     'tool_input': {'command': cmd,
+                                                    'run_in_background': bg}})
+                reason = json.loads(out)['hookSpecificOutput'][
+                    'permissionDecisionReason']
+                self.assertTrue(reason.startswith('exit-status-guard: '),
+                                'reason opens %r' % reason[:40])
+
     def test_never_asks(self):
         """A deny reaches the model; an ask reaches the user, and the model
         never learns why the command was wrong."""

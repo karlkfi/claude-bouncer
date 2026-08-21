@@ -73,6 +73,15 @@ against the whole command also fires on every `git show`, `grep`, and commit
 message that names the command. This is the single most important design
 property here and the easiest one to regress.
 
+**Every deny reason opens with `exit-status-guard: `.** A deny hands the model a
+string and no hook name, so the opener is the only attribution it gets, and
+`<name>-guard: ` is the form the sibling guards' friction reports key on. The
+cost lands on anything parsing a reason from the front: `GATE_RE` in
+`scripts/friction-report.py` reads the gate from the backticks that follow, and
+keeps the prefix optional because transcripts hold denials from before it
+shipped. Change the opener and that reader breaks silently — the report keeps
+running and stops naming gates.
+
 **Anything `hooks.json` invokes ships executable.** 1.0.0 shipped the launcher
 at mode 644: the shell refused it, the hook exited 126 with nothing on stdout,
 and Claude Code read that as no objection, so the guard never fired once

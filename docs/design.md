@@ -36,6 +36,14 @@ The whole value of this guard is the explanation, and the explanation is only
 useful to whoever is holding the keyboard for the rewrite. That is the model.
 So every verdict is a deny, regardless of severity.
 
+It also makes the reason the only place attribution can live. An `ask` renders a
+prompt that names the hook; a deny hands over the string and nothing else, so a
+model running under several guards has only the advice to tell them apart by.
+Hence the `exit-status-guard: ` opener, matching the sibling guards. The cost is
+that anything parsing a reason from the front has to skip it —
+`scripts/friction-report.py` reads the gate out of the backticks that follow,
+and accepts denials recorded before the prefix shipped.
+
 The escape hatch has to reach the model too, which is why it is a command
 prefix (`EXIT_STATUS_GUARD_OVERRIDE=<reason>`) rather than a setting: the model can
 apply it in the next turn without a round trip through the user.

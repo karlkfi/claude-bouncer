@@ -52,8 +52,10 @@ REASON_PATTERNS = {
     'sequenced':  re.compile(r"runs the second whatever the first returned"),
 }
 
-# The gate each denial names, which the reason opens with in backticks.
-GATE_RE = re.compile(r'^`([^`]+)`')
+# The gate each denial names, in backticks after the guard's own name. The
+# prefix is optional because it is not in denials recorded before it shipped,
+# and dropping those would report gates that were hit as never hit.
+GATE_RE = re.compile(r'^(?:[a-z0-9-]+-guard:\s+)?`([^`]+)`')
 
 # Volatile command fragments to collapse so near-identical commands group
 # together. --raw disables this.
