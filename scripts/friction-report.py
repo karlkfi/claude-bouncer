@@ -104,7 +104,23 @@ OVERRIDE_SIG = re.compile(r'foreground-guard override acknowledged')
 # opens `foreground-guard: `, so that opener is the key. A guard wording its
 # reason differently is not recoverable this way and still under-counts its
 # denies under `--plugin all`; the report says so rather than showing a zero.
-DENY_TEXT = re.compile(r'^(?:Error:\s*)?([a-z0-9-]+-guard):\s')
+# The convention that makes the opener a usable key across repos is written up
+# in docs/development/cross-guard-deny-convention.md.
+#
+# Siblings whose plugin name does not end in `-guard`. The `-guard` suffix is
+# shape enough on its own — it cannot open ordinary error prose — so a new guard
+# needs no edit here, but a name outside that shape has to be listed or its
+# denies stay invisible. Widening to a bare `\w+: ` opener instead is what this
+# tuple exists to avoid: `error: `, `fatal: `, `warning: ` and `Traceback: ` all
+# open ordinary tool failures, and reading those as denies would credit each to
+# a plugin that does not exist.
+NON_GUARD_PLUGINS = ('pr-sentinel',)
+
+DENY_TEXT = re.compile(
+    r'^(?:Error:\s*)?('
+    + '|'.join([r'[a-z0-9-]+-guard']
+               + [re.escape(p) for p in NON_GUARD_PLUGINS])
+    + r'):\s')
 
 # An attachment records what became of the hook, not only what it said, and only
 # this type carries a verdict. The others mean the hook never spoke, so reading
@@ -181,11 +197,21 @@ def parse_ts(rec):
 
 def guard_name(command):
     """Plugin label from a hook command, e.g. '.../bash-foreground-guard.py'
-    -> 'foreground-guard'. Returns None if the command names no *.py guard."""
+    -> 'foreground-guard'. Returns None if the command names no *.py guard.
+
+    The label has to be the same word DENY_TEXT reads off a deny, because the
+    two streams are counted together. A plugin whose name does not end in
+    `-guard` may still call its hook script `<name>-guard.py` — pr-sentinel's is
+    `pr-sentinel-guard.py` — and left alone that splits one plugin across two
+    labels: its asks under `<name>-guard` and its denies under `<name>`, so
+    `--plugin all` lists it twice and neither `--plugin <name>` value gets both
+    halves. Fold the script name back onto the plugin's own."""
     m = re.search(r'([A-Za-z0-9_-]+)\.py', command or '')
     if not m:
         return None
-    return re.sub(r'^bash-', '', m.group(1))
+    name = re.sub(r'^bash-', '', m.group(1))
+    trimmed = re.sub(r'-guard$', '', name)
+    return trimmed if trimmed in NON_GUARD_PLUGINS else name
 
 
 def deny_from_result(block):
@@ -474,8 +500,8 @@ def print_text(r, top, plugin='foreground-guard'):
     if plugin == 'all':
         print("  note: denies are read from tool-result text, the only place "
               "Claude Code records")
-        print("        them — a guard whose reason does not open "
-              "`<name>-guard:` under-reports")
+        print("        them — a guard whose reason does not open with its own "
+              "plugin name under-reports")
     # Only foreground-guard's own overrides are counted, so the line has no
     # place under a header covering every guard — omit it rather than show one
     # guard's statistic as if it summarized the set.
