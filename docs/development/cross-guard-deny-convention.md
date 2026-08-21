@@ -35,9 +35,15 @@ counting attachment-stream asks against denies the shipped `deny_from_result`
 recovers from error results: foreground-guard 262 and 151, prod-guard 61 and 41,
 pr-sentinel 0 and 53. workspace-guard shows 1,448 asks and 0 recoverable denies,
 and branch-guard 140 and 0 — not because they never denied, as the table below
-shows, but because their reasons carry no opener for the reader to match. The
-corpus-wide zero is corroboration, not the finding: it is the figure that looks
-strongest while being weakest.
+shows, but because their reasons carry no opener for the reader to match.
+
+exit-status-guard is the limiting case, and it does not appear in that stream at
+all rather than appearing with a zero: its `emit` is defined once and called
+once, with a literal `'deny'` (installed 2.0.0, `bash-exit-status-guard.py:1228`),
+so it never writes an `allow` or an `ask` either. The one guard in the family that
+can only deny is the one wholly invisible to the decision stream. The corpus-wide
+zero is corroboration, not the finding: it is the figure that looks strongest
+while being weakest.
 
 The reason still reaches the transcript, by the other route. The blocked call
 hands the agent back an error whose text is verbatim what the hook printed,
