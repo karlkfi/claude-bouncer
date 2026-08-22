@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # On demand, for re-running the suite against an unchanged tree -- the case
+  # that comes up when a flake is suspected and nothing needs pushing.
+  workflow_dispatch:
 
 # Each plugin keeps the jobs it had as its own repo, scoped with
 # working-directory. They are deliberately not collapsed into one matrix: the
