@@ -1,0 +1,17 @@
+{
+  "name": "foreground-guard",
+  "owner": { "name": "karlkfi", "url": "https://github.com/karlkfi" },
+  "description": "Main-thread time guard rails for Claude Code Bash commands.",
+  "plugins": [
+    {
+      "name": "foreground-guard",
+      "version": "0.5.1",
+      "description": "Prompt before foreground polling/watching (gh run watch, tail -f, sleep-loops) and before known-slow commands run with an inadequate timeout.",
+      "author": { "name": "Karl" },
+      "source": {
+        "source": "github",
+        "repo": "karlkfi/claude-foreground-guard"
+      }
+    }
+  ]
+}

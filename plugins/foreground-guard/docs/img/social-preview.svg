@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" font-family="-apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d1117"/>
+      <stop offset="1" stop-color="#161b22"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#a78bfa" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#a78bfa" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="shieldMark" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#a78bfa"/>
+      <stop offset="1" stop-color="#7e57c2"/>
+    </linearGradient>
+  </defs>
+
+  <!-- background -->
+  <rect width="1280" height="640" fill="url(#bg)"/>
+  <ellipse cx="640" cy="360" rx="520" ry="300" fill="url(#glow)" opacity="0.22"/>
+
+  <!-- ===== header ===== -->
+  <!-- shield + hourglass mark -->
+  <g transform="translate(64,50)">
+    <path d="M36 2 L70 14 V44 C70 66 54 80 36 88 C18 80 2 66 2 44 V14 Z"
+          fill="url(#shieldMark)" stroke="#c4b5fd" stroke-width="1.6"/>
+    <g fill="#f1ecff">
+      <rect x="19" y="24" width="34" height="5" rx="2.5"/>
+      <rect x="19" y="63" width="34" height="5" rx="2.5"/>
+      <path d="M23 30 H49 L36 46 Z M36 46 L49 62 H23 Z"/>
+    </g>
+  </g>
+
+  <text x="156" y="90" font-size="58" font-weight="800" letter-spacing="-1">
+    <tspan fill="#e6edf3">foreground</tspan><tspan fill="#a78bfa">-guard</tspan>
+  </text>
+  <text x="158" y="130" font-size="25" font-weight="500" fill="#8b949e" letter-spacing="0.2">
+    Main-thread time guard rails for Claude Code
+  </text>
+  <text x="1216" y="130" text-anchor="end" font-size="18" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" fill="#6e7681">github.com/karlkfi/claude-foreground-guard</text>
+
+  <!-- ===== terminal panel ===== -->
+  <g>
+    <rect x="64" y="172" width="1152" height="360" rx="18" fill="#0b0f16" stroke="#222b38" stroke-width="1.5"/>
+    <!-- title bar -->
+    <path d="M64 190 a18 18 0 0 1 18 -18 H1198 a18 18 0 0 1 18 18 V216 H64 Z" fill="#11161f"/>
+    <circle cx="92" cy="194" r="6" fill="#ff5f56"/>
+    <circle cx="114" cy="194" r="6" fill="#ffbd2e"/>
+    <circle cx="136" cy="194" r="6" fill="#27c93f"/>
+    <text x="640" y="199" text-anchor="middle" font-size="16" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" fill="#6e7681">PreToolUse · Bash</text>
+  </g>
+
+  <!-- ===== two guarded classes: caught command  →  the fix it names ===== -->
+  <!-- Class A: foreground poll  →  background it -->
+  <!-- ask chip -->
+  <g transform="translate(96,282)" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace">
+    <rect x="0" y="0" width="86" height="36" rx="18" fill="#2a2210" stroke="#9e6a03" stroke-width="1.5"/>
+    <path d="M18 10 l9 15 h-18 Z" fill="none" stroke="#e3b341" stroke-width="2.4" stroke-linejoin="round"/>
+    <line x1="18" y1="16" x2="18" y2="20" stroke="#e3b341" stroke-width="2.4" stroke-linecap="round"/>
+    <circle cx="18" cy="23" r="1.2" fill="#e3b341"/>
+    <text x="38" y="24" font-size="17" font-weight="700" font-family="-apple-system, sans-serif" fill="#e3b341">ask</text>
+  </g>
+  <text x="200" y="309" font-size="27" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" fill="#e6edf3"><tspan fill="#7e57c2">$ </tspan>gh run <tspan fill="#e3b341" font-weight="700">watch</tspan></text>
+  <!-- transform arrow -->
+  <path d="M566 300 h60 M612 289 l15 11 l-15 11" fill="none" stroke="#a78bfa" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- fix chip: run in background -->
+  <g transform="translate(660,270)">
+    <rect x="0" y="0" width="472" height="60" rx="30" fill="#0f2418" stroke="#238636" stroke-width="1.6"/>
+    <!-- stacked-windows glyph: send to background -->
+    <g transform="translate(28,20)">
+      <rect x="8" y="6" width="22" height="16" rx="2.5" fill="#0f2418" stroke="#3fb950" stroke-width="2.4"/>
+      <rect x="0" y="0" width="22" height="16" rx="2.5" fill="#12261a" stroke="#3fb950" stroke-width="2.4"/>
+    </g>
+    <text x="80" y="39" font-size="25" font-weight="600" font-family="-apple-system, sans-serif" fill="#c9d1d9">run it in the <tspan fill="#3fb950" font-weight="800">background</tspan></text>
+  </g>
+
+  <!-- Class B: slow run  →  longer timeout -->
+  <g transform="translate(96,432)" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace">
+    <rect x="0" y="0" width="86" height="36" rx="18" fill="#2a2210" stroke="#9e6a03" stroke-width="1.5"/>
+    <path d="M18 10 l9 15 h-18 Z" fill="none" stroke="#e3b341" stroke-width="2.4" stroke-linejoin="round"/>
+    <line x1="18" y1="16" x2="18" y2="20" stroke="#e3b341" stroke-width="2.4" stroke-linecap="round"/>
+    <circle cx="18" cy="23" r="1.2" fill="#e3b341"/>
+    <text x="38" y="24" font-size="17" font-weight="700" font-family="-apple-system, sans-serif" fill="#e3b341">ask</text>
+  </g>
+  <text x="200" y="459" font-size="27" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" fill="#e6edf3"><tspan fill="#7e57c2">$ </tspan>make test-race</text>
+  <!-- transform arrow -->
+  <path d="M566 450 h60 M612 439 l15 11 l-15 11" fill="none" stroke="#a78bfa" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- fix chip: raise the timeout (2m -> 10m) -->
+  <g transform="translate(660,420)">
+    <rect x="0" y="0" width="472" height="60" rx="30" fill="#0f2418" stroke="#238636" stroke-width="1.6"/>
+    <!-- clock glyph -->
+    <g transform="translate(40,30)" fill="none" stroke="#3fb950" stroke-width="2.4">
+      <circle cx="0" cy="0" r="13"/>
+      <path d="M0 -7 V0 L6 5" stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+    <text x="80" y="39" font-size="25" font-weight="600" font-family="-apple-system, sans-serif" fill="#c9d1d9">timeout <tspan font-family="ui-monospace, 'SF Mono', Menlo, monospace" fill="#e3b341" font-weight="700">2m</tspan> <tspan fill="#8b949e">→</tspan> <tspan font-family="ui-monospace, 'SF Mono', Menlo, monospace" fill="#3fb950" font-weight="800">10m</tspan></text>
+  </g>
+
+  <!-- caption -->
+  <text x="640" y="586" text-anchor="middle" font-size="22" font-weight="500" fill="#c9d1d9">
+    It prompts the moment the main thread would stall — and <tspan fill="#3fb950" font-weight="700">names the fix</tspan>. Everything else defers.
+  </text>
+</svg>

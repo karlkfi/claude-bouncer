@@ -1,0 +1,13 @@
+{
+  "name": "foreground-guard",
+  "version": "0.5.1",
+  "description": "Main-thread time guard for Claude Code Bash commands: catch foreground polling/watching and slow commands about to be killed by an inadequate timeout.",
+  "author": {
+    "name": "Karl",
+    "url": "https://github.com/karlkfi"
+  },
+  "homepage": "https://github.com/karlkfi/claude-foreground-guard",
+  "repository": "https://github.com/karlkfi/claude-foreground-guard",
+  "license": "MIT",
+  "keywords": ["claude-code", "hooks", "guardrail", "background", "polling", "watch", "sleep", "timeout", "gh", "kubectl", "tail", "journalctl", "docker", "productivity", "command", "friction"]
+}
