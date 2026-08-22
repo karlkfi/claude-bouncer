@@ -60,7 +60,8 @@ lives in three places that nothing gates: the plugin's `plugin.json`, its entry
 in the root `marketplace.json`, and the version column of the root `README.md`.
 A `lib/` change reaches five guards and releases none of them.
 
-The steps, the version levels, and the notes harvest are in
+`/release` drives a cut end to end, over `scripts/release.py` (`status`,
+`bump`, `tag`). The steps, the version levels, and the notes harvest are in
 `docs/development/release-process.md`.
 
 ## Links to the retired repositories
