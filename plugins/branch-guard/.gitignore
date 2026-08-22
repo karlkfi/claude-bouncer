@@ -1,0 +1,19 @@
+tmp/
+__pycache__/
+.context/
+
+# Claude Code — local runtime artifacts (keep settings.json / commands / agents / skills / hooks tracked)
+.claude/.credentials.json
+.claude/scheduled_tasks.lock
+.claude/shell-snapshots/
+.claude/history.jsonl
+.claude/todos/
+.claude/tasks/
+.claude/projects/
+.claude/sessions/
+.claude/session-env/
+.claude/cache/
+.claude/telemetry/
+.claude/backups/
+.claude/downloads/
+.claude/worktrees/
