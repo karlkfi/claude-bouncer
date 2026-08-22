@@ -33,7 +33,7 @@ Everything else defers to your normal permission settings.
 - [Agent guidance: avoiding prompts](#agent-guidance-avoiding-prompts)
 - [Configuration](#configuration)
 - [Limitations](#limitations)
-- [Companion plugin](#companion-plugin)
+- [Companion plugins](#companion-plugins)
 - [Privacy](#privacy)
 - [Contributing](#contributing)
 - [License](#license)
@@ -903,7 +903,7 @@ protected branch (main/master) or destructive git commands. To keep work flowing
 - The guard only governs Claude's `Bash`/`Edit`/`Write`/`MultiEdit`/`NotebookEdit`
   tools. It does **not** intercept file mutations done through other Bash
   commands — e.g. `sed -i`, `>` redirects, or `rm` — on a protected branch.
-  [workspace-guard](#companion-plugin), a companion plugin, guards those Bash
+  [workspace-guard](#companion-plugins), a companion plugin, guards those Bash
   file commands on a path boundary.
 - It auto-approves a *safe* set of `git`/`gh` subcommands and asks on a
   *destructive* set; anything outside both (an unknown subcommand, a `git config`
@@ -950,15 +950,38 @@ protected branch (main/master) or destructive git commands. To keep work flowing
   open PR is not treated as shared, though deleting it locally leaves both the
   remote branch and the PR intact.
 
-## Companion plugin
+## Companion plugins
 
-branch-guard reasons about **git/branch semantics** — which branch you're on and
-whether a `git`/`gh` command is destructive. It deliberately leaves the
-**filesystem boundary** to a sibling hook:
-[**workspace-guard**](https://github.com/karlkfi/claude-bouncer),
-path-aware bash permissions that prompt when a command reads or writes a file
-outside your project root (`$CLAUDE_PROJECT_DIR`). The two are complementary and
-don't overlap:
+branch-guard watches the **git history** boundary — which branch you're on, and
+whether a `git`/`gh` command is destructive. Its siblings guard other axes
+with the same secure-by-default design:
+
+- [**workspace-guard**](https://github.com/karlkfi/claude-bouncer) — the
+  **filesystem** boundary: prompts before guarded file commands
+  (`grep`/`sed`/`cat`/`cp`/`rm`/…) read or write paths outside the project root.
+- [**prod-guard**](https://github.com/karlkfi/claude-bouncer) — the
+  **infrastructure blast-radius** boundary: denies mutations aimed at production
+  contexts.
+- [**exit-status-guard**](https://github.com/karlkfi/claude-bouncer) — the
+  **evidence** boundary: catches a gate whose failure reads as success — piped
+  into a filter, backgrounded behind an `echo`, or sequenced before a state
+  change with `;`.
+- [**foreground-guard**](https://github.com/karlkfi/claude-bouncer) — the
+  **liveness** boundary: keeps polling, watching, and blocking commands from
+  stalling the session's main thread.
+- [**pr-sentinel**](https://github.com/karlkfi/claude-pr-sentinel) — the
+  **review** boundary: watches a PR to green without merging it, and denies a
+  `gh pr create` whose branch edits lines an open PR already changes.
+
+They run side by side; each defers to normal permissions outside its own axis.
+The guards share one marketplace —
+[`karlkfi/claude-bouncer`](https://github.com/karlkfi/claude-bouncer#install)
+lists the install line for each — and pr-sentinel ships from its own.
+
+### The pairing with workspace-guard
+
+branch-guard and workspace-guard divide one job along two axes, and don't
+overlap:
 
 | Plugin | Guards | Boundary |
 | --- | --- | --- |
@@ -971,13 +994,6 @@ exactly what workspace-guard catches — when they touch a path outside your
 workspace. Run both for coverage across both dimensions. (Neither catches an
 in-repo `sed -i` on a protected branch; for a hard guarantee there, use a git
 `pre-commit`/`pre-push` hook or server-side branch protection.)
-
-Install it the same way as branch-guard:
-
-```
-/plugin marketplace add karlkfi/claude-bouncer
-/plugin install workspace-guard@claude-bouncer
-```
 
 ## Privacy
 

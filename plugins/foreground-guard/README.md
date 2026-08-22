@@ -506,15 +506,31 @@ failure directions follow from the guard's job:
 
 ## Companion plugins
 
-- [workspace-guard](https://github.com/karlkfi/claude-bouncer) —
-  keep Bash file operations inside the workspace.
-- [branch-guard](https://github.com/karlkfi/claude-bouncer) — keep
-  commits off protected branches.
-- [prod-guard](https://github.com/karlkfi/claude-bouncer) — block
-  mutating infrastructure commands aimed at production.
+foreground-guard watches the **liveness** boundary — whether a command will
+stall the session's main thread. Its siblings guard other axes
+with the same secure-by-default design:
 
-All four compose: none of them ever emits `allow`, so each can only add
-friction, never remove another's.
+- [**workspace-guard**](https://github.com/karlkfi/claude-bouncer) — the
+  **filesystem** boundary: prompts before guarded file commands
+  (`grep`/`sed`/`cat`/`cp`/`rm`/…) read or write paths outside the project root.
+- [**branch-guard**](https://github.com/karlkfi/claude-bouncer) — the **git
+  history** boundary: auto-approves safe git on feature branches, pauses commits
+  and pushes to `main` and destructive git.
+- [**prod-guard**](https://github.com/karlkfi/claude-bouncer) — the
+  **infrastructure blast-radius** boundary: denies mutations aimed at production
+  contexts.
+- [**exit-status-guard**](https://github.com/karlkfi/claude-bouncer) — the
+  **evidence** boundary: catches a gate whose failure reads as success — piped
+  into a filter, backgrounded behind an `echo`, or sequenced before a state
+  change with `;`.
+- [**pr-sentinel**](https://github.com/karlkfi/claude-pr-sentinel) — the
+  **review** boundary: watches a PR to green without merging it, and denies a
+  `gh pr create` whose branch edits lines an open PR already changes.
+
+They run side by side; each defers to normal permissions outside its own axis.
+The guards share one marketplace —
+[`karlkfi/claude-bouncer`](https://github.com/karlkfi/claude-bouncer#install)
+lists the install line for each — and pr-sentinel ships from its own.
 
 Writing a guard of your own? Open every `deny` reason with your plugin's name,
 so the cross-guard `--plugin all` friction report can count your denies —

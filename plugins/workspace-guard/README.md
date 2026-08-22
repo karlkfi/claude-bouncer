@@ -34,7 +34,7 @@ instead.
 - [Agent guidance: avoiding prompts](#agent-guidance-avoiding-prompts)
 - [Configuration](#configuration)
 - [Limitations](#limitations)
-- [Companion plugin: branch-guard](#companion-plugin-branch-guard)
+- [Companion plugins](#companion-plugins)
 - [Design](#design)
 - [Privacy](#privacy)
 - [Contributing](#contributing)
@@ -1607,10 +1607,11 @@ final output.
   rather than `ask` for outside-workspace paths: equally blocking, but the agent
   receives the reason and can recover instead of stalling. See
   [Configuration](#configuration).
-- **How much the hook protects you depends on your permission mode.** `ask` and
-  `deny` block in every mode, but a *deferred* command — one the hook declines
-  to judge — runs silently under `auto`, `acceptEdits`, and `bypassPermissions`,
-  and is blocked only under `manual`, `dontAsk`, and `plan`. So the mechanisms
+- **How much the hook protects you depends on your permission mode.** No mode
+  auto-approves an `ask` or a `deny`, so neither runs on the hook's decision
+  alone. But a *deferred* command — one the hook declines to judge — runs
+  silently under `auto`, `acceptEdits`, and `bypassPermissions`, and is blocked
+  only under `manual`, `dontAsk`, and `plan`. So the mechanisms
   that work by declining to vouch (the suppressions described in step 16) add
   protection only in the latter group; in a pre-approving mode they hand the
   decision back to rules that already said yes. The measured matrix, and which
@@ -1728,21 +1729,45 @@ final output.
   rather than guessing. Either way the effect is a prompt naming a path that
   isn't quite the one being opened, never a missed one.
 
-## Companion plugin: branch-guard
+## Companion plugins
 
-workspace-guard draws its boundary along the **filesystem**: it asks before a
-guarded command reads or writes a path outside `$CLAUDE_PROJECT_DIR`. It says
-nothing about *git history* — once a path is in-root, an in-root
-`git commit && git push` to `main`, a `git reset --hard`, or a `git clean -fd`
-runs without a second look. Those are exactly the operations that turn an
-in-workspace edit into an unrecoverable one.
+workspace-guard watches the **filesystem** boundary — whether a guarded
+command reads or writes a path outside `$CLAUDE_PROJECT_DIR`. Its siblings guard other axes
+with the same secure-by-default design:
 
-[**branch-guard**](https://github.com/karlkfi/claude-bouncer) covers that
-gap. It's a sibling plugin with the same secure-by-default, `ask`-based design,
-but its axis is the **git branch** rather than the filesystem path. Its motto:
-*"Let Claude commit and push all day on feature branches. Pause it at main."*
-It parses pending `git`/`gh` commands (and blocks file edits when the repo is on
-a protected branch), then:
+- [**branch-guard**](https://github.com/karlkfi/claude-bouncer) — the **git
+  history** boundary: auto-approves safe git on feature branches, pauses commits
+  and pushes to `main` and destructive git.
+- [**prod-guard**](https://github.com/karlkfi/claude-bouncer) — the
+  **infrastructure blast-radius** boundary: denies mutations aimed at production
+  contexts.
+- [**exit-status-guard**](https://github.com/karlkfi/claude-bouncer) — the
+  **evidence** boundary: catches a gate whose failure reads as success — piped
+  into a filter, backgrounded behind an `echo`, or sequenced before a state
+  change with `;`.
+- [**foreground-guard**](https://github.com/karlkfi/claude-bouncer) — the
+  **liveness** boundary: keeps polling, watching, and blocking commands from
+  stalling the session's main thread.
+- [**pr-sentinel**](https://github.com/karlkfi/claude-pr-sentinel) — the
+  **review** boundary: watches a PR to green without merging it, and denies a
+  `gh pr create` whose branch edits lines an open PR already changes.
+
+They run side by side; each defers to normal permissions outside its own axis.
+The guards share one marketplace —
+[`karlkfi/claude-bouncer`](https://github.com/karlkfi/claude-bouncer#install)
+lists the install line for each — and pr-sentinel ships from its own.
+
+### The pairing with branch-guard
+
+workspace-guard says nothing about *git history* — once a path is in-root, an
+in-root `git commit && git push` to `main`, a `git reset --hard`, or a
+`git clean -fd` runs without a second look. Those are exactly the operations
+that turn an in-workspace edit into an unrecoverable one.
+
+[**branch-guard**](https://github.com/karlkfi/claude-bouncer) covers that gap.
+Its motto: *"Let Claude commit and push all day on feature branches. Pause it at
+main."* It parses pending `git`/`gh` commands (and blocks file edits when the
+repo is on a protected branch), then:
 
 - **asks** before committing or pushing to `main`/`master`, force-pushing, or
   running destructive commands (`reset --hard`, `clean -fd`, `branch -D`,
@@ -1750,15 +1775,6 @@ a protected branch), then:
 - **allows** read-only git, staging, branch creation, and commits/pushes on
   feature/worktree branches to run silently;
 - **defers** unknown commands to your normal permission settings.
-
-The two are complementary and run side by side — workspace-guard watches the
-path boundary, branch-guard watches the history boundary. Install it the same
-way you installed this one:
-
-```
-/plugin marketplace add karlkfi/claude-bouncer
-/plugin install branch-guard@claude-bouncer
-```
 
 ## Design
 

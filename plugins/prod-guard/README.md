@@ -542,26 +542,31 @@ python3 scripts/friction-report.py --since 30d --repo gateway --top 20
 
 ## Companion plugins
 
-prod-guard watches the **infrastructure blast-radius** boundary. Two sibling
-plugins guard different axes with the same secure-by-default design:
+prod-guard watches the **infrastructure blast-radius** boundary — whether a
+mutating command is aimed at production. Its siblings guard other axes
+with the same secure-by-default design:
 
-- [**workspace-guard**](https://github.com/karlkfi/claude-bouncer) —
-  the **filesystem** boundary: prompts before guarded file commands
-  (`grep`/`sed`/`cat`/`cp`/`rm`/…) read or write paths outside the project
-  root.
-- [**branch-guard**](https://github.com/karlkfi/claude-bouncer) — the
-  **git history** boundary: auto-approves safe git on feature branches,
-  pauses commits/pushes to `main` and destructive git.
+- [**workspace-guard**](https://github.com/karlkfi/claude-bouncer) — the
+  **filesystem** boundary: prompts before guarded file commands
+  (`grep`/`sed`/`cat`/`cp`/`rm`/…) read or write paths outside the project root.
+- [**branch-guard**](https://github.com/karlkfi/claude-bouncer) — the **git
+  history** boundary: auto-approves safe git on feature branches, pauses commits
+  and pushes to `main` and destructive git.
+- [**exit-status-guard**](https://github.com/karlkfi/claude-bouncer) — the
+  **evidence** boundary: catches a gate whose failure reads as success — piped
+  into a filter, backgrounded behind an `echo`, or sequenced before a state
+  change with `;`.
+- [**foreground-guard**](https://github.com/karlkfi/claude-bouncer) — the
+  **liveness** boundary: keeps polling, watching, and blocking commands from
+  stalling the session's main thread.
+- [**pr-sentinel**](https://github.com/karlkfi/claude-pr-sentinel) — the
+  **review** boundary: watches a PR to green without merging it, and denies a
+  `gh pr create` whose branch edits lines an open PR already changes.
 
-All three run side by side; each defers to normal permissions outside its
-own axis.
-
-```
-/plugin marketplace add karlkfi/claude-bouncer
-/plugin install workspace-guard@claude-bouncer
-/plugin marketplace add karlkfi/claude-bouncer
-/plugin install branch-guard@claude-bouncer
-```
+They run side by side; each defers to normal permissions outside its own axis.
+The guards share one marketplace —
+[`karlkfi/claude-bouncer`](https://github.com/karlkfi/claude-bouncer#install)
+lists the install line for each — and pr-sentinel ships from its own.
 
 ## Design
 
