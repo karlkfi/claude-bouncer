@@ -117,6 +117,35 @@ does not, so the manifest is the line to re-read. And a merge that bumps a
 version without a tag behind it is a silent release: keep the bump in the
 release PR and tag as soon as it lands.
 
+## The fast path: `/release`
+
+`/release` drives everything below. With no argument it surveys all five and
+proposes a cut; with a plugin name it goes straight to that one.
+
+```
+/release                          # every plugin with changes worth releasing
+/release workspace-guard minor
+```
+
+It leans on `scripts/release.py`, which is also usable on its own:
+
+```
+python3 scripts/release.py status --notes     # delta, harvested notes, verdict
+python3 scripts/release.py bump <plugin> minor
+python3 scripts/release.py tag <plugin>       # after the release PR merges
+```
+
+`status` computes the delta against `<plugin>/v*` when the plugin has released
+from here, and against its subtree boundary commit when it has not. `bump`
+writes all three version locations or refuses. `tag` refuses a tag that exists,
+a missing notes file, or a HEAD that is not `origin/main`, then prints the
+publish commands rather than running them.
+
+What the script deliberately leaves alone is the judgment: which level a
+release gets, whether a delta is worth a tag, and the notes prose. Its verdict
+column reads commit types and harvested notes, so it cannot see a diff that
+moves a decision under a `chore:` subject. Read the commits under a `hold`.
+
 ## Steps
 
 1. **Pick the plugin and the level.** The previous tag is
@@ -221,7 +250,18 @@ verbatim with no title heading. workspace-guard, branch-guard, and
 exit-status-guard have the directory and a README stating the convention.
 prod-guard and foreground-guard have neither: copy
 [`plugins/workspace-guard/docs/releases/README.md`](../../plugins/workspace-guard/docs/releases/README.md)
-and fix its paths when you cut their first release.
+when you cut their first release — and fix its commands rather than only its
+paths. All three of those READMEs predate the consolidation, so their publish
+and verify examples name a bare `vX.Y.Z` and a notes path relative to the
+plugin. Both are wrong here:
+
+```
+gh release edit 'workspace-guard/v1.10.1' --notes-file plugins/workspace-guard/docs/releases/v1.10.1.md
+```
+
+Their existing examples are not merely stale spellings. Every release those
+three READMEs describe was published from a retired repository, so a bare
+`v1.8.0` resolves to nothing in this repo whatever the notes path says.
 
 Close the body with the compare link, both ends prefixed:
 
@@ -241,21 +281,19 @@ release of the retired one instead:
 Previous release: https://github.com/karlkfi/claude-workspace-guard/releases/tag/v1.10.0
 ```
 
-## The two release scripts do not run here
+## The two scripts that predate the consolidation
 
-Both came from their own repositories and neither survived the move. Fix
-before use. Do not run either as it stands.
+`plugins/foreground-guard/scripts/cut-release.sh` and
+`plugins/branch-guard/scripts/verify-release-notes.sh` came over with their own
+repositories and neither runs here: the first bumps `plugins[0]`, targets
+`karlkfi/claude-foreground-guard`, and pushes the bump straight to `main`; the
+second derives each tag from a notes filename, so it looks up `v1.9.0`. Both
+are being retired in a separate change — `scripts/release.py` replaces the
+first, and the second moves to `scripts/` and learns to resolve each notes
+file's venue, since all 30 existing files were published from a retired
+repository and no `<plugin>/vX.Y.Z` release exists for any of them yet.
 
-- `plugins/foreground-guard/scripts/cut-release.sh` reads
-  `.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json` from the
-  repository root, bumps `plugins[0]` (workspace-guard's entry), targets
-  `karlkfi/claude-foreground-guard`, runs the root `tests/` suite — the shared
-  parser, not foreground-guard's — pushes the bump straight to `main`, and
-  tags `vX.Y.Z`.
-- `plugins/branch-guard/scripts/verify-release-notes.sh` derives each tag from
-  a notes filename, so it looks up `v1.9.0`, which no longer exists. What it
-  does is still right: diff every published body against the file it was
-  published from.
+Do not run either as it stands.
 
 ## Anti-patterns
 
