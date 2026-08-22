@@ -9,8 +9,8 @@ them here fixes that.
 
 ## The files are bodies, not documents
 
-A file is the body byte for byte, terminator included: a body published without a final
-newline is stored without one. In particular:
+A file is the body byte for byte, terminator included. Every body ends with a final newline, so
+every file here does; a body published without one would be stored without one. In particular:
 
 - **No `# vX.Y.Z` heading.** The tag name is already the Release title; adding one renders it
   twice. This is why these files open mid-thought instead of with a title like every other doc

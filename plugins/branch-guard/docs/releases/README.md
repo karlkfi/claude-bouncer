@@ -41,7 +41,9 @@ file against whichever of the two published it.
 It compares against `--template '{{.body}}'`, which emits the stored body byte-for-byte. `--jq .body`
 appends a newline and would report a difference on every release that already has one.
 
-Because the comparison is byte-exact, it also catches a trailing newline
-appearing or disappearing — `v1.1.0`, `v1.2.0`, `v1.3.0`, and `v1.3.1` were published without a
-final newline and are stored that way, so an editor that adds one on save will show up here. That
-is the check working: the file no longer matches what is published, and the fix is to re-publish it.
+Because the comparison is byte-exact, it also catches a trailing newline appearing or
+disappearing. Every body ends with one, and so does every file here: the four published without
+it — `v1.1.0`, `v1.2.0`, `v1.3.0`, `v1.3.1` — were re-published to add it rather than stored
+short to match, so this convention and git's are the same rule. An editor that drops the final
+byte shows up here. That is the check working: the file no longer matches what is published, and
+the fix is to re-publish it.
