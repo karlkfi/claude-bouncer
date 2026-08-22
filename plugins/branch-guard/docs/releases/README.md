@@ -15,8 +15,11 @@ That makes the browser's "Edit release" box the thing to avoid: it changes one c
 diff. Re-publish from the file instead:
 
 ```bash
-gh release edit vX.Y.Z --notes-file docs/releases/vX.Y.Z.md
+gh release edit 'branch-guard/v1.9.1' --notes-file plugins/branch-guard/docs/releases/v1.9.1.md
 ```
+
+A body published from `karlkfi/claude-branch-guard` is corrected there instead, with `--repo`
+and its bare `vX.Y.Z` tag.
 
 ## Format
 
@@ -34,15 +37,17 @@ From the repository root — every plugin, or just the ones named as arguments:
 scripts/verify-release-notes.sh branch-guard
 ```
 
-A release cut from this repository is tagged `branch-guard/vX.Y.Z`. Everything older shipped from
-`karlkfi/claude-branch-guard` as a bare `vX.Y.Z` and still resolves there, so the script checks each
+A release cut from this repository is tagged `branch-guard/vX.Y.Z`. Notes files predating the move were published from
+`karlkfi/claude-branch-guard` as a bare `vX.Y.Z` and still resolve there, so the script checks each
 file against whichever of the two published it.
 
-It compares against `--template '{{.body}}'`, which emits the stored body byte-for-byte. `--jq .body`
-appends a newline and would report a difference on every release that already has one.
+The comparison is byte-exact, so it also catches a trailing newline appearing or disappearing.
+Do not hand-roll it with `--json body --jq .body`: `--jq` appends a newline unconditionally, so
+it reports a body that ends without one as matching and a body that ends with one as carrying a
+stray line. Both readings are wrong and they point in opposite directions. The script uses
+`--template '{{.body}}'`, which returns the bytes.
 
-Because the comparison is byte-exact, it also catches a trailing newline appearing or
-disappearing. Every body ends with one, and so does every file here: the four published without
+Every body ends with a final newline, and so does every file here: the four published without
 it — `v1.1.0`, `v1.2.0`, `v1.3.0`, `v1.3.1` — were re-published to add it rather than stored
 short to match, so this convention and git's are the same rule. An editor that drops the final
 byte shows up here. That is the check working: the file no longer matches what is published, and
