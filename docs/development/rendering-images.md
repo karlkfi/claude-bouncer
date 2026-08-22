@@ -102,6 +102,11 @@ regardless, and is the only way to pick up a resvg upgrade. `git status` after a
 render is still the check: a raster whose master you did not touch should not
 appear in it.
 
+That check is what catches the one case the timestamps get wrong. A rebase or a
+checkout rewrites mtimes, so masters can come out newer than their rasters and
+the next run rebuilds them. The rebuild is harmless under one resvg version,
+because the output is byte-identical and `git status` stays quiet.
+
 ## Authoring gotchas
 
 These bite when editing the masters:
