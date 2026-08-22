@@ -60,8 +60,8 @@ who owns that plugin, and `tests/test_backlog.py` fails a row that has none.
 
 Label the plugin **whose tree the work lands in**, which for almost every item
 is also the plugin it was found in. Where the two differ, the second wins: Q94
-carries both `prod-guard` and `workspace-guard` because the shipped plan docs it
-archives sit in both trees.
+carried both `prod-guard` and `workspace-guard` because the shipped plan docs it
+archived sat in both trees.
 
 `lib` is the second label this repo adds, and the reason the rule above needs
 stating at all. An item whose fix lands in `lib/bouncer_parse.py` reaches all
