@@ -250,7 +250,18 @@ verbatim with no title heading. workspace-guard, branch-guard, and
 exit-status-guard have the directory and a README stating the convention.
 prod-guard and foreground-guard have neither: copy
 [`plugins/workspace-guard/docs/releases/README.md`](../../plugins/workspace-guard/docs/releases/README.md)
-and fix its paths when you cut their first release.
+when you cut their first release — and fix its commands rather than only its
+paths. All three of those READMEs predate the consolidation, so their publish
+and verify examples name a bare `vX.Y.Z` and a notes path relative to the
+plugin. Both are wrong here:
+
+```
+gh release edit 'workspace-guard/v1.10.1' --notes-file plugins/workspace-guard/docs/releases/v1.10.1.md
+```
+
+Their existing examples are not merely stale spellings. Every release those
+three READMEs describe was published from a retired repository, so a bare
+`v1.8.0` resolves to nothing in this repo whatever the notes path says.
 
 Close the body with the compare link, both ends prefixed:
 
