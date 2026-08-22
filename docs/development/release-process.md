@@ -88,21 +88,16 @@ Per plugin, and all three must agree:
   one that gets forgotten, and it is the reason the bump is no longer a pure
   two-line commit.
 
-Nothing gates the agreement. Check it before and after the bump:
+`make version-check` compares all three and fails when they disagree. It runs
+in `make check` and in CI, so a one-sided bump cannot reach `main` quietly.
+Check before and after the bump:
 
 ```
-python3 - <<'PY'
-import json, re, pathlib
-mk = json.load(open('.claude-plugin/marketplace.json'))
-readme = pathlib.Path('README.md').read_text()
-for entry in mk['plugins']:
-    name = entry['name']
-    pj = json.load(open(f'plugins/{name}/.claude-plugin/plugin.json'))['version']
-    row = re.search(r'\[%s\]\([^)]*\) \| ([0-9.]+)' % re.escape(name), readme)
-    versions = {entry['version'], pj, row.group(1) if row else 'MISSING'}
-    print(('ok  ' if len(versions) == 1 else 'DIFF'), name, sorted(versions))
-PY
+make version-check
 ```
+
+It also fails when a plugin is missing from one of the three, which is what a
+newly added guard looks like before anyone lists it.
 
 ## Delivery comes from `main`, not from the tag
 
@@ -298,7 +293,8 @@ Do not run either as it stands.
 ## Anti-patterns
 
 - **Bumping one or two of the three version locations.** The README row is the
-  one that gets missed, and nothing fails when it does.
+  one that gets missed. `make version-check` fails when it happens, so this
+  costs a red build rather than a wrong front page.
 - **A bare `vX.Y.Z` tag.** It claims all five plugins and collides with the
   next guard to release.
 - **Tagging before the release PR merges,** or merging it and leaving the tag
