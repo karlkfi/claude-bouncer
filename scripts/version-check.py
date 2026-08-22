@@ -38,6 +38,13 @@ ROW_RE = re.compile(
 
 
 def plugin_names():
+    # Directories, deliberately, NOT the marketplace entries -- a guard that
+    # exists on disk and is unlisted is what a half-finished addition looks
+    # like, and iterating entries could not see it. release.py iterates the
+    # entries instead, so it is blind to that plugin (its `status` omits it and
+    # a bump is refused as unknown); this gate is the only thing that reports
+    # it. Switching to entries here would look like a harmless alignment with
+    # release.py and would leave nothing checking for one.
     return sorted(d for d in os.listdir(PLUGINS)
                   if os.path.isdir(os.path.join(PLUGINS, d)))
 
