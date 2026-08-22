@@ -46,6 +46,16 @@ readable across five plugins:
 make backlog ARGS='--label workspace-guard'
 ```
 
+**An item whose fix lands in `lib/bouncer_parse.py` also carries `lib`.** The
+shared parser reaches all five guards, so that label is what separates a change
+one guard has to re-run from one every guard does. It is added beside the plugin
+label, not instead of it — the plugin is still where the measurement and the
+fixture live.
+
+```bash
+make backlog ARGS='--label lib'
+```
+
 A link out of an item is written relative to this directory, so a plugin's own
 docs are reached as `../../plugins/<name>/docs/…`.
 

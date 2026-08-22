@@ -47,9 +47,13 @@ item, priority in each item's `rank` key. A plugin has no backlog of its own.
 
 Two rules the store cannot enforce on its own:
 
-- **Every item carries the plugin it belongs to as a label** — a guard's name,
-  or `repo` for work on the repository. `make backlog ARGS='--label prod-guard'`
-  is how the owner of one plugin finds their work in a store of five.
+- **Every item carries a label for the plugin whose tree the work lands in** — a
+  guard's name, or `repo` for work on the repository.
+  `make backlog ARGS='--label prod-guard'` is how the owner of one plugin finds
+  their work in a store of five. An item whose fix lands in `lib/` also carries
+  `lib`, beside the plugin label rather than instead of it, because that change
+  reaches all five guards and the row is the only place that is visible before
+  the diff exists.
 - **Never hand-pick an ID or hand-type a `rank`.** Both are computed; see
   [`docs/development/maintaining-backlog.md`](docs/development/maintaining-backlog.md),
   which also records why the workspace-guard IDs kept their numbers and the
