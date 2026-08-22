@@ -28,11 +28,15 @@ when each one applies.
 
 ## Verifying
 
-Every file, or just the tags named as arguments:
+From the repository root — every plugin, or just the ones named as arguments:
 
 ```bash
-./scripts/verify-release-notes.sh
+scripts/verify-release-notes.sh branch-guard
 ```
+
+A release cut from this repository is tagged `branch-guard/vX.Y.Z`. Everything older shipped from
+`karlkfi/claude-branch-guard` as a bare `vX.Y.Z` and still resolves there, so the script checks each
+file against whichever of the two published it.
 
 It compares against `--template '{{.body}}'`, which emits the stored body byte-for-byte. `--jq .body`
 appends a newline and would report a difference on every release that already has one.
