@@ -164,15 +164,35 @@ Edit `lib/bouncer_parse.py`. Never a vendored copy.
 lib/bouncer_parse.py              the shared parser
 scripts/sync-lib.py               vendors it, and the CI drift gate
 scripts/render-images.py          rasterizes the brand images, here and per plugin
+scripts/queue.py                  reads, orders and checks the backlog
 docs/img/                         this repo's brand images and their SVG masters
+docs/queue/                       the backlog, one file per item
 tests/                            parser tests, gate tests, release-note tests
 plugins/<name>/                   one plugin, self-contained
 ```
 
+## The shared backlog
+
+[`docs/queue/`](docs/queue/README.md) holds the work for all five guards. Each
+item is a file, so its priority lives in a `rank` key rather than in a position
+in a table and two sessions working different items never touch the same one.
+Every item names the plugin it belongs to.
+
+A directory listing sorts `Q10` before `Q2`, so read it with the tool instead:
+
+```
+make backlog                            # the whole queue, in priority order
+make backlog ARGS='--label prod-guard'  # one plugin's items
+make backlog-next                       # the top ready item
+```
+
+The three plugins that had their own `docs/STATUS.md` gave them up on
+2026-08-22; the other two had no backlog at all and now have one.
+
 ## Development and tests
 
 ```
-make check    # what CI runs: drift gate, parser tests, all five suites
+make check    # what CI runs: drift, version, backlog lint, parser tests, all five suites
 make images   # rasterize the brand images from their SVG masters
 make help     # the rest of the targets
 ```

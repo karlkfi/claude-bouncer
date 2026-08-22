@@ -116,7 +116,7 @@ What the recursion is *not* allowed to do is upgrade a decision. A body's offend
 - **Defending against an attacker with arbitrary shell execution.** The agent can write a script and `bash` it; the hook does not try to model every wrapper command. The "wrapper commands" section of [`security-notes.md`](security-notes.md) covers this.
 - **Sandboxing the workspace from itself.** Workspace-local reads are explicitly allowed, including reads of sensitive files (`.env`, `.git/config`) inside the project. Protecting those is the user's choice via other means.
 - **Replacing Claude Code's permission system.** The hook augments it for one specific gap. If the gap closes upstream, this plugin retires.
-- **Modeling every shell construct.** Variable expansion, command substitution, `cd` semantics, etc. are out of scope for the lexer but covered as Queue items where the gap has security impact (`STATUS.md` Q5–Q8). Constructs without security impact stay unmodeled.
+- **Modeling every shell construct.** Variable expansion, command substitution, `cd` semantics, etc. are out of scope for the lexer but covered as backlog items where the gap has security impact. Constructs without security impact stay unmodeled.
 
 ## Open questions
 

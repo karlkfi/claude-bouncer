@@ -30,7 +30,7 @@ From `karlkfi/claude-skills`. Measured 2026-08-16: `session-backlog` is the only
 
 ### `session-backlog`
 
-The format and grooming process for the Queue in [`docs/STATUS.md`](../STATUS.md): identifier allocation, adding and completing and deferring items, and the commit discipline that keeps merge conflicts trivial. [`maintaining-backlog.md`](maintaining-backlog.md) is authoritative wherever the two overlap and holds this repo's wiring, and the repo vendors the skill's tooling (`scripts/lint-backlog.sh`, `scripts/next-task.sh`, `scripts/backlog-metrics.sh`) so the checks work whether or not the skill is installed.
+The format and grooming process for the repository-root backlog, `docs/queue/`: identifier allocation, adding and completing and deferring items, and the commit discipline that keeps the *why* separable from the *what*. [`maintaining-backlog.md`](../../../../docs/development/maintaining-backlog.md) at the repository root is authoritative wherever the two overlap and holds the wiring, and the repo vendors the skill's `queue.py` so the checks work whether or not the skill is installed.
 
 ## Keeping this page honest
 

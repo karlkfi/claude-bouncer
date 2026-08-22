@@ -2,10 +2,11 @@
 
 Five Claude Code guard plugins in one marketplace. Each plugin under
 `plugins/<name>/` is self-contained and has its own `CLAUDE.md` covering its
-rules and its backlog. Read that one for plugin work. This file covers what is
-true of the repo as a whole. Releasing is one of those things: it moves the
-root manifest and the root README, so the runbook is
-`docs/development/release-process.md` and there is no per-plugin one.
+rules. Read that one for plugin work. This file covers what is true of the repo
+as a whole. Releasing is one of those things: it moves the root manifest and
+the root README, so the runbook is `docs/development/release-process.md` and
+there is no per-plugin one. The backlog is another — one store for all five,
+below.
 
 ## Never edit a vendored parser copy
 
@@ -39,10 +40,27 @@ Extend additively when a guard needs more: `strip_heredoc_bodies` grew an
 `unterminated` out-parameter that way, and the guards that do not pass one are
 unaffected.
 
+## One backlog, five plugins
+
+All work is tracked in [`docs/queue/`](docs/queue/README.md) — one file per
+item, priority in each item's `rank` key. A plugin has no backlog of its own.
+
+Two rules the store cannot enforce on its own:
+
+- **Every item carries the plugin it belongs to as a label** — a guard's name,
+  or `repo` for work on the repository. `make backlog ARGS='--label prod-guard'`
+  is how the owner of one plugin finds their work in a store of five.
+- **Never hand-pick an ID or hand-type a `rank`.** Both are computed; see
+  [`docs/development/maintaining-backlog.md`](docs/development/maintaining-backlog.md),
+  which also records why the workspace-guard IDs kept their numbers and the
+  others did not.
+
+Invoke the `session-backlog` skill for any change to the store.
+
 ## Checks
 
 ```
-make check    # drift gate, version gate, parser tests, doc links, all five plugin suites
+make check    # drift, version, backlog lint, parser tests, doc links, all five suites
 ```
 
 Run it before proposing a change is done. A change under `lib/` reaches all

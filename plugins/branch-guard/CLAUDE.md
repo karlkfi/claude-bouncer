@@ -45,6 +45,11 @@ Before introducing a new pattern or abstraction, check whether the existing tool
    - **New configuration or hook surface** → `README.md`, `hooks/hooks.json`, and `.claude-plugin/plugin.json` keywords/description.
 4. **Commit when done** — small, focused, Conventional Commits.
 
+Work is tracked in the repo-root backlog, [`docs/queue/`](../../docs/queue/README.md),
+shared with the other four guards. File items with the `branch-guard` label. The
+issue numbers cited throughout this file are `karlkfi/claude-branch-guard`'s and
+are history — that repository is retired and takes no new issues.
+
 ## Code standards
 
 ### Python (`hooks/branch-guard.py`)

@@ -1,8 +1,8 @@
 # Security notes: out-of-scope findings
 
-A companion to the Queue in [`STATUS.md`](STATUS.md). This file records security observations that came out of audits but are **not** going on the backlog — either because the impact is too low to warrant code changes, because they reflect the documented threat model, or because they can't be reproduced reliably. They're recorded here so a future audit doesn't repeat the investigation.
+A companion to the [backlog](../../../docs/queue/README.md). This file records security observations that came out of audits but are **not** going on the backlog — either because the impact is too low to warrant code changes, because they reflect the documented threat model, or because they can't be reproduced reliably. They're recorded here so a future audit doesn't repeat the investigation.
 
-For known limitations that affect normal use, see the **Limitations** section of [`../README.md`](../README.md). For active work, see the Queue in [`STATUS.md`](STATUS.md).
+For known limitations that affect normal use, see the **Limitations** section of [`../README.md`](../README.md). For active work, see the [backlog](../../../docs/queue/README.md).
 
 ## ANSI escape injection in `permissionDecisionReason`
 
@@ -64,7 +64,7 @@ So `ask` blocks in every unattended mode; the boundary holds regardless of `perm
 
 ## When to promote a note to the Queue
 
-Move an item from this file to [`STATUS.md`](STATUS.md) when any of the following changes:
+Move an item from this file to the [backlog](../../../docs/queue/README.md) when any of the following changes:
 
 - A reproducer lands that demonstrates real file disclosure or write (not just a distorted prompt).
 - The threat model expands — e.g. the plugin starts being installed by a system administrator rather than the end user, raising the bar on env-var trust.

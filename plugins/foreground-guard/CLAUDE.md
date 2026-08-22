@@ -19,7 +19,7 @@ Make the smallest change that achieves the goal. Before introducing a new patter
 3. **After making changes** — review the diff; update the README decision table / covered-forms / config sections when semantics change; keep `plugin.json` and `marketplace.json` versions in lockstep.
 4. **Commit when done** — small, focused, Conventional Commits.
 
-Work is tracked in [`docs/STATUS.md`](docs/STATUS.md): pick the next task from the top of the Queue, run `gh pr list` before picking, and commit `docs/STATUS.md` changes in isolated `docs(status):` commits.
+Work is tracked in the repo-root backlog, [`docs/queue/`](../../docs/queue/README.md): pick the top ready item, run `gh pr list` before picking, and commit backlog changes in isolated `docs(status):` commits.
 
 ## Code standards
 
