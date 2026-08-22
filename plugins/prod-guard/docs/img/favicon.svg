@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="shield" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#a78bfa"/>
+      <stop offset="1" stop-color="#7e57c2"/>
+    </linearGradient>
+  </defs>
+  <!-- shield + server stack, centered: translate(76,31) scale(5) maps the 88-unit mark to a 512 canvas -->
+  <g transform="translate(76,31) scale(5)">
+    <path d="M36 2 L70 14 V44 C70 66 54 80 36 88 C18 80 2 66 2 44 V14 Z"
+          fill="url(#shield)" stroke="#5b3da8" stroke-width="1.4"/>
+    <!-- server stack: three racked units with status LEDs -->
+    <g fill="#f1ecff">
+      <rect x="18" y="24" width="36" height="10" rx="3"/>
+      <rect x="18" y="39" width="36" height="10" rx="3"/>
+      <rect x="18" y="54" width="36" height="10" rx="3"/>
+    </g>
+    <g fill="#7e57c2">
+      <circle cx="25" cy="29" r="2.4"/>
+      <circle cx="25" cy="44" r="2.4"/>
+      <circle cx="25" cy="59" r="2.4"/>
+    </g>
+  </g>
+</svg>

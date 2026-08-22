@@ -1,0 +1,13 @@
+{
+  "name": "prod-guard",
+  "version": "2.5.1",
+  "description": "Production-target guard for Claude Code Bash commands.",
+  "author": {
+    "name": "Karl",
+    "url": "https://github.com/karlkfi"
+  },
+  "homepage": "https://github.com/karlkfi/claude-prod-guard",
+  "repository": "https://github.com/karlkfi/claude-prod-guard",
+  "license": "MIT",
+  "keywords": ["claude-code", "hooks", "security", "guardrail", "production", "kubernetes", "kubectl", "helm", "terraform", "gcloud", "aws", "azure", "docker", "ssh", "pulumi", "ansible", "devops", "sre", "command", "friction", "override", "session"]
+}

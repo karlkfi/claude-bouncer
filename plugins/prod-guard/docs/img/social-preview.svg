@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" font-family="-apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d1117"/>
+      <stop offset="1" stop-color="#161b22"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#a78bfa" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#a78bfa" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="shieldMark" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#a78bfa"/>
+      <stop offset="1" stop-color="#7e57c2"/>
+    </linearGradient>
+  </defs>
+
+  <!-- background -->
+  <rect width="1280" height="640" fill="url(#bg)"/>
+  <ellipse cx="640" cy="360" rx="520" ry="300" fill="url(#glow)" opacity="0.22"/>
+
+  <!-- ===== header ===== -->
+  <!-- shield + server-stack mark -->
+  <g transform="translate(64,50)">
+    <path d="M36 2 L70 14 V44 C70 66 54 80 36 88 C18 80 2 66 2 44 V14 Z"
+          fill="url(#shieldMark)" stroke="#c4b5fd" stroke-width="1.6"/>
+    <g fill="#f1ecff">
+      <rect x="18" y="24" width="36" height="10" rx="3"/>
+      <rect x="18" y="39" width="36" height="10" rx="3"/>
+      <rect x="18" y="54" width="36" height="10" rx="3"/>
+    </g>
+    <g fill="#7e57c2">
+      <circle cx="25" cy="29" r="2.4"/>
+      <circle cx="25" cy="44" r="2.4"/>
+      <circle cx="25" cy="59" r="2.4"/>
+    </g>
+  </g>
+
+  <text x="156" y="90" font-size="58" font-weight="800" letter-spacing="-1">
+    <tspan fill="#e6edf3">prod</tspan><tspan fill="#a78bfa">-guard</tspan>
+  </text>
+  <text x="158" y="130" font-size="25" font-weight="500" fill="#8b949e" letter-spacing="0.2">
+    Production-aware infra permissions for Claude Code
+  </text>
+  <text x="1216" y="130" text-anchor="end" font-size="18" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" fill="#6e7681">github.com/karlkfi/claude-prod-guard</text>
+
+  <!-- ===== terminal panel ===== -->
+  <g>
+    <rect x="64" y="172" width="1152" height="360" rx="18" fill="#0b0f16" stroke="#222b38" stroke-width="1.5"/>
+    <!-- title bar -->
+    <path d="M64 190 a18 18 0 0 1 18 -18 H1198 a18 18 0 0 1 18 18 V216 H64 Z" fill="#11161f"/>
+    <circle cx="92" cy="194" r="6" fill="#ff5f56"/>
+    <circle cx="114" cy="194" r="6" fill="#ffbd2e"/>
+    <circle cx="136" cy="194" r="6" fill="#27c93f"/>
+    <text x="640" y="199" text-anchor="middle" font-size="16" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" fill="#6e7681">PreToolUse · Bash</text>
+  </g>
+
+  <!-- ===== three outcomes ===== -->
+  <g font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace">
+
+    <!-- row 1: non-prod mutation -> defer -->
+    <g transform="translate(96,256)">
+      <rect x="0" y="0" width="100" height="36" rx="18" fill="#12261a" stroke="#238636" stroke-width="1.5"/>
+      <path d="M18 18 l5 5 l10 -12" fill="none" stroke="#3fb950" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="44" y="24" font-size="17" font-weight="700" font-family="-apple-system, sans-serif" fill="#3fb950">defer</text>
+    </g>
+    <text x="218" y="282" font-size="23" fill="#c9d1d9"><tspan fill="#7e57c2">$ </tspan>kubectl --context <tspan fill="#3fb950" font-weight="700">dev</tspan> delete pod x</text>
+
+    <!-- row 2: prod mutation -> deny -->
+    <g transform="translate(96,356)">
+      <rect x="0" y="0" width="100" height="36" rx="18" fill="#2a1618" stroke="#a5303a" stroke-width="1.5"/>
+      <circle cx="18" cy="18" r="7.5" fill="none" stroke="#f85149" stroke-width="2.6"/>
+      <line x1="12.9" y1="23.1" x2="23.1" y2="12.9" stroke="#f85149" stroke-width="2.6" stroke-linecap="round"/>
+      <text x="44" y="24" font-size="17" font-weight="700" font-family="-apple-system, sans-serif" fill="#f85149">deny</text>
+    </g>
+    <text x="218" y="382" font-size="23" fill="#c9d1d9"><tspan fill="#7e57c2">$ </tspan>kubectl --context <tspan fill="#f85149" font-weight="700">prod</tspan> delete ns x</text>
+
+    <!-- row 3: prod mutation + override -> ask -->
+    <g transform="translate(96,456)">
+      <rect x="0" y="0" width="100" height="36" rx="18" fill="#2a2210" stroke="#9e6a03" stroke-width="1.5"/>
+      <path d="M18 10 l9 15 h-18 Z" fill="none" stroke="#e3b341" stroke-width="2.4" stroke-linejoin="round"/>
+      <line x1="18" y1="16" x2="18" y2="20" stroke="#e3b341" stroke-width="2.4" stroke-linecap="round"/>
+      <circle cx="18" cy="23" r="1.2" fill="#e3b341"/>
+      <text x="44" y="24" font-size="17" font-weight="700" font-family="-apple-system, sans-serif" fill="#e3b341">ask</text>
+    </g>
+    <text x="218" y="482" font-size="23" fill="#c9d1d9"><tspan fill="#a78bfa">$ </tspan><tspan fill="#c4b5fd">PROD_GUARD_OVERRIDE=incident-42</tspan> kubectl --context <tspan fill="#f85149" font-weight="700">prod</tspan> delete ns x</text>
+  </g>
+
+  <!-- caption -->
+  <text x="640" y="586" text-anchor="middle" font-size="22" font-weight="500" fill="#c9d1d9">
+    A gate, not a wall: prod mutations <tspan fill="#f85149" font-weight="700">deny</tspan> by default; an <tspan font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" fill="#c4b5fd">OVERRIDE</tspan> downgrades to a <tspan fill="#e3b341" font-weight="700">prompt</tspan>.
+  </text>
+</svg>
