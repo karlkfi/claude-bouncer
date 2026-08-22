@@ -2,7 +2,7 @@
 
 **Production-target guard rails for Claude Code Bash commands.**
 
-[![release](https://img.shields.io/github/v/release/karlkfi/claude-prod-guard)](https://github.com/karlkfi/claude-prod-guard/releases) [![tests](https://img.shields.io/github/actions/workflow/status/karlkfi/claude-prod-guard/tests.yml?branch=main&label=tests)](https://github.com/karlkfi/claude-prod-guard/actions/workflows/tests.yml) [![License: MIT](https://img.shields.io/github/license/karlkfi/claude-prod-guard.svg)](LICENSE) [![Claude Code plugin](https://img.shields.io/badge/Claude_Code-plugin-7e57c2)](#install)
+[![release](https://img.shields.io/github/v/release/karlkfi/claude-prod-guard)](https://github.com/karlkfi/claude-prod-guard/releases) [![tests](https://img.shields.io/github/actions/workflow/status/karlkfi/claude-bouncer/tests.yml?branch=main&label=tests)](https://github.com/karlkfi/claude-bouncer/actions/workflows/tests.yml) [![License: MIT](https://img.shields.io/github/license/karlkfi/claude-bouncer.svg)](LICENSE) [![Claude Code plugin](https://img.shields.io/badge/Claude_Code-plugin-7e57c2)](#install)
 
 > Let Claude mutate kind and dev clusters all day. Stop it at prod.
 

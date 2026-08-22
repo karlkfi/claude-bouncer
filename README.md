@@ -2,6 +2,8 @@
 
 🛡️ **Guard rails for Claude Code: five `PreToolUse` guard plugins in one marketplace.**
 
+[![tests](https://img.shields.io/github/actions/workflow/status/karlkfi/claude-bouncer/tests.yml?branch=main&label=tests)](https://github.com/karlkfi/claude-bouncer/actions/workflows/tests.yml) [![License: MIT](https://img.shields.io/github/license/karlkfi/claude-bouncer.svg)](LICENSE) [![Claude Code marketplace](https://img.shields.io/badge/Claude_Code-marketplace-7e57c2)](#install)
+
 > A bouncer doesn't care what a command is called. It cares what the command does.
 
 Claude Code's permission rules judge a shell command by its name, and a name is a
@@ -170,10 +172,8 @@ make check    # what CI runs: drift gate, parser tests, all five suites
 make help     # the rest of the targets
 ```
 
-2537 tests: 1326 workspace-guard, 477 branch-guard, 427 prod-guard, 203
-foreground-guard, 55 exit-status-guard, 49 shared. branch-guard drives its hook
-through a shell harness. The others use `unittest`. Python 3.9 is the floor,
-because exit-status-guard supports it.
+branch-guard drives its hook through a shell harness. The others use
+`unittest`. Python 3.9 is the floor, because exit-status-guard supports it.
 
 CI keeps the per-plugin jobs separate rather than collapsing them into one matrix.
 They differ in Python floor, in OS coverage (workspace-guard and branch-guard add
