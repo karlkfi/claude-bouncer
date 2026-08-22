@@ -46,7 +46,7 @@
   <text x="156" y="98" font-size="58" font-weight="800" letter-spacing="-1">
     <tspan fill="#e6edf3">branch</tspan><tspan fill="#a78bfa">-guard</tspan>
   </text>
-  <text x="158" y="138" font-size="25" font-weight="500" fill="#8b949e" letter-spacing="0.2">
+  <text x="158" y="138" font-size="25" font-weight="500" fill="#c9d1d9" letter-spacing="0.2">
     Branch-aware git permissions for Claude Code
   </text>
 
@@ -58,7 +58,7 @@
     <circle cx="92" cy="218" r="6" fill="#ff5f56"/>
     <circle cx="114" cy="218" r="6" fill="#ffbd2e"/>
     <circle cx="136" cy="218" r="6" fill="#27c93f"/>
-    <text x="640" y="223" text-anchor="middle" font-size="16" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" fill="#6e7681">PreToolUse · git</text>
+    <text x="640" y="223" text-anchor="middle" font-size="16" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" fill="#a2aab4">PreToolUse · git</text>
   </g>
 
   <!-- protected-branch boundary -->
@@ -70,7 +70,7 @@
   </g>
 
   <!-- zone labels -->
-  <text x="100" y="316" font-size="15" font-weight="700" fill="#3fb950" letter-spacing="2">ON A FEATURE BRANCH</text>
+  <text x="100" y="316" font-size="15" font-weight="700" fill="#56d364" letter-spacing="2">ON A FEATURE BRANCH</text>
   <text x="1180" y="316" text-anchor="end" font-size="15" font-weight="700" fill="#d29922" letter-spacing="2">main · OR DESTRUCTIVE</text>
 
   <!-- ===== feature-branch entries (allow) ===== -->
@@ -79,15 +79,15 @@
     <text x="100" y="372" font-size="23" fill="#adbac7"><tspan fill="#7e57c2">$ </tspan>git commit -am "wip"</text>
     <g transform="translate(100,392)">
       <rect x="0" y="0" width="96" height="32" rx="16" fill="#12261a" stroke="#238636" stroke-width="1.5"/>
-      <path d="M16 16 l5 5 l9 -11" fill="none" stroke="#3fb950" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
-      <text x="40" y="21" font-size="16" font-weight="700" font-family="-apple-system, sans-serif" fill="#3fb950">allow</text>
+      <path d="M16 16 l5 5 l9 -11" fill="none" stroke="#56d364" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="40" y="21" font-size="16" font-weight="700" font-family="-apple-system, sans-serif" fill="#56d364">allow</text>
     </g>
     <!-- entry 2 -->
     <text x="100" y="476" font-size="23" fill="#adbac7"><tspan fill="#7e57c2">$ </tspan>git push -u origin HEAD</text>
     <g transform="translate(100,496)">
       <rect x="0" y="0" width="96" height="32" rx="16" fill="#12261a" stroke="#238636" stroke-width="1.5"/>
-      <path d="M16 16 l5 5 l9 -11" fill="none" stroke="#3fb950" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
-      <text x="40" y="21" font-size="16" font-weight="700" font-family="-apple-system, sans-serif" fill="#3fb950">allow</text>
+      <path d="M16 16 l5 5 l9 -11" fill="none" stroke="#56d364" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="40" y="21" font-size="16" font-weight="700" font-family="-apple-system, sans-serif" fill="#56d364">allow</text>
     </g>
   </g>
 
@@ -114,5 +114,5 @@
   </g>
 
   <!-- footer -->
-  <text x="1216" y="138" text-anchor="end" font-size="18" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" fill="#6e7681">github.com/karlkfi/claude-branch-guard</text>
+  <text x="1216" y="138" text-anchor="end" font-size="18" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" fill="#a2aab4">github.com/karlkfi/claude-branch-guard</text>
 </svg>

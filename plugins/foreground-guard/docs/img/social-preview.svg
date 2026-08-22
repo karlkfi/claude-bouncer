@@ -33,10 +33,10 @@
   <text x="156" y="90" font-size="58" font-weight="800" letter-spacing="-1">
     <tspan fill="#e6edf3">foreground</tspan><tspan fill="#a78bfa">-guard</tspan>
   </text>
-  <text x="158" y="130" font-size="25" font-weight="500" fill="#8b949e" letter-spacing="0.2">
+  <text x="158" y="130" font-size="25" font-weight="500" fill="#c9d1d9" letter-spacing="0.2">
     Main-thread time guard rails for Claude Code
   </text>
-  <text x="1216" y="130" text-anchor="end" font-size="18" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" fill="#6e7681">github.com/karlkfi/claude-foreground-guard</text>
+  <text x="1216" y="130" text-anchor="end" font-size="18" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" fill="#a2aab4">github.com/karlkfi/claude-foreground-guard</text>
 
   <!-- ===== terminal panel ===== -->
   <g>
@@ -46,7 +46,7 @@
     <circle cx="92" cy="194" r="6" fill="#ff5f56"/>
     <circle cx="114" cy="194" r="6" fill="#ffbd2e"/>
     <circle cx="136" cy="194" r="6" fill="#27c93f"/>
-    <text x="640" y="199" text-anchor="middle" font-size="16" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" fill="#6e7681">PreToolUse · Bash</text>
+    <text x="640" y="199" text-anchor="middle" font-size="16" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" fill="#a2aab4">PreToolUse · Bash</text>
   </g>
 
   <!-- ===== two guarded classes: caught command  →  the fix it names ===== -->
@@ -67,10 +67,10 @@
     <rect x="0" y="0" width="472" height="60" rx="30" fill="#0f2418" stroke="#238636" stroke-width="1.6"/>
     <!-- stacked-windows glyph: send to background -->
     <g transform="translate(28,20)">
-      <rect x="8" y="6" width="22" height="16" rx="2.5" fill="#0f2418" stroke="#3fb950" stroke-width="2.4"/>
-      <rect x="0" y="0" width="22" height="16" rx="2.5" fill="#12261a" stroke="#3fb950" stroke-width="2.4"/>
+      <rect x="8" y="6" width="22" height="16" rx="2.5" fill="#0f2418" stroke="#56d364" stroke-width="2.4"/>
+      <rect x="0" y="0" width="22" height="16" rx="2.5" fill="#12261a" stroke="#56d364" stroke-width="2.4"/>
     </g>
-    <text x="80" y="39" font-size="25" font-weight="600" font-family="-apple-system, sans-serif" fill="#c9d1d9">run it in the <tspan fill="#3fb950" font-weight="800">background</tspan></text>
+    <text x="80" y="39" font-size="25" font-weight="600" font-family="-apple-system, sans-serif" fill="#c9d1d9">run it in the <tspan fill="#56d364" font-weight="800">background</tspan></text>
   </g>
 
   <!-- Class B: slow run  →  longer timeout -->
@@ -88,15 +88,15 @@
   <g transform="translate(660,420)">
     <rect x="0" y="0" width="472" height="60" rx="30" fill="#0f2418" stroke="#238636" stroke-width="1.6"/>
     <!-- clock glyph -->
-    <g transform="translate(40,30)" fill="none" stroke="#3fb950" stroke-width="2.4">
+    <g transform="translate(40,30)" fill="none" stroke="#56d364" stroke-width="2.4">
       <circle cx="0" cy="0" r="13"/>
       <path d="M0 -7 V0 L6 5" stroke-linecap="round" stroke-linejoin="round"/>
     </g>
-    <text x="80" y="39" font-size="25" font-weight="600" font-family="-apple-system, sans-serif" fill="#c9d1d9">timeout <tspan font-family="ui-monospace, 'SF Mono', Menlo, monospace" fill="#e3b341" font-weight="700">2m</tspan> <tspan fill="#8b949e">→</tspan> <tspan font-family="ui-monospace, 'SF Mono', Menlo, monospace" fill="#3fb950" font-weight="800">10m</tspan></text>
+    <text x="80" y="39" font-size="25" font-weight="600" font-family="-apple-system, sans-serif" fill="#c9d1d9">timeout <tspan font-family="ui-monospace, 'SF Mono', Menlo, monospace" fill="#e3b341" font-weight="700">2m</tspan> <tspan fill="#c9d1d9">→</tspan> <tspan font-family="ui-monospace, 'SF Mono', Menlo, monospace" fill="#56d364" font-weight="800">10m</tspan></text>
   </g>
 
   <!-- caption -->
   <text x="640" y="586" text-anchor="middle" font-size="22" font-weight="500" fill="#c9d1d9">
-    It prompts the moment the main thread would stall — and <tspan fill="#3fb950" font-weight="700">names the fix</tspan>. Everything else defers.
+    It prompts the moment the main thread would stall — and <tspan fill="#56d364" font-weight="700">names the fix</tspan>. Everything else defers.
   </text>
 </svg>
