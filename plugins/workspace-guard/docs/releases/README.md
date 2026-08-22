@@ -29,22 +29,26 @@ gh release edit 'workspace-guard/v1.10.1' --notes-file plugins/workspace-guard/d
 
 Editing a body in the web UI puts it out of sync with the file, and the next `--notes-file`
 publish silently reverts it. Correct the file, open a pull request (PR) like any other docs
-change, and re-publish from it after merge.
+change, and re-publish from it after merge. A body published from
+`karlkfi/claude-workspace-guard` is corrected there, with `--repo` and its bare `vX.Y.Z` tag.
 
-To confirm a published body still matches its file:
+## Verifying
+
+From the repository root — every plugin, or just the ones named as arguments:
 
 ```bash
-diff <(gh release view v1.8.0 --repo karlkfi/claude-workspace-guard --json body --template '{{.body}}') docs/releases/v1.8.0.md
+scripts/verify-release-notes.sh workspace-guard
 ```
 
-Every release described here was published from `karlkfi/claude-workspace-guard`, so the
-`--repo` flag is what makes the lookup resolve at all. It drops once a release is cut from
-this repo, where the tag is `workspace-guard/vX.Y.Z`.
+A release cut from this repository is tagged `workspace-guard/vX.Y.Z`. Notes files predating the move were published
+from `karlkfi/claude-workspace-guard` as a bare `vX.Y.Z` and still resolve there, so the script
+checks each file against whichever of the two published it.
 
-Do not reach for `--json body --jq .body` here. `--jq` appends a newline
-unconditionally, so it reports a body that ends without one as matching, and a body that ends
-with one as carrying a stray blank line. Both readings are wrong and they point in opposite
-directions. `--template '{{.body}}'`, which the script uses, returns the bytes.
+The comparison is byte-exact, so it also catches a trailing newline appearing or disappearing.
+Do not hand-roll it with `--json body --jq .body`: `--jq` appends a newline unconditionally, so
+it reports a body that ends without one as matching and a body that ends with one as carrying a
+stray line. Both readings are wrong and they point in opposite directions. The script uses
+`--template '{{.body}}'`, which returns the bytes.
 
 The full runbook — version bump, tag, publish — is in
 [`../development/release-process.md`](../development/release-process.md).

@@ -7,8 +7,11 @@ renders the tag as the page `<h1>` and a `# vX.Y.Z` would duplicate it.
 Publish, or republish after an edit, with:
 
 ```bash
-gh release edit vX.Y.Z --notes-file docs/releases/vX.Y.Z.md
+gh release edit 'exit-status-guard/v2.0.1' --notes-file plugins/exit-status-guard/docs/releases/v2.0.1.md
 ```
+
+A body published from `karlkfi/claude-exit-status-guard` is corrected
+there instead, with `--repo` and its bare `vX.Y.Z` tag.
 
 Authoring here rather than in the web form is what makes each fix a diff and
 each published body reproducible from a commit. The invariant is that this file
@@ -32,3 +35,31 @@ Reconstructing that list at tag time instead — from commit subjects, PR titles
 and diffs — is what v1.0.1 had to do, and it is the expensive half of cutting a
 release. It also under-reports: commit subjects name what was changed, not what
 it does to someone on the previous version.
+
+## Verifying
+
+From the repository root — every plugin, or just the ones named as
+arguments:
+
+```bash
+scripts/verify-release-notes.sh exit-status-guard
+```
+
+A release cut from this repository is tagged `exit-status-guard/vX.Y.Z`.
+Notes files predating the move were published from
+`karlkfi/claude-exit-status-guard` as a bare `vX.Y.Z` and still resolve
+there, so the script checks each file against whichever of the two
+published it.
+
+The comparison is byte-exact, so it also catches a trailing newline
+appearing or disappearing. Do not hand-roll it with
+`--json body --jq .body`: `--jq` appends a newline unconditionally, so it
+reports a body that ends without one as matching and a body that ends
+with one as carrying a stray line. Both readings are wrong and they point
+in opposite directions. The script uses `--template '{{.body}}'`, which
+returns the bytes.
+
+The full runbook — version bump, tag, publish — is in
+[`docs/development/release-process.md`](../../../../docs/development/release-process.md).
+Unlike its four siblings, exit-status-guard carries no per-plugin pointer file,
+so this link goes to the repository root.
