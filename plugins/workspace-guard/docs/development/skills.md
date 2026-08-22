@@ -25,13 +25,13 @@ is in-tree and needs no entry here, so link it directly.
 
 ### session-backlog
 
-Maintains `docs/STATUS.md`: the priority-ordered Queue, the stable `Q`-prefixed IDs, and the
-`**Next ID:**` counter that allocates them. Invoke it for any change to the Queue or header —
-adding an item, picking the next task, marking one done, deferring one, or a full grooming pass.
+Maintains the repository-root backlog, `docs/queue/` — one file per item, with priority in each
+item's `rank` key. Invoke it for any change to the store: adding an item, picking the next task,
+marking one done, deferring one, or a full grooming pass.
 
-It fires on every backlog edit. This repo's rules, including the invariants that still hold when
-the skill is unavailable, are in [`maintaining-backlog.md`](maintaining-backlog.md). This repo
-vendors three of its helper scripts into `scripts/`, so a fix to one belongs upstream as well.
+It fires on every backlog edit. The repo's rules, including the invariants that still hold when
+the skill is unavailable, are in [`maintaining-backlog.md`](../../../../docs/development/maintaining-backlog.md) at the
+repository root, which also vendors the skill's `queue.py` — so a fix to it belongs upstream as well.
 
 ## Names drift, and nothing here goes red
 

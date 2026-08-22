@@ -15,9 +15,12 @@ on:
 # averaged those would weaken every one of them to the weakest.
 
 jobs:
-  # ------------------------------------------------------------ shared parser
-  # Runs first and on the widest Python range: every guard imports this, so its
-  # floor is the lowest floor any plugin supports (3.9, exit-status-guard's).
+  # ------------------------------------------------- shared parser and backlog
+  # Runs first and on the widest Python range: every guard imports the parser,
+  # so its floor is the lowest floor any plugin supports (3.9,
+  # exit-status-guard's). The root suite also carries the backlog gate --
+  # test_backlog.py runs scripts/queue.py over docs/queue/ and over stores
+  # carrying one introduced defect each, so the gate is shown able to fail.
   shared-parser:
     runs-on: ubuntu-latest
     strategy:

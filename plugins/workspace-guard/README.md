@@ -77,7 +77,7 @@ Guarded commands: `grep` (and `egrep`, `fgrep`), `rg`, `sed`, `awk` (and
 On the write side: `cp`, `mv`, `tee`, `rm`, `dd`, and `mktemp` (whose default
 location is host temp — see below). These are the file-reading and file-writing
 commands Claude reaches for most often; tools like `ls`, `find`, and `xargs`
-aren't covered yet (see [`docs/STATUS.md`](docs/STATUS.md)). A **redirect**
+aren't covered yet (see the [shared backlog](https://github.com/karlkfi/claude-bouncer/blob/main/docs/queue/README.md)). A **redirect**
 target (`> file`) is checked on *any* command, guarded or not — it's a write the
 shell performs regardless of the command word.
 
@@ -1734,8 +1734,8 @@ small git metadata files (`.git`, `commondir`, `HEAD`) locally. See
 
 Bugs, ideas, and questions go in
 [GitHub Issues](https://github.com/karlkfi/claude-bouncer/issues).
-For the development backlog and how to add new guarded commands, see
-[`docs/STATUS.md`](docs/STATUS.md).
+For the development backlog and how to add new guarded commands, see the
+[shared backlog](https://github.com/karlkfi/claude-bouncer/blob/main/docs/queue/README.md).
 
 ## License
 

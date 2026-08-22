@@ -9,10 +9,10 @@ The load-bearing piece is `scripts/bash-prod-guard.py` — a stdlib-only Python 
 Build the right thing AND build it well. Before writing any code, state the goal in one sentence and the approach in two or three. If the goal is unclear, ask one focused question rather than guessing.
 
 Make the smallest change that achieves the goal. If you notice problems outside the current task's scope, flag them rather than fixing them:
-- New near-term work → add a row to the Queue in `docs/STATUS.md` in priority order.
-- Larger / speculative work → add a row to the Deferred table in `docs/STATUS.md` with a concrete revive trigger (`**Demand:**` / `**Event:**` / `**Decision:**`).
+- New near-term work → file an item in the repo-root backlog, [`docs/queue/`](../../docs/queue/README.md), at the priority it deserves.
+- Larger / speculative work → file it `status: deferred` with a concrete revive trigger (`**Demand:**` / `**Event:**` / `**Decision:**`).
 
-Capture knowledge durably, don't leave it in chat. When the user states a standing preference or decision, persist it in the repo (CLAUDE.md, the relevant `docs/` file, or memory) rather than applying it once and moving on. When follow-up work surfaces mid-task, record it on the Queue in `docs/STATUS.md` — including the *why* of any decision it depends on — instead of only mentioning it in the response.
+Capture knowledge durably, don't leave it in chat. When the user states a standing preference or decision, persist it in the repo (CLAUDE.md, the relevant `docs/` file, or memory) rather than applying it once and moving on. When follow-up work surfaces mid-task, record it in the repo-root backlog `docs/queue/` — including the *why* of any decision it depends on — instead of only mentioning it in the response.
 
 Before introducing a new pattern or abstraction, check whether the existing model already solves the problem: a new tool is usually an `EVALUATORS` entry (often an alias of an existing one), a new verb is a table row, a new environment name is a config pattern — not a parser change.
 
@@ -20,15 +20,15 @@ Before introducing a new pattern or abstraction, check whether the existing mode
 
 1. **At session start, check whether the worktree is stale.** Run `git fetch origin main` and compare with `git log --oneline HEAD..origin/main`; if `origin/main` has new commits, rebase before doing any other work.
    - **Work on a `claude/`-prefixed branch, never on `main`.** In a worktree session, do all work via the worktree path.
-2. **Before making changes** — read `README.md` and skim `scripts/bash-prod-guard.py` so the proposed change matches the existing parsing/policy model. If picking the next task, run `gh pr list` first and skip any Queue item from `docs/STATUS.md` already covered by an open PR.
+2. **Before making changes** — read `README.md` and skim `scripts/bash-prod-guard.py` so the proposed change matches the existing parsing/policy model. If picking the next task, run `gh pr list` first and skip any backlog item already covered by an open PR.
    - **Verify 🚫 blockers are still real.** Grep for the deliverables before treating an item as blocked.
    - **Investigation findings marked ✅ must be end-to-end verified, not just source-read.** Shell and CLI parsing are full of surprises that only show up when you exec the thing — but see the fixture-safety rule in Testing before exec'ing anything.
 3. **For complex tasks** — write an explicit plan to `docs/plan/<slug>.md` and follow it. Keep it updated so completed scope is verifiable at the end.
 4. **After making changes** — review the diff. Update docs proactively:
    - **Changed decision semantics, verb tables, or covered tools** → update the decision table and "Covered tools" section in `README.md`, and `docs/design.md` if a rationale changed.
    - **New configuration or hook surface** → `README.md` Configuration section and `.claude-plugin/plugin.json` keywords/description.
-   - Update `docs/STATUS.md`: remove the completed Queue row.
-5. **Commit when done** — small, focused, Conventional Commits. **Always commit `docs/STATUS.md` changes in their own isolated commit** (see `docs/development/maintaining-backlog.md`).
+   - Delete the completed item's file from `docs/queue/`.
+5. **Commit when done** — small, focused, Conventional Commits. **Always commit backlog changes in their own isolated commit** (see `docs/development/maintaining-backlog.md` at the repo root).
 
 ## Code standards
 
@@ -75,10 +75,10 @@ When changing tables or policy, add the case that motivated the change as a fixt
 - Follow the Conventional Commits standard.
 - Amending an unpushed commit is fine — fix up the message or staged changes before pushing without asking. Once a commit is pushed, prefer a follow-up commit; only amend + force-push (always `--force-with-lease`, never on `main`/`master`) when the user asks for it.
 - After pushing, check whether a PR exists (`gh pr view`). If one does, update its description with `gh pr edit` to reflect any new commits.
-- Always commit `docs/STATUS.md` changes in their own isolated commit, separate from code and plan-doc changes. STATUS.md is high-contention across parallel sessions; isolating it makes rebase conflicts trivial to resolve.
+- Always commit backlog changes in their own isolated commit, separate from code and plan-doc changes. One item per file means this no longer buys conflict relief; it keeps the *why* separable from the *what* for whoever reviews the PR.
 - If a change doesn't belong in the current PR, open a separate PR for it. Working multiple PRs in parallel is fine and preferable to bundling unrelated concerns.
 - Act only on your own branch and PR. Never re-run, edit, or push to a PR or branch owned by another session; when CI fails on another session's PR, reproduce the failure locally instead.
-- Queue items have `Q`-prefixed IDs (e.g. `Q1`). Use the bare ID in commit messages and PR bodies — the `Q` stops GitHub from auto-linking the number to PR/issue 1.
+- Backlog items have `Q`-prefixed IDs (e.g. `Q1`). Use the bare ID in commit messages and PR bodies — the `Q` stops GitHub from auto-linking the number to PR/issue 1.
 
 ## Documentation conventions
 
@@ -94,8 +94,8 @@ When working on specific tasks, read the relevant doc before starting:
 
 | Task | Reference |
 |---|---|
-| Picking the next task, tracking progress, adding new items | `docs/STATUS.md` — also run `gh pr list` and skip any Queue item already covered by an open PR |
-| Editing `docs/STATUS.md` (any change to the Queue or header) | Invoke the `session-backlog` skill; repo wiring in `docs/development/maintaining-backlog.md` |
+| Picking the next task, tracking progress, adding new items | [`docs/queue/`](../../docs/queue/README.md) at the repo root — also run `gh pr list` and skip any item already covered by an open PR |
+| Editing the backlog (any change under `docs/queue/`) | Invoke the `session-backlog` skill; repo wiring in [`maintaining-backlog.md`](../../docs/development/maintaining-backlog.md) at the repo root |
 | Naming or linking a globally installed skill from a doc | `docs/development/skills.md` — link that page's anchor, never a `~/.claude/skills/...` path |
 | Changing decision semantics, verb tables, or covered tools | `scripts/bash-prod-guard.py` + `README.md` decision table + `docs/design.md` |
 | Plugin packaging / marketplace listing | `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` |

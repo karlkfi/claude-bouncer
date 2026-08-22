@@ -4,6 +4,11 @@ exit-status-guard is a Claude Code PreToolUse hook. It denies Bash commands
 whose exit status is the answer and gets discarded — piped into a filter,
 backgrounded behind an `echo`, or sequenced before a state change with `;`.
 
+Work is tracked in the repo-root backlog, [`docs/queue/`](https://github.com/karlkfi/claude-bouncer/blob/main/docs/queue/README.md),
+shared with the other four guards. File items with the `exit-status-guard`
+label; the issue links below point at the retired `claude-pipe-guard`
+repository and are history, not somewhere to file.
+
 ## Layout
 
 | Path | What it is |

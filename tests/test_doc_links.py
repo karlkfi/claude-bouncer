@@ -136,6 +136,90 @@ def read_in_repo(path):
         return f.read()
 
 
+def reachable_pages(readme, inside, exists, read):
+    """Markdown pages a reader reaches from `readme` without leaving `inside`."""
+    seen, queue = set(), [readme]
+    while queue:
+        path = queue.pop()
+        if path in seen or not path.endswith('.md') or not exists(path):
+            continue
+        seen.add(path)
+        for _, target in links(strip_code(read(path))):
+            body = target.partition('#')[0]
+            if not body:
+                continue
+            dest = os.path.normpath(os.path.join(os.path.dirname(path), body))
+            if dest.startswith(inside + os.sep):
+                queue.append(dest)
+    return seen
+
+
+def escaping(paths, inside, read):
+    """Relative links on `paths` landing outside `inside`, as printable lines."""
+    bad = []
+    for path in sorted(paths):
+        for line, target in links(strip_code(read(path))):
+            body = target.partition('#')[0]
+            if not body:
+                continue
+            dest = os.path.normpath(os.path.join(os.path.dirname(path), body))
+            if not dest.startswith(inside + os.sep):
+                bad.append('%s:%d -> %s' % (path, line, target))
+    return bad
+
+
+PLUGINS = ('workspace-guard', 'branch-guard', 'prod-guard',
+           'exit-status-guard', 'foreground-guard')
+
+
+class PluginReaderLinkTests(unittest.TestCase):
+    """A page a plugin's README reaches must not link out of that plugin.
+
+    Claude Code copies a plugin into
+    `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/`, so someone who
+    installed the guard has that directory and nothing above it -- the same
+    reason `lib/bouncer_parse.py` is vendored into each plugin. A relative link
+    climbing out resolves while you browse the repository and dead-ends for the
+    reader it was written for, which is why `DocLinkTests` above passes on one.
+
+    The criterion is reachability from the README, not which directory a page
+    sits in: foreground-guard's README links a page under `docs/development/`,
+    so that page is graded too. What is exempt is everything a README never
+    reaches -- CLAUDE.md and the release runbooks -- because those are read in
+    a checkout, where a relative link is the one that follows the branch you
+    are on rather than jumping to `main`.
+    """
+
+    def test_no_reader_facing_page_links_out_of_its_plugin(self):
+        bad = []
+        for name in PLUGINS:
+            inside = os.path.join('plugins', name)
+            bad += escaping(
+                reachable_pages(os.path.join(inside, 'README.md'), inside,
+                                exists_in_repo, read_in_repo),
+                inside, read_in_repo)
+        self.assertEqual([], bad, 'reader-facing page links out of its '
+                         'plugin; use an absolute URL:\n  ' + '\n  '.join(bad))
+
+    def test_the_check_can_fail(self):
+        """Pins the walk as well as the finding: an absolute URL is invisible
+        to `links`, and a page the README never reaches is never graded."""
+        docs = {
+            'plugins/p/README.md': ('[d](docs/design.md)\n'
+                                    '[c](../../docs/queue/README.md)\n'),
+            'plugins/p/docs/design.md': ('[b](../../../docs/queue/README.md)\n'
+                                         '[ok](https://example.invalid/x)\n'),
+            'plugins/p/CLAUDE.md': '[unreached](../../docs/queue/README.md)\n',
+        }
+        pages = reachable_pages('plugins/p/README.md', 'plugins/p',
+                                lambda p: p in docs, docs.__getitem__)
+        self.assertEqual({'plugins/p/README.md', 'plugins/p/docs/design.md'},
+                         pages)
+        bad = escaping(pages, 'plugins/p', docs.__getitem__)
+        self.assertEqual(2, len(bad), bad)
+        self.assertNotIn('CLAUDE.md', ' '.join(bad))
+
+
 class DocLinkTests(unittest.TestCase):
     def test_every_relative_link_resolves(self):
         bad = broken(tracked_markdown(), exists_in_repo, read_in_repo)
