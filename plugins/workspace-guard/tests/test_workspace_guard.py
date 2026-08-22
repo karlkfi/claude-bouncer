@@ -6628,7 +6628,8 @@ class ShellCBodyAnalysisTests(unittest.TestCase):
 class SiblingSessionScratchE2ETests(unittest.TestCase):
     """#61 end-to-end: read-only guarded commands on a SAME-project sibling
     session's Claude scratch are allowed (the dispatcher-tails-worker case);
-    writes, redirect targets, and cross-project reads still prompt.
+    cross-project reads still prompt, and writes are denied with this session's
+    own scratchpad named (Q97).
 
     Creates a synthetic ``<tmp_root>/<slug>/<session>/`` layout under the real
     Claude temp root so the hook's directory scan (claude_session_project_dir)
@@ -6651,11 +6652,15 @@ class SiblingSessionScratchE2ETests(unittest.TestCase):
         self.current = "cccccccc-1111-2222-3333-" + tag
         self.worker = "wwwwwwww-1111-2222-3333-" + tag
         # The current session's own scratch dir (scan anchor) and a sibling
-        # worker session's dir, both under the same project slug.
+        # worker session's dir, both under the same project slug. The current
+        # session gets a scratchpad/ too — it is what the cross-session deny
+        # steers at, and session_scratchpad() only names one that exists.
         os.makedirs(os.path.join(self.proj_dir, self.current, "tasks"),
                     exist_ok=True)
         os.makedirs(os.path.join(self.proj_dir, self.worker, "tasks"),
                     exist_ok=True)
+        self.scratchpad = os.path.join(self.proj_dir, self.current, "scratchpad")
+        os.makedirs(self.scratchpad, exist_ok=True)
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -6688,19 +6693,47 @@ class SiblingSessionScratchE2ETests(unittest.TestCase):
         self._expect(f"cat {sh(self._sibling(self.current))}", "allow",
                      session_id=self.current)
 
-    def test_sibling_worker_cp_write_still_ask(self):
+    def test_sibling_worker_cp_write_denied(self):
         # Copying INTO a sibling session's scratch is a write -> not exempt.
-        self._expect(f"cp ./in.txt {sh(self._sibling(self.worker))}", "ask",
+        self._expect(f"cp ./in.txt {sh(self._sibling(self.worker))}", "deny",
                      session_id=self.current)
 
-    def test_redirect_into_sibling_worker_still_ask(self):
+    def test_redirect_into_sibling_worker_denied(self):
         # Redirect targets pass is_read=False, so they stay guarded.
-        self._expect(f"cat in.txt > {sh(self._sibling(self.worker))}", "ask",
+        self._expect(f"cat in.txt > {sh(self._sibling(self.worker))}", "deny",
                      session_id=self.current)
 
-    def test_rm_sibling_worker_still_ask(self):
-        self._expect(f"rm {sh(self._sibling(self.worker))}", "ask",
+    def test_rm_sibling_worker_denied(self):
+        self._expect(f"rm {sh(self._sibling(self.worker))}", "deny",
                      session_id=self.current)
+
+    def test_deny_names_this_sessions_scratchpad(self):
+        # The whole point of the category: the reason carries the path to use,
+        # so the agent rewrites it instead of the operator answering a prompt.
+        out = self._expect(f"cp ./in.txt {sh(self._sibling(self.worker))}",
+                           "deny", session_id=self.current)
+        reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn(self.scratchpad, reason)
+        self.assertIn("this session's own scratchpad", reason)
+
+    def test_deny_falls_back_when_no_scratchpad_exists(self):
+        # Steering at a scratchpad that isn't there trades a deny for a "no
+        # such file or directory", so the repo-local dir is named instead.
+        shutil.rmtree(self.scratchpad, ignore_errors=True)
+        out = self._expect(f"cp ./in.txt {sh(self._sibling(self.worker))}",
+                           "deny", session_id=self.current)
+        reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertNotIn(self.scratchpad, reason)
+        self.assertIn("./tmp/", reason)
+
+    def test_override_downgrades_cross_session_write_to_ask(self):
+        # A dispatcher deliberately seeding a worker's scratch says so.
+        out = self._expect(f"cp ./in.txt {sh(self._sibling(self.worker))}",
+                           "ask", session_id=self.current,
+                           env_extra={"WORKSPACE_GUARD_OVERRIDE":
+                                      "seeding a worker"})
+        self.assertIn("seeding a worker",
+                      out["hookSpecificOutput"]["permissionDecisionReason"])
 
     def test_no_session_id_still_ask(self):
         # Without session_id the scan can't anchor -> exemption off -> ask.

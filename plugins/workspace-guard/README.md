@@ -105,8 +105,11 @@ background work therefore aren't spammed with prompts for reading their own
 output — in real usage that one case accounted for ~37% of all prompts.
 Read-only commands may also poll a **sibling** session's output under the same
 project's scratch dir — the dispatcher-tails-workers pattern of parallel
-dispatch. Writing into another session's scratch still asks, and a different
-project's scratch still asks entirely.
+dispatch. Writing into another session's scratch is **denied**, with this
+session's own scratchpad named in the refusal, because the usual cause is a
+path the agent carried across a resume or a compaction — each mints a new
+session id and a new scratch dir, leaving the remembered path pointing at the
+old one. A different project's scratch still asks entirely.
 
 | Command                              | Decision |
 | ------------------------------------ | -------- |
@@ -137,6 +140,7 @@ project's scratch still asks entirely.
 | `tail /tmp/claude-501/…/<this-session>/…` (own task output) | allow |
 | `echo x > /tmp/claude-501/…/<this-session>/scratchpad/f` (own scratch write) | allow |
 | `tail /tmp/claude-501/<this-project>/<sibling-session>/…` (sibling read) | allow |
+| `echo x > /tmp/claude-501/<this-project>/<sibling-session>/scratchpad/f` (sibling write) | **deny** |
 | `f=notes.md; cat $f`                 | allow    |
 | `d=sub; cd $d && cat x.txt`          | allow    |
 | `cp x "$(git rev-parse --show-toplevel)/backup/"` | allow |
@@ -935,13 +939,22 @@ through the same boundary rules and produce the same reasons. Symlink staging
      undocumented slug encoding (which differs between a worktree and the main
      checkout); if it can't be located, the read simply keeps prompting.
 
+   The write half of that second rule is **denied** rather than allowed, and the
+   refusal names this session's own `scratchpad/`. The usual cause is a path the
+   agent carried across a resume or a compaction — each mints a new session id
+   and a new scratch dir under the same project slug, so the remembered path now
+   names a sibling's — and that is indistinguishable here from a deliberate
+   cross-session write, which is what `WORKSPACE_GUARD_OVERRIDE=<reason>` is for.
+   Where the session's own `scratchpad/` isn't on disk to steer at, the message
+   falls back to the repo-local scratch dir.
+
    `/tmp/claude-<uid>` is the POSIX root; on Windows there is no per-UID suffix
    because the temp dir is already per-user, so the root is `%LOCALAPPDATA%\Temp\claude`.
 
-   Writing into another session's scratch, and any access to a *different
-   project's* scratch, still prompt. Because these allows match on the resolved
-   `realpath` — and run *after* the `ln`-staging check — a symlink planted in
-   the scratch dir that escapes the root is still flagged.
+   Any access to a *different project's* scratch still prompts. Because these
+   allows match on the resolved `realpath` — and run *after* the `ln`-staging
+   check — a symlink planted in the scratch dir that escapes the root is still
+   flagged.
 10. **Allow reads of Claude-owned project data.** For read-only commands (`cat`,
    `head`, `tail`, `grep`, `rg`, `sed`, `awk`, `jq`, `yq`, `diff`, `sort`,
    `wc`, `file`, `hexdump`, and their aliases), a path whose resolved
@@ -972,8 +985,9 @@ through the same boundary rules and produce the same reasons. Symlink staging
    the session. Because this runs on the already-resolved file
    arguments, a `/tmp` that appears only as text (a grep pattern, an `echo`
    string) is never matched. The Claude-managed temp root from step 9 is
-   excluded — another session's task output keeps its `ask` (or, for a
-   same-project read, the step 9 allow) rather than this steer-to-`./tmp/` deny.
+   excluded — another session's task output keeps its `ask`, or the step 9
+   verdict where that applies (allow for a same-project read, deny for a
+   same-project write), rather than this steer-to-`./tmp/` deny.
    The action, scratch-dir name, extra roots,
    and an allowlist escape hatch are all configurable; see
    [Configuration](#configuration).
@@ -1311,7 +1325,7 @@ both, read at hook time (no restart needed):
 
 | Env var | Default | Effect |
 | --- | --- | --- |
-| `WORKSPACE_GUARD_OVERRIDE` | (empty) | When set to a non-empty reason string, downgrades the sibling-checkout deny and the unanchored-kill deny to `ask`, for work that deliberately reaches another checkout. The reason is echoed back in the prompt. |
+| `WORKSPACE_GUARD_OVERRIDE` | (empty) | When set to a non-empty reason string, downgrades the sibling-checkout deny, the cross-session scratch-write deny, and the unanchored-kill deny to `ask`, for work that deliberately reaches another checkout or session. The reason is echoed back in the prompt. |
 
 `WORKSPACE_GUARD_OVERRIDE` is the one knob that *loosens* this guard, so it's
 empty by default and opt-in. The denies are the secure default: they self-heal in

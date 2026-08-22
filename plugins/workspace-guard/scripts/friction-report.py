@@ -59,6 +59,7 @@ REASON_PATTERNS = {
     'hosttemp':  re.compile(r"Host-wide temp path\(s\): (.*?)\. "
                             r"Host-wide temp is shared"),
     'sibling':   re.compile(r"Sibling-checkout write\(s\)"),
+    'crosssession': re.compile(r"Cross-session scratch write\(s\)"),
     'kill':      re.compile(r"Unanchored process kill\(s\)"),
 }
 

@@ -69,6 +69,14 @@ Detection lives in the same script the Bash hook uses (dispatched on `tool_name`
 
 The deny (rather than `ask`) is the secure default here specifically because the failure mode is an approvable-by-reflex prompt whose only correct answer was "reject and retype the path"; a deny self-heals in one agent round trip. `WORKSPACE_GUARD_OVERRIDE=<reason>` is the documented, reasoned escape hatch for deliberate cross-checkout work.
 
+### Why a write into another session's scratch denies while a read is allowed
+
+The scratch tree Claude Code hands each session sits under one project slug, so a dispatcher and its workers share a parent. Reads across that parent are allowed — tailing a worker's task output is the case they were opened for — and the write half stays blocked, because a session writing into a sibling's scratch clobbers work nobody asked it to touch.
+
+What makes it a `deny` with a rewrite rather than an `ask` is where those writes come from. A resume or a compaction mints a new session id and a new scratch dir under the same slug, while the path already in the agent's context still names the old one; the write is a stale reference rather than an intent. Measured over 30 days of one developer's transcripts: 41 such prompts, all writes, 40 of them naming a session other than the running one, and one session took nine in ninety minutes on a single path — because an approved `ask` never reaches the agent, so nothing corrected the path that produced the next one. The hook knows the right path and can say it, which is the whole test for `deny` over `ask`.
+
+A deliberate cross-session write — seeding a worker's scratch with a brief — is the case `WORKSPACE_GUARD_OVERRIDE` covers, and it is rare enough to be worth naming when it happens.
+
 ### Why a process kill is in scope, though it touches no file
 
 `pkill -f` — and `Stop-Process` on the PowerShell side — reaches another session's work without naming a path. It signals by *pattern*, matched against the whole command line, so `pkill -f "make check"` hits every checkout on the host running one — the same wrong-branch mistake as a sibling-checkout write, addressed the one way a path check cannot see. It sits in this plugin rather than a new one for the same reason the write tools do: the workspace root, the tokenizer, and the override are already here.

@@ -81,6 +81,12 @@ class CategorizeTests(unittest.TestCase):
                  "the wrong branch. `../other/a.txt` is inside another "
                  "checkout of this repo (/r, on branch main).",
                  {'sibling': []}),
+                ("workspace-guard: Cross-session scratch write(s) blocked: "
+                 "that scratch dir belongs to a different session of this "
+                 "project. `/fake-tmp/claude-0/-proj/sess-b/scratchpad/x`. "
+                 "Fix: write to `/fake-tmp/claude-0/-proj/sess-a/scratchpad`, "
+                 "this session's own scratchpad.",
+                 {'crosssession': []}),
                 ("workspace-guard: Unanchored process kill(s) blocked: a "
                  "pattern that names no path in this workspace matches the "
                  "same process in every checkout on this host. `pkill` "
