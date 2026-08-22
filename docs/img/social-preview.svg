@@ -42,34 +42,27 @@
   </text>
   <text x="1216" y="138" text-anchor="end" font-size="18" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" fill="#a2aab4">github.com/karlkfi/claude-bouncer</text>
 
-  <!-- ===== panel ===== -->
-  <g>
-    <rect x="64" y="196" width="1152" height="380" rx="18" fill="#0b0f16" stroke="#222b38" stroke-width="1.5"/>
-    <path d="M64 214 a18 18 0 0 1 18 -18 H1198 a18 18 0 0 1 18 18 V240 H64 Z" fill="#11161f"/>
-    <circle cx="92" cy="218" r="6" fill="#ff5f56"/>
-    <circle cx="114" cy="218" r="6" fill="#ffbd2e"/>
-    <circle cx="136" cy="218" r="6" fill="#27c93f"/>
-    <text x="640" y="223" text-anchor="middle" font-size="16" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" fill="#a2aab4">PreToolUse · five hooks</text>
-  </g>
-
   <!-- ===== the five guards ===== -->
-  <!-- card i sits at x = 76 + i*230, width 208; glyph groups are the plugin marks at scale 0.72 -->
+  <!-- The cards are the only containers: the sibling previews frame their
+       content in a terminal window because they show shell commands, and
+       this one shows a catalogue. Card i sits at x = 76 + i*230, width 208;
+       each glyph group is that plugin's own mark at scale 0.72. -->
   <g>
     <!-- workspace-guard -->
-    <rect x="76" y="272" width="208" height="200" rx="14" fill="#11161f" stroke="#222b38" stroke-width="1.5"/>
-    <g transform="translate(154.08,296) scale(0.72)">
+    <rect x="76" y="240" width="208" height="200" rx="14" fill="#11161f" stroke="#222b38" stroke-width="1.5"/>
+    <g transform="translate(154.08,264) scale(0.72)">
       <path d="M36 2 L70 14 V44 C70 66 54 80 36 88 C18 80 2 66 2 44 V14 Z" fill="url(#shieldMark)" stroke="#c4b5fd" stroke-width="1.6"/>
       <g transform="translate(15,24)">
         <path d="M2 6 H14 L18 11 H40 V34 H2 Z" fill="#f1ecff" stroke="#f1ecff" stroke-width="1.6" stroke-linejoin="round"/>
       </g>
     </g>
-    <text x="180" y="390" text-anchor="middle" font-size="19" font-weight="700" fill="#e6edf3">workspace-guard</text>
-    <text x="180" y="416" text-anchor="middle" font-size="15" fill="#c9d1d9">Reads and writes outside</text>
-    <text x="180" y="438" text-anchor="middle" font-size="15" fill="#c9d1d9">the project root</text>
+    <text x="180" y="358" text-anchor="middle" font-size="19" font-weight="700" fill="#e6edf3">workspace-guard</text>
+    <text x="180" y="384" text-anchor="middle" font-size="15" fill="#c9d1d9">Reads and writes outside</text>
+    <text x="180" y="406" text-anchor="middle" font-size="15" fill="#c9d1d9">the project root</text>
 
     <!-- branch-guard -->
-    <rect x="306" y="272" width="208" height="200" rx="14" fill="#11161f" stroke="#222b38" stroke-width="1.5"/>
-    <g transform="translate(384.08,296) scale(0.72)">
+    <rect x="306" y="240" width="208" height="200" rx="14" fill="#11161f" stroke="#222b38" stroke-width="1.5"/>
+    <g transform="translate(384.08,264) scale(0.72)">
       <path d="M36 2 L70 14 V44 C70 66 54 80 36 88 C18 80 2 66 2 44 V14 Z" fill="url(#shieldMark)" stroke="#c4b5fd" stroke-width="1.6"/>
       <g fill="none" stroke="#f1ecff" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
         <path d="M28 28 V60"/>
@@ -81,13 +74,13 @@
         <circle cx="44" cy="30" r="6"/>
       </g>
     </g>
-    <text x="410" y="390" text-anchor="middle" font-size="19" font-weight="700" fill="#e6edf3">branch-guard</text>
-    <text x="410" y="416" text-anchor="middle" font-size="15" fill="#c9d1d9">Commits and pushes to</text>
-    <text x="410" y="438" text-anchor="middle" font-size="15" fill="#c9d1d9">a protected branch</text>
+    <text x="410" y="358" text-anchor="middle" font-size="19" font-weight="700" fill="#e6edf3">branch-guard</text>
+    <text x="410" y="384" text-anchor="middle" font-size="15" fill="#c9d1d9">Commits and pushes to</text>
+    <text x="410" y="406" text-anchor="middle" font-size="15" fill="#c9d1d9">a protected branch</text>
 
     <!-- prod-guard -->
-    <rect x="536" y="272" width="208" height="200" rx="14" fill="#11161f" stroke="#222b38" stroke-width="1.5"/>
-    <g transform="translate(614.08,296) scale(0.72)">
+    <rect x="536" y="240" width="208" height="200" rx="14" fill="#11161f" stroke="#222b38" stroke-width="1.5"/>
+    <g transform="translate(614.08,264) scale(0.72)">
       <path d="M36 2 L70 14 V44 C70 66 54 80 36 88 C18 80 2 66 2 44 V14 Z" fill="url(#shieldMark)" stroke="#c4b5fd" stroke-width="1.6"/>
       <g fill="#f1ecff">
         <rect x="18" y="24" width="36" height="10" rx="3"/>
@@ -100,26 +93,26 @@
         <circle cx="25" cy="59" r="2.4"/>
       </g>
     </g>
-    <text x="640" y="390" text-anchor="middle" font-size="19" font-weight="700" fill="#e6edf3">prod-guard</text>
-    <text x="640" y="416" text-anchor="middle" font-size="15" fill="#c9d1d9">Infra commands aimed</text>
-    <text x="640" y="438" text-anchor="middle" font-size="15" fill="#c9d1d9">at production</text>
+    <text x="640" y="358" text-anchor="middle" font-size="19" font-weight="700" fill="#e6edf3">prod-guard</text>
+    <text x="640" y="384" text-anchor="middle" font-size="15" fill="#c9d1d9">Infra commands aimed</text>
+    <text x="640" y="406" text-anchor="middle" font-size="15" fill="#c9d1d9">at production</text>
 
     <!-- exit-status-guard -->
-    <rect x="766" y="272" width="208" height="200" rx="14" fill="#11161f" stroke="#222b38" stroke-width="1.5"/>
-    <g transform="translate(844.08,296) scale(0.72)">
+    <rect x="766" y="240" width="208" height="200" rx="14" fill="#11161f" stroke="#222b38" stroke-width="1.5"/>
+    <g transform="translate(844.08,264) scale(0.72)">
       <path d="M36 2 L70 14 V44 C70 66 54 80 36 88 C18 80 2 66 2 44 V14 Z" fill="url(#shieldMark)" stroke="#c4b5fd" stroke-width="1.6"/>
       <g transform="translate(38,43) rotate(-45)" fill="none" stroke="#f1ecff" stroke-width="5">
         <rect x="4" y="-7" width="24" height="14" rx="7"/>
         <rect x="-28" y="-7" width="24" height="14" rx="7"/>
       </g>
     </g>
-    <text x="870" y="390" text-anchor="middle" font-size="19" font-weight="700" fill="#e6edf3">exit-status-guard</text>
-    <text x="870" y="416" text-anchor="middle" font-size="15" fill="#c9d1d9">A failing gate that</text>
-    <text x="870" y="438" text-anchor="middle" font-size="15" fill="#c9d1d9">reports success</text>
+    <text x="870" y="358" text-anchor="middle" font-size="19" font-weight="700" fill="#e6edf3">exit-status-guard</text>
+    <text x="870" y="384" text-anchor="middle" font-size="15" fill="#c9d1d9">A failing gate that</text>
+    <text x="870" y="406" text-anchor="middle" font-size="15" fill="#c9d1d9">reports success</text>
 
     <!-- foreground-guard -->
-    <rect x="996" y="272" width="208" height="200" rx="14" fill="#11161f" stroke="#222b38" stroke-width="1.5"/>
-    <g transform="translate(1074.08,296) scale(0.72)">
+    <rect x="996" y="240" width="208" height="200" rx="14" fill="#11161f" stroke="#222b38" stroke-width="1.5"/>
+    <g transform="translate(1074.08,264) scale(0.72)">
       <path d="M36 2 L70 14 V44 C70 66 54 80 36 88 C18 80 2 66 2 44 V14 Z" fill="url(#shieldMark)" stroke="#c4b5fd" stroke-width="1.6"/>
       <g fill="#f1ecff">
         <rect x="19" y="24" width="34" height="5" rx="2.5"/>
@@ -127,14 +120,14 @@
         <path d="M23 30 H49 L36 46 Z M36 46 L49 62 H23 Z"/>
       </g>
     </g>
-    <text x="1100" y="390" text-anchor="middle" font-size="19" font-weight="700" fill="#e6edf3">foreground-guard</text>
-    <text x="1100" y="416" text-anchor="middle" font-size="15" fill="#c9d1d9">Polls and waits on</text>
-    <text x="1100" y="438" text-anchor="middle" font-size="15" fill="#c9d1d9">the main thread</text>
+    <text x="1100" y="358" text-anchor="middle" font-size="19" font-weight="700" fill="#e6edf3">foreground-guard</text>
+    <text x="1100" y="384" text-anchor="middle" font-size="15" fill="#c9d1d9">Polls and waits on</text>
+    <text x="1100" y="406" text-anchor="middle" font-size="15" fill="#c9d1d9">the main thread</text>
   </g>
 
   <!-- install line -->
   <g>
-    <rect x="313" y="500" width="654" height="46" rx="23" fill="#1b1530" stroke="#7e57c2" stroke-width="1.5"/>
-    <text x="640" y="530" text-anchor="middle" font-size="22" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" fill="#c4b5fd">/plugin marketplace add karlkfi/claude-bouncer</text>
+    <rect x="313" y="468" width="654" height="46" rx="23" fill="#1b1530" stroke="#7e57c2" stroke-width="1.5"/>
+    <text x="640" y="498" text-anchor="middle" font-size="22" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" fill="#c4b5fd">/plugin marketplace add karlkfi/claude-bouncer</text>
   </g>
 </svg>
