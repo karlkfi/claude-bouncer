@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Enable per-clone with: git config core.hooksPath .githooks
+set -euo pipefail
+root="$(git rev-parse --show-toplevel)"
+if git diff --cached --name-only | grep -q '^docs/queue/'; then
+    "${PYTHON:-python3}" "$root/scripts/queue.py" lint \
+        --strict blocked-opener --strict deferred-trigger --strict empty-store
+fi
