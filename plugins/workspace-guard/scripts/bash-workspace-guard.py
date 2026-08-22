@@ -2863,7 +2863,7 @@ def decide(offenders, ctx, bypass):
     ``bypassPermissions`` (no human to answer an ask), when a host-temp path is
     hit and the configured action is ``deny``, when a sibling-checkout write, a
     cross-session scratch write, or an unanchored process kill is hit without an
-    override, or when every
+    override, or when ANY
     offender is one the hook merely failed to parse (``UNPARSED_CATS``);
     otherwise ``ask``.
     Both decisions block equally — this is a recoverability/steering choice, not
@@ -2873,11 +2873,19 @@ def decide(offenders, ctx, bypass):
     host_temp_hit = 'hosttemp' in cats
     cross_hit = bool(cats & {'sibling', 'kill', 'crosssession'})
     cross_deny = cross_hit and ctx.override is None
-    # Every offender, not any: a command that also names a genuinely outside
-    # path keeps the `ask` that path is owed.
-    unparsed_only = bool(cats) and cats <= UNPARSED_CATS
+    # Any offender, not every. This read `cats <= UNPARSED_CATS` when the
+    # unparsed deny arrived, on the reasoning that a command also naming a
+    # genuinely outside path keeps the `ask` that path is owed. The ask is
+    # still owed — it just arrives one step later, on a command whose every
+    # token is literal, which is the only version a person can actually judge.
+    # Asking first spends someone's attention on a string half of which nobody
+    # at the prompt can resolve, and leaves the rewrite unapplied.
+    #
+    # It also made the rule non-monotonic: `cat $f` denied while
+    # `cat $f /etc/hosts` asked, so adding an offender SOFTENED the verdict.
+    unparsed_hit = bool(cats & UNPARSED_CATS)
     deny_now = bypass or (host_temp_hit and ctx.tmp_action == 'deny') \
-        or cross_deny or unparsed_only
+        or cross_deny or unparsed_hit
     decision = "deny" if deny_now else "ask"
     reason = build_reason(offenders,
                           build_scratch_hint(
@@ -2952,7 +2960,8 @@ def analyze_command(cmd, ctx, base_cwd, depth=0):
     return offenders, guarded and not kf.signal
 
 
-def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None):
+def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None,
+                     seed_loops=None):
     """Analyze one command string; returns ``(offenders, guarded, KillFacts)``.
 
     Command-substitution bodies (``"$(…)"`` and backtick ``` `…` ```, plus the
@@ -2977,6 +2986,12 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
     substitution recursion passes it, and only the string-wide stable names
     (see ``track_stable``); a shell ``-c`` body instead carries whatever
     ``substitute_vars`` already put in its token, at its own position.
+
+    ``seed_loops`` does the same for loop bindings, and for the same reason: a
+    substitution inherits the loop variable it sits inside, so without it
+    ``for f in docs/*.md; do echo "$(wc -l < "$f")"; done`` blocks on an ``$f``
+    the enclosing string had already resolved — while the same command without
+    the ``$( )`` allows. See ``stable_loops`` for what qualifies.
     """
     proj, cwd = ctx.proj, base_cwd
     # Alias for readability at the two use sites far below; the group loop's own
@@ -3248,7 +3263,32 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
     # records NAME's candidate value set here instead of poisoning it, so a
     # later `$NAME` in a file arg is checked against every value bash iterates.
     # Poisoned by the same reassignment/`read`/`eval` rules as varmap (below).
-    loopmap = {}
+    loopmap = dict(seed_loops) if seed_loops else {}
+    # The subset the substitution recursion may start from — `stable_vars`'
+    # discipline, with a union where that uses equality. The scan runs once for
+    # the whole string, so a name two loops bind has to answer for both value
+    # sets; the union is a superset of either, and checking a superset can only
+    # find more paths, never fewer. Over the cap it poisons rather than
+    # truncating, for the reason MAX_LOOP_CANDIDATES gives.
+    #
+    # A name that is ever poisoned or reassigned as a scalar is blacklisted
+    # outright instead: once no binding describes it, leaving the token
+    # unexpanded is what blocks it, and carrying a stale candidate list would
+    # answer for a value bash never takes.
+    stable_loops, unstable_loops = {}, set()
+
+    def blacklist_loops(names):
+        for nm in names:
+            unstable_loops.add(nm)
+            stable_loops.pop(nm, None)
+
+    def record_loop(name, values):
+        if name in unstable_loops:
+            return
+        seen = stable_loops.setdefault(name, [])
+        seen.extend(v for v in values if v not in seen)
+        if len(seen) > MAX_LOOP_CANDIDATES:
+            blacklist_loops([name])
     # Process-signalling facts for this string (issue 125 follow-up). Grep
     # patterns are held with their pipeline number and only promoted to pid
     # sources after the loop, so a `ps` segment counts wherever in its pipeline
@@ -3289,11 +3329,13 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
                 # A name set as a scalar literal is no longer a loop variable.
                 for nm in assigned:
                     loopmap.pop(nm, None)
+                blacklist_loops(assigned)
                 if 'IFS' in assigned:
                     # See clobbers_ifs: a changed IFS re-splits every later
                     # expansion, so stop propagating for the rest of the string.
                     varmap.clear()
                     loopmap.clear()
+                    blacklist_loops(list(stable_loops))
                     propagate = False
                 continue                          # assignment-only group
             forbind = for_loop_binding(kw_g, loopmap)
@@ -3302,16 +3344,21 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
                 varmap.pop(name, None)            # a loop var isn't a scalar
                 if values is None:
                     loopmap.pop(name, None)       # unresolvable list -> poison
+                    blacklist_loops([name])
                 else:
                     loopmap[name] = values
+                    record_loop(name, values)
                 continue                          # for-header: nothing to check
             if clobbers_ifs(sub_g):
                 varmap.clear()
                 loopmap.clear()
+                blacklist_loops(list(stable_loops))
                 propagate = False
             else:
                 poison_vars(sub_g, varmap)
+                had = set(loopmap)
                 poison_vars(sub_g, loopmap)       # same rules invalidate loops
+                blacklist_loops(had - set(loopmap))
         g = strip_env_prefix(kw_g)
         if not g: continue                        # keyword/env-only or redirect-only group
         # Signalling and pid-source classification runs before every `continue`
@@ -3553,7 +3600,8 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
         for body in subs:
             sub_off, _, sub_kf = _analyze_command(body, ctx, base_cwd,
                                                   subst_depth + 1, in_subst=True,
-                                                  seed_vars=stable_vars)
+                                                  seed_vars=stable_vars,
+                                                  seed_loops=stable_loops)
             outside.extend(sub_off)
             signal = signal or sub_kf.signal
             launder = launder or sub_kf.launder

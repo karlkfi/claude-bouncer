@@ -1504,10 +1504,28 @@ class HookEndToEndTests(unittest.TestCase):
         # whether this file is legitimately outside the root.
         self._decision("cat /q84-fake-outside/x", "ask")
 
-    def test_unresolvable_mixed_with_outside_still_asks(self):
-        # `$f` alone would deny, but the command also names a genuinely outside
-        # path, and that question is still owed a human.
-        self._decision("cat $f /q84-fake-outside/x", "ask")
+    def test_unresolvable_mixed_with_outside_denies(self):
+        # A command carrying BOTH an unreadable token and a genuinely outside
+        # path denies on the unreadable one. The boundary question the outside
+        # path raises is still owed a human — it arrives one step later, as an
+        # `ask` on a command whose every token is literal, which is the only
+        # version a person at the prompt can actually judge.
+        #
+        # This asked while the unparsed deny keyed on `cats <= UNPARSED_CATS`,
+        # which also made the rule non-monotonic: `cat $f` denied while
+        # `cat $f <outside>` asked, so adding an offender softened the verdict.
+        out = self._decision("cat $f /q84-fake-outside/x", "deny")
+        reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("$f", reason)
+        # The outside path is still named, so the rewrite and the boundary
+        # question both reach the agent in one pass.
+        self.assertIn("/q84-fake-outside/x", reason)
+
+    def test_offender_sets_are_monotonic(self):
+        # Adding an offender must never soften the verdict.
+        self._decision("cat $f", "deny")
+        self._decision("cat $f /q84-fake-outside/x", "deny")
+        self._decision("cat /q84-fake-outside/x", "ask")
 
     # --- outside-workspace ask ----------------------------------------------
 
@@ -2345,19 +2363,20 @@ class HookEndToEndTests(unittest.TestCase):
 
     def test_ln_dollar_target_stages_link_as_outside(self):
         # `$HOME` target can't be resolved at hook time; secure-by-default
-        # treats it as outside, so link gets staged.
+        # treats it as outside, so link gets staged. The verdict is `deny`
+        # because that same unreadable token is remediable — which is what
+        # `cat $HOME/…` has always done, so the two spellings now agree.
         self._decision(
-            "ln -s $HOME/secret link && cat link", "ask",
+            "ln -s $HOME/secret link && cat link", "deny",
         )
 
-    def test_ln_dollar_link_not_staged_but_cat_still_blocks(self):
+    def test_ln_dollar_link_not_staged_but_cat_still_denies(self):
         # `link` with `$` is unresolvable — staging can't pin it down. The
-        # later `cat $X` still blocks via the existing $/~ rule. The verdict
-        # is `ask` rather than `deny` because Q80 adds the outside target as a
-        # second offender, and the deny is reserved for a command whose
-        # offenders are *all* tokens the hook merely failed to parse.
+        # later `cat $X` still blocks via the existing $/~ rule, and the
+        # unreadable token is what sets the verdict even though Q80 added the
+        # outside target beside it.
         self._decision(
-            "ln -s /q8-fake-target $LINK && cat $LINK", "ask",
+            "ln -s /q8-fake-target $LINK && cat $LINK", "deny",
         )
 
     def test_ln_only_command_asks_on_outside_target(self):
@@ -2811,6 +2830,48 @@ class HookEndToEndTests(unittest.TestCase):
 
     def test_oneline_for_do_loopvar_workspace_allow(self):
         self._decision("for f in in.txt; do cat $f; done", "allow")
+
+    # --- a loop binding reaches into a command substitution ------------------
+
+    def test_loopvar_inside_substitution_is_resolved(self):
+        # The binding is carried into the substitution recursion, so an
+        # in-workspace loop no longer blocks. Before this it denied, on advice
+        # ("write the literal path") that cannot be followed: the path is
+        # already as literal as a loop variable gets. The verdict is `defer`
+        # rather than `allow` because a substitution's `guarded` is discarded
+        # by design (Q33) — the point is that nothing is flagged.
+        self._defer('for f in in.txt sub.txt; do echo "$(wc -l < "$f")"; done')
+        self._defer('for f in in.txt sub.txt; do echo "($(wc -l < $f))"; done')
+        # The control: identical command with no substitution, which resolved
+        # the binding before this change and still does.
+        self._decision('for f in in.txt sub.txt; do wc -l < "$f"; done', "allow")
+
+    def test_loopvar_inside_substitution_still_finds_outside(self):
+        # Carrying the binding must not stop an outside candidate being found.
+        self._decision(
+            'for f in in.txt /q1-fake-outside; do echo "$(cat "$f")"; done',
+            "ask")
+
+    def test_loopvar_union_covers_every_binding_in_the_string(self):
+        # Two loops bind the same name. The substitution scan runs once for the
+        # whole string and has no position to snapshot at, so it answers for
+        # the UNION of both value sets — a superset of either, which can find
+        # more paths and never fewer. Over-strict here, in the secure
+        # direction: the substitution sits in the first loop only.
+        self._decision(
+            'for f in in.txt; do echo "$(cat $f)"; done; '
+            'for f in /q1-fake-outside; do :; done', "ask")
+
+    def test_loopvar_poisoned_name_is_not_carried(self):
+        # A name reassigned as a scalar, re-bound by `read`, or bound to a list
+        # the hook can't read is blacklisted rather than carried: once no
+        # binding describes it, leaving the token unexpanded is what blocks it.
+        self._decision('for f in in.txt; do read f; echo "$(cat $f)"; done',
+                       "deny")
+        self._decision('for f in in.txt; do f=/q1-fake-outside; '
+                       'echo "$(cat $f)"; done', "deny")
+        self._decision('for f in $UNRESOLVABLE; do echo "$(cat $f)"; done',
+                       "deny")
 
     # --- heredoc / here-string (Q4) -----------------------------------------
 
@@ -4030,7 +4091,11 @@ class QuotedSubstBodyEndToEndTests(unittest.TestCase):
                       out["hookSpecificOutput"]["permissionDecisionReason"])
 
     def test_quoted_grep_outside_read_names_inner_path(self):
-        out = self._decision('cat "$(grep foo /etc/q33-fake-target)"', "ask")
+        # Denies rather than asks: the outer `"$(…)"` is a token the hook can't
+        # read, and a command carrying one is remediated before its boundary
+        # question reaches a person. The inner path is still named in the
+        # reason, which is what the assertion below pins.
+        out = self._decision('cat "$(grep foo /etc/q33-fake-target)"', "deny")
         self.assertIn("/etc/q33-fake-target",
                       out["hookSpecificOutput"]["permissionDecisionReason"])
 
@@ -4428,10 +4493,12 @@ class Issue83HeredocEndToEndTests(unittest.TestCase):
         self._decision(
             "cat > doc.md <<'EOF'\nrun `cat /etc/q35-fake`\nEOF", "allow")
 
-    def test_substitution_on_quoted_heredoc_command_line_still_ask(self):
+    def test_substitution_on_quoted_heredoc_command_line_still_blocks(self):
         # Only the BODY is literal; the command line around it still expands.
+        # The redirect target is a substitution the hook can't read, so this
+        # denies with the rewrite rather than asking.
         self._decision(
-            "cat > \"$(cat /etc/q35-fake)\" <<'EOF'\nplain\nEOF", "ask")
+            "cat > \"$(cat /etc/q35-fake)\" <<'EOF'\nplain\nEOF", "deny")
 
     def test_substitution_after_quoted_heredoc_still_ask(self):
         self._decision(
