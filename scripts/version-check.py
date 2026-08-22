@@ -13,6 +13,10 @@ wrong, which nothing else in the repo would notice.
 Prints one line per plugin and exits 1 on any disagreement.
 
   python3 scripts/version-check.py
+
+`read_sources()` and `versions()` are the importable half, so a writer of these
+three files reads them back through the same definition the gate uses. Where a
+version lives, and how a README row is parsed, is defined here only.
 """
 import json
 import os
@@ -68,25 +72,49 @@ def readme_versions():
                 for m in ROW_RE.finditer(text))
 
 
-def main():
-    names = plugin_names()
-    sources = (
-        ('plugin.json', plugin_versions(names)),
+def read_sources():
+    """The three version tables, each keyed by plugin name, in report order."""
+    return (
+        ('plugin.json', plugin_versions(plugin_names())),
         ('marketplace.json', marketplace_versions()),
         ('README.md', readme_versions()),
     )
 
+
+def versions(name, sources=None):
+    """One plugin's three version strings, keyed by source, MISSING if absent.
+
+    Pass `sources` from a single `read_sources()` to read the files once
+    across several plugins.
+    """
+    if sources is None:
+        sources = read_sources()
+    out = {}
+    for label, table in sources:
+        out[label] = table.get(name, MISSING)
+    return out
+
+
+def agree(found):
+    """True when all three are present and identical."""
+    seen = set(found.values())
+    return len(seen) == 1 and MISSING not in seen
+
+
+def main():
+    names = plugin_names()
+    sources = read_sources()
+
     width = max([len(n) for n in names] + [0])
     bad = []
     for name in names:
-        found = [(label, table.get(name, MISSING)) for label, table in sources]
-        versions = set(v for _, v in found)
-        if len(versions) == 1 and MISSING not in versions:
-            print('ok   %-*s  %s' % (width, name, found[0][1]))
+        found = versions(name, sources)
+        if agree(found):
+            print('ok   %-*s  %s' % (width, name, found['plugin.json']))
             continue
         bad.append(name)
-        print('DIFF %-*s  %s' % (width, name,
-                                 '  '.join('%s=%s' % f for f in found)))
+        print('DIFF %-*s  %s' % (width, name, '  '.join(
+            '%s=%s' % (label, found[label]) for label, _ in sources)))
 
     if bad:
         sys.stderr.write(

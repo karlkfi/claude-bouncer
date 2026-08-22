@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from importlib import util
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(ROOT, 'scripts', 'version-check.py')
@@ -133,6 +134,37 @@ class RealTreeTests(unittest.TestCase):
         r = subprocess.run([sys.executable, SCRIPT], cwd=ROOT,
                            capture_output=True, text=True)
         self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+
+
+class ImportableSurfaceTests(unittest.TestCase):
+    """`read_sources` and `versions` are consumed by scripts/release.py, so a
+    change to their shape has to fail here rather than in the release path."""
+
+    @classmethod
+    def setUpClass(cls):
+        spec = util.spec_from_file_location('version_check', SCRIPT)
+        cls.mod = util.module_from_spec(spec)
+        spec.loader.exec_module(cls.mod)
+
+    def test_read_sources_names_the_three_places_in_report_order(self):
+        labels = [label for label, _ in self.mod.read_sources()]
+        self.assertEqual(['plugin.json', 'marketplace.json', 'README.md'], labels)
+
+    def test_versions_returns_one_value_per_place(self):
+        found = self.mod.versions('workspace-guard')
+        self.assertEqual({'plugin.json', 'marketplace.json', 'README.md'},
+                         set(found))
+        self.assertTrue(self.mod.agree(found), found)
+
+    def test_an_unknown_plugin_is_missing_everywhere(self):
+        found = self.mod.versions('no-such-guard')
+        self.assertEqual([self.mod.MISSING] * 3, list(found.values()))
+        self.assertFalse(self.mod.agree(found))
+
+    def test_sources_can_be_read_once_and_reused(self):
+        sources = self.mod.read_sources()
+        self.assertEqual(self.mod.versions('prod-guard'),
+                         self.mod.versions('prod-guard', sources))
 
 
 if __name__ == '__main__':
