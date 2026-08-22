@@ -4,6 +4,8 @@
 
 [![release](https://img.shields.io/github/v/release/karlkfi/claude-exit-status-guard)](https://github.com/karlkfi/claude-exit-status-guard/releases) [![tests](https://img.shields.io/github/actions/workflow/status/karlkfi/claude-bouncer/tests.yml?branch=main&label=tests)](https://github.com/karlkfi/claude-bouncer/actions/workflows/tests.yml) [![License: MIT](https://img.shields.io/github/license/karlkfi/claude-bouncer.svg)](LICENSE) [![Claude Code plugin](https://img.shields.io/badge/Claude_Code-plugin-7e57c2)](#install)
 
+![exit-status-guard: shell commands whose exit status is the answer](docs/img/social-preview.png)
+
 > The gate failed. The agent reported green. Both were telling the truth.
 
 ```

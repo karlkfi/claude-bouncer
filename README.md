@@ -4,6 +4,8 @@
 
 [![tests](https://img.shields.io/github/actions/workflow/status/karlkfi/claude-bouncer/tests.yml?branch=main&label=tests)](https://github.com/karlkfi/claude-bouncer/actions/workflows/tests.yml) [![License: MIT](https://img.shields.io/github/license/karlkfi/claude-bouncer.svg)](LICENSE) [![Claude Code marketplace](https://img.shields.io/badge/Claude_Code-marketplace-7e57c2)](#install)
 
+![claude-bouncer: five PreToolUse guards for Claude Code, one marketplace](docs/img/social-preview.png)
+
 > A bouncer doesn't care what a command is called. It cares what the command does.
 
 Claude Code's permission rules judge a shell command by its name, and a name is a
@@ -36,13 +38,13 @@ Then install whichever you want. They're independent and work in any combination
 
 ## The five guards
 
-| Plugin | Version | What it stops at the door |
-| --- | --- | --- |
-| [workspace-guard](plugins/workspace-guard) | 1.10.0 | `grep`/`sed`/`jq`/`cat` reading or writing outside the workspace, and blind process kills |
-| [branch-guard](plugins/branch-guard) | 1.9.0 | Commits and pushes to a protected branch, and destructive `git`/`gh` commands. Auto-approves the safe ones |
-| [prod-guard](plugins/prod-guard) | 2.5.1 | Mutating `kubectl`/`helm`/`terraform`/`gcloud`/`aws` aimed at production, or relying on ambient context that can change under it |
-| [exit-status-guard](plugins/exit-status-guard) | 2.0.0 | A gate whose failure reads as success: piped into a filter, backgrounded behind an `echo`, or sequenced before a state change with `;` |
-| [foreground-guard](plugins/foreground-guard) | 0.5.1 | Polling and watching on the main thread, and slow commands about to be killed by too short a timeout |
+| | Plugin | Version | What it stops at the door |
+| --- | --- | --- | --- |
+| <img src="plugins/workspace-guard/docs/img/favicon-48.png" width="24" height="24" alt=""> | [workspace-guard](plugins/workspace-guard) | 1.10.0 | `grep`/`sed`/`jq`/`cat` reading or writing outside the workspace, and blind process kills |
+| <img src="plugins/branch-guard/docs/img/favicon-48.png" width="24" height="24" alt=""> | [branch-guard](plugins/branch-guard) | 1.9.0 | Commits and pushes to a protected branch, and destructive `git`/`gh` commands. Auto-approves the safe ones |
+| <img src="plugins/prod-guard/docs/img/favicon-48.png" width="24" height="24" alt=""> | [prod-guard](plugins/prod-guard) | 2.5.1 | Mutating `kubectl`/`helm`/`terraform`/`gcloud`/`aws` aimed at production, or relying on ambient context that can change under it |
+| <img src="plugins/exit-status-guard/docs/img/favicon-48.png" width="24" height="24" alt=""> | [exit-status-guard](plugins/exit-status-guard) | 2.0.0 | A gate whose failure reads as success: piped into a filter, backgrounded behind an `echo`, or sequenced before a state change with `;` |
+| <img src="plugins/foreground-guard/docs/img/favicon-48.png" width="24" height="24" alt=""> | [foreground-guard](plugins/foreground-guard) | 0.5.1 | Polling and watching on the main thread, and slow commands about to be killed by too short a timeout |
 
 Each plugin's README covers its rules, its config file, its override, and its
 `/friction-report` command. Start there. This page is the map.
@@ -161,6 +163,8 @@ Edit `lib/bouncer_parse.py`. Never a vendored copy.
 .claude-plugin/marketplace.json   the five entries, sourced from ./plugins/<name>
 lib/bouncer_parse.py              the shared parser
 scripts/sync-lib.py               vendors it, and the CI drift gate
+scripts/render-images.py          rasterizes the brand images, here and per plugin
+docs/img/                         this repo's brand images and their SVG masters
 tests/                            parser tests, gate tests, release-note tests
 plugins/<name>/                   one plugin, self-contained
 ```
@@ -169,6 +173,7 @@ plugins/<name>/                   one plugin, self-contained
 
 ```
 make check    # what CI runs: drift gate, parser tests, all five suites
+make images   # rasterize the brand images from their SVG masters
 make help     # the rest of the targets
 ```
 

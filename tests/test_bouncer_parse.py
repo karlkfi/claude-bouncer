@@ -179,8 +179,11 @@ class ReadmeTests(unittest.TestCase):
             entries = {p['name']: p['version'] for p in json.load(f)['plugins']}
         with open(os.path.join(ROOT, 'README.md')) as f:
             readme = f.read()
+        # The leading cell is the plugin's icon, so the name cell is optionally
+        # preceded by one. assertEqual below is what keeps this honest: a regex
+        # that stops matching finds fewer than five rows and fails.
         rows = dict(re.findall(
-            r'^\| \[([a-z-]+)\]\(plugins/[a-z-]+\) \| ([0-9][^ |]*) \|',
+            r'^\|(?:[^|]*\|)? \[([a-z-]+)\]\(plugins/[a-z-]+\) \| ([0-9][^ |]*) \|',
             readme, re.M))
         self.assertEqual(entries, rows,
                          'README version table and marketplace.json disagree')
