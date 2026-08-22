@@ -70,11 +70,13 @@ The hook produces one of four outcomes:
 
 Guarded commands: `grep` (and `egrep`, `fgrep`), `rg`, `sed`, `awk` (and
 `gawk`, `mawk`), `jq`, `yq`, `cat`, `head`, `tail`, `sort`, `wc`, `diff`,
-`file`, `hexdump`, `uniq`, `xxd` (whose optional second positional is an
+`file`, `hexdump`, `cut`, `base64` (whose BSD `-o OUT` is treated as a write,
+like `sort -o`), `uniq`, `xxd` (whose optional second positional is an
 *output* file and is treated as a write), plus the cat-shape readers `less`,
 `more`, `tac`, `rev`, `nl`, `od`, `strings`, `cmp`, and
 `zcat`/`gzcat`/`bzcat`/`xzcat`.
-On the write side: `cp`, `mv`, `tee`, `rm`, `dd`, and `mktemp` (whose default
+On the write side: `cp`, `mv`, `tee`, `rm`, `unlink`, `ln` (both its source and
+the link it creates), `dd`, and `mktemp` (whose default
 location is host temp — see below). These are the file-reading and file-writing
 commands Claude reaches for most often; tools like `ls`, `find`, and `xargs`
 aren't covered yet (see the [shared backlog](https://github.com/karlkfi/claude-bouncer/blob/main/docs/queue/README.md)). A **redirect**
@@ -121,10 +123,14 @@ old one. A different project's scratch still asks entirely.
 | `sed 's/a/b/g' notes.md`             | allow    |
 | `wc -l data.txt`                     | allow    |
 | `sort -o sorted.txt data.txt`        | allow    |
+| `cut -d / -f1 data.txt` (`/` is the delimiter) | allow |
+| `base64 -w 0 data.bin`               | allow    |
 | `diff a.txt b.txt`                   | allow    |
 | `cp a.txt b.txt`                     | allow    |
 | `mv a.txt b.txt`                     | allow    |
 | `rm -rf ./build`                     | allow    |
+| `unlink ./build/stale.o`             | allow    |
+| `ln -s ./src/a.txt ./link`           | allow    |
 | `dd if=./in of=./out bs=1M`          | allow    |
 | `echo foo \| tee log.txt`            | allow    |
 | `cat data.txt > /dev/null`           | allow    |
@@ -149,9 +155,14 @@ old one. A different project's scratch still asks entirely.
 | `jq '.x' /etc/hosts`                 | **ask**  |
 | `yq -o json /etc/hosts`              | **ask**  |
 | `wc --files0-from=/etc/list`         | **ask**  |
+| `cut -f1 /etc/passwd`                | **ask**  |
+| `base64 /etc/hosts` · `base64 -i /etc/hosts` (BSD) | **ask** |
 | `diff --from-file=/etc/hosts in.txt` | **ask**  |
 | `mv .env ~/leaked`                   | **ask**  |
 | `tee /etc/hosts`                     | **ask**  |
+| `unlink ~/notes.md`                  | **ask**  |
+| `ln -s /etc/passwd link` (the `ln` itself) | **ask** |
+| `ln ./notes.md ~/outside/link`       | **ask**  |
 | `less /var/log/syslog`               | **ask**  |
 | `cat ../../etc/passwd`               | **ask**  |
 | `cat ~/.aws/credentials`             | **ask**  |
@@ -172,8 +183,11 @@ old one. A different project's scratch still asks entirely.
 | `sed -f /tmp/evil.sed notes.md`      | **deny** |
 | `grep foo data.txt > /tmp/out.txt`   | **deny** |
 | `sort -o /tmp/out.txt data.txt`      | **deny** |
+| `base64 -o /tmp/out.b64 data.bin` (BSD) | **deny** |
 | `cp ./secret.txt /tmp/exfil`         | **deny** |
 | `rm -rf /tmp/foo`                    | **deny** |
+| `unlink /tmp/foo`                    | **deny** |
+| `ln -s ./notes.md /tmp/link`         | **deny** |
 | `dd if=./in of=/tmp/out`             | **deny** |
 | `cd /tmp && cat in.txt > evil`       | **deny** |
 | `echo secret > /tmp/out` (unguarded redirect) | **deny** |
@@ -385,8 +399,9 @@ a worktree, and a path in an *unrelated* git repo is never treated as a sibling
 [Configuration](#configuration).
 
 **An operand that is itself a symlink is judged by the link, not its target**,
-for the commands that act on the name rather than the contents: `rm`'s operands
-and `mv`'s sources. `rm link` unlinks the link and cannot write what it points
+for the commands that act on the name rather than the contents: the operands of
+`rm` and `unlink`, and `mv`'s sources. `rm link` unlinks the link and cannot
+write what it points
 at, so `rm ~/.claude/skills/<name>`, where that name is a symlink into a repo
 you have a worktree of, is an ordinary outside-workspace `ask` rather than a
 sibling deny. Everything above the last component still resolves, so
@@ -880,16 +895,24 @@ through the same boundary rules and produce the same reasons. Symlink staging
    hook time — bare `cd`, `cd -`, `cd $HOME`, `popd`, any other substitution —
    later relative paths short-circuit to `deny`, naming the literal-target
    rewrite (the hook couldn't read the `cd`, and neither could you).
-7. **Stage** symlinks *and* hard links created by an earlier `ln OUTSIDE LINK`
-   in the chain (with or without `-s`). `LINK`'s resolved path is recorded so
-   a later `cat LINK` is flagged — bash hasn't materialised the link yet at
-   hook time, so a naive `realpath` would otherwise place `LINK` lexically
-   inside the workspace and let it through.
+7. **Check and stage** `ln`. Its own operands — every source, plus the link or
+   the `-t DIR` the links land in — are checked like any other file argument,
+   in write context, so an `ln` that names a path outside the root answers for
+   it whether or not anything later reads through the link. On top of that,
+   symlinks *and* hard links created by an earlier `ln OUTSIDE LINK` in the
+   chain (with or without `-s`) are **staged**: `LINK`'s resolved path is
+   recorded so a later `cat LINK` is flagged too — bash hasn't materialised the
+   link yet at hook time, so a naive `realpath` would otherwise place `LINK`
+   lexically inside the workspace and let it through. Staging covers the
+   `ln SRC LINK` and `ln SRC` forms, where the link's path is a token in the
+   command; under `-t DIR`, and in the multi-source form, the link lands at
+   `DIR/basename(SRC)` and there is no such token to record.
 8. **Resolve** every file argument against `$CLAUDE_PROJECT_DIR` with
    `realpath`, collapsing `../` and following symlinks. The exception is an
-   operand naming a directory *entry* rather than file contents — `rm`'s
-   operands and `mv`'s sources, which unlink or rename the name they are given
-   and never write through it. Those resolve every component but the last, so
+   operand naming a directory *entry* rather than file contents — the operands
+   of `rm` and `unlink`, and `mv`'s sources, which unlink or rename the name
+   they are given and never write through it. Those resolve every component but
+   the last, so
    the link rather than its target is what gets checked. Anything that resolves
    outside the root yields `ask`; otherwise `allow`. A token the hook cannot
    resolve at all yields `deny` with the rewrite instead. A leading `~` or `~/…` is
@@ -957,15 +980,19 @@ through the same boundary rules and produce the same reasons. Symlink staging
    flagged.
 10. **Allow reads of Claude-owned project data.** For read-only commands (`cat`,
    `head`, `tail`, `grep`, `rg`, `sed`, `awk`, `jq`, `yq`, `diff`, `sort`,
-   `wc`, `file`, `hexdump`, and their aliases), a path whose resolved
+   `wc`, `file`, `hexdump`, `cut`, `base64`, and their aliases), a path whose
+   resolved
    `realpath` is under `~/.claude/projects/` is allowed silently. That
    directory is written exclusively by the Claude Code harness (session
    metadata, sub-agent data, workflow journals) and reading it back is not
-   the boundary this hook guards. Write commands (`cp`, `mv`, `tee`, `rm`)
-   are **not** exempt — they must still pass the workspace check — and
-   neither is a read command invoked with a write-mode flag (`sed -i` /
+   the boundary this hook guards. Write commands (`cp`, `mv`, `tee`, `rm`,
+   `unlink`) are **not** exempt — they must still pass the workspace check,
+   and neither do `ln`'s operands, which are judged in write context for the
+   same reason `cp`'s sources are. Nor is a read command invoked with a
+   write-mode flag (`sed -i` /
    `--in-place`, gawk `-i` / `--include`, `yq -i` / `--inplace`, `sort -o`
-   / `--output`): any of these flips the whole invocation into write mode.
+   / `--output`, BSD `base64 -o`): any of these flips the whole invocation into
+   write mode.
    The second positional of `uniq IN OUT` / `xxd IN OUT` is an output file
    and is checked as a write (the `IN` operand keeps the exemption).
    The exemption also does not apply to redirect targets, since the hook
@@ -1270,9 +1297,12 @@ the gentler way to keep a human in the loop.
 
 A set of path prefixes are always allowed for **read-only** guarded commands
 (`cat`, `head`, `tail`, `grep`, `rg`, `sed`, `awk`, `jq`, `yq`, `diff`,
-`sort`, `wc`, `file`, `hexdump`, and their aliases). Write commands (`cp`,
-`mv`, `tee`, `rm`), redirect targets, read commands carrying a
-write-mode flag (`sed -i`, gawk `-i inplace`, `yq -i`, `sort -o`), and the
+`sort`, `wc`, `file`, `hexdump`, `cut`, `base64`, and their aliases). Write
+commands (`cp`,
+`mv`, `tee`, `rm`, `unlink`), every operand of `ln`, redirect targets, read
+commands carrying a
+write-mode flag (`sed -i`, gawk `-i inplace`, `yq -i`, `sort -o`, BSD
+`base64 -o`), and the
 positional output file of `uniq IN OUT` / `xxd IN OUT` are never exempt.
 
 The built-in defaults are `~/.claude/projects/` (Claude Code's own session and
@@ -1609,9 +1639,11 @@ final output.
   split.
 - The sibling-checkout `deny` classifies *write-context* file arguments — the
   same set the read-prefix exemption treats as writes: redirect targets, `dd`
-  operands, every operand of `cp`/`mv`/`tee`/`rm`, every operand of a read
+  operands, every operand of `cp`/`mv`/`tee`/`rm`/`unlink`/`ln`, every operand
+  of a read
   command carrying a write-mode flag (`sed -i`, gawk `-i inplace`, `yq -i`,
-  `sort -o`), and the positional output file of `uniq IN OUT` / `xxd IN OUT`.
+  `sort -o`, BSD `base64 -o`), and the positional output file of
+  `uniq IN OUT` / `xxd IN OUT`.
   So a `cp` **source** or a
   `dd if=` reading *from* a sibling checkout is denied too, not just the
   destination. That's stricter than a pure "destination only" reading, in the
