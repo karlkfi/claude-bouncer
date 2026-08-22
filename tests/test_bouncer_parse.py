@@ -169,3 +169,21 @@ class VendoringTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ReadmeTests(unittest.TestCase):
+    """The root README's table names a version per plugin, which goes stale
+    silently: nothing installs from it, so nobody finds out by being wrong."""
+
+    def test_version_table_matches_the_manifest(self):
+        import json
+        import re
+        with open(os.path.join(ROOT, '.claude-plugin', 'marketplace.json')) as f:
+            entries = {p['name']: p['version'] for p in json.load(f)['plugins']}
+        with open(os.path.join(ROOT, 'README.md')) as f:
+            readme = f.read()
+        rows = dict(re.findall(
+            r'^\| \[([a-z-]+)\]\(plugins/[a-z-]+\) \| ([0-9][^ |]*) \|',
+            readme, re.M))
+        self.assertEqual(entries, rows,
+                         'README version table and marketplace.json disagree')
