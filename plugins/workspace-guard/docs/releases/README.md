@@ -9,7 +9,8 @@ them here fixes that.
 
 ## The files are bodies, not documents
 
-A file is the body verbatim, minus trailing blank lines. In particular:
+A file is the body byte for byte, terminator included: a body published without a final
+newline is stored without one. In particular:
 
 - **No `# vX.Y.Z` heading.** The tag name is already the Release title; adding one renders it
   twice. This is why these files open mid-thought instead of with a title like every other doc
@@ -21,7 +22,7 @@ A file is the body verbatim, minus trailing blank lines. In particular:
 Publishing is therefore a copy, and re-publishing is idempotent:
 
 ```bash
-gh release edit v1.8.0 --notes-file docs/releases/v1.8.0.md
+gh release edit 'workspace-guard/v1.10.1' --notes-file plugins/workspace-guard/docs/releases/v1.10.1.md
 ```
 
 ## Fix a mistake in the file, not on the website
@@ -33,12 +34,17 @@ change, and re-publish from it after merge.
 To confirm a published body still matches its file:
 
 ```bash
-diff <(gh release view v1.8.0 --json body --jq .body) docs/releases/v1.8.0.md
+diff <(gh release view v1.8.0 --repo karlkfi/claude-workspace-guard --json body --template '{{.body}}') docs/releases/v1.8.0.md
 ```
 
-The bodies backfilled from the web form are byte-identical except that three of them — v1.1.0,
-v1.6.0, and v1.8.0 — end in a stray blank line the form left behind. Until those are re-published
-from their file, the check above reports that one line for them and nothing else.
+Every release described here was published from `karlkfi/claude-workspace-guard`, so the
+`--repo` flag is what makes the lookup resolve at all. It drops once a release is cut from
+this repo, where the tag is `workspace-guard/vX.Y.Z`.
+
+Do not reach for `--json body --jq .body` here. `--jq` appends a newline
+unconditionally, so it reports a body that ends without one as matching, and a body that ends
+with one as carrying a stray blank line. Both readings are wrong and they point in opposite
+directions. `--template '{{.body}}'`, which the script uses, returns the bytes.
 
 The full runbook — version bump, tag, publish — is in
 [`../development/release-process.md`](../development/release-process.md).
