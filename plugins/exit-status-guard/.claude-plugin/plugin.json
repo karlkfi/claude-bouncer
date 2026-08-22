@@ -1,0 +1,13 @@
+{
+  "name": "exit-status-guard",
+  "version": "2.0.0",
+  "description": "Deny shell commands whose exit status is the answer and gets lost.",
+  "author": {
+    "name": "Karl",
+    "url": "https://github.com/karlkfi"
+  },
+  "homepage": "https://github.com/karlkfi/claude-exit-status-guard",
+  "repository": "https://github.com/karlkfi/claude-exit-status-guard",
+  "license": "MIT",
+  "keywords": ["claude-code", "hooks", "guardrail", "bash", "zsh", "shell", "pipeline", "pipestatus", "exit-status", "ci", "gate", "false-green", "background", "verification", "command"]
+}

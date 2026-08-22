@@ -1,0 +1,71 @@
+{
+  "_comment": "Gate registry for claude-exit-status-guard. Patterns are regular expressions matched against the HEAD of a shell segment — its command word and arguments, after leading `VAR=val` assignments and `bash`/`sudo`/`time`-style wrappers are peeled — never against the whole command string. A pattern matched against the raw string also fires on every `git show`, `grep`, and commit message that merely names the command. Anchor every pattern with `^`; the test suite enforces it. POSIX bracket classes (`[[:space:]]`) are translated to their Python equivalents, so a pattern copied from an ERE registry works unchanged. Scope: `gates` are commands whose exit status IS the answer, so losing it turns a failure into a false green — to a pipe, which yields its last stage's status, or to a backgrounded call, which yields its last statement's. Deliberately NOT every command: a registry that denies every pipeline gets overridden reflexively and then means nothing. `exempt` wins over BOTH `gates` and `mutators`, and carries the informational targets whose output, not status, is the point. A capability probe (`--version`, `--help`, `-V`, `-h`) needs no entry, and neither does a read whose subcommand path names one (`git stash list`, `kubectl rollout history`): both shapes are recognized structurally for every gate, so do not add per-tool probe or read patterns — they fix one tool and leave the class. Where a subcommand has a read form and a write form that no verb tells apart (`git tag --sort` lists, `git tag -a` publishes), register the WRITE forms and leave the rest unregistered: git grows listing flags every release and grows tag-creation flags never, so enumerating the reads is the side that goes stale. `mutators` are the state-changing commands the third rule looks for AFTER a gate sequenced with `;`, where the status is read correctly and then ignored. A project extends these lists with its own `.claude/exit-status-guard.json`; set `\"replace\": true` there to take full control instead. Every verdict is a `deny`, so the reason reaches the model rather than the user; the break-glass is a `EXIT_STATUS_GUARD_OVERRIDE=<reason>` prefix on the command, and a rule that needs one routinely is a defect to fix here rather than to override.",
+
+  "gates": [
+    "^make(\\s|$)",
+    "^(just|task|mage)(\\s|$)",
+    "^pre-commit(\\s|$)",
+
+    "^(npm|pnpm|yarn|bun)\\s+(run\\s+)?(test|lint|build|typecheck|check|ci|audit)(\\s|$)",
+    "^(npm|pnpm|yarn|bun)\\s+(ci|install)(\\s|$)",
+    "^npx\\s+(tsc|eslint|prettier|vitest|jest|stylelint)(\\s|$)",
+    "^(tsc|eslint|prettier|vitest|jest|stylelint|biome)(\\s|$)",
+
+    "^(pytest|tox|nox)(\\s|$)",
+    "^python[0-9.]*\\s+-m\\s+(pytest|unittest|mypy|ruff|black|flake8|tox|build|pip)(\\s|$)",
+    "^(ruff|mypy|black|flake8|pylint|isort)(\\s|$)",
+    "^(pip|pip3|uv|poetry)\\s+(install|sync|lock)(\\s|$)",
+
+    "^go\\s+(build|test|vet|generate|install)(\\s|$)",
+    "^golangci-lint(\\s|$)",
+    "^cargo\\s+(build|test|check|clippy|fmt|bench)(\\s|$)",
+    "^(gradle|gradlew|\\./gradlew)(\\s|$)",
+    "^(mvn|mvnw|\\./mvnw)(\\s|$)",
+    "^dotnet\\s+(build|test|restore|publish)(\\s|$)",
+    "^swift\\s+(build|test)(\\s|$)",
+    "^(ctest|ninja|meson\\s+test)(\\s|$)",
+    "^cmake\\s+--build(\\s|$)",
+    "^bazel\\s+(build|test|run)(\\s|$)",
+    "^(rake|rspec)(\\s|$)",
+    "^bundle\\s+(install|exec)(\\s|$)",
+
+    "^(shellcheck|shfmt|hadolint|yamllint|actionlint)(\\s|$)",
+    "^(terraform|tofu)\\s+(validate|plan|fmt|init)(\\s|$)",
+    "^helm\\s+(lint|template)(\\s|$)",
+    "^(docker|podman)\\s+(build|push)(\\s|$)",
+    "^docker\\s+compose\\s+(build|up|run)(\\s|$)",
+    "^kubectl\\s+(apply|create|delete|patch|replace|rollout|wait)(\\s|$)",
+
+    "^\\.?/?(scripts|tools|bin|hack|ci)/[A-Za-z0-9_./-]+\\.(sh|bash|py|rb|js|ts|pl)(\\s|$)",
+
+    "^git\\s+(pull|push|rebase|merge|cherry-pick|apply|am|commit|revert|add|stash|clone|fetch|checkout|switch|worktree|reset)(\\s|$)",
+    "^git\\s+tag\\s+(-\\S+\\s+)*(-[A-Za-z]*[adefmsuF]|--(annotate|sign|no-sign|local-user|message|file|force|delete|edit|cleanup))(\\s|=|$)",
+    "^git\\s+tag\\s+[^-\\s]",
+    "^gh\\s+(pr\\s+(create|merge|edit|close|ready|review|checkout)|release\\s+(create|edit|delete|upload)|repo\\s+(create|delete|fork|clone)|workflow\\s+run|run\\s+rerun|api)(\\s|$)"
+  ],
+
+  "exempt": [
+    "^make(\\s+-C\\s+\\S+)?\\s+(help|list|-n|--dry-run|--just-print)(\\s|$)",
+    "^make\\s+-n(\\s|$)",
+    "^(npm|pnpm|yarn|bun)\\s+run\\s*$",
+    "^(just|task)\\s+(-l|--list|--summary)(\\s|$)",
+    "^(terraform|tofu)\\s+\\S+\\s+-help(\\s|$)",
+    "^kubectl\\s+\\S+\\s+--dry-run(\\s|=)"
+  ],
+
+  "mutators": [
+    "^git\\s+(push|commit|merge|rebase|cherry-pick|revert|am|apply|reset)(\\s|$)",
+    "^git\\s+tag\\s+(-\\S+\\s+)*(-[A-Za-z]*[adefmsuF]|--(annotate|sign|no-sign|local-user|message|file|force|delete|edit|cleanup))(\\s|=|$)",
+    "^git\\s+tag\\s+[^-\\s]",
+    "^gh\\s+(pr\\s+(create|merge|ready|close)|release\\s+(create|upload|edit|delete)|repo\\s+(create|delete)|workflow\\s+run)(\\s|$)",
+    "^(npm|pnpm|yarn)\\s+publish(\\s|$)",
+    "^cargo\\s+publish(\\s|$)",
+    "^(twine|poetry)\\s+publish(\\s|$)",
+    "^(docker|podman)\\s+push(\\s|$)",
+    "^kubectl\\s+(apply|create|delete|patch|replace)(\\s|$)",
+    "^kubectl\\s+rollout\\s+(restart|undo|pause|resume)(\\s|$)",
+    "^helm\\s+(install|upgrade|uninstall|rollback)(\\s|$)",
+    "^(terraform|tofu)\\s+(apply|destroy)(\\s|$)",
+    "^make\\s+(deploy|release|publish|push|upload)(\\s|$)"
+  ]
+}
