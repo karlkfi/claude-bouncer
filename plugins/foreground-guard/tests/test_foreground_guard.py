@@ -840,23 +840,24 @@ class PermissionModeTests(unittest.TestCase):
             self.assertEqual(d, "deny", "expected deny in %s mode" % mode)
 
     def test_supervised_ask_survives_an_attended_mode(self):
-        for mode in (None, "default", "acceptEdits", "plan"):
+        # `auto` belongs here rather than below: the prompt reaches somebody,
+        # so a repo's explicit `ask` is honoured instead of converted.
+        for mode in (None, "default", "acceptEdits", "plan", "auto"):
             d, _ = run_hook("gh run watch 123", config=POLL_ASK_CFG,
                             permission_mode=mode)
             self.assertEqual(d, "ask", "expected ask in %s mode" % mode)
 
     def test_supervised_ask_becomes_a_deny_where_nobody_answers(self):
-        # The prompt reaches no one: `auto` interrupts a run the user chose
-        # not to babysit, `dontAsk` replaces the reason with a generic deny,
-        # and `bypassPermissions` stalls. Deny keeps the reason.
-        for mode in ("auto", "dontAsk", "bypassPermissions"):
+        # The prompt reaches no one: `dontAsk` replaces the reason with a
+        # generic deny, and `bypassPermissions` stalls. Deny keeps the reason.
+        for mode in ("dontAsk", "bypassPermissions"):
             d, _ = run_hook("gh run watch 123", config=POLL_ASK_CFG,
                             permission_mode=mode)
             self.assertEqual(d, "deny", "expected deny in %s mode" % mode)
 
     def test_supervised_slow_ask_becomes_a_deny_unattended(self):
         d, _ = run_hook("make test-race", config=SLOW_ASK_CFG,
-                        permission_mode="auto")
+                        permission_mode="dontAsk")
         self.assertEqual(d, "deny")
 
     def test_backgrounded_poll_deny_does_not_advise_backgrounding(self):

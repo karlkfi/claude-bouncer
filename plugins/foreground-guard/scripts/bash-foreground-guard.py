@@ -52,7 +52,7 @@ produces exactly the killed run the class exists to prevent.
 `"action": "ask"` on either class de-escalates it back to a prompt. That is
 the supervised posture — for someone who wants to watch the guard work —
 and it is opt-in, because it is the setting that spends a person's
-attention. In an unattended permission mode (`auto`, `dontAsk`,
+attention. In an unattended permission mode (`dontAsk` or
 `bypassPermissions`) a de-escalated `ask` is emitted as `deny` again: the
 reason reaches the agent rather than parking on a prompt nobody answers.
 
@@ -430,7 +430,15 @@ ISSUES_URL = 'https://github.com/karlkfi/claude-bouncer/issues'
 # Permission modes in which nobody is expected to be watching the prompt
 # stream, so a config-de-escalated `ask` buys friction and no answer. Only
 # reachable via `"action": "ask"` — the defaults deny in every mode.
-UNATTENDED_MODES = frozenset({'auto', 'dontAsk', 'bypassPermissions'})
+#
+# `auto` is deliberately absent. The name reads as unattended and the mode
+# isn't: an `ask` there reaches Claude Code's standard prompt and somebody
+# answers it, so converting it removed the human rather than protecting them.
+# A repo that set `"action": "ask"` asked to be prompted, and that is the more
+# specific signal. branch-guard dropped `auto` from its own set in v1.7.0 for
+# the same reason, and workspace-guard treats `bypassPermissions` alone as
+# human-free.
+UNATTENDED_MODES = frozenset({'dontAsk', 'bypassPermissions'})
 
 
 def deny_tail():
@@ -812,11 +820,10 @@ def main():
     mode = data.get('permission_mode') or ''
     decision = 'deny' if severity == DENY else 'ask'
     # Only a config-de-escalated `ask` reaches here, and an unattended mode is
-    # where it cannot be answered: in `auto` the prompt interrupts a run the
-    # user chose not to babysit, in `dontAsk` Claude Code turns it into its own
-    # generic deny and the reason is lost, and in `bypassPermissions` it stalls
-    # on a prompt with no one there. Deny instead: equally blocking, and the
-    # reason is fed back so the agent self-corrects.
+    # where it cannot be answered: in `dontAsk` Claude Code turns it into its
+    # own generic deny and the reason is lost, and in `bypassPermissions` it
+    # stalls on a prompt with no one there. Deny instead: equally blocking, and
+    # the reason is fed back so the agent self-corrects.
     if decision == 'ask' and mode in UNATTENDED_MODES:
         decision = 'deny'
     if decision == 'deny':
