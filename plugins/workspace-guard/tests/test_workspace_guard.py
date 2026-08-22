@@ -7958,7 +7958,7 @@ class CIWiringTests(unittest.TestCase):
     def test_windows_job_runs_the_suite_through_the_skip_ceiling(self):
         self.assertTrue((REPO / "scripts" / "run-tests.py").is_file(),
                         "missing scripts/run-tests.py")
-        workflow = (REPO / ".github" / "workflows" / "tests.yml").read_text()
+        workflow = (REPO.parent.parent / ".github" / "workflows" / "tests.yml").read_text()
         self.assertRegex(
             workflow, r"run-tests\.py --max-skips \d+",
             "the Windows job must run the suite through --max-skips",
@@ -7971,7 +7971,7 @@ class CIWiringTests(unittest.TestCase):
         # the commands it reads were written for Git Bash. Dropping the Git Bash
         # job leaves every environment-reading helper verified in one of the two
         # Windows environments it has to be right in.
-        workflow = (REPO / ".github" / "workflows" / "tests.yml").read_text()
+        workflow = (REPO.parent.parent / ".github" / "workflows" / "tests.yml").read_text()
         self.assertRegex(
             workflow, r"run-tests\.py --max-skips \d+\n\s+shell: bash",
             "a Windows job must run the suite under Git Bash (shell: bash)",

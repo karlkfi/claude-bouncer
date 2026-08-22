@@ -1,0 +1,286 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Each plugin keeps the jobs it had as its own repo, scoped with
+# working-directory. They are deliberately not collapsed into one matrix: the
+# per-plugin jobs differ in Python floor, in OS coverage, and in the
+# mutation-control jobs that prove a suite can still go red, and a matrix that
+# averaged those would weaken every one of them to the weakest.
+
+jobs:
+  # ------------------------------------------------------------ shared parser
+  # Runs first and on the widest Python range: every guard imports this, so its
+  # floor is the lowest floor any plugin supports (3.9, exit-status-guard's).
+  shared-parser:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      # Before the tests: a plugin suite passing against a stale vendored copy
+      # is the exact failure this gate exists to catch.
+      - run: python3 scripts/sync-lib.py --check
+      - run: python3 -m unittest discover tests
+
+  # --------------------------------------------------------- workspace-guard
+  workspace-guard:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python3 scripts/run-tests.py
+        working-directory: plugins/workspace-guard
+
+  # Q70 sharded the matrix above, which runs each test in a worker holding only
+  # a slice of the suite. That hides an order dependence between two tests as
+  # surely as a serial run hides a race between them, so one job keeps running
+  # the suite the plain way.
+  workspace-guard-serial:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python3 -m unittest discover tests
+        working-directory: plugins/workspace-guard
+
+  # The default shell is pwsh, which is the right model for THIS job: Claude
+  # Code launches the hook through run-python-hook.cmd, so the hook process
+  # inherits a cmd.exe environment with no $HOME. A few tests skip on Windows
+  # and a plain run reports OK either way, so the count is capped.
+  workspace-guard-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python scripts/run-tests.py --max-skips 5
+        working-directory: plugins/workspace-guard
+
+  # The same suite under Git Bash, what Claude Code's Bash tool runs on native
+  # Windows. MSYS rewrites path-shaped variables on the way into a native
+  # binary, so every environment-reading helper has two distinct Windows
+  # environments to be correct in and pwsh only covers one.
+  workspace-guard-windows-gitbash:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python scripts/run-tests.py --max-skips 3
+        shell: bash
+        working-directory: plugins/workspace-guard
+
+  # ------------------------------------------------------------ branch-guard
+  branch-guard:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      # git and jq are preinstalled on ubuntu-latest; the harness uses both.
+      - run: bash test/run.sh
+        working-directory: plugins/branch-guard
+
+  # Windows resolves paths through ntpath, where a leading slash is
+  # drive-relative -- so a POSIX-shaped path lands on the hook process's drive
+  # and the repo lookup misses, silently downgrading a protected-branch `ask`
+  # to no decision at all. Nothing in the Linux matrix can catch that.
+  branch-guard-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: bash test/run.sh
+        shell: bash
+        working-directory: plugins/branch-guard
+
+  # -------------------------------------------------------------- prod-guard
+  prod-guard:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python3 -m unittest discover tests
+        working-directory: plugins/prod-guard
+
+  # -------------------------------------------------------- foreground-guard
+  foreground-guard:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python3 -m unittest discover tests
+        working-directory: plugins/foreground-guard
+
+  # ------------------------------------------------------- exit-status-guard
+  exit-status-guard:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ['3.9', '3.13']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m unittest discover -s tests -v
+        working-directory: plugins/exit-status-guard
+
+  # The suite runs the guard with sys.executable, so the launcher hooks.json
+  # actually invokes is never executed by it. A launcher that stops working
+  # does not fail loudly -- Claude Code lets the tool call proceed -- so the
+  # guard would just quietly stop enforcing.
+  exit-status-guard-launcher:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python tests/launcher_check.py
+        working-directory: plugins/exit-status-guard
+
+  # The suite asserts both directions, so a harness that silently stopped
+  # loading the guard would still report OK. This breaks one rule and requires
+  # the suite to go red -- if it stays green, the tests are not testing it.
+  exit-status-guard-mutation-control:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: plugins/exit-status-guard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Disable the pipe rule
+        run: |
+          python - <<'PY'
+          import pathlib
+          p = pathlib.Path('scripts/bash-exit-status-guard.py')
+          s = p.read_text()
+          old = "        if next_op(seg.post_ops) not in PIPE_OPS:\n            continue"
+          new = "        if True:\n            continue"
+          assert old in s, "mutation target not found -- update this job"
+          p.write_text(s.replace(old, new, 1))
+          PY
+      - name: The suite must fail
+        run: |
+          python -m unittest discover -s tests > mutant.log 2>&1 && rc=0 || rc=$?
+          echo "suite exit: $rc"
+          tail -5 mutant.log
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::the suite passed with the pipe rule disabled" >&2
+            exit 1
+          fi
+
+  # A launcher that never runs the guard produces exactly the empty stdout a
+  # clean command produces, so the launcher job is only worth anything if it
+  # can go red.
+  exit-status-guard-launcher-mutation-control:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: plugins/exit-status-guard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Break the interpreter probe
+        run: |
+          python - <<'PY'
+          import pathlib
+          p = pathlib.Path('scripts/run-python-hook.cmd')
+          s = p.read_text()
+          old = 'for interp in python3 python; do'
+          new = 'for interp in python-does-not-exist; do'
+          assert old in s, "mutation target not found -- update this job"
+          p.write_text(s.replace(old, new, 1))
+          PY
+      - name: The launcher check must fail
+        run: |
+          python tests/launcher_check.py > mutant.log 2>&1 && rc=0 || rc=$?
+          echo "check exit: $rc"
+          cat mutant.log
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::the launcher check passed with no working interpreter" >&2
+            exit 1
+          fi
+
+  # The 1.0.0 bug: the launcher shipped mode 644, the shell refused it, and the
+  # hook exited 126 with nothing on stdout -- which Claude Code reads as no
+  # objection. Both checks that cover it have to go red when it comes back.
+  exit-status-guard-packaging-mutation-control:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: plugins/exit-status-guard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Ship the launcher non-executable
+        run: |
+          chmod -x scripts/run-python-hook.cmd
+          git update-index --chmod=-x scripts/run-python-hook.cmd
+      - name: The suite and the launcher check must fail
+        run: |
+          python -m unittest discover -s tests > suite.log 2>&1 && suite=0 || suite=$?
+          python tests/launcher_check.py > launcher.log 2>&1 && launcher=0 || launcher=$?
+          echo "suite exit: $suite, launcher exit: $launcher"
+          tail -5 suite.log
+          cat launcher.log
+          if [ "$suite" -eq 0 ]; then
+            echo "::error::the suite passed with the launcher shipped non-executable" >&2
+            exit 1
+          fi
+          if [ "$launcher" -eq 0 ]; then
+            echo "::error::the launcher check passed with the launcher non-executable" >&2
+            exit 1
+          fi

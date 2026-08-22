@@ -36,7 +36,7 @@ import unittest
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 TESTS = REPO / "tests"
-CEILING_FILE = ".github/workflows/tests.yml"
+CEILING_FILE = ".github/workflows/tests.yml"  # at the monorepo root
 
 # Discovery hands back the import failure as a synthetic test whose name can't
 # be loaded again by a worker.

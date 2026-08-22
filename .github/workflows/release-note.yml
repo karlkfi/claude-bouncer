@@ -1,5 +1,7 @@
 name: release-note
 
+# Repo-wide: one PR body convention for all five plugins.
+
 # `edited` matters as much as `opened`: answering the block is a body edit,
 # and without it a corrected pull request stays red until an unrelated push.
 on:
