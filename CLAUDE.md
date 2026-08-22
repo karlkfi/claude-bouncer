@@ -56,7 +56,7 @@ which makes it easy to miss locally.
 
 One plugin at a time. Each guard keeps its own version line, the tag names it
 (`workspace-guard/v1.10.1`, never a bare `vX.Y.Z`), and the version string
-lives in three places that nothing gates: the plugin's `plugin.json`, its entry
+lives in three places, gated by `make version-check`: the plugin's `plugin.json`, its entry
 in the root `marketplace.json`, and the version column of the root `README.md`.
 A `lib/` change reaches five guards and releases none of them.
 

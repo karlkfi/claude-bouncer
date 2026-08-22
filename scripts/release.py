@@ -73,25 +73,44 @@ def read_file(path):
         return f.read()
 
 
+_VERSION_CHECK = None
+
+
+def version_check():
+    """`scripts/version-check.py`'s readers, loaded the way `harvest` loads
+    `release-note.py`'s extractor.
+
+    Where a version lives, and how a README row is parsed, is defined once in
+    the gate `make check` runs. A second copy here is how the writer and the
+    gate drift into disagreeing -- the failure this repo already paid for with
+    five copies of one lexer. The patterns below stay because the WRITE side
+    needs them; only the reading comes from there.
+
+    The module is cached, the values are not: every call re-reads the files, so
+    the post-bump check in `cmd_bump` still sees the tree as written.
+    """
+    global _VERSION_CHECK
+    if _VERSION_CHECK is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            'version_check', os.path.join(ROOT, 'scripts', 'version-check.py'))
+        _VERSION_CHECK = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_VERSION_CHECK)
+    return _VERSION_CHECK
+
+
 def locations(name):
-    """The three files, each as (label, path, current value or None)."""
-    pj = read_file(plugin_json(name))
-    pj_m = re.search(r'"version"\s*:\s*"([^"]+)"', pj)
-    mk = read_file(MARKETPLACE)
-    mk_m = marketplace_pattern(name).search(mk)
-    rd = read_file(README)
-    rd_m = readme_pattern(name).search(rd)
-    return [
-        ('plugin.json', plugin_json(name), pj_m.group(1) if pj_m else None),
-        ('marketplace.json', MARKETPLACE, mk_m.group(2) if mk_m else None),
-        ('README.md', README, rd_m.group(2) if rd_m else None),
-    ]
+    """The three places, each as (label, current value or None)."""
+    vc = version_check()
+    return [(label, None if value == vc.MISSING else value)
+            for label, value in vc.versions(name).items()]
 
 
 def current_version(name):
     """The agreed version, or None when the three disagree or one is missing."""
-    found = set(v for _, _, v in locations(name))
-    return found.pop() if len(found) == 1 and None not in found else None
+    vc = version_check()
+    found = vc.versions(name)
+    return set(found.values()).pop() if vc.agree(found) else None
 
 
 def write_version(name, new):
@@ -220,7 +239,7 @@ def cmd_status(args):
         report.append({
             'plugin': name,
             'version': current_version(name),
-            'locations': [(label, value) for label, _, value in locations(name)],
+            'locations': locations(name),
             'previous_tag': tag,
             'since': since,
             'first_release_here': tag is None,

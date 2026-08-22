@@ -104,6 +104,10 @@ class TreeTests(unittest.TestCase):
         shutil.copy(SCRIPT, os.path.join(self.tmp, 'scripts', 'release.py'))
         shutil.copy(os.path.join(ROOT, 'scripts', 'release-note.py'),
                     os.path.join(self.tmp, 'scripts', 'release-note.py'))
+        # release.py reads the three version locations through this one; the
+        # fixture is hermetic and will not reach the real tree's copy.
+        shutil.copy(os.path.join(ROOT, 'scripts', 'version-check.py'),
+                    os.path.join(self.tmp, 'scripts', 'version-check.py'))
         self.write('.claude-plugin/marketplace.json', json.dumps(MARKETPLACE, indent=2))
         self.write('README.md', README)
         for entry in MARKETPLACE['plugins']:
@@ -171,16 +175,32 @@ class TreeTests(unittest.TestCase):
         self.assertEqual(1, r.returncode, r.stdout)
         self.assertNotIn('created', r.stdout)
 
-    def test_status_reports_every_plugin(self):
+    def commit_all(self, subject):
         subprocess.run(['git', '-C', self.tmp, 'add', '-A'], check=True)
         subprocess.run(['git', '-C', self.tmp, '-c', 'user.email=t@t', '-c', 'user.name=t',
-                        'commit', '-qm', 'feat(alpha-guard): a thing'], check=True)
+                        'commit', '-qm', subject], check=True)
+
+    def test_status_reports_every_plugin(self):
+        self.commit_all('feat(alpha-guard): a thing')
         r = self.run_release('status', '--json')
         self.assertEqual(0, r.returncode, r.stdout + r.stderr)
         report = json.loads(r.stdout)
         self.assertEqual(['alpha-guard', 'beta-guard'], [i['plugin'] for i in report])
         self.assertEqual('1.2.3', report[0]['version'])
         self.assertTrue(report[0]['first_release_here'])
+
+    def test_status_names_all_three_locations(self):
+        """`locations` is what the DISAGREE line and the report show, and since
+        `version` is no longer derived from it, nothing else notices it quietly
+        dropping a source."""
+        self.commit_all('feat(alpha-guard): a thing')
+        r = self.run_release('status', '--json')
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        report = json.loads(r.stdout)
+        self.assertEqual([['plugin.json', '1.2.3'],
+                          ['marketplace.json', '1.2.3'],
+                          ['README.md', '1.2.3']],
+                         report[0]['locations'])
 
 
 if __name__ == '__main__':
