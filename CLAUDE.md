@@ -2,8 +2,10 @@
 
 Five Claude Code guard plugins in one marketplace. Each plugin under
 `plugins/<name>/` is self-contained and has its own `CLAUDE.md` covering its
-rules, its backlog, and its release process. Read that one for plugin work.
-This file covers what is true of the repo as a whole.
+rules and its backlog. Read that one for plugin work. This file covers what is
+true of the repo as a whole. Releasing is one of those things: it moves the
+root manifest and the root README, so the runbook is
+`docs/development/release-process.md` and there is no per-plugin one.
 
 ## Never edit a vendored parser copy
 
@@ -49,6 +51,17 @@ five guards, so say which ones you re-ran.
 Python 3.9 is the floor. exit-status-guard supports it and CI runs the shared
 parser against it, so 3.10+ syntax in `lib/` breaks that job and nothing else,
 which makes it easy to miss locally.
+
+## Releases
+
+One plugin at a time. Each guard keeps its own version line, the tag names it
+(`workspace-guard/v1.10.1`, never a bare `vX.Y.Z`), and the version string
+lives in three places that nothing gates: the plugin's `plugin.json`, its entry
+in the root `marketplace.json`, and the version column of the root `README.md`.
+A `lib/` change reaches five guards and releases none of them.
+
+The steps, the version levels, and the notes harvest are in
+`docs/development/release-process.md`.
 
 ## Links to the retired repositories
 
