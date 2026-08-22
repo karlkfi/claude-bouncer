@@ -6,8 +6,30 @@
     "name": "Karl",
     "url": "https://github.com/karlkfi"
   },
-  "homepage": "https://github.com/karlkfi/claude-workspace-guard",
-  "repository": "https://github.com/karlkfi/claude-workspace-guard",
+  "homepage": "https://github.com/karlkfi/claude-bouncer/tree/main/plugins/workspace-guard",
+  "repository": "https://github.com/karlkfi/claude-bouncer",
   "license": "MIT",
-  "keywords": ["claude-code", "hooks", "sandbox", "security", "guardrail", "permissions", "workspace", "worktree", "bash", "powershell", "windows", "read", "tools", "tmp", "scratch", "skill", "command", "mktemp", "redirect", "pkill", "process"]
+  "keywords": [
+    "claude-code",
+    "hooks",
+    "sandbox",
+    "security",
+    "guardrail",
+    "permissions",
+    "workspace",
+    "worktree",
+    "bash",
+    "powershell",
+    "windows",
+    "read",
+    "tools",
+    "tmp",
+    "scratch",
+    "skill",
+    "command",
+    "mktemp",
+    "redirect",
+    "pkill",
+    "process"
+  ]
 }

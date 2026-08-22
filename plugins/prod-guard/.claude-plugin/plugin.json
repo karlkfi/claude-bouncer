@@ -6,8 +6,31 @@
     "name": "Karl",
     "url": "https://github.com/karlkfi"
   },
-  "homepage": "https://github.com/karlkfi/claude-prod-guard",
-  "repository": "https://github.com/karlkfi/claude-prod-guard",
+  "homepage": "https://github.com/karlkfi/claude-bouncer/tree/main/plugins/prod-guard",
+  "repository": "https://github.com/karlkfi/claude-bouncer",
   "license": "MIT",
-  "keywords": ["claude-code", "hooks", "security", "guardrail", "production", "kubernetes", "kubectl", "helm", "terraform", "gcloud", "aws", "azure", "docker", "ssh", "pulumi", "ansible", "devops", "sre", "command", "friction", "override", "session"]
+  "keywords": [
+    "claude-code",
+    "hooks",
+    "security",
+    "guardrail",
+    "production",
+    "kubernetes",
+    "kubectl",
+    "helm",
+    "terraform",
+    "gcloud",
+    "aws",
+    "azure",
+    "docker",
+    "ssh",
+    "pulumi",
+    "ansible",
+    "devops",
+    "sre",
+    "command",
+    "friction",
+    "override",
+    "session"
+  ]
 }

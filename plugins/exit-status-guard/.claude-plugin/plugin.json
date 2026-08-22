@@ -6,8 +6,24 @@
     "name": "Karl",
     "url": "https://github.com/karlkfi"
   },
-  "homepage": "https://github.com/karlkfi/claude-exit-status-guard",
-  "repository": "https://github.com/karlkfi/claude-exit-status-guard",
+  "homepage": "https://github.com/karlkfi/claude-bouncer/tree/main/plugins/exit-status-guard",
+  "repository": "https://github.com/karlkfi/claude-bouncer",
   "license": "MIT",
-  "keywords": ["claude-code", "hooks", "guardrail", "bash", "zsh", "shell", "pipeline", "pipestatus", "exit-status", "ci", "gate", "false-green", "background", "verification", "command"]
+  "keywords": [
+    "claude-code",
+    "hooks",
+    "guardrail",
+    "bash",
+    "zsh",
+    "shell",
+    "pipeline",
+    "pipestatus",
+    "exit-status",
+    "ci",
+    "gate",
+    "false-green",
+    "background",
+    "verification",
+    "command"
+  ]
 }

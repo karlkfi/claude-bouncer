@@ -6,8 +6,21 @@
     "name": "Karl Isenberg",
     "url": "https://github.com/karlkfi"
   },
-  "homepage": "https://github.com/karlkfi/claude-branch-guard",
-  "repository": "https://github.com/karlkfi/claude-branch-guard",
+  "homepage": "https://github.com/karlkfi/claude-bouncer/tree/main/plugins/branch-guard",
+  "repository": "https://github.com/karlkfi/claude-bouncer",
   "license": "MIT",
-  "keywords": ["claude-code", "hooks", "guardrail", "permissions", "safety", "git", "gh", "worktree", "push", "break-glass", "rebase", "merge-queue"]
+  "keywords": [
+    "claude-code",
+    "hooks",
+    "guardrail",
+    "permissions",
+    "safety",
+    "git",
+    "gh",
+    "worktree",
+    "push",
+    "break-glass",
+    "rebase",
+    "merge-queue"
+  ]
 }
