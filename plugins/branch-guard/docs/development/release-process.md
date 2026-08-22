@@ -1,19 +1,22 @@
 # Agent reference: Cutting a release
 
-A release is three artifacts that must agree: the **version string** (in two files), an **annotated git tag**, and a **GitHub Release**. This doc is the checklist for producing all three consistently. Releases are the one place where a commit lands on `main` without a PR — that exception is deliberate and scoped to the version bump only (see §The direct-to-main exception).
+A release is three artifacts that must agree: the **version string** (in three places), an **annotated git tag**, and a **GitHub Release**. This doc is the checklist for producing all three consistently. Releases are the one place where a commit lands on `main` without a PR — that exception is deliberate and scoped to the version bump only (see §The direct-to-main exception).
 
-## The version string lives in exactly two files
+## The version string lives in three places
 
-Both must be bumped together and kept identical:
+All three must be bumped together and kept identical:
 
-- `.claude-plugin/plugin.json` → `"version"`
-- `.claude-plugin/marketplace.json` → `plugins[0].version`
+- `plugins/branch-guard/.claude-plugin/plugin.json` → `"version"`
+- `.claude-plugin/marketplace.json` at the repository root → the entry whose `"name"` is this plugin
+- `README.md` at the repository root → the version column of the "The guards" table
 
-Nothing else in the repo encodes the version (no README badge, no `__version__`). If you add a third location, add it here too. To confirm before bumping:
+The marketplace entry is the one `claude plugin update` compares, so a bump that misses it ships nothing while the README announces a new version. To read all three, from the repository root:
 
 ```
-grep -rn '"version"' .claude-plugin/
+python3 scripts/version-check.py
 ```
+
+It exits nonzero on any disagreement, and `make check` runs it.
 
 ## Steps
 
@@ -37,7 +40,7 @@ grep -rn '"version"' .claude-plugin/
 
    A notes PR cannot list itself in its own **Everything since v<PREV>** section, so it is the one omission that section always has; account for it in the sentence saying what the list leaves out. See §Release notes for the body format.
 
-4. **Bump both version files** to the new `X.Y.Z`. Patch (`Z`) for fixes, docs, and packaging; minor (`Y`) for new guarded commands or hook surface; major (`X`) for a default-behavior change. Most releases are patch.
+4. **Bump all three version strings** to the new `X.Y.Z`. Patch (`Z`) for fixes, docs, and packaging; minor (`Y`) for new guarded commands or hook surface; major (`X`) for a default-behavior change. Most releases are patch.
 
 5. **Commit the bump alone** — no other changes in this commit:
 

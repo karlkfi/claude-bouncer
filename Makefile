@@ -2,17 +2,18 @@
 PYTHON ?= python3
 PLUGINS := workspace-guard branch-guard prod-guard exit-status-guard foreground-guard
 
-.PHONY: check sync sync-check lib-test plugin-tests validate help
+.PHONY: check sync sync-check version-check lib-test plugin-tests validate help
 
 help:
-	@echo "make check        run everything CI runs"
-	@echo "make sync         copy lib/bouncer_parse.py into each plugin"
-	@echo "make sync-check   fail if a vendored copy has drifted"
-	@echo "make lib-test     test the shared parser"
-	@echo "make plugin-tests test every plugin"
-	@echo "make validate     validate the marketplace manifest"
+	@echo "make check         run everything CI runs"
+	@echo "make sync          copy lib/bouncer_parse.py into each plugin"
+	@echo "make sync-check    fail if a vendored copy has drifted"
+	@echo "make version-check fail if a plugin's three version strings disagree"
+	@echo "make lib-test      test the shared parser"
+	@echo "make plugin-tests  test every plugin"
+	@echo "make validate      validate the marketplace manifest"
 
-check: sync-check lib-test plugin-tests
+check: sync-check version-check lib-test plugin-tests
 
 sync:
 	$(PYTHON) scripts/sync-lib.py
@@ -22,6 +23,11 @@ sync:
 # failure mode the gate exists to catch.
 sync-check:
 	$(PYTHON) scripts/sync-lib.py --check
+
+# The marketplace entry is what `claude plugin update` compares, so a bump
+# that misses it ships nothing while the README announces the new version.
+version-check:
+	$(PYTHON) scripts/version-check.py
 
 lib-test:
 	$(PYTHON) -m unittest discover tests

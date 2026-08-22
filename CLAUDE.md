@@ -40,11 +40,17 @@ unaffected.
 ## Checks
 
 ```
-make check    # drift gate, parser tests, all five plugin suites
+make check    # drift gate, version gate, parser tests, all five plugin suites
 ```
 
 Run it before proposing a change is done. A change under `lib/` reaches all
 five guards, so say which ones you re-ran.
+
+A plugin's version string lives in three places — its `plugin.json`, its entry
+in the root `marketplace.json`, and its row in the README's guards table — and
+`make version-check` fails when they disagree. The marketplace entry is what
+`claude plugin update` compares, so a bump that misses it ships nothing while
+the README announces a new version.
 
 Python 3.9 is the floor. exit-status-guard supports it and CI runs the shared
 parser against it, so 3.10+ syntax in `lib/` breaks that job and nothing else,

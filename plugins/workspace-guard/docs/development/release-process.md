@@ -1,19 +1,22 @@
 # Agent reference: Cutting a release
 
-A release is four artifacts that must agree: the **version string** (in two files), a **notes file** under [`docs/releases/`](../releases/), an **annotated git tag**, and a **GitHub Release**. This doc is the checklist for producing all four consistently. Releases are the one place where a commit lands on `main` without a PR — that exception is deliberate and scoped to the version bump only (see §The direct-to-main exception).
+A release is four artifacts that must agree: the **version string** (in three places), a **notes file** under [`docs/releases/`](../releases/), an **annotated git tag**, and a **GitHub Release**. This doc is the checklist for producing all four consistently. Releases are the one place where a commit lands on `main` without a PR — that exception is deliberate and scoped to the version bump only (see §The direct-to-main exception).
 
-## The version string lives in exactly two files
+## The version string lives in three places
 
-Both must be bumped together and kept identical:
+All three must be bumped together and kept identical:
 
-- `.claude-plugin/plugin.json` → `"version"`
-- `.claude-plugin/marketplace.json` → `plugins[0].version`
+- `plugins/workspace-guard/.claude-plugin/plugin.json` → `"version"`
+- `.claude-plugin/marketplace.json` at the repository root → the entry whose `"name"` is this plugin
+- `README.md` at the repository root → the version column of the "The guards" table
 
-Nothing else in the repo encodes the version (no README badge, no `__version__`). If you add a third location, add it here too. To confirm before bumping:
+The marketplace entry is the one `claude plugin update` compares, so a bump that misses it ships nothing while the README announces a new version. To read all three, from the repository root:
 
 ```
-grep -rn '"version"' .claude-plugin/
+python3 scripts/version-check.py
 ```
+
+It exits nonzero on any disagreement, and `make check` runs it.
 
 ## Pre-flight: the session must be able to push
 
@@ -39,7 +42,7 @@ Run the release interactively, or plan to hand steps 7–9 to a terminal. Everyt
 
 4. **Write the notes to `docs/releases/vX.Y.Z.md` and land them through a pull request (PR).** See §Release notes for drafting the body and [`docs/releases/README.md`](../releases/README.md) for what belongs in the file. Landing them before the bump is what puts a tag's own notes inside the tagged commit, and it is the only step that gets the prose reviewed.
 
-5. **Bump both version files** to `X.Y.Z`.
+5. **Bump all three version strings** to `X.Y.Z`.
 
 6. **Commit the bump alone** — no other changes in this commit:
 
