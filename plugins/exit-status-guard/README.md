@@ -2,7 +2,7 @@
 
 **Guard rails for Claude Code shell commands whose exit status is the answer.**
 
-[![release](https://img.shields.io/github/v/release/karlkfi/claude-exit-status-guard)](https://github.com/karlkfi/claude-exit-status-guard/releases) [![tests](https://img.shields.io/github/actions/workflow/status/karlkfi/claude-exit-status-guard/tests.yml?branch=main&label=tests)](https://github.com/karlkfi/claude-exit-status-guard/actions/workflows/tests.yml) [![License: MIT](https://img.shields.io/github/license/karlkfi/claude-exit-status-guard.svg)](LICENSE) [![Claude Code plugin](https://img.shields.io/badge/Claude_Code-plugin-7e57c2)](#install)
+[![release](https://img.shields.io/github/v/release/karlkfi/claude-exit-status-guard)](https://github.com/karlkfi/claude-exit-status-guard/releases) [![tests](https://img.shields.io/github/actions/workflow/status/karlkfi/claude-bouncer/tests.yml?branch=main&label=tests)](https://github.com/karlkfi/claude-bouncer/actions/workflows/tests.yml) [![License: MIT](https://img.shields.io/github/license/karlkfi/claude-bouncer.svg)](LICENSE) [![Claude Code plugin](https://img.shields.io/badge/Claude_Code-plugin-7e57c2)](#install)
 
 > The gate failed. The agent reported green. Both were telling the truth.
 
