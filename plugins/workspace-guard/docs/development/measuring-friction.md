@@ -133,12 +133,12 @@ no recorded decisions at all: those are real answers of zero.
   an attachment with empty stdout, but silent runs aren't recorded at all, so in
   practice it stays at zero.
 - **By category** — `outside` / `expand` / `untracked` / `hosttemp` /
-  `sibling` / `kill`, the buckets `build_reason()` emits in
+  `sibling` / `crosssession` / `kill`, the buckets `build_reason()` emits in
   `scripts/bash-workspace-guard.py`, plus `other` for any prompt whose reason
-  matches none of them. The last three are denies in the default configuration,
-  so they appear only once the denies above are counted; `sibling` and `kill`
-  carry their targets inline rather than as a token list, so they add no rows to
-  the path ranking. Under `--plugin all` `other` is where the companion guards'
+  matches none of them. The last four are denies in the default configuration,
+  so they appear only once the denies above are counted; `sibling`,
+  `crosssession` and `kill` carry their targets inline rather than as a token
+  list, so they add no rows to the path ranking. Under `--plugin all` `other` is where the companion guards'
   prompts land, so the table still sums to the friction count in the header (a
   reason can match more than one bucket, so the sum can exceed it).
 - **Top offending paths** — only `outside`/`expand`/`untracked` reasons carry

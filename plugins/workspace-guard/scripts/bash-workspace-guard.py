@@ -2501,6 +2501,44 @@ def build_kill_hint(kills, override=None):
     return lead + body + tail
 
 
+def build_crosssession_hint(crosses, scratch, override=None):
+    """One-line guidance for writes into a sibling session's scratch dir.
+
+    `crosses` is a list of `(token, detail)` where `detail` carries the
+    `corrected` path — this session's own scratchpad, or None when
+    :func:`session_scratchpad` couldn't find one. Without it there is nothing
+    concrete to steer at, so the repo-local `scratch` dir is named instead;
+    pointing an agent at a scratchpad that isn't there just trades a deny for a
+    "no such file or directory". When `override` is set the write is downgraded
+    to a prompt rather than blocked, so the wording adjusts. (Q97)
+    """
+    seen, parts, corrected = set(), [], None
+    for tok, d in crosses:
+        corrected = corrected or d.get('corrected')
+        if tok in seen:
+            continue
+        seen.add(tok)
+        parts.append("`%s`" % tok)
+    body = ", ".join(parts) + "."
+    if override:
+        lead = ("Cross-session scratch write(s) — prompting because "
+                "WORKSPACE_GUARD_OVERRIDE is set (%s): " % override)
+        return lead + body
+    lead = ("Cross-session scratch write(s) blocked: that scratch dir belongs "
+            "to a different session of this project, and a resume or a "
+            "compaction gives this session a new one — so a path carried over "
+            "from earlier in the conversation now names somebody else's: ")
+    if corrected:
+        fix = "Fix: write to `%s`, this session's own scratchpad." % corrected
+    else:
+        fix = ("Fix: use the repo-local scratch dir `./%s/` — this session's "
+               "own scratchpad isn't there to steer at."
+               % (scratch.rstrip('/') or 'tmp'))
+    return (lead + body + " " + fix
+            + " For a deliberate cross-session write set "
+            "WORKSPACE_GUARD_OVERRIDE=<reason> to downgrade this to a prompt.")
+
+
 def offender_display(tok, rp):
     """Display form of an offending file token for the decision reason.
 
@@ -2524,6 +2562,9 @@ def build_reason(offenders, scratch_hint='', override=None):
       * 'sibling'   — a WRITE into a sibling checkout of the same repo (primary
                       checkout or another worktree). `detail` carries the
                       checkout root, branch, and corrected in-session path.
+      * 'crosssession' — a WRITE into a sibling session's scratch dir under the
+                      same project slug. `detail` carries this session's own
+                      scratchpad to steer at, or None when it can't be found.
       * 'kill'      — a `pkill`/`killall`, or a PowerShell `Stop-Process`, with
                       nothing naming a path in this workspace. `detail` carries
                       the command, the pattern, the workspace root to anchor to,
@@ -2541,7 +2582,7 @@ def build_reason(offenders, scratch_hint='', override=None):
     de-duplicated.
     """
     buckets = {'hosttemp': [], 'outside': [], 'expand': [], 'untracked': []}
-    siblings, kills = [], []
+    siblings, kills, crosses = [], [], []
     for item in offenders:
         tok, cat = item[0], item[1]
         detail = item[2] if len(item) > 2 else None
@@ -2549,6 +2590,8 @@ def build_reason(offenders, scratch_hint='', override=None):
             siblings.append((tok, detail or {}))
         elif cat == 'kill':
             kills.append((tok, detail or {}))
+        elif cat == 'crosssession':
+            crosses.append((tok, detail or {}))
         else:
             buckets[cat].append(tok)
 
@@ -2557,6 +2600,9 @@ def build_reason(offenders, scratch_hint='', override=None):
         hints.append(build_sibling_hint(siblings, override))
     if kills:
         hints.append(build_kill_hint(kills, override))
+    if crosses:
+        hints.append(build_crosssession_hint(crosses, scratch_dir_name(),
+                                             override))
     if buckets['hosttemp']:
         hints.append(
             "Host-wide temp path(s): "
@@ -2657,7 +2703,8 @@ def classify_outside(rp, ctx, is_read):
     """Classify a RESOLVED realpath ``rp`` against the workspace boundary.
 
     Returns ``(category, detail)`` — category one of 'sibling' (carrying a detail
-    dict of ``{root, branch, corrected}``), 'hosttemp', or 'outside' — or ``None``
+    dict of ``{root, branch, corrected}``), 'crosssession' (carrying
+    ``{corrected}``), 'hosttemp', or 'outside' — or ``None``
     when the path is in-workspace or covered by an exemption. This is the shared
     core: ``handle_bash`` (after its ln-staging / expand tracking),
     ``handle_edit``, and ``handle_read_tool`` all route resolved paths through
@@ -2679,6 +2726,18 @@ def classify_outside(rp, ctx, is_read):
     if is_read and ctx.session_proj_dir \
             and path_at_or_under(rp, ctx.session_proj_dir):
         return None
+    # The write half of that exemption, which stays excluded: a session writing
+    # into a SIBLING session's scratch. Usually a path the agent carried across
+    # a resume or a compaction — each mints a new session id and a new scratch
+    # dir under the same project slug, while the remembered path still names the
+    # old one — and indistinguishable here from a deliberate cross-session
+    # write, so it blocks either way. It gets a category of its own only so the
+    # reason can hand back this session's own scratchpad. (Q97)
+    if not is_read and ctx.session_proj_dir \
+            and path_at_or_under(rp, ctx.session_proj_dir):
+        return ('crosssession', {
+            'corrected': session_scratchpad(ctx.session_id,
+                                            ctx.session_proj_dir)})
     # Write into a sibling checkout of the same repo -> wrong-branch deny.
     if not is_read:
         sib = sibling_checkout_for(rp, ctx.session_wt)
@@ -2689,7 +2748,8 @@ def classify_outside(rp, ctx, is_read):
             return ('sibling', {'root': root, 'branch': branch,
                                 'corrected': corrected})
     # Host-wide temp (/tmp, /var/tmp, $TMPDIR) -> steered deny — unless under the
-    # Claude-managed temp root (keeps cross-session ask) or explicitly allowed.
+    # Claude-managed temp root (a read there, or another project's slug, keeps
+    # the cross-session ask) or explicitly allowed.
     if is_host_temp(rp, ctx.tmp_roots) \
             and not path_at_or_under(rp, ctx.session_tmp_root):
         if matches_allowlist(rp, ctx.tmp_allow, ctx.cwd):
@@ -2728,8 +2788,9 @@ def decide(offenders, ctx, bypass):
 
     Shared final step for every handler. ``deny`` when running under
     ``bypassPermissions`` (no human to answer an ask), when a host-temp path is
-    hit and the configured action is ``deny``, when a sibling-checkout write or
-    an unanchored process kill is hit without an override, or when every
+    hit and the configured action is ``deny``, when a sibling-checkout write, a
+    cross-session scratch write, or an unanchored process kill is hit without an
+    override, or when every
     offender is one the hook merely failed to parse (``UNPARSED_CATS``);
     otherwise ``ask``.
     Both decisions block equally — this is a recoverability/steering choice, not
@@ -2737,7 +2798,7 @@ def decide(offenders, ctx, bypass):
     neither the prompt nor the refusal text names the plugin on its own."""
     cats = {cat for _, cat, _ in offenders}
     host_temp_hit = 'hosttemp' in cats
-    cross_hit = bool(cats & {'sibling', 'kill'})
+    cross_hit = bool(cats & {'sibling', 'kill', 'crosssession'})
     cross_deny = cross_hit and ctx.override is None
     # Every offender, not any: a command that also names a genuinely outside
     # path keeps the `ask` that path is owed.
@@ -3004,12 +3065,13 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
         symbolic or hard — in this chain), else None.
 
         `category` is one of 'sibling' (a WRITE into a sibling checkout of the
-        same repo), 'outside' (a resolved path outside the root), 'expand' (a
+        same repo), 'crosssession' (a WRITE into a sibling session's scratch
+        dir), 'outside' (a resolved path outside the root), 'expand' (a
         runtime-expanded `~`/`$` token), or 'untracked' (a relative path after a
         `cd` we couldn't follow). All block; the category steers both the
         advice and the verdict — the two the hook merely failed to parse deny
-        with a rewrite (UNPARSED_CATS), the rest ask — and 'sibling'
-        additionally carries a `detail` dict (else None).
+        with a rewrite (UNPARSED_CATS), the rest ask — and 'sibling' and
+        'crosssession' additionally carry a `detail` dict (else None).
 
         `is_read=True` enables the ALLOWED_READ_PREFIXES exemption for
         commands that only read files (see WRITE_COMMANDS). Redirect
@@ -3466,12 +3528,14 @@ def handle_bash(data):
         # are equally blocking — this is a recoverability/steering choice, not a
         # weakening of the boundary.
         #
-        # Two more deny drivers reach past this session's own checkout: a WRITE
-        # into a sibling checkout of the same repo (the 'sibling' category), and
-        # a `pkill`/`killall` whose pattern names no path in this workspace (the
-        # 'kill' category). Both deny by default — they self-heal in one agent
-        # round trip — unless WORKSPACE_GUARD_OVERRIDE is set, which downgrades
-        # them to `ask` for deliberate cross-workspace work.
+        # Three more deny drivers reach past this session's own checkout: a
+        # WRITE into a sibling checkout of the same repo (the 'sibling'
+        # category), a WRITE into a sibling session's Claude scratch (the
+        # 'crosssession' category), and a `pkill`/`killall` whose pattern names
+        # no path in this workspace (the 'kill' category). All three deny by
+        # default — they self-heal in one agent round trip — unless
+        # WORKSPACE_GUARD_OVERRIDE is set, which downgrades them to `ask` for
+        # deliberate cross-workspace work.
         bypass = data.get("permission_mode") == "bypassPermissions"
         decision, reason = decide(outside, ctx, bypass)
     else:
@@ -3483,8 +3547,8 @@ def handle_edit(data):
     """Guard the file-writing tools (Edit, Write, MultiEdit, NotebookEdit).
 
     These tools always WRITE, so the file arg is checked with is_read=False: it
-    gets the full outside/host-temp/sibling-checkout treatment, identical to a
-    bash write of the same path. An in-workspace target, an unresolvable
+    gets the full outside/host-temp/sibling-checkout/cross-session treatment,
+    identical to a bash write of the same path. An in-workspace target, an unresolvable
     ``~``/``$`` path, or a path covered by an exemption defers (emits nothing) so
     builtin permissions apply.
     """

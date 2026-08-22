@@ -84,7 +84,8 @@ and that differs by how the session is running:
 So in an interactive session an `ask` is a wall the agent cannot learn from,
 while a `deny` carrying a reason is a **gate**: it blocks, explains itself, and
 the agent either corrects course or takes the documented override. That is the
-reasoning already applied to the sibling-checkout write and the unanchored kill
+reasoning already applied to the sibling-checkout write, the cross-session
+scratch write, and the unanchored kill
 (see [`design.md`](design.md)), and it generalizes: prefer `deny` + override
 wherever the correct response is "change the command," and reserve `ask` for
 cases where "approve this one, unchanged" is genuinely the right answer.
