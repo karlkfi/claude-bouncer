@@ -64,11 +64,25 @@ Invoke the `session-backlog` skill for any change to the store.
 ## Checks
 
 ```
-make check    # drift, version, path filters, backlog lint, parser tests, doc links, all five suites
+make check    # drift, version, path filters, backlog lint, parser tests, all five suites
 ```
 
 Run it before proposing a change is done. A change under `lib/` reaches all
 five guards, so say which ones you re-ran.
+
+**The pull request body is gated separately, and `make check` cannot see it.**
+`.github/workflows/release-note.yml` fails a body with no answered
+`## Release note` block. No local target reaches a surface that is not in the
+tree, so a green `make check` and a red pull request are consistent here --
+and `gh pr create --body-file` bypasses the template that would have supplied
+the block, which is how an agent writes a body of any length. Check it before
+you open:
+
+```
+python3 scripts/release-note.py < body.md
+```
+
+It exits 1 on `!! NO SECTION` and `!! UNANSWERED`, and echoes the note on 0.
 
 CI does not run every job on every pull request. `.github/workflows/tests.yml`
 classifies the diff in a `changes` job and each plugin's jobs skip when nothing
