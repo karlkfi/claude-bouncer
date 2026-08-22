@@ -8,8 +8,12 @@ would drift.
 
 The load-bearing invariants, for sessions without the skill available:
 
-1. **Never hand-pick an ID.** Claim it, or you will collide with a session you
-   cannot see. IDs are stable and never reused or renumbered.
+1. **Take the next number above the highest the store has ever held** — and read
+   that from git, not from the directory, which understates it by every item
+   that has shipped. IDs are stable and never reused or renumbered. This is the
+   part of the process that does not survive two sessions filing at once, which
+   is what Q92 is for; until it lands, a second concurrent filer collides and
+   git reports it as an add/add conflict on one path rather than silently.
 2. **Never hand-type a `rank`.** `scripts/queue.py rank --head` / `--tail` /
    `--after` / `--before` computes one.
 3. **Isolate backlog edits in their own commit.** Under a per-item store this

@@ -66,6 +66,6 @@ rather than working from a copy of its rules. This repo's wiring, and the
 invariants that still hold when the skill is not available, are in
 [`../development/maintaining-backlog.md`](../development/maintaining-backlog.md).
 
-The short version: claim an ID, compute a rank with `scripts/queue.py rank`,
-write the file, and lint. Completing an item deletes its file — git is the
-archive.
+The short version: take the next unused ID, compute a rank with
+`scripts/queue.py rank`, write the file, and lint. Completing an item deletes
+its file — git is the archive.
