@@ -1,0 +1,13 @@
+{
+  "name": "workspace-guard",
+  "version": "1.10.0",
+  "description": "Workspace-boundary shell permissions for Claude Code.",
+  "author": {
+    "name": "Karl",
+    "url": "https://github.com/karlkfi"
+  },
+  "homepage": "https://github.com/karlkfi/claude-workspace-guard",
+  "repository": "https://github.com/karlkfi/claude-workspace-guard",
+  "license": "MIT",
+  "keywords": ["claude-code", "hooks", "sandbox", "security", "guardrail", "permissions", "workspace", "worktree", "bash", "powershell", "windows", "read", "tools", "tmp", "scratch", "skill", "command", "mktemp", "redirect", "pkill", "process"]
+}

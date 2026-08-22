@@ -1,0 +1,17 @@
+{
+  "name": "workspace-guard",
+  "owner": { "name": "karlkfi", "url": "https://github.com/karlkfi" },
+  "description": "Workspace-boundary guard rails for Claude Code shell commands.",
+  "plugins": [
+    {
+      "name": "workspace-guard",
+      "version": "1.10.0",
+      "description": "Prompt before grep/sed/jq/awk/cat/head/tail touch files outside the workspace; deny blind process kills.",
+      "author": { "name": "Karl" },
+      "source": {
+        "source": "github",
+        "repo": "karlkfi/claude-workspace-guard"
+      }
+    }
+  ]
+}

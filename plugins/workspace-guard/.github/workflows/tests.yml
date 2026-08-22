@@ -1,0 +1,75 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  unittest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python3 scripts/run-tests.py
+
+  # Q70 sharded the matrix above, which runs each test in a worker holding only
+  # a slice of the suite. That hides an order dependence between two tests as
+  # surely as a serial run hides a race between them, so one job keeps running
+  # the suite the plain way -- also the fallback to reach for when the runner
+  # itself is what's suspect.
+  unittest-serial:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python3 -m unittest discover tests
+
+  # An ordinary gate since Q39: the suite passes on Windows. A few tests skip
+  # there -- they run everywhere else, and a plain run reports OK either way,
+  # so the count is capped. Q43 made the home directory resolve without $HOME,
+  # which took this from 50 to 3; the 3 left are real platform splits. Raise it
+  # only with a reason.
+  #
+  # The default shell is pwsh, which is the right model for THIS job: Claude
+  # Code launches the hook through run-python-hook.cmd, so the hook process
+  # inherits a cmd.exe environment with no $HOME. The shell whose commands the
+  # hook parses is a different process -- see unittest-windows-gitbash.
+  #
+  # 3 -> 5 in Q44: MsysEnvironmentTests adds two cases that assert MSYS's
+  # variable conversion, which by construction can only run under MSYS. They
+  # run in the Git Bash job below, whose ceiling stays at 3 and is the tighter
+  # gate of the two.
+  unittest-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python scripts/run-tests.py --max-skips 5
+
+  # The same suite under Git Bash, which is what Claude Code's Bash tool runs on
+  # native Windows (Q44). Not redundant with the job above: the two differ in
+  # environment, and MSYS rewrites path-shaped variables on the way into a
+  # native binary -- `HOME=/c/Users/x` and `TMP=/tmp` in the shell arrive as
+  # `C:\Users\x` and the real temp dir in Python. Every helper that reads the
+  # environment (resolved_home, claude_tmp_root, host_temp_roots) therefore has
+  # two distinct Windows environments to be correct in, and pwsh only covers one.
+  unittest-windows-gitbash:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python scripts/run-tests.py --max-skips 3
+        shell: bash
