@@ -125,8 +125,8 @@ CLI, the IDE extensions, or **Claude Code for Claude Desktop**.
 **Claude Code (CLI or IDE extension)** — run the slash commands:
 
 ```
-/plugin marketplace add karlkfi/claude-foreground-guard
-/plugin install foreground-guard@foreground-guard
+/plugin marketplace add karlkfi/claude-bouncer
+/plugin install foreground-guard@claude-bouncer
 ```
 
 **Claude Code for Claude Desktop** — use the **Customize** tab:
@@ -147,7 +147,7 @@ After installing with either method:
   {
     "extraKnownMarketplaces": {
       "foreground-guard": {
-        "source": { "source": "git", "url": "https://github.com/karlkfi/claude-foreground-guard.git" },
+        "source": { "source": "git", "url": "https://github.com/karlkfi/claude-bouncer.git" },
         "autoUpdate": true
       }
     }
@@ -176,7 +176,7 @@ until you either enable auto-update or update it by hand.
 {
   "extraKnownMarketplaces": {
     "foreground-guard": {
-      "source": { "source": "git", "url": "https://github.com/karlkfi/claude-foreground-guard.git" },
+      "source": { "source": "git", "url": "https://github.com/karlkfi/claude-bouncer.git" },
       "autoUpdate": true
     }
   }
@@ -187,8 +187,8 @@ until you either enable auto-update or update it by hand.
 restart to apply:
 
 ```
-claude plugin marketplace update foreground-guard
-claude plugin update foreground-guard@foreground-guard
+claude plugin marketplace update claude-bouncer
+claude plugin update foreground-guard@claude-bouncer
 ```
 
 ## Covered forms
@@ -500,11 +500,11 @@ failure directions follow from the guard's job:
 
 ## Companion plugins
 
-- [workspace-guard](https://github.com/karlkfi/claude-workspace-guard) —
+- [workspace-guard](https://github.com/karlkfi/claude-bouncer) —
   keep Bash file operations inside the workspace.
-- [branch-guard](https://github.com/karlkfi/claude-branch-guard) — keep
+- [branch-guard](https://github.com/karlkfi/claude-bouncer) — keep
   commits off protected branches.
-- [prod-guard](https://github.com/karlkfi/claude-prod-guard) — block
+- [prod-guard](https://github.com/karlkfi/claude-bouncer) — block
   mutating infrastructure commands aimed at production.
 
 All four compose: none of them ever emits `allow`, so each can only add

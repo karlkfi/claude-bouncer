@@ -42,4 +42,4 @@ date above revised accordingly.
 ## Contact
 
 Questions or concerns:
-<https://github.com/karlkfi/claude-workspace-guard/issues>
+<https://github.com/karlkfi/claude-bouncer/issues>

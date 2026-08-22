@@ -128,7 +128,7 @@ def write_transcript(lines):
 
 
 def write_plugins_dir(root, installed, available, plugin="prod-guard",
-                      marketplace="prod-guard"):
+                      marketplace="claude-bouncer"):
     """A synthetic ~/.claude/plugins: one install record plus a marketplace
     clone advertising `available`. Returns the dir as a string."""
     root = Path(root)
@@ -377,7 +377,7 @@ class StalenessTests(unittest.TestCase):
             self.assertEqual(
                 fr.check_staleness(d, "prod-guard"),
                 {"plugin": "prod-guard", "installed": "1.1.0",
-                 "available": "2.4.0", "marketplace": "prod-guard"})
+                 "available": "2.4.0", "marketplace": "claude-bouncer"})
 
     def test_current_install_not_flagged(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -400,7 +400,7 @@ class StalenessTests(unittest.TestCase):
             root = Path(tmp)
             write_plugins_dir(tmp, installed="1.1.0", available="2.4.0")
             (root / "installed_plugins.json").write_text(json.dumps({
-                "plugins": {"prod-guard@prod-guard": [
+                "plugins": {"prod-guard@claude-bouncer": [
                     {"scope": "project", "version": "1.1.0"},
                     {"scope": "user", "version": "2.4.0"},
                 ]}}))
@@ -434,8 +434,8 @@ class StalenessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "installed_plugins.json").write_text(json.dumps({
-                "plugins": {"prod-guard@prod-guard": [{"version": "1.1.0"}]}}))
-            clone = root / "marketplaces" / "prod-guard" / ".claude-plugin"
+                "plugins": {"prod-guard@claude-bouncer": [{"version": "1.1.0"}]}}))
+            clone = root / "marketplaces" / "claude-bouncer" / ".claude-plugin"
             clone.mkdir(parents=True)
             (clone / "plugin.json").write_text(json.dumps(
                 {"name": "prod-guard", "version": "2.4.0"}))
@@ -498,7 +498,7 @@ class PrintTests(unittest.TestCase):
 
     def test_stale_warning_shown(self):
         stale = {"plugin": "prod-guard", "installed": "1.1.0",
-                 "available": "2.4.0", "marketplace": "prod-guard"}
+                 "available": "2.4.0", "marketplace": "claude-bouncer"}
         buf = io.StringIO()
         with redirect_stdout(buf):
             fr.print_text(fr.build_report([
@@ -507,11 +507,11 @@ class PrintTests(unittest.TestCase):
             ]), 15, "prod-guard", stale)
         out = buf.getvalue()
         self.assertIn("prod-guard 1.1.0 installed, 2.4.0 available", out)
-        self.assertIn("claude plugin update prod-guard@prod-guard", out)
+        self.assertIn("claude plugin update prod-guard@claude-bouncer", out)
 
     def test_stale_warning_shown_when_no_decisions(self):
         stale = {"plugin": "prod-guard", "installed": "1.1.0",
-                 "available": "2.4.0", "marketplace": "prod-guard"}
+                 "available": "2.4.0", "marketplace": "claude-bouncer"}
         buf = io.StringIO()
         with redirect_stdout(buf):
             fr.print_text(fr.build_report([]), 15, "prod-guard", stale)

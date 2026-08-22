@@ -547,15 +547,15 @@ the IDE extensions, or **Claude Code for Claude Desktop**.
 **Claude Code (CLI or IDE extension)** — run the slash commands:
 
 ```
-/plugin marketplace add karlkfi/claude-branch-guard
-/plugin install branch-guard@branch-guard
+/plugin marketplace add karlkfi/claude-bouncer
+/plugin install branch-guard@claude-bouncer
 ```
 
 **Claude Code for Claude Desktop** — use the **Customize** tab:
 
 1. Open the **Customize** tab and go to its plugins / marketplaces section.
 2. Add `karlkfi/claude-branch-guard` as a marketplace (the repo at
-   `https://github.com/karlkfi/claude-branch-guard.git`).
+   `https://github.com/karlkfi/claude-bouncer.git`).
 3. Find **branch-guard** in that marketplace, install it, and make sure it's
    enabled.
 
@@ -584,7 +584,7 @@ time is the moment to decide — add the marketplace with `autoUpdate` on in
 {
   "extraKnownMarketplaces": {
     "branch-guard": {
-      "source": { "source": "git", "url": "https://github.com/karlkfi/claude-branch-guard.git" },
+      "source": { "source": "git", "url": "https://github.com/karlkfi/claude-bouncer.git" },
       "autoUpdate": true
     }
   }
@@ -610,7 +610,7 @@ add it as a `directory` marketplace in `~/.claude/settings.json`:
     }
   },
   "enabledPlugins": {
-    "branch-guard@claude-branch-guard": true
+    "branch-guard@claude-bouncer": true
   }
 }
 ```
@@ -636,7 +636,7 @@ this to `~/.claude/settings.json` (the same block works from the
 {
   "extraKnownMarketplaces": {
     "branch-guard": {
-      "source": { "source": "git", "url": "https://github.com/karlkfi/claude-branch-guard.git" },
+      "source": { "source": "git", "url": "https://github.com/karlkfi/claude-bouncer.git" },
       "autoUpdate": true
     }
   }
@@ -655,9 +655,9 @@ Left auto-update off? Pull new versions by hand.
 **Claude Code (CLI or IDE extension)** — run the slash commands:
 
 ```
-/plugin marketplace update branch-guard
-/plugin uninstall branch-guard@branch-guard
-/plugin install branch-guard@branch-guard
+/plugin marketplace update claude-bouncer
+/plugin uninstall branch-guard@claude-bouncer
+/plugin install branch-guard@claude-bouncer
 ```
 
 The first command re-fetches the marketplace manifest from the repo; the
@@ -675,8 +675,8 @@ plugin state, so you can update headlessly from a terminal instead of hunting fo
 the menu:
 
 ```bash
-claude plugin marketplace update branch-guard
-claude plugin update branch-guard@branch-guard
+claude plugin marketplace update claude-bouncer
+claude plugin update branch-guard@claude-bouncer
 ```
 
 Restart the Desktop app afterward to load the new version.
@@ -953,7 +953,7 @@ protected branch (main/master) or destructive git commands. To keep work flowing
 branch-guard reasons about **git/branch semantics** — which branch you're on and
 whether a `git`/`gh` command is destructive. It deliberately leaves the
 **filesystem boundary** to a sibling hook:
-[**workspace-guard**](https://github.com/karlkfi/claude-workspace-guard),
+[**workspace-guard**](https://github.com/karlkfi/claude-bouncer),
 path-aware bash permissions that prompt when a command reads or writes a file
 outside your project root (`$CLAUDE_PROJECT_DIR`). The two are complementary and
 don't overlap:
@@ -973,8 +973,8 @@ in-repo `sed -i` on a protected branch; for a hard guarantee there, use a git
 Install it the same way as branch-guard:
 
 ```
-/plugin marketplace add karlkfi/claude-workspace-guard
-/plugin install workspace-guard@workspace-guard
+/plugin marketplace add karlkfi/claude-bouncer
+/plugin install workspace-guard@claude-bouncer
 ```
 
 ## Privacy
@@ -989,7 +989,7 @@ opens the contents of the file being edited and never writes anything to disk.
 ## Contributing
 
 Bugs, ideas, and questions go in
-[GitHub Issues](https://github.com/karlkfi/claude-branch-guard/issues).
+[GitHub Issues](https://github.com/karlkfi/claude-bouncer/issues).
 
 Run the test suite (spins up a throwaway git repo under `tmp/` and asserts the
 decision for each command/branch combination):

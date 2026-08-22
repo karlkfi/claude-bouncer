@@ -197,7 +197,7 @@ class VersionTupleTests(unittest.TestCase):
 class StalenessTests(unittest.TestCase):
     """A synthetic plugins dir standing in for ~/.claude/plugins."""
 
-    def _plugins_dir(self, tmp, installed, available, marketplace="workspace-guard",
+    def _plugins_dir(self, tmp, installed, available, marketplace="claude-bouncer",
                      plugin="workspace-guard"):
         root = Path(tmp)
         (root / "installed_plugins.json").write_text(json.dumps({
@@ -220,7 +220,7 @@ class StalenessTests(unittest.TestCase):
             d = self._plugins_dir(tmp, installed="1.3.0", available="1.5.0")
             s = fr.check_staleness(d, "workspace-guard")
             self.assertEqual(s, {"plugin": "workspace-guard", "installed": "1.3.0",
-                                 "available": "1.5.0", "marketplace": "workspace-guard"})
+                                 "available": "1.5.0", "marketplace": "claude-bouncer"})
 
     def test_current_install_not_flagged(self):
         with tempfile.TemporaryDirectory() as tmp:

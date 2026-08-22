@@ -150,8 +150,8 @@ CLI, the IDE extensions, or **Claude Code for Claude Desktop**.
 **Claude Code (CLI or IDE extension)** — run the slash commands:
 
 ```
-/plugin marketplace add karlkfi/claude-prod-guard
-/plugin install prod-guard@prod-guard
+/plugin marketplace add karlkfi/claude-bouncer
+/plugin install prod-guard@claude-bouncer
 ```
 
 **Claude Code for Claude Desktop** — use the **Customize** tab:
@@ -174,7 +174,7 @@ After installing with either method:
   {
     "extraKnownMarketplaces": {
       "prod-guard": {
-        "source": { "source": "git", "url": "https://github.com/karlkfi/claude-prod-guard.git" },
+        "source": { "source": "git", "url": "https://github.com/karlkfi/claude-bouncer.git" },
         "autoUpdate": true
       }
     }
@@ -206,7 +206,7 @@ version behind, missing the shell-variable-expansion classifier and more.)
 {
   "extraKnownMarketplaces": {
     "prod-guard": {
-      "source": { "source": "git", "url": "https://github.com/karlkfi/claude-prod-guard.git" },
+      "source": { "source": "git", "url": "https://github.com/karlkfi/claude-bouncer.git" },
       "autoUpdate": true
     }
   }
@@ -217,14 +217,14 @@ version behind, missing the shell-variable-expansion classifier and more.)
 restart to apply:
 
 ```
-claude plugin marketplace update prod-guard
-claude plugin update prod-guard@prod-guard
+claude plugin marketplace update claude-bouncer
+claude plugin update prod-guard@claude-bouncer
 ```
 
 These `claude` CLI commands work headlessly and share Claude Desktop's plugin
 state, so they update a Desktop install too (Desktop has no `/plugin` slash
 command). On the CLI or an IDE extension you can equivalently run
-`/plugin marketplace update prod-guard` then `/plugin install prod-guard@prod-guard`.
+`/plugin marketplace update claude-bouncer` then `/plugin install prod-guard@claude-bouncer`.
 Compare the installed version against the
 [latest release](https://github.com/karlkfi/claude-prod-guard/releases) after
 updating.
@@ -460,7 +460,7 @@ local marketplace clone (`prod-guard 1.1.0 installed, 2.4.1 available`) — some
 of the friction it just ranked may already be fixed upstream. See
 [Keeping it updated](#keeping-it-updated). The comparison is local-only, so no
 warning means "no lag against the clone you have", not "up to date": refresh the
-clone with `claude plugin marketplace update prod-guard` first if it has been a
+clone with `claude plugin marketplace update claude-bouncer` first if it has been a
 while.
 
 You can also run the script directly:
@@ -543,11 +543,11 @@ python3 scripts/friction-report.py --since 30d --repo gateway --top 20
 prod-guard watches the **infrastructure blast-radius** boundary. Two sibling
 plugins guard different axes with the same secure-by-default design:
 
-- [**workspace-guard**](https://github.com/karlkfi/claude-workspace-guard) —
+- [**workspace-guard**](https://github.com/karlkfi/claude-bouncer) —
   the **filesystem** boundary: prompts before guarded file commands
   (`grep`/`sed`/`cat`/`cp`/`rm`/…) read or write paths outside the project
   root.
-- [**branch-guard**](https://github.com/karlkfi/claude-branch-guard) — the
+- [**branch-guard**](https://github.com/karlkfi/claude-bouncer) — the
   **git history** boundary: auto-approves safe git on feature branches,
   pauses commits/pushes to `main` and destructive git.
 
@@ -555,10 +555,10 @@ All three run side by side; each defers to normal permissions outside its
 own axis.
 
 ```
-/plugin marketplace add karlkfi/claude-workspace-guard
-/plugin install workspace-guard@workspace-guard
-/plugin marketplace add karlkfi/claude-branch-guard
-/plugin install branch-guard@claude-branch-guard
+/plugin marketplace add karlkfi/claude-bouncer
+/plugin install workspace-guard@claude-bouncer
+/plugin marketplace add karlkfi/claude-bouncer
+/plugin install branch-guard@claude-bouncer
 ```
 
 ## Design
@@ -580,7 +580,7 @@ active config, docker `currentContext`, azure default subscription, the
 ## Contributing
 
 Bugs, ideas, and questions go in
-[GitHub Issues](https://github.com/karlkfi/claude-prod-guard/issues).
+[GitHub Issues](https://github.com/karlkfi/claude-bouncer/issues).
 For the development backlog, see [`docs/STATUS.md`](docs/STATUS.md).
 
 ## License

@@ -165,15 +165,15 @@ the same marketplace and plugin.
 **Claude Code (CLI or IDE extension)** — run the slash commands:
 
 ```
-/plugin marketplace add karlkfi/claude-exit-status-guard
-/plugin install exit-status-guard@exit-status-guard
+/plugin marketplace add karlkfi/claude-bouncer
+/plugin install exit-status-guard@claude-bouncer
 ```
 
 **Claude Code for Claude Desktop** — use the **Customize** tab:
 
 1. Open the **Customize** tab and go to its plugins / marketplaces section.
 2. Add `karlkfi/claude-exit-status-guard` as a marketplace (the repo at
-   `https://github.com/karlkfi/claude-exit-status-guard.git`).
+   `https://github.com/karlkfi/claude-bouncer.git`).
 3. Find **exit-status-guard** in that marketplace, install it, and make sure it's
    enabled.
 
@@ -220,8 +220,8 @@ name, so remove both and add them fresh.
 ```
 /plugin uninstall pipe-guard@pipe-guard
 /plugin marketplace remove pipe-guard
-/plugin marketplace add karlkfi/claude-exit-status-guard
-/plugin install exit-status-guard@exit-status-guard
+/plugin marketplace add karlkfi/claude-bouncer
+/plugin install exit-status-guard@claude-bouncer
 ```
 
 **Claude Code for Claude Desktop / headless** — the same four, as CLI commands:
@@ -229,8 +229,8 @@ name, so remove both and add them fresh.
 ```bash
 claude plugin uninstall pipe-guard@pipe-guard
 claude plugin marketplace remove pipe-guard
-claude plugin marketplace add karlkfi/claude-exit-status-guard
-claude plugin install exit-status-guard@exit-status-guard
+claude plugin marketplace add karlkfi/claude-bouncer
+claude plugin install exit-status-guard@claude-bouncer
 ```
 
 Then restart Claude Code, since the hook is registered at startup. Nothing breaks
@@ -270,9 +270,9 @@ plugin.
 **Claude Code (CLI or IDE extension)** — run the slash commands:
 
 ```
-/plugin marketplace update exit-status-guard
-/plugin uninstall exit-status-guard@exit-status-guard
-/plugin install exit-status-guard@exit-status-guard
+/plugin marketplace update claude-bouncer
+/plugin uninstall exit-status-guard@claude-bouncer
+/plugin install exit-status-guard@claude-bouncer
 ```
 
 The first command re-fetches the marketplace manifest from the repo; the
@@ -284,8 +284,8 @@ upgrade an already-installed plugin — hence the explicit reinstall.
 Desktop's plugin state, so it works there and in any headless run:
 
 ```
-claude plugin marketplace update exit-status-guard
-claude plugin update exit-status-guard@exit-status-guard
+claude plugin marketplace update claude-bouncer
+claude plugin update exit-status-guard@claude-bouncer
 ```
 
 `claude plugin update` updates in place (no uninstall/reinstall needed); it
@@ -308,7 +308,7 @@ it:
 ```json
 "extraKnownMarketplaces": {
   "exit-status-guard": {
-    "source": { "source": "git", "url": "https://github.com/karlkfi/claude-exit-status-guard.git" },
+    "source": { "source": "git", "url": "https://github.com/karlkfi/claude-bouncer.git" },
     "autoUpdate": true
   }
 }
@@ -374,7 +374,7 @@ disables nothing.
 
 **A rule that needs an override routinely is a defect to fix in the registry,
 not to override.** Please
-[file it](https://github.com/karlkfi/claude-exit-status-guard/issues) instead of
+[file it](https://github.com/karlkfi/claude-bouncer/issues) instead of
 reaching for the prefix every time.
 
 ## Configuration
@@ -444,7 +444,7 @@ registry.
 The report also warns when your installed exit-status-guard lags the version in the
 local marketplace clone. The comparison is local-only, so no warning means "no
 lag against the clone you have", not "up to date" — refresh with
-`claude plugin marketplace update exit-status-guard` first if it has been a while.
+`claude plugin marketplace update claude-bouncer` first if it has been a while.
 
 You can also run the script directly:
 
@@ -482,18 +482,18 @@ exit-status-guard watches the **evidence** boundary — whether a command's
 result can still be read after the shell is done with it. Sibling plugins guard
 different axes with the same secure-by-default design:
 
-- [**workspace-guard**](https://github.com/karlkfi/claude-workspace-guard) — the
+- [**workspace-guard**](https://github.com/karlkfi/claude-bouncer) — the
   **filesystem** boundary: prompts before guarded file commands
   (`grep`/`sed`/`cat`/`cp`/`rm`/…) read or write paths outside the project root.
-- [**branch-guard**](https://github.com/karlkfi/claude-branch-guard) — the **git
+- [**branch-guard**](https://github.com/karlkfi/claude-bouncer) — the **git
   history** boundary: auto-approves safe git on feature branches, pauses commits
   and pushes to `main` and destructive git. It also owns the check for a `git
   push` onto a base that has moved into this branch's own lines, which
   exit-status-guard carried briefly and never released.
-- [**prod-guard**](https://github.com/karlkfi/claude-prod-guard) — the
+- [**prod-guard**](https://github.com/karlkfi/claude-bouncer) — the
   **infrastructure blast-radius** boundary: denies mutations aimed at production
   contexts.
-- [**foreground-guard**](https://github.com/karlkfi/claude-foreground-guard) —
+- [**foreground-guard**](https://github.com/karlkfi/claude-bouncer) —
   the **liveness** boundary: keeps blocking commands from stalling a session.
 - [**pr-sentinel**](https://github.com/karlkfi/claude-pr-sentinel) — the
   **review** boundary: watches a PR to green without merging it, and denies a
@@ -502,10 +502,10 @@ different axes with the same secure-by-default design:
 They run side by side; each defers to normal permissions outside its own axis.
 
 ```
-/plugin marketplace add karlkfi/claude-workspace-guard
-/plugin install workspace-guard@workspace-guard
-/plugin marketplace add karlkfi/claude-branch-guard
-/plugin install branch-guard@branch-guard
+/plugin marketplace add karlkfi/claude-bouncer
+/plugin install workspace-guard@claude-bouncer
+/plugin marketplace add karlkfi/claude-bouncer
+/plugin install branch-guard@claude-bouncer
 ```
 
 ## Design
@@ -526,7 +526,7 @@ for the full policy.
 ## Contributing
 
 Bugs, ideas, and questions go in
-[GitHub Issues](https://github.com/karlkfi/claude-exit-status-guard/issues).
+[GitHub Issues](https://github.com/karlkfi/claude-bouncer/issues).
 
 A rule that denies ordinary work is a bug worth reporting — include the exact
 command and the deny text. For development conventions (stdlib only, never

@@ -664,7 +664,7 @@ REASON_PREFIX = 'exit-status-guard: '
 # will read, so the sentence before it is the same one throughout.
 OVERRIDE_TAIL = (
     " If this call is not the mistake the rule describes, that is a defect in "
-    "the rule: report it at https://github.com/karlkfi/claude-exit-status-guard/issues "
+    "the rule: report it at https://github.com/karlkfi/claude-bouncer/issues "
     "rather than overriding it every time.")
 
 OVERRIDE_HINT = (

@@ -425,7 +425,7 @@ ASK, DENY = 1, 2
 CONFIG_HINT = ('Config: .claude/foreground-guard.json '
                '(see the foreground-guard README).')
 
-ISSUES_URL = 'https://github.com/karlkfi/claude-foreground-guard/issues'
+ISSUES_URL = 'https://github.com/karlkfi/claude-bouncer/issues'
 
 # Permission modes in which nobody is expected to be watching the prompt
 # stream, so a config-de-escalated `ask` buys friction and no answer. Only

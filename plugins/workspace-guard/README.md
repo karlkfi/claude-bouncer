@@ -633,15 +633,15 @@ the same marketplace and plugin.
 **Claude Code (CLI or IDE extension)** — run the slash commands:
 
 ```
-/plugin marketplace add karlkfi/claude-workspace-guard
-/plugin install workspace-guard@workspace-guard
+/plugin marketplace add karlkfi/claude-bouncer
+/plugin install workspace-guard@claude-bouncer
 ```
 
 **Claude Code for Claude Desktop** — use the **Customize** tab:
 
 1. Open the **Customize** tab and go to its plugins / marketplaces section.
 2. Add `karlkfi/claude-workspace-guard` as a marketplace (the repo at
-   `https://github.com/karlkfi/claude-workspace-guard.git`).
+   `https://github.com/karlkfi/claude-bouncer.git`).
 3. Find **workspace-guard** in that marketplace, install it, and make sure it's
    enabled.
 
@@ -654,7 +654,7 @@ so new releases reach you automatically.
 ```json
 "extraKnownMarketplaces": {
   "workspace-guard": {
-    "source": { "source": "git", "url": "https://github.com/karlkfi/claude-workspace-guard.git" },
+    "source": { "source": "git", "url": "https://github.com/karlkfi/claude-bouncer.git" },
     "autoUpdate": true
   }
 }
@@ -698,7 +698,7 @@ restart Claude Code:
 ```json
 "extraKnownMarketplaces": {
   "workspace-guard": {
-    "source": { "source": "git", "url": "https://github.com/karlkfi/claude-workspace-guard.git" },
+    "source": { "source": "git", "url": "https://github.com/karlkfi/claude-bouncer.git" },
     "autoUpdate": true
   }
 }
@@ -716,9 +716,9 @@ yourself.
 **Claude Code (CLI or IDE extension)** — run the slash commands:
 
 ```
-/plugin marketplace update workspace-guard
-/plugin uninstall workspace-guard@workspace-guard
-/plugin install workspace-guard@workspace-guard
+/plugin marketplace update claude-bouncer
+/plugin uninstall workspace-guard@claude-bouncer
+/plugin install workspace-guard@claude-bouncer
 ```
 
 The first command re-fetches the marketplace manifest from the repo; the
@@ -730,8 +730,8 @@ upgrade an already-installed plugin — hence the explicit reinstall.
 Desktop's plugin state, so it works there and in any headless run:
 
 ```
-claude plugin marketplace update workspace-guard
-claude plugin update workspace-guard@workspace-guard
+claude plugin marketplace update claude-bouncer
+claude plugin update workspace-guard@claude-bouncer
 ```
 
 `claude plugin update` updates in place (no uninstall/reinstall needed); it
@@ -1689,7 +1689,7 @@ nothing about *git history* — once a path is in-root, an in-root
 runs without a second look. Those are exactly the operations that turn an
 in-workspace edit into an unrecoverable one.
 
-[**branch-guard**](https://github.com/karlkfi/claude-branch-guard) covers that
+[**branch-guard**](https://github.com/karlkfi/claude-bouncer) covers that
 gap. It's a sibling plugin with the same secure-by-default, `ask`-based design,
 but its axis is the **git branch** rather than the filesystem path. Its motto:
 *"Let Claude commit and push all day on feature branches. Pause it at main."*
@@ -1708,8 +1708,8 @@ path boundary, branch-guard watches the history boundary. Install it the same
 way you installed this one:
 
 ```
-/plugin marketplace add karlkfi/claude-branch-guard
-/plugin install branch-guard@claude-branch-guard
+/plugin marketplace add karlkfi/claude-bouncer
+/plugin install branch-guard@claude-bouncer
 ```
 
 ## Design
@@ -1731,7 +1731,7 @@ small git metadata files (`.git`, `commondir`, `HEAD`) locally. See
 ## Contributing
 
 Bugs, ideas, and questions go in
-[GitHub Issues](https://github.com/karlkfi/claude-workspace-guard/issues).
+[GitHub Issues](https://github.com/karlkfi/claude-bouncer/issues).
 For the development backlog and how to add new guarded commands, see
 [`docs/STATUS.md`](docs/STATUS.md).
 

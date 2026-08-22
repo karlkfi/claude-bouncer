@@ -873,7 +873,7 @@ class PermissionModeTests(unittest.TestCase):
         self.assertEqual(d, "deny")
         self.assertIn("FOREGROUND_GUARD_OVERRIDE=<reason>", r)
         self.assertIn("friction-report", r)
-        self.assertIn("github.com/karlkfi/claude-foreground-guard/issues", r)
+        self.assertIn("github.com/karlkfi/claude-bouncer/issues", r)
         # The deny tail is appended to the fixes, not substituted for them.
         self.assertIn("Monitor", r)
 
