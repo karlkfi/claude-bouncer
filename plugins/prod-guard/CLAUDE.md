@@ -100,5 +100,5 @@ When working on specific tasks, read the relevant doc before starting:
 | Changing decision semantics, verb tables, or covered tools | `scripts/bash-prod-guard.py` + `README.md` decision table + `docs/design.md` |
 | Plugin packaging / marketplace listing | `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` |
 | Cutting a release (version bump, tag, GitHub Release) | `docs/development/release-process.md` |
-| Rendering or regenerating brand images (social preview, favicon, icon) | `docs/development/rendering-images.md` |
+| Rendering or regenerating brand images (social preview, favicon, icon) | `../../docs/development/rendering-images.md` — one procedure for all six asset directories |
 | Hook registration | `hooks/hooks.json` |

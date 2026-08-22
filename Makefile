@@ -2,7 +2,7 @@
 PYTHON ?= python3
 PLUGINS := workspace-guard branch-guard prod-guard exit-status-guard foreground-guard
 
-.PHONY: check sync sync-check version-check lib-test plugin-tests validate help
+.PHONY: check sync sync-check version-check lib-test plugin-tests validate images help
 
 help:
 	@echo "make check         run everything CI runs"
@@ -12,6 +12,7 @@ help:
 	@echo "make lib-test      test the shared parser"
 	@echo "make plugin-tests  test every plugin"
 	@echo "make validate      validate the marketplace manifest"
+	@echo "make images        rasterize the brand images from their SVG masters"
 
 check: sync-check version-check lib-test plugin-tests
 
@@ -45,3 +46,8 @@ plugin-tests:
 
 validate:
 	claude plugin validate .
+
+# Deliberately outside `check`: it needs resvg, which CI does not install,
+# and a raster only goes stale when its SVG master changes.
+images:
+	$(PYTHON) scripts/render-images.py
