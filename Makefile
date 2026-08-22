@@ -2,23 +2,24 @@
 PYTHON ?= python3
 PLUGINS := workspace-guard branch-guard prod-guard exit-status-guard foreground-guard
 
-.PHONY: check sync sync-check version-check lib-test plugin-tests validate images help \
-        backlog backlog-next backlog-lint
+.PHONY: check sync sync-check version-check path-filter-check lib-test plugin-tests \
+        validate images help backlog backlog-next backlog-lint
 
 help:
-	@echo "make check         run everything CI runs"
-	@echo "make sync          copy lib/bouncer_parse.py into each plugin"
-	@echo "make sync-check    fail if a vendored copy has drifted"
-	@echo "make version-check fail if a plugin's three version strings disagree"
-	@echo "make lib-test      test the shared parser"
-	@echo "make plugin-tests  test every plugin"
-	@echo "make validate      validate the marketplace manifest"
-	@echo "make images        rasterize the brand images from their SVG masters"
-	@echo "make backlog       the queue in priority order (ARGS='--label prod-guard')"
-	@echo "make backlog-next  the top ready item, as a session prompt"
-	@echo "make backlog-lint  check docs/queue"
+	@echo "make check             run everything CI runs"
+	@echo "make sync              copy lib/bouncer_parse.py into each plugin"
+	@echo "make sync-check        fail if a vendored copy has drifted"
+	@echo "make version-check     fail if a plugin's three version strings disagree"
+	@echo "make path-filter-check fail if a plugin's CI jobs are unfiltered or misfiltered"
+	@echo "make lib-test          test the shared parser"
+	@echo "make plugin-tests      test every plugin"
+	@echo "make validate          validate the marketplace manifest"
+	@echo "make images            rasterize the brand images from their SVG masters"
+	@echo "make backlog           the queue in priority order (ARGS='--label prod-guard')"
+	@echo "make backlog-next      the top ready item, as a session prompt"
+	@echo "make backlog-lint      check docs/queue"
 
-check: sync-check version-check backlog-lint lib-test plugin-tests
+check: sync-check version-check path-filter-check backlog-lint lib-test plugin-tests
 
 sync:
 	$(PYTHON) scripts/sync-lib.py
@@ -33,6 +34,12 @@ sync-check:
 # that misses it ships nothing while the README announces the new version.
 version-check:
 	$(PYTHON) scripts/version-check.py
+
+# A filter that omits a plugin makes its jobs go green by SKIPPING, which reads
+# exactly like passing in a checks list. Runs beside the other two gates rather
+# than inside the suite, so a broken workflow fails before the tests it gates.
+path-filter-check:
+	$(PYTHON) scripts/path-filter-check.py
 
 lib-test:
 	$(PYTHON) -m unittest discover tests

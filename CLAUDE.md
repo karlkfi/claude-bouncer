@@ -64,11 +64,21 @@ Invoke the `session-backlog` skill for any change to the store.
 ## Checks
 
 ```
-make check    # drift, version, backlog lint, parser tests, doc links, all five suites
+make check    # drift, version, path filters, backlog lint, parser tests, doc links, all five suites
 ```
 
 Run it before proposing a change is done. A change under `lib/` reaches all
 five guards, so say which ones you re-ran.
+
+CI does not run every job on every pull request. `.github/workflows/tests.yml`
+classifies the diff in a `changes` job and each plugin's jobs skip when nothing
+under `plugins/<name>/` -- or under `lib/` -- changed. **A skipped job is a
+path-skip, not a pass**, and the checks list cannot tell you which, so read the
+filters before reading a green run as coverage. `make path-filter-check` is the
+recurrence guard: it fails when a plugin has no filter, when a filter omits its
+own directory or the shared anchor, or when a job is gated on the wrong plugin.
+Everything runs unfiltered on push to `main`, which is what makes "tag a green
+one" in the release process mean what it says.
 
 Python 3.9 is the floor. exit-status-guard supports it and CI runs the shared
 parser against it, so 3.10+ syntax in `lib/` breaks that job and nothing else,

@@ -15,6 +15,77 @@ on:
 # averaged those would weaken every one of them to the weakest.
 
 jobs:
+  # ---------------------------------------------------------------- path gate
+  # Classify the diff once, then let each job below skip when nothing it covers
+  # changed. Every guard is independent -- a workspace-guard fix cannot break
+  # prod-guard unless it went through lib/ -- so a PR touching one plugin has no
+  # reason to spend the other four.
+  #
+  # The workflow itself carries NO top-level `paths:`. A workflow skipped that
+  # way reports no check at all, which leaves a required check Pending forever;
+  # triggering on every PR and skipping inside means each job either runs or
+  # reports as skipped, and a `<workflow>-gate` job can be required later
+  # without revisiting any of this.
+  #
+  # A skipped job is a path-skip, NOT a pass. Nothing here says so in the checks
+  # list, so read the filters below before reading a green run as coverage.
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    # Fail OPEN. paths-filter resolves the changed-file list through one
+    # un-retried API call, so a transient 5xx would otherwise skip every gated
+    # job -- the most expensive kind of false negative, because `main` ends up
+    # green on evidence it never gathered. An unclassifiable diff runs
+    # everything instead.
+    outputs:
+      workspace_guard: ${{ steps.filter.outcome == 'success' && steps.filter.outputs.workspace_guard || 'true' }}
+      branch_guard: ${{ steps.filter.outcome == 'success' && steps.filter.outputs.branch_guard || 'true' }}
+      prod_guard: ${{ steps.filter.outcome == 'success' && steps.filter.outputs.prod_guard || 'true' }}
+      foreground_guard: ${{ steps.filter.outcome == 'success' && steps.filter.outputs.foreground_guard || 'true' }}
+      exit_status_guard: ${{ steps.filter.outcome == 'success' && steps.filter.outputs.exit_status_guard || 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        continue-on-error: true
+        with:
+          # A plugin's filter is its whole directory, deliberately. Suites read
+          # tracked Markdown from under their own root -- exit-status-guard
+          # globs commands/*.md, prod-guard reads commands/friction-report.md --
+          # so a filter that let "docs" mean "no code" would go green by
+          # skipping the suite covering the file being edited.
+          #
+          # Which docs are test inputs is a list that rots: workspace-guard was
+          # a third example until its docs/STATUS.md moved to the root store,
+          # and nothing would have told a narrower filter to stop naming it.
+          # The directory is the one boundary that stays correct on its own.
+          #
+          # `shared` is the anchor every plugin pulls in. lib/ reaches all five
+          # through the vendored copies, and an edit there that skipped
+          # `make sync` would show no plugins/*/lib change at all.
+          filters: |
+            shared: &shared
+              - 'lib/**'
+              - 'scripts/sync-lib.py'
+              - '.github/workflows/tests.yml'
+            workspace_guard:
+              - *shared
+              - 'plugins/workspace-guard/**'
+            branch_guard:
+              - *shared
+              - 'plugins/branch-guard/**'
+            prod_guard:
+              - *shared
+              - 'plugins/prod-guard/**'
+            foreground_guard:
+              - *shared
+              - 'plugins/foreground-guard/**'
+            exit_status_guard:
+              - *shared
+              - 'plugins/exit-status-guard/**'
+
   # ------------------------------------------------- shared parser and backlog
   # Runs first and on the widest Python range: every guard imports the parser,
   # so its floor is the lowest floor any plugin supports (3.9,
@@ -38,10 +109,15 @@ jobs:
       # The marketplace entry is what `claude plugin update` compares, so a
       # bump that misses it ships nothing while the README announces it.
       - run: python3 scripts/version-check.py
+      # The filters below decide which of this workflow's jobs run at all, so a
+      # plugin missing from them skips its suite on every pull request.
+      - run: python3 scripts/path-filter-check.py
       - run: python3 -m unittest discover tests
 
   # --------------------------------------------------------- workspace-guard
   workspace-guard:
+    needs: [changes]
+    if: needs.changes.outputs.workspace_guard == 'true' || github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -60,6 +136,8 @@ jobs:
   # surely as a serial run hides a race between them, so one job keeps running
   # the suite the plain way.
   workspace-guard-serial:
+    needs: [changes]
+    if: needs.changes.outputs.workspace_guard == 'true' || github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -74,6 +152,8 @@ jobs:
   # inherits a cmd.exe environment with no $HOME. A few tests skip on Windows
   # and a plain run reports OK either way, so the count is capped.
   workspace-guard-windows:
+    needs: [changes]
+    if: needs.changes.outputs.workspace_guard == 'true' || github.event_name != 'pull_request'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -88,6 +168,8 @@ jobs:
   # binary, so every environment-reading helper has two distinct Windows
   # environments to be correct in and pwsh only covers one.
   workspace-guard-windows-gitbash:
+    needs: [changes]
+    if: needs.changes.outputs.workspace_guard == 'true' || github.event_name != 'pull_request'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -100,6 +182,8 @@ jobs:
 
   # ------------------------------------------------------------ branch-guard
   branch-guard:
+    needs: [changes]
+    if: needs.changes.outputs.branch_guard == 'true' || github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -119,6 +203,8 @@ jobs:
   # and the repo lookup misses, silently downgrading a protected-branch `ask`
   # to no decision at all. Nothing in the Linux matrix can catch that.
   branch-guard-windows:
+    needs: [changes]
+    if: needs.changes.outputs.branch_guard == 'true' || github.event_name != 'pull_request'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -131,6 +217,8 @@ jobs:
 
   # -------------------------------------------------------------- prod-guard
   prod-guard:
+    needs: [changes]
+    if: needs.changes.outputs.prod_guard == 'true' || github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -146,6 +234,8 @@ jobs:
 
   # -------------------------------------------------------- foreground-guard
   foreground-guard:
+    needs: [changes]
+    if: needs.changes.outputs.foreground_guard == 'true' || github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -160,11 +250,20 @@ jobs:
         working-directory: plugins/foreground-guard
 
   # ------------------------------------------------------- exit-status-guard
+  # No macOS leg. Every platform fork in the guard is POSIX-vs-Windows and is
+  # discriminated as such -- `scratch_root` keys on `hasattr(os, 'getuid')`, the
+  # launcher on `os.name == 'nt'`, and test_packaging reads git's index modes
+  # rather than the working tree -- so a macOS runner re-runs the ubuntu path
+  # under a different kernel and nothing else. It was 20 of this workflow's 82
+  # runner-minute equivalents (macOS bills at 10x) for no distinct code path.
+  # The launcher job below keeps its macOS leg, which does have one.
   exit-status-guard:
+    needs: [changes]
+    if: needs.changes.outputs.exit_status_guard == 'true' || github.event_name != 'pull_request'
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest]
         python: ['3.9', '3.13']
     runs-on: ${{ matrix.os }}
     steps:
@@ -179,7 +278,15 @@ jobs:
   # actually invokes is never executed by it. A launcher that stops working
   # does not fail loudly -- Claude Code lets the tool call proceed -- so the
   # guard would just quietly stop enforcing.
+  #
+  # This one keeps macOS where the suite above drops it. launcher_check runs the
+  # wired command line through `sh -c`, and `sh` is dash on ubuntu and bash 3.2
+  # on macOS -- two dialects reading the same hand-written cmd.exe/POSIX
+  # polyglot, and a dialect difference is the one thing a Linux runner
+  # structurally cannot show.
   exit-status-guard-launcher:
+    needs: [changes]
+    if: needs.changes.outputs.exit_status_guard == 'true' || github.event_name != 'pull_request'
     strategy:
       fail-fast: false
       matrix:
@@ -197,6 +304,8 @@ jobs:
   # loading the guard would still report OK. This breaks one rule and requires
   # the suite to go red -- if it stays green, the tests are not testing it.
   exit-status-guard-mutation-control:
+    needs: [changes]
+    if: needs.changes.outputs.exit_status_guard == 'true' || github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -231,6 +340,8 @@ jobs:
   # clean command produces, so the launcher job is only worth anything if it
   # can go red.
   exit-status-guard-launcher-mutation-control:
+    needs: [changes]
+    if: needs.changes.outputs.exit_status_guard == 'true' || github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -265,6 +376,8 @@ jobs:
   # hook exited 126 with nothing on stdout -- which Claude Code reads as no
   # objection. Both checks that cover it have to go red when it comes back.
   exit-status-guard-packaging-mutation-control:
+    needs: [changes]
+    if: needs.changes.outputs.exit_status_guard == 'true' || github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     defaults:
       run:
