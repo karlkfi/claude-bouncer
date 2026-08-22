@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Session scratch
+tmp/
+.claude/worktrees/
+
+# OS
+.DS_Store
