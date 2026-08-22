@@ -167,9 +167,6 @@ class VendoringTests(unittest.TestCase):
                           '%s has a stale copy; run scripts/sync-lib.py' % name)
 
 
-if __name__ == '__main__':
-    unittest.main()
-
 
 class ReadmeTests(unittest.TestCase):
     """The root README's table names a version per plugin, which goes stale
@@ -187,3 +184,6 @@ class ReadmeTests(unittest.TestCase):
             readme, re.M))
         self.assertEqual(entries, rows,
                          'README version table and marketplace.json disagree')
+
+if __name__ == '__main__':
+    unittest.main()

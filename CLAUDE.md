@@ -42,7 +42,7 @@ unaffected.
 ## Checks
 
 ```
-make check    # drift gate, version gate, parser tests, all five plugin suites
+make check    # drift gate, version gate, parser tests, doc links, all five plugin suites
 ```
 
 Run it before proposing a change is done. A change under `lib/` reaches all
