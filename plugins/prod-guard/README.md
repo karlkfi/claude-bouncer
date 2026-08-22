@@ -583,7 +583,7 @@ active config, docker `currentContext`, azure default subscription, the
 
 Bugs, ideas, and questions go in
 [GitHub Issues](https://github.com/karlkfi/claude-bouncer/issues).
-For the development backlog, see the [backlog at the repository root](../../docs/queue/README.md).
+For the development backlog, see the [shared backlog](https://github.com/karlkfi/claude-bouncer/blob/main/docs/queue/README.md).
 
 ## License
 
