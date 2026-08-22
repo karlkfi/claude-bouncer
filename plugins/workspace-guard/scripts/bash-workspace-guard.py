@@ -117,6 +117,9 @@ WRITE_MODE_FLAGS = {
     'awk':  {'short': 'i', 'long': ('--include',)},
     'yq':   {'short': 'i', 'long': ('--inplace',)},
     'sort': {'short': 'o', 'long': ('--output',)},
+    # BSD `base64 -o OUT`, the same shape as `sort -o` (Q75). GNU base64 has
+    # no output flag at all, short or long, so there is no long form to list.
+    'base64': {'short': 'o', 'long': ()},
 }
 
 
@@ -994,6 +997,28 @@ SPEC = {
     'hexdump':{'consume':{'-e':1,'-n':1,'-s':1},
                'file_flags':{'-f':(1,[0])},
                'prog':0},
+    # Q75: `cut` reads its positional files like `cat` but takes flag values,
+    # so aliasing would read `cut -d / -f1 f`'s delimiter as a file operand and
+    # prompt on `/`. Own row with the value-taking flags declared. `prog` is 0,
+    # so a flag declared wrongly can swallow only its own value — never a file
+    # operand the row would then miss. Zero-arg flags (`-s`, `-n`, `-w`,
+    # `--complement`, `-z`) fall through.
+    'cut':  {'consume':{'-b':1,'--bytes':1,'-c':1,'--characters':1,
+                        '-d':1,'--delimiter':1,'-f':1,'--fields':1,
+                        '--output-delimiter':1},
+             'file_flags':{}, 'prog':0},
+    # Q75: `base64` (and the BSD variant macOS ships) reads a positional file,
+    # but BSD also names input and output through `-i`/`-o`. Both are file
+    # flags so the path participates in the check; `-o` additionally appears in
+    # WRITE_MODE_FLAGS, so an outside `-o` is judged as the write it is rather
+    # than picking up the read-prefix exemption. GNU spells `-i` as
+    # `--ignore-garbage`, a zero-arg flag: declaring it here consumes the next
+    # token, which is the positional input file GNU would have supplied — the
+    # same path, checked either way. `-w`/`--wrap` (GNU) and `-b` (BSD) set the
+    # line width.
+    'base64':{'consume':{'-w':1,'--wrap':1,'-b':1},
+              'file_flags':{'-i':(1,[0]),'-o':(1,[0])},
+              'prog':0},
     # Q37: cat-shape readers whose SECOND positional is an OUTPUT file
     # (`uniq IN OUT`, `xxd IN OUT`). Aliasing them to `cat` classified every
     # operand as a read, so the read-prefix exemption silently allowed the
@@ -1044,17 +1069,27 @@ SPEC = {
     # `--preserve-root` key falls through and the value is discarded.
     'rm':   {'consume':{}, 'file_flags':{}, 'prog':0},
 }
-# Pure cat-shape readers — aliased to `cat`. cat's spec (no consume flags,
-# no file flags, prog:0) matches every tool here: positional files only,
+# Commands whose argument shape another row already describes exactly. Most are
+# pure cat-shape readers — aliased to `cat`. cat's spec (no consume flags,
+# no file flags, prog:0) matches every reader here: positional files only,
 # no program/pattern token, no file-naming flags. Value-taking flags like
 # `tac -s SEP` mean SEP is treated as a positional/file; in practice SEP
 # resolves lexically inside cwd, so the false-positive risk is negligible.
+#
+# `unlink` is the one entry here that is not a reader: it aliases to `rm`, and
+# the shapes match exactly (Q77). Every operand is a removal target, and every
+# flag either variant documents (`--help`, `--version`) is zero-arg, so rm's
+# empty `consume`/`file_flags` and `prog:0` describe it without a row of its
+# own. Aliasing rather than adding a row is also what carries the rest of rm's
+# treatment across: WRITE_COMMANDS and ENTRY_OPERANDS are keyed on the resolved
+# name, so `unlink` picks up write context and by-the-name resolution for free.
 ALIASES = {'egrep':'grep','fgrep':'grep','gawk':'awk','mawk':'awk',
            'less':'cat','more':'cat',
            'tac':'cat','rev':'cat','nl':'cat',
            'od':'cat',
            'strings':'cat','cmp':'cat',
-           'zcat':'cat','gzcat':'cat','bzcat':'cat','xzcat':'cat'}
+           'zcat':'cat','gzcat':'cat','bzcat':'cat','xzcat':'cat',
+           'unlink':'rm'}
 
 # Read-classified commands whose trailing positionals are OUTPUT files (Q37):
 # value = index of the first output operand among the file positionals
@@ -1065,8 +1100,9 @@ ALIASES = {'egrep':'grep','fgrep':'grep','gawk':'awk','mawk':'awk',
 # positional operands in order (a unit test pins this row shape).
 OUTPUT_POSITIONALS = {'uniq': 1, 'xxd': 1}
 # Commands whose file operands name a directory ENTRY rather than the contents
-# of what it points at. `rm` unlinks the name it is given and `mv` renames it,
-# so neither writes through a symlink operand — the link is what the command
+# of what it points at. `rm` (and `unlink`, which aliases to it) unlinks the
+# name it is given and `mv` renames it, so neither writes through a symlink
+# operand — the link is what the command
 # touches, and its target is a file the command never opens. Resolving such an
 # operand to its target is what made `rm <link into a sibling checkout>` deny a
 # removal that lands nothing on the wrong branch.
@@ -1503,29 +1539,32 @@ def expand_tilde(tok):
     return tok
 
 
-def classify_ln(tokens):
-    """For an `ln ...` command, return `(target_token, link_token_or_None)`.
+def ln_operands(tokens):
+    """For an `ln ...` command, return `(sources, destination, dest_is_link)`.
 
-    Returns None when the command isn't `ln` or uses the multi-source form
-    (3+ positionals — `ln a b destdir/`), which the staging logic deliberately
-    doesn't track.
+    Returns None when the command isn't `ln`. Every operand `ln` touches is in
+    one of the two halves, so a caller that checks both has covered the whole
+    command — including the multi-source form (`ln a b destdir/`) and the
+    `-t DIR` form, which `classify_ln` declines to stage.
 
-    Both the symbolic-link form (`ln -s`) and the hard-link form (`ln SRC LINK`
-    without `-s`) are recognised — the threat model is identical: a later read
-    through LINK reaches a file that may resolve outside the workspace, and the
-    lexical `realpath` check would otherwise miss it because bash hasn't
-    created LINK yet. Hard links can't cross filesystems, so the exposure is
-    narrower in practice, but the bypass shape is the same on a single volume.
+    The destination is the `-t`/`--target-directory` value when one is given,
+    else the last positional when there are two or more, else None: a lone
+    positional (`ln SRC`) has no destination operand, because POSIX puts the
+    link at `basename(SRC)` in the current directory and that is a name this
+    function has no token for.
 
-    Consumes the value-taking flags (`-t`/`--target-directory`, `-S`/`--suffix`,
-    `--backup`) so they don't surface as positionals; other flags fall through
-    harmlessly.
+    `dest_is_link` is True only when the destination is the link's own path —
+    the `ln SRC LINK` form. Under `-t DIR`, and in the multi-source form, the
+    destination is a directory the links are created *inside*.
+
+    `-S`/`--suffix` and `--backup` are consumed so their values don't surface
+    as positionals; other flags fall through harmlessly.
     """
     if not tokens or os.path.basename(tokens[0]) != 'ln':
         return None
-    consume = {'-t': 1, '--target-directory': 1,
-               '-S': 1, '--suffix': 1, '--backup': 1}
-    positionals = []
+    consume = {'-S': 1, '--suffix': 1, '--backup': 1}
+    target_dir_flags = {'-t': 1, '--target-directory': 1}
+    positionals, target_dir = [], None
     i, n, end_opts = 1, len(tokens), False
     while i < n:
         tok = tokens[i]
@@ -1533,15 +1572,49 @@ def classify_ln(tokens):
             end_opts = True; i += 1; continue
         if not end_opts and tok.startswith('-') and tok != '-':
             key, inline = split_eq(tok)
+            if key in target_dir_flags:
+                if inline is not None:
+                    target_dir = inline; i += 1; continue
+                if i + 1 < n:
+                    target_dir = tokens[i+1]
+                i += 2; continue
             if key in consume:
                 i += 1 + (0 if inline is not None else consume[key]); continue
             i += 1; continue
         positionals.append(tok); i += 1
-    if len(positionals) == 1:
-        return (positionals[0], None)
-    if len(positionals) == 2:
-        return (positionals[0], positionals[1])
-    return None
+    if target_dir is not None:
+        return (positionals, target_dir, False)
+    if len(positionals) >= 2:
+        return (positionals[:-1], positionals[-1], len(positionals) == 2)
+    return (positionals, None, False)
+
+
+def classify_ln(tokens):
+    """For an `ln ...` command, return `(target_token, link_token_or_None)` for
+    the forms whose link path is a token the staging logic can pin down.
+
+    Returns None when the command isn't `ln`, when it uses the multi-source
+    form (3+ positionals — `ln a b destdir/`), or when `-t DIR` names the
+    destination directory. Both of those put the link at
+    `DIR/basename(SRC)`, a path built at runtime rather than written in the
+    command, so there is no link token to record.
+
+    Both the symbolic-link form (`ln -s`) and the hard-link form (`ln SRC LINK`
+    without `-s`) are recognised — the threat model is identical: a later read
+    through LINK reaches a file that may resolve outside the workspace, and the
+    lexical `realpath` check would otherwise miss it because bash hasn't
+    created LINK yet. Hard links can't cross filesystems, so the exposure is
+    narrower in practice, but the bypass shape is the same on a single volume.
+    """
+    ops = ln_operands(tokens)
+    if ops is None:
+        return None
+    sources, dest, dest_is_link = ops
+    if len(sources) != 1:
+        return None
+    if dest is None:
+        return (sources[0], None)
+    return (sources[0], dest) if dest_is_link else None
 
 
 def classify_dd(tokens):
@@ -3323,9 +3396,31 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
             else:
                 group_cwd_unknown = True
             continue
-        ln = classify_ln(g)
-        if ln is not None:
-            stage_ln(ln[0], ln[1], group_cwd, group_cwd_unknown)
+        lnop = ln_operands(g)
+        if lnop is not None:
+            # Q80: `ln`'s own operands are checked, not just staged. Staging
+            # (Q8/Q17) only ever caught a later read *through* the new link in
+            # the same chain; `ln -s OUTSIDE link` on its own named an outside
+            # path and deferred.
+            #
+            # Every operand is judged in write context — the same rule `cp`
+            # applies to its sources. A hard link hands the source inode a
+            # second name inside the workspace, and a later write through that
+            # name resolves to a path the guard reads as in-workspace, so
+            # treating the source as a read would let the boundary be crossed
+            # once and then never seen again.
+            guarded = True
+            sources, dest, _ = lnop
+            for f in sources + ([dest] if dest is not None else []):
+                o = check_file(f, group_cwd, group_cwd_unknown)
+                if o is not None:
+                    outside.append(o)
+            # Staged after the checks: staging records the link's resolved path
+            # in `staged_outside_paths`, and checking the destination against a
+            # set it had just been added to would report the same link twice.
+            ln = classify_ln(g)
+            if ln is not None:
+                stage_ln(ln[0], ln[1], group_cwd, group_cwd_unknown)
             continue
         dd = classify_dd(g)
         if dd is not None:

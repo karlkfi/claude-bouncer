@@ -90,7 +90,10 @@ class SpecShapeTests(unittest.TestCase):
              # Q11 PR2: rm.
              "rm",
              # Q37: readers whose second positional is an output file.
-             "uniq", "xxd"},
+             "uniq", "xxd",
+             # Q75: readers that take flag values (`cut -d ,`, `base64 -w 0`)
+             # and so can't share cat's row.
+             "cut", "base64"},
         )
 
     def test_documented_aliases_present(self):
@@ -106,7 +109,10 @@ class SpecShapeTests(unittest.TestCase):
              "od": "cat",
              "strings": "cat", "cmp": "cat",
              "zcat": "cat", "gzcat": "cat",
-             "bzcat": "cat", "xzcat": "cat"},
+             "bzcat": "cat", "xzcat": "cat",
+             # Q77: the one alias that isn't a reader. `unlink` removes the
+             # name it is given, exactly `rm`'s shape.
+             "unlink": "rm"},
         )
 
 
@@ -2237,13 +2243,19 @@ class HookEndToEndTests(unittest.TestCase):
         self._decision('cd - && cat "$(pwd)/in.txt"', "deny")
 
     # --- ln -s symlink staging (Q8) -----------------------------------------
+    #
+    # The synthetic targets here sit at the filesystem root rather than under
+    # `/tmp`, which is what they used before Q80 guarded `ln`'s own operands.
+    # A host-temp operand is reclassified from `ask` to `deny`, so a `/tmp`
+    # target would settle every case in this block on the host-temp rule and
+    # none of them would still be testing whether the link was staged.
 
     def test_ln_outside_target_then_cat_link_ask(self):
         # The Q8 motivating case: `ln -s OUTSIDE link && cat link`. Pre-Q8,
         # `link` didn't exist at hook time so realpath kept it lexically inside
         # the workspace and the whole chain was allowed.
         out = self._decision(
-            "ln -s /tmp/q8-fake-target link && cat link", "ask",
+            "ln -s /q8-fake-target link && cat link", "ask",
         )
         self.assertIn(
             "link",
@@ -2256,16 +2268,16 @@ class HookEndToEndTests(unittest.TestCase):
 
     def test_ln_long_symbolic_flag_staged(self):
         self._decision(
-            "ln --symbolic /tmp/q8-fake-target link && cat link", "ask",
+            "ln --symbolic /q8-fake-target link && cat link", "ask",
         )
 
     def test_ln_combined_short_flags_staged(self):
         # `-fs` / `-fns` — symbolic mode hides inside the combined flag.
         self._decision(
-            "ln -fs /tmp/q8-fake-target link && cat link", "ask",
+            "ln -fs /q8-fake-target link && cat link", "ask",
         )
         self._decision(
-            "ln -fns /tmp/q8-fake-target link && cat link", "ask",
+            "ln -fns /q8-fake-target link && cat link", "ask",
         )
 
     def test_ln_hard_link_outside_target_then_cat_link_ask(self):
@@ -2274,7 +2286,7 @@ class HookEndToEndTests(unittest.TestCase):
         # lexical realpath of `link` lands inside the workspace and would
         # otherwise sneak through. Staging catches it.
         self._decision(
-            "ln /tmp/q8-fake-target link && cat link", "ask",
+            "ln /q8-fake-target link && cat link", "ask",
         )
 
     def test_ln_hard_link_inside_target_then_cat_link_allow(self):
@@ -2283,33 +2295,44 @@ class HookEndToEndTests(unittest.TestCase):
         self._decision("ln in.txt link && cat link", "allow")
 
     def test_ln_omitted_link_uses_basename(self):
-        # `ln -s /tmp/q8-fake-target` creates `q8-fake-target` in cwd.
+        # `ln -s /q8-fake-target` creates `q8-fake-target` in cwd.
         self._decision(
-            "ln -s /tmp/q8-fake-target && cat q8-fake-target", "ask",
+            "ln -s /q8-fake-target && cat q8-fake-target", "ask",
         )
 
     def test_ln_absolute_outside_link_caught_by_existing_check(self):
         # Link itself is outside-workspace; the cat already asks via the
         # absolute-path rule, staging is a no-op. Decision is still ask.
         self._decision(
-            "ln -s /tmp/q8-fake-target /tmp/q8-link && cat /tmp/q8-link",
+            "ln -s /q8-fake-target /q8-link && cat /q8-link",
             "ask",
         )
 
     def test_ln_after_cd_stages_against_shifted_cwd(self):
         # `cd /tmp && ln -s OUTSIDE link && cat link` — link lives in /tmp,
-        # so the staged path is /tmp/link. The cat must still ask.
-        self._decision(
-            "cd /tmp && ln -s /tmp/q8-fake-target link && cat link", "ask",
+        # so the staged path is /tmp/link and the cat matches it. The verdict
+        # is the host-temp `deny` rather than the staged `ask`, because Q80
+        # checks the `ln`'s own operands and `link` resolves into host temp:
+        # planting a symlink there is a host-temp write like any other.
+        out = self._decision(
+            "cd /tmp && ln -s /q8-fake-target link && cat link", "deny",
+        )
+        self.assertIn(
+            "link",
+            out["hookSpecificOutput"]["permissionDecisionReason"],
         )
 
     def test_ln_inside_target_relative_link_outside_workspace(self):
-        # `ln -s ./in.txt /tmp/out` — target inside, link outside. Staging
-        # skips (target inside), but the resulting symlink lives outside, so
-        # no later guarded read in the workspace would be affected. This
-        # scenario stays allow because there's no later cat inside-workspace.
-        # The `ln` itself isn't guarded yet (that's Q11's scope).
-        self._defer("ln -s ./in.txt /tmp/out")
+        # `ln -s ./in.txt /tmp/out` — target inside, link outside, so staging
+        # skips and no later read in the workspace is affected. Before Q80 the
+        # whole command deferred, because nothing checked `ln`'s operands and
+        # there was no other guarded command. The link is a write into host
+        # temp, so it now denies on its own.
+        out = self._decision("ln -s ./in.txt /tmp/out", "deny")
+        self.assertIn(
+            "/tmp/out",
+            out["hookSpecificOutput"]["permissionDecisionReason"],
+        )
 
     def test_ln_subdir_link_path_stages_correctly(self):
         # `ln -s OUTSIDE ./sub/link && cat ./sub/link` — staged path is
@@ -2317,7 +2340,7 @@ class HookEndToEndTests(unittest.TestCase):
         nested = os.path.join(self.workspace, "sub")
         os.mkdir(nested)
         self._decision(
-            "ln -s /tmp/q8-fake-target ./sub/link && cat ./sub/link", "ask",
+            "ln -s /q8-fake-target ./sub/link && cat ./sub/link", "ask",
         )
 
     def test_ln_dollar_target_stages_link_as_outside(self):
@@ -2327,17 +2350,26 @@ class HookEndToEndTests(unittest.TestCase):
             "ln -s $HOME/secret link && cat link", "ask",
         )
 
-    def test_ln_dollar_link_not_staged_but_cat_denies_anyway(self):
+    def test_ln_dollar_link_not_staged_but_cat_still_blocks(self):
         # `link` with `$` is unresolvable — staging can't pin it down. The
-        # later `cat $X` still blocks via the existing $/~ rule.
+        # later `cat $X` still blocks via the existing $/~ rule. The verdict
+        # is `ask` rather than `deny` because Q80 adds the outside target as a
+        # second offender, and the deny is reserved for a command whose
+        # offenders are *all* tokens the hook merely failed to parse.
         self._decision(
-            "ln -s /tmp/q8-fake-target $LINK && cat $LINK", "deny",
+            "ln -s /q8-fake-target $LINK && cat $LINK", "ask",
         )
 
-    def test_ln_only_command_defers(self):
-        # `ln -s OUTSIDE link` alone has no guarded command — must defer
-        # (ln itself isn't guarded; that's Q11).
-        self._defer("ln -s /tmp/q8-fake-target link")
+    def test_ln_only_command_asks_on_outside_target(self):
+        # Q80: `ln -s OUTSIDE link` on its own used to defer — staging caught
+        # only a later read *through* the link, and nothing looked at the `ln`
+        # operands themselves, so the command that names the outside path was
+        # the one command that never had to answer for it.
+        out = self._decision("ln -s /q8-fake-target link", "ask")
+        self.assertIn(
+            "/q8-fake-target",
+            out["hookSpecificOutput"]["permissionDecisionReason"],
+        )
 
     def test_classify_ln_helper_basic(self):
         self.assertEqual(
@@ -2390,16 +2422,139 @@ class HookEndToEndTests(unittest.TestCase):
             guard.classify_ln(["ln", "-s", "a", "b", "destdir"]),
         )
 
-    def test_classify_ln_helper_target_directory_flag_consumed(self):
-        # `-t DIR` consumes DIR as a value, not a positional.
-        self.assertEqual(
+    def test_classify_ln_helper_target_directory_returns_none(self):
+        # `-t DIR` puts the link at `DIR/basename(SRC)`, a path built at
+        # runtime. classify_ln used to discard DIR and hand back
+        # `("/tmp/x", None)`, which staged `./x` — a path bash never creates,
+        # so it both false-positived on `cat x` and missed `cat destdir/x`.
+        # There is no link token to record, so it declines; `ln_operands` is
+        # what covers the form, and the operand check blocks an outside source
+        # before any staged read could matter.
+        self.assertIsNone(
             guard.classify_ln(["ln", "-s", "-t", "destdir", "/tmp/x"]),
-            ("/tmp/x", None),
         )
+
+    def test_ln_operands_splits_sources_from_destination(self):
+        self.assertEqual(
+            guard.ln_operands(["ln", "-s", "src", "link"]),
+            (["src"], "link", True),
+        )
+        # Multi-source: the last positional is the directory they land in, not
+        # a link name.
+        self.assertEqual(
+            guard.ln_operands(["ln", "a", "b", "destdir"]),
+            (["a", "b"], "destdir", False),
+        )
+        # `-t DIR`, bare and inline — every positional is a source.
+        self.assertEqual(
+            guard.ln_operands(["ln", "-s", "-t", "destdir", "a"]),
+            (["a"], "destdir", False),
+        )
+        self.assertEqual(
+            guard.ln_operands(["ln", "--target-directory=destdir", "a", "b"]),
+            (["a", "b"], "destdir", False),
+        )
+        # A lone positional: POSIX derives the link name, so there is no
+        # destination token.
+        self.assertEqual(
+            guard.ln_operands(["ln", "-s", "src"]), (["src"], None, False),
+        )
+        self.assertIsNone(guard.ln_operands(["cp", "-s", "a", "b"]))
+        self.assertIsNone(guard.ln_operands([]))
 
     def test_classify_ln_helper_not_ln(self):
         self.assertIsNone(guard.classify_ln(["cat", "-s", "/tmp/x"]))
         self.assertIsNone(guard.classify_ln([]))
+
+    # --- ln operands are checked, not only staged (Q80) ----------------------
+
+    def test_ln_link_into_outside_directory_asks(self):
+        # The destination half. `ln -s in.txt OUTSIDE/link` creates an entry
+        # outside the root even though the source is a workspace file.
+        self._decision("ln -s in.txt /q80-fake-dir/link", "ask")
+
+    def test_ln_target_directory_flag_checks_both_halves(self):
+        # `-t DIR` names the destination; the positionals are all sources.
+        self._decision("ln -s -t /q80-fake-dir in.txt", "ask")
+        self._decision("ln -s -t ./sub /q80-fake-target", "ask")
+
+    def test_ln_multi_source_form_is_checked(self):
+        # 3+ positionals — classify_ln declines to stage this form, so before
+        # Q80 nothing looked at it at all.
+        nested = os.path.join(self.workspace, "sub")
+        os.mkdir(nested)
+        self._decision("ln in.txt /q80-fake-target ./sub", "ask")
+
+    def test_ln_entirely_inside_workspace_allows(self):
+        # Every operand in-workspace — the new check must not turn an ordinary
+        # link into a prompt.
+        self._decision("ln -s in.txt link", "allow")
+        self._decision("ln in.txt hard", "allow")
+        self._decision("ln -s -t . in.txt", "allow")
+
+    def test_ln_source_is_write_context(self):
+        # `ln` operands are judged in write context, the same rule `cp` applies
+        # to its sources: a hard link hands the source inode a second name
+        # inside the workspace, and a later write through that name resolves
+        # to a path the guard reads as in-workspace. So the read-only exemption
+        # for Claude-owned dirs does not apply here.
+        home = os.path.expanduser("~")
+        src = os.path.join(home, ".claude", "projects", "q80-fake-target")
+        self._decision(f"ln -s {sh(src)} link", "ask")
+        # The same path stays exempt for a genuine read.
+        self._decision(f"cat {sh(src)}", "allow")
+
+    # --- cut and base64 (Q75) ------------------------------------------------
+
+    def test_cut_outside_file_asks(self):
+        # Q75's motivating case: `cut` was unguarded, so a chain led by a
+        # guarded command emitted `allow` for the whole thing.
+        self._decision("cut -f1 /q75-fake-target", "ask")
+        self._decision("cat in.txt && cut -f1 /q75-fake-target", "ask")
+
+    def test_cut_flag_values_are_consumed_not_read_as_files(self):
+        # The reason `cut` has its own row rather than aliasing to `cat`: with
+        # cat's flagless spec the delimiter `/` would be a file operand and
+        # resolve to the filesystem root, prompting on an in-workspace command.
+        self._decision("cut -d / -f1 in.txt", "allow")
+        self._decision("cut -d, --output-delimiter=; -f1 in.txt", "allow")
+        self.assertEqual(
+            guard.files_in_command(["cut", "-d", "/", "-f1", "in.txt"]),
+            ["in.txt"],
+        )
+
+    def test_base64_outside_file_asks(self):
+        self._decision("base64 /q75-fake-target", "ask")
+        self._decision("base64 -w 0 in.txt", "allow")
+
+    def test_base64_bsd_input_and_output_flags(self):
+        # BSD names input and output through flags; `-o` also flips the whole
+        # invocation into write mode, so its target never picks up the
+        # read-only exemption for Claude-owned dirs.
+        self._decision("base64 -i /q75-fake-target", "ask")
+        self._decision("base64 -o /q75-fake-out in.txt", "ask")
+        home = os.path.expanduser("~")
+        out = os.path.join(home, ".claude", "projects", "q75-fake-out")
+        self._decision(f"base64 -o {sh(out)} in.txt", "ask")
+        self._decision(f"cat {sh(out)}", "allow")
+
+    # --- unlink (Q77) --------------------------------------------------------
+
+    def test_unlink_outside_path_asks(self):
+        # Q77: `unlink` removes a file exactly as `rm` does, but had no row of
+        # its own, so it was the unguarded spelling of a guarded command.
+        self._decision("unlink /q77-fake-target", "ask")
+        self._decision("unlink in.txt", "allow")
+
+    def test_unlink_inherits_rm_entry_operand_treatment(self):
+        # Aliasing to `rm` is what carries ENTRY_OPERANDS across: the operand
+        # names the link, not what it points at, so removing a symlink that
+        # escapes the workspace is an ordinary outside `ask` rather than being
+        # judged by its target.
+        link = os.path.join(self.workspace, "escape")
+        os.symlink("/q77-fake-target", link)
+        self.assertEqual(guard.entry_operand_mask(["unlink", "escape"]), [True])
+        self._decision("unlink escape", "allow")
 
     # --- classify_dd helper (Q11 PR3) ---------------------------------------
 
@@ -2765,7 +2920,7 @@ class HookEndToEndTests(unittest.TestCase):
         sess = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
         link = self._session_tmp(sess, "link")
         out = self._decision(
-            f"ln -s /tmp/q21-fake-target {sh(link)} && cat {sh(link)}", "ask",
+            f"ln -s /q21-fake-target {sh(link)} && cat {sh(link)}", "ask",
             session_id=sess)
         self.assertIn(link,
                       out["hookSpecificOutput"]["permissionDecisionReason"])
@@ -6235,9 +6390,11 @@ class PsPidSourceEndToEndTests(unittest.TestCase):
 
     def test_a_ps_pipeline_with_no_kill_is_unaffected(self):
         # No launderable kill, so the ps contributes nothing and each pipeline
-        # keeps the verdict its own commands earn: `awk` is guarded, `cut` isn't.
+        # keeps the verdict its own commands earn: `awk` and `cut` are guarded
+        # and name nothing outside the root, `tr` isn't guarded at all.
         self._decision("ps aux | awk '{print $1}'", "allow")
-        self._decision("ps -eo pid,command | cut -d' ' -f1", "defer")
+        self._decision("ps -eo pid,command | cut -d' ' -f1", "allow")
+        self._decision("ps -eo pid,command | tr -d ' '", "defer")
 
     def test_awk_outside_a_ps_pipeline_is_not_a_pid_source(self):
         self._decision("awk '/ginkgo/ {print $1}' ./in.txt", "allow")
@@ -6750,12 +6907,15 @@ class SiblingSessionScratchE2ETests(unittest.TestCase):
         finally:
             shutil.rmtree(other_proj, ignore_errors=True)
 
-    def test_sibling_symlink_escape_still_ask(self):
+    def test_sibling_symlink_escape_still_blocked(self):
         # The ln-staging defense runs before the sibling-read exemption: a link
-        # inside the sibling scratch pointing outside is still flagged.
+        # inside the sibling scratch pointing outside is still flagged. Since
+        # Q80 the `ln` also answers for its own operands, and creating that
+        # link is a write into a sibling's scratch — so the verdict is the
+        # cross-session `deny` rather than the staged read's `ask`.
         link = self._sibling(self.worker, "link")
         out = self._expect(
-            f"ln -s /tmp/q61-fake-target {sh(link)} && cat {sh(link)}", "ask",
+            f"ln -s /q61-fake-target {sh(link)} && cat {sh(link)}", "deny",
             session_id=self.current)
         self.assertIn(link,
                       out["hookSpecificOutput"]["permissionDecisionReason"])
