@@ -86,6 +86,13 @@ job; the two don't overlap.
 """
 import sys, os, json, re, shlex, subprocess, fnmatch
 
+# The parsing primitives every claude-bouncer guard shares. This guard keeps its
+# own SEPARATORS/REDIR: it folds the duplicating operators into REDIR and
+# derives FD_PREFIX_REDIR from it, a shape the shared split does not carry. The
+# copy under this plugin's `lib/` is vendored; see scripts/sync-lib.py.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
+from bouncer_parse import ASSIGNMENT_RE, PUNCT_CHARS, lex     # noqa: E402
+
 # Branch names protected no matter what the environment says. Configuration only
 # ever ADDS to this set (see `protected_patterns`), so a typo — or an empty or
 # nonsense BRANCH_GUARD_PROTECTED_BRANCHES — can't quietly drop protection from
@@ -100,11 +107,6 @@ DEFAULT_PROTECTED_BRANCHES = ('main', 'master')
 # and `fnmatch` can't raise on a malformed one the way `re.compile` can. Note
 # `*` spans `/`, so `release/*` covers `release/2.0/rc` too.
 PROTECTED_BRANCHES_ENV = 'BRANCH_GUARD_PROTECTED_BRANCHES'
-
-# POSIX command-prefix assignment (`FOO=bar git commit`): NAME then `=`.
-# Bash treats leading assignments as inline env exports; they don't change
-# the command name lookup.
-ASSIGNMENT_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
 
 # Operator-run tokens that separate one simple command from the next.
 SEPARATORS = {'|', '||', '&&', '&', ';', '\n', '(', ')'}
@@ -126,9 +128,6 @@ WRITE_REDIR_OPS = frozenset({'>', '>>', '>|', '&>', '&>>'})
 # these is NOT treated as a file write, so ubiquitous noise-silencing forms
 # (`git fetch 2>/dev/null`, `… >/dev/null 2>&1`) stay auto-approvable.
 DISCARD_TARGETS = frozenset({'/dev/null', '/dev/stdout', '/dev/stderr'})
-# Every char shlex treats as punctuation (matches the tokenizer below).
-PUNCT_CHARS = frozenset(';()<>|&\n')
-
 # git global options that consume a separate following value token (so the
 # subcommand isn't mistaken for the value). `--opt=value` forms are a single
 # token and need no entry here.
@@ -654,11 +653,7 @@ def tokenize(cmd):
     grouping) with newline separators peeled out of operator runs. Quotes are
     respected and shell operators (`|`, `&&`, `>`, `;`, …) become their own
     tokens. Raises ValueError on unbalanced quotes."""
-    lex = shlex.shlex(cmd, posix=True, punctuation_chars=';()<>|&\n')
-    lex.whitespace_split = True
-    lex.whitespace = lex.whitespace.replace('\n', '')
-    lex.commenters = ''            # `#` mid-command is not a comment in a shell line
-    return split_newline_separators(list(lex))
+    return split_newline_separators(lex(cmd))
 
 
 def extract_command_substitutions(token):

@@ -953,18 +953,21 @@ class WiringTests(unittest.TestCase):
                         "hook script must be executable: %s" % rel)
 
     def test_plugin_and_marketplace_agree(self):
+        # One manifest at the monorepo root now lists all five guards, so the
+        # entry has to be found by name rather than taken as plugins[0], and a
+        # version that drifts from plugin.json is a live risk per plugin.
         with open(REPO / ".claude-plugin" / "plugin.json",
                   encoding="utf-8") as f:
             plugin = json.load(f)
-        with open(REPO / ".claude-plugin" / "marketplace.json",
+        with open(REPO.parent.parent / ".claude-plugin" / "marketplace.json",
                   encoding="utf-8") as f:
             market = json.load(f)
         self.assertEqual(plugin["name"], "foreground-guard")
-        entry = market["plugins"][0]
-        self.assertEqual(entry["name"], plugin["name"])
+        entry = next((p for p in market["plugins"]
+                      if p["name"] == "foreground-guard"), None)
+        self.assertIsNotNone(entry, "marketplace.json does not list this plugin")
         self.assertEqual(entry["version"], plugin["version"])
-        self.assertEqual(entry["source"]["repo"],
-                         "karlkfi/claude-foreground-guard")
+        self.assertEqual(entry["source"], "./plugins/foreground-guard")
 
 
 if __name__ == "__main__":

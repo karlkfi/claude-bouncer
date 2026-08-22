@@ -73,6 +73,11 @@ import re
 import shlex
 import subprocess
 import sys
+
+# The parsing primitives every claude-bouncer guard shares. The copy under this
+# plugin's `lib/` is vendored from the repository root; see scripts/sync-lib.py.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
+from bouncer_parse import ASSIGNMENT_RE, PUNCT_CHARS, strip_heredoc_bodies  # noqa: E402
 import time
 
 # ---------------------------------------------------------------------------
@@ -251,12 +256,6 @@ def classify(value):
 # Shell parsing: raw command string -> simple commands
 # ---------------------------------------------------------------------------
 
-# Every char shlex treats as punctuation with punctuation_chars enabled.
-# A token built only from these is a separator/operator run, never a word.
-PUNCT_CHARS = frozenset(';()<>|&\n')
-
-ASSIGNMENT_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
-
 # Shells whose `-c <string>` argument is itself a command to evaluate.
 SHELL_NAMES = frozenset({'bash', 'sh', 'zsh', 'dash', 'ksh'})
 
@@ -371,14 +370,33 @@ def tokenize(raw):
     punctuation chars and act as separators). Rewriting inside quotes only
     ever creates extra segments to inspect, never hides one. Returns None on
     unbalanced quotes (caller defers: fail-open on parse errors)."""
-    raw = strip_quoted_heredocs(raw)
+    expanded = []
+    raw = strip_heredoc_bodies(raw, expanded, expanded)
     raw = raw.replace('`', ';').replace('\n', ';')
-    lex = shlex.shlex(raw, posix=True, punctuation_chars=';()<>|&\n')
-    lex.whitespace_split = True
     try:
-        return list(lex)
+        tokens = _lex_semicolons(raw)
+        # Every body is stripped above, so the ones this guard still has to see
+        # come back through the out-lists and are appended as their own
+        # segments: the ones bash would EXPAND, and the ones whose terminator
+        # never appeared. Dropping either would hide a `kubectl delete` written
+        # inside a heredoc -- a false negative, the one direction this guard
+        # must not move in, and an unterminated body is malformed input, where
+        # judging the text beats trusting the friendlier reading. They are
+        # appended rather than left inline because a body is data: an
+        # apostrophe in one would otherwise open a quote for the rest of the
+        # command.
+        for body in expanded:
+            tokens.append(';')
+            tokens.extend(_lex_semicolons(body.replace('`', ';').replace('\n', ';')))
+        return tokens
     except ValueError:
         return None
+
+
+def _lex_semicolons(raw):
+    lex = shlex.shlex(raw, posix=True, punctuation_chars=';()<>|&\n')
+    lex.whitespace_split = True
+    return list(lex)
 
 
 def split_simple_commands(tokens):

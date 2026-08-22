@@ -27,6 +27,9 @@ from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "scripts" / "bash-workspace-guard.py"
+# The marketplace manifest lives at the monorepo root, one per repo
+# rather than one per plugin; the entry's `source` points back here.
+MARKETPLACE = REPO.parent.parent / ".claude-plugin" / "marketplace.json"
 
 
 def sh(path):
@@ -7931,12 +7934,20 @@ class PluginWiringTests(unittest.TestCase):
         self.assertIn("version", data)
 
     def test_marketplace_json_valid_and_lists_plugin(self):
-        data = self._load_json(".claude-plugin/marketplace.json")
-        names = [p.get("name") for p in data.get("plugins", [])]
-        self.assertIn(
-            "workspace-guard", names,
-            "marketplace.json does not list the workspace-guard plugin",
-        )
+        self.assertTrue(MARKETPLACE.is_file(), f"missing {MARKETPLACE}")
+        with open(MARKETPLACE) as f:
+            data = json.load(f)
+        entry = next((p for p in data.get("plugins", [])
+                      if p.get("name") == "workspace-guard"), None)
+        self.assertIsNotNone(
+            entry, "marketplace.json does not list the workspace-guard plugin")
+        # The source is what actually resolves at install time: a name listed
+        # against a path that no longer exists installs nothing.
+        self.assertEqual(entry.get("source"), "./plugins/workspace-guard")
+        self.assertTrue((MARKETPLACE.parent.parent / "plugins" /
+                         "workspace-guard" / ".claude-plugin" /
+                         "plugin.json").is_file(),
+                        "marketplace source path has no plugin.json")
 
 
 class CIWiringTests(unittest.TestCase):

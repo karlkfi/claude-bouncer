@@ -863,10 +863,19 @@ class TestSegmentation(unittest.TestCase):
         pg.strip_heredoc_bodies("echo \"$(cat <<'MSG'\nbody\nMSG\n)\"", expanded)
         self.assertEqual([], expanded)
 
-    def test_an_unterminated_substitution_strips_nothing(self):
-        """No balanced `)` means no body to recurse into -- quiet, not a crash."""
+    def test_an_unterminated_substitution_still_strips_the_body(self):
+        """An unterminated `$(` is quiet, not a crash -- and still sees the heredoc.
+
+        The old copy pre-scanned for the balanced `)` and gave up without one,
+        leaving the body in place. The shared parser tracks context as it goes,
+        so there is nothing to give up on: the body is dropped to end-of-input,
+        which is what bash does with an unterminated heredoc. That is also the
+        answer this guard wants -- `make check | tail` written inside a body is
+        data, and a copy of it left in the cleaned text is precisely the false
+        positive stripping bodies exists to prevent.
+        """
         cmd = 'echo "$(cat <<EOF\nmake check | tail\nEOF'
-        self.assertEqual(cmd, pg.strip_heredoc_bodies(cmd))
+        self.assertEqual('echo "$(cat <<EOF\n', pg.strip_heredoc_bodies(cmd))
 
     def test_redirect_targets_leave_the_head(self):
         segs = self.segs('make check > tmp/out.log 2>&1')

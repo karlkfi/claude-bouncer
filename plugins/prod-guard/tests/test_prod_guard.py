@@ -2892,13 +2892,19 @@ class WiringTests(unittest.TestCase):
         self.assertTrue(SCRIPT.exists())
 
     def test_plugin_and_marketplace_versions_match(self):
+        # One manifest at the monorepo root lists all five guards, so the entry
+        # is found by name rather than taken as plugins[0].
         with open(REPO / ".claude-plugin" / "plugin.json", encoding="utf-8") as f:
             plugin = json.load(f)
-        with open(REPO / ".claude-plugin" / "marketplace.json", encoding="utf-8") as f:
+        with open(REPO.parent.parent / ".claude-plugin" / "marketplace.json",
+                  encoding="utf-8") as f:
             market = json.load(f)
         self.assertEqual(plugin["name"], "prod-guard")
-        self.assertEqual(market["plugins"][0]["name"], "prod-guard")
-        self.assertEqual(plugin["version"], market["plugins"][0]["version"])
+        entry = next((p for p in market["plugins"]
+                      if p["name"] == "prod-guard"), None)
+        self.assertIsNotNone(entry, "marketplace.json does not list this plugin")
+        self.assertEqual(plugin["version"], entry["version"])
+        self.assertEqual(entry["source"], "./plugins/prod-guard")
 
     def test_friction_report_command_points_at_script(self):
         # The read-only analyzer command must invoke the real script name.
