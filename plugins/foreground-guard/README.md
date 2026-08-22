@@ -421,15 +421,19 @@ prompts?" to trigger it.
 
 With default config this section changes nothing: both classes already deny in
 every mode. It matters once you have set `"action": "ask"` on a class, because
-three modes cannot deliver the prompt you asked for — so a de-escalated `ask`
+two modes cannot deliver the prompt you asked for — so a de-escalated `ask`
 is emitted as a `deny` again there.
 
 | Mode | What Claude Code does with a hook `ask` |
 | --- | --- |
-| `default`, `acceptEdits`, `plan` | prompts you — the supervised posture works as intended |
-| `auto` | prompts you *anyway*, interrupting the run you chose not to babysit |
+| `default`, `acceptEdits`, `plan`, `auto` | prompts you — the supervised posture works as intended |
 | `dontAsk` | converts it to its own generic deny, dropping the guard's reason |
 | `bypassPermissions` | leaves the run stalled on a prompt no one can answer |
+
+**`auto` is on the attended side despite its name.** The prompt reaches you and
+somebody answers it, so converting it removed the human rather than protecting
+them — and setting `"action": "ask"` is a request to be prompted, which is the
+more specific signal. branch-guard made the same move in its v1.7.0.
 
 A `deny` blocks the same way but returns the reason to the agent, which reads
 the fix and retries with one snapshot, a Monitor, or a `timeout` bound — no
