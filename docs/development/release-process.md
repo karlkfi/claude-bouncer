@@ -241,17 +241,13 @@ second parent came from the old repository.
 ## Where the notes live
 
 `plugins/<name>/docs/releases/vX.Y.Z.md`, one file per tag, holding the body
-verbatim with no title heading. workspace-guard, branch-guard, and
-exit-status-guard have the directory and a README stating the convention.
-prod-guard and foreground-guard have neither: copy
-[`plugins/workspace-guard/docs/releases/README.md`](../../plugins/workspace-guard/docs/releases/README.md)
-when you cut their first release and substitute the plugin name throughout. It
-is the fullest of the three — what a file is, how to publish, why a fix goes in
-the file rather than the web form, and how to verify — and nothing in it is
-true of workspace-guard alone. Every guard released from a retired repository
-before the move, so what it says about correcting an older body there, and
-about which repository the verify script falls back to, carries over with the
-name changed.
+verbatim with no title heading. All five plugins have the directory and a
+README stating the convention — what a file is, how to publish, why a fix goes
+in the file rather than the web form, and how to verify. Read the one under the
+plugin you are releasing rather than a sibling's. Every guard released from a
+retired repository before the move, so each README names its own: which
+repository an older body is corrected in, and which one the verify script falls
+back to for a bare `vX.Y.Z` tag.
 
 Close the body with the compare link, both ends prefixed:
 
