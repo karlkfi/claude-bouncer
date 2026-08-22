@@ -37,9 +37,9 @@ From the repository root — every plugin, or just the ones named as arguments:
 scripts/verify-release-notes.sh branch-guard
 ```
 
-A release cut from this repository is tagged `branch-guard/vX.Y.Z`. Notes files predating the move were published from
-`karlkfi/claude-branch-guard` as a bare `vX.Y.Z` and still resolve there, so the script checks each
-file against whichever of the two published it.
+A release cut from this repository is tagged `branch-guard/vX.Y.Z`. Notes files predating the
+move were published from `karlkfi/claude-branch-guard` as a bare `vX.Y.Z` and still resolve
+there, so the script checks each file against whichever of the two published it.
 
 The comparison is byte-exact, so it also catches a trailing newline appearing or disappearing.
 Do not hand-roll it with `--json body --jq .body`: `--jq` appends a newline unconditionally, so

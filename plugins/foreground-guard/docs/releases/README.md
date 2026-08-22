@@ -22,7 +22,7 @@ every file here does; a body published without one would be stored without one. 
 Publishing is therefore a copy, and re-publishing is idempotent:
 
 ```bash
-gh release edit 'workspace-guard/v1.10.1' --notes-file plugins/workspace-guard/docs/releases/v1.10.1.md
+gh release edit 'foreground-guard/v0.5.2' --notes-file plugins/foreground-guard/docs/releases/v0.5.2.md
 ```
 
 ## Fix a mistake in the file, not on the website
@@ -30,18 +30,18 @@ gh release edit 'workspace-guard/v1.10.1' --notes-file plugins/workspace-guard/d
 Editing a body in the web UI puts it out of sync with the file, and the next `--notes-file`
 publish silently reverts it. Correct the file, open a pull request (PR) like any other docs
 change, and re-publish from it after merge. A body published from
-`karlkfi/claude-workspace-guard` is corrected there, with `--repo` and its bare `vX.Y.Z` tag.
+`karlkfi/claude-foreground-guard` is corrected there, with `--repo` and its bare `vX.Y.Z` tag.
 
 ## Verifying
 
 From the repository root — every plugin, or just the ones named as arguments:
 
 ```bash
-scripts/verify-release-notes.sh workspace-guard
+scripts/verify-release-notes.sh foreground-guard
 ```
 
-A release cut from this repository is tagged `workspace-guard/vX.Y.Z`. Notes files predating the
-move were published from `karlkfi/claude-workspace-guard` as a bare `vX.Y.Z` and still resolve
+A release cut from this repository is tagged `foreground-guard/vX.Y.Z`. Notes files predating the
+move were published from `karlkfi/claude-foreground-guard` as a bare `vX.Y.Z` and still resolve
 there, so the script checks each file against whichever of the two published it.
 
 The comparison is byte-exact, so it also catches a trailing newline appearing or disappearing.
