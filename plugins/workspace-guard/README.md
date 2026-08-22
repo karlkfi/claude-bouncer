@@ -148,6 +148,9 @@ old one. A different project's scratch still asks entirely.
 | `tail /tmp/claude-501/<this-project>/<sibling-session>/…` (sibling read) | allow |
 | `echo x > /tmp/claude-501/<this-project>/<sibling-session>/scratchpad/f` (sibling write) | **deny** |
 | `f=notes.md; cat $f`                 | allow    |
+| `for f in docs/*.md; do cat $f; done` | allow   |
+| `for f in docs/*.md; do echo "$(wc -l < "$f")"; done` (loop var inside a substitution) | defer |
+| `for f in docs/*.md /etc/hosts; do echo "$(cat "$f")"; done` | **ask** |
 | `d=sub; cd $d && cat x.txt`          | allow    |
 | `cp x "$(git rev-parse --show-toplevel)/backup/"` | allow |
 | `cat "$(pwd)/notes.md"`              | allow    |
@@ -210,7 +213,7 @@ old one. A different project's scratch still asks entirely.
 | `f=$HOME/x; cat $f` (non-literal value) | **deny** |
 | `cat $TMPDIR/out.log`                | **deny** |
 | `cd $HOME && cat notes.md` (untracked `cd`) | **deny** |
-| `cat $f /etc/hosts` (also names an outside path) | **ask** |
+| `cat $f /etc/hosts` (also names an outside path) | **deny** |
 | `rm -rf <sibling-worktree>` (the whole checkout) | **deny** |
 | `rm ~/.claude/skills/x` (a symlink into a sibling) | **ask** |
 | `rm <link-to-sibling>/main.go` (real file inside) | **deny** |
@@ -860,6 +863,15 @@ through the same boundary rules and produce the same reasons. Symlink staging
    poison rather than truncate — a checked prefix would say nothing about the
    candidates past it.
 
+   The binding also reaches into a **command substitution** inside the loop, so
+   `for f in docs/*.md; do echo "$(wc -l < "$f")"; done` resolves the same `$f`
+   the loop body would. That scan runs once for the whole command string and
+   has no position to snapshot at, so where two loops bind one name it answers
+   for the *union* of both value sets — a superset of either, which can only
+   find more paths, never fewer. A name that is reassigned as a scalar, re-bound
+   by `read`, or bound to a list the hook can't read is not carried at all:
+   once no binding describes it, leaving the token unexpanded is what blocks it.
+
    Lists with a non-literal item (a `$` the hook can't resolve, command
    substitution, or brace like `{a,b}` — brace-expanded by bash, so the literal
    string isn't a stand-in for the real paths), the `for VAR; do …` ("$@")
@@ -1418,8 +1430,19 @@ The agent applies that in its own loop and nobody is interrupted.
 This does not move the boundary — it moves the question to where it can be
 answered. A rewritten literal that turns out to land outside the root comes
 back as an ordinary outside-workspace `ask`, now naming a path you can actually
-judge. A command carrying both an unreadable argument *and* a resolved outside
-path keeps its `ask`, since the second half is still owed a human.
+judge.
+
+A command carrying both an unreadable argument *and* a resolved outside path
+denies on the unreadable one. The boundary question the outside path raises is
+still owed a human; it arrives one step later, on a command whose every token
+is literal, which is the only version a person at the prompt can judge. Asking
+first would spend their attention on a string half of which nobody there can
+resolve, and leave the rewrite unapplied. The reason names both, so the fix and
+the boundary question reach the agent in a single pass.
+
+This is also what keeps the verdict monotonic: adding an offender to a command
+never softens its decision. While the deny required *every* offender to be
+unreadable, `cat $f` denied and `cat $f /etc/hosts` asked.
 
 ### Outside-workspace ask vs. deny
 
@@ -1521,7 +1544,10 @@ final output.
   candidates; one outside item taints the loop. Lists with any non-literal item,
   the `for VAR; do …` ("$@") form, the `for ((…))` arithmetic form, and a loop
   variable reassigned inside the body all keep today's behavior. As with
-  assignments, this only ever adds allows for the exact values bash iterates.
+  assignments, this only ever adds allows for the exact values bash iterates —
+  with one deliberate exception: a command substitution is scanned once for the
+  whole string, so a name two loops bind is checked against the union of both
+  value sets there. That errs toward finding a path, never away from one.
 - A glob item stands for its whole expansion rather than being enumerated, so a
   loop over one is exactly as strong as the same glob written into a file
   argument directly — no more and no less. In particular, `realpath` can't see
