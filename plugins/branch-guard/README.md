@@ -4,6 +4,8 @@
 
 [![release](https://img.shields.io/github/v/release/karlkfi/claude-branch-guard)](https://github.com/karlkfi/claude-branch-guard/releases) [![tests](https://img.shields.io/github/actions/workflow/status/karlkfi/claude-bouncer/tests.yml?branch=main&label=tests)](https://github.com/karlkfi/claude-bouncer/actions/workflows/tests.yml) [![License: MIT](https://img.shields.io/github/license/karlkfi/claude-bouncer.svg)](LICENSE) [![Claude Code plugin](https://img.shields.io/badge/Claude_Code-plugin-7e57c2)](#install)
 
+![branch-guard: branch-aware git permissions for Claude Code](docs/img/social-preview.png)
+
 > Let Claude commit and push all day on feature branches. Pause it at `main`.
 
 Claude finishes a task and runs `git add -A && git commit -m "fix" && git push` —

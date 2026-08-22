@@ -4,6 +4,8 @@
 
 [![tests](https://img.shields.io/github/actions/workflow/status/karlkfi/claude-bouncer/tests.yml?branch=main&label=tests)](https://github.com/karlkfi/claude-bouncer/actions/workflows/tests.yml) [![License: MIT](https://img.shields.io/github/license/karlkfi/claude-bouncer.svg)](LICENSE) [![Claude Code plugin](https://img.shields.io/badge/Claude_Code-plugin-7e57c2)](#install)
 
+![foreground-guard: main-thread time guard rails for Claude Code Bash commands](docs/img/social-preview.png)
+
 > The main thread is the one you're talking to. Don't let it sit and watch
 > paint dry — and don't let a 10-minute test run get killed at minute 2.
 

@@ -117,5 +117,5 @@ When working on specific tasks, read the relevant doc before starting:
 | Plugin packaging / marketplace listing | `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` |
 | Cutting a release (version bump, notes file, tag, GitHub Release) | `docs/development/release-process.md` |
 | Measuring where prompts accumulate (friction review) | `docs/development/measuring-friction.md` + `scripts/friction-report.py` |
-| Rendering or regenerating brand images (social preview, favicon) | `docs/development/rendering-images.md` |
+| Rendering or regenerating brand images (social preview, favicon) | `../../docs/development/rendering-images.md` — one procedure for all six asset directories |
 | Hook registration | `hooks/hooks.json` |

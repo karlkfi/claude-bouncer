@@ -62,10 +62,13 @@ class VersionCheckGateTests(unittest.TestCase):
             json.dump({'plugins': [{'name': n, 'version': v}
                                    for n, v in sorted(marketplace.items())]}, f)
 
-        rows = '\n'.join('| [%s](plugins/%s) | %s | what it stops |' % (n, n, v)
+        rows = '\n'.join(self.readme_row(n, v)
                          for n, v in sorted(readme.items()))
         with open(os.path.join(self.tmp, 'README.md'), 'w') as f:
             f.write(README % rows)
+
+    def readme_row(self, name, version):
+        return '| [%s](plugins/%s) | %s | what it stops |' % (name, name, version)
 
     def run_check(self):
         return subprocess.run(
@@ -126,6 +129,20 @@ class VersionCheckGateTests(unittest.TestCase):
         self.assertEqual(1, r.returncode, r.stdout + r.stderr)
         self.assertIn('beta-guard', r.stderr)
         self.assertIn('plugin.json=-', r.stdout)
+
+
+class IconColumnGateTests(VersionCheckGateTests):
+    """Every case above, against the row shape the README actually ships.
+
+    The guards table leads each row with the plugin's icon, so the version is
+    no longer the second cell. Running the whole suite against that shape is
+    what stops a row regex that only reads the bare form from passing here.
+    """
+
+    def readme_row(self, name, version):
+        return ('| <img src="plugins/%s/docs/img/favicon-48.png" width="24" alt=""> '
+                '| [%s](plugins/%s) | %s | what it stops |'
+                % (name, name, name, version))
 
 
 class RealTreeTests(unittest.TestCase):

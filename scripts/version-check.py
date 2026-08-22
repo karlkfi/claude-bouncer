@@ -32,8 +32,9 @@ MISSING = '-'
 
 # A row of the README's guards table: the plugin's linked name, then the
 # version cell. Anchored on the link so prose tables elsewhere cannot match.
+# One cell may precede the name -- the table leads with the plugin's icon.
 ROW_RE = re.compile(
-    r'^\|\s*\[(?P<name>[^\]]+)\]\([^)]*\)\s*\|\s*(?P<version>[^|\s]+)\s*\|',
+    r'^\|(?:[^|]*\|)?\s*\[(?P<name>[^\]]+)\]\([^)]*\)\s*\|\s*(?P<version>[^|\s]+)\s*\|',
     re.M)
 
 
