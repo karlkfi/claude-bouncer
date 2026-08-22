@@ -481,34 +481,33 @@ python3 scripts/friction-report.py --since 30d --repo gateway --top 20
 ## Companion plugins
 
 exit-status-guard watches the **evidence** boundary — whether a command's
-result can still be read after the shell is done with it. Sibling plugins guard
-different axes with the same secure-by-default design:
+result can still be read after the shell is done with it. Its siblings guard other axes
+with the same secure-by-default design:
 
 - [**workspace-guard**](https://github.com/karlkfi/claude-bouncer) — the
   **filesystem** boundary: prompts before guarded file commands
   (`grep`/`sed`/`cat`/`cp`/`rm`/…) read or write paths outside the project root.
 - [**branch-guard**](https://github.com/karlkfi/claude-bouncer) — the **git
   history** boundary: auto-approves safe git on feature branches, pauses commits
-  and pushes to `main` and destructive git. It also owns the check for a `git
-  push` onto a base that has moved into this branch's own lines, which
-  exit-status-guard carried briefly and never released.
+  and pushes to `main` and destructive git.
 - [**prod-guard**](https://github.com/karlkfi/claude-bouncer) — the
   **infrastructure blast-radius** boundary: denies mutations aimed at production
   contexts.
-- [**foreground-guard**](https://github.com/karlkfi/claude-bouncer) —
-  the **liveness** boundary: keeps blocking commands from stalling a session.
+- [**foreground-guard**](https://github.com/karlkfi/claude-bouncer) — the
+  **liveness** boundary: keeps polling, watching, and blocking commands from
+  stalling the session's main thread.
 - [**pr-sentinel**](https://github.com/karlkfi/claude-pr-sentinel) — the
   **review** boundary: watches a PR to green without merging it, and denies a
   `gh pr create` whose branch edits lines an open PR already changes.
 
 They run side by side; each defers to normal permissions outside its own axis.
+The guards share one marketplace —
+[`karlkfi/claude-bouncer`](https://github.com/karlkfi/claude-bouncer#install)
+lists the install line for each — and pr-sentinel ships from its own.
 
-```
-/plugin marketplace add karlkfi/claude-bouncer
-/plugin install workspace-guard@claude-bouncer
-/plugin marketplace add karlkfi/claude-bouncer
-/plugin install branch-guard@claude-bouncer
-```
+branch-guard also owns the check for a `git push` onto a base that has moved
+into this branch's own lines, which exit-status-guard carried briefly and never
+released.
 
 ## Design
 
