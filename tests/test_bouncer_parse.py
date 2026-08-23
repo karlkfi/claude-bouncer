@@ -137,6 +137,65 @@ class CommandSubstitutionTests(unittest.TestCase):
         self.assertEqual([], bp.command_substitutions('echo $((1+2))'))
 
 
+class CasePatternScanTests(unittest.TestCase):
+    """A `case` pattern's `)` needs no opener, so it must not end a `$(…)` (Q81).
+
+    Every command here was run under bash 5.3 while these were written: each
+    prints its clause's output followed by the `T` after the substitution,
+    which is what says bash read the whole clause as inside it. Only bash 3.2
+    agrees with the pre-fix reading, where the body came back as `case $x in a`
+    and the clause -- heredocs included -- was never scanned.
+    """
+    def test_bare_pattern_does_not_close_the_substitution(self):
+        self.assertEqual(['case $x in a) cat /etc/passwd;; esac'],
+                         bp.command_substitutions(
+                             'echo "$(case $x in a) cat /etc/passwd;; esac)" T'))
+
+    def test_parenthesised_pattern_still_works(self):
+        self.assertEqual(['case $x in (a) cat /etc/passwd;; esac'],
+                         bp.command_substitutions(
+                             'echo "$(case $x in (a) cat /etc/passwd;; esac)" T'))
+
+    def test_every_clause_terminator_returns_to_a_pattern(self):
+        for term in (';;', ';&', ';;&'):
+            body = 'case $x in a) echo P%s b) cat /etc/passwd;; esac' % term
+            self.assertEqual([body],
+                             bp.command_substitutions('echo "$(%s)" T' % body),
+                             term)
+
+    def test_a_nested_case_closes_only_its_own_clause(self):
+        body = 'case $x in a) case $y in b) cat /etc/passwd;; esac;; esac'
+        self.assertEqual([body], bp.command_substitutions('echo "$(%s)" T' % body))
+
+    def test_esac_may_stand_where_a_pattern_would(self):
+        # `case $x in esac` is a clause with no patterns, so the next `)` is
+        # the substitution's own.
+        self.assertEqual(['case $x in esac'],
+                         bp.command_substitutions('echo "$(case $x in esac)" T'))
+
+    def test_a_quoted_pattern_keeps_its_paren_literal(self):
+        body = 'case $x in "a)b") cat /etc/passwd;; esac'
+        self.assertEqual([body], bp.command_substitutions('echo "$(%s)" T' % body))
+
+    def test_case_is_a_keyword_only_in_command_position(self):
+        # `echo case` passes an operand. Reading it as the keyword would swallow
+        # the real close and drop a substitution that reads fine today.
+        for body in ('echo case', 'grep -c case /dev/null', 'echo esac in case'):
+            self.assertEqual([body],
+                             bp.command_substitutions('echo "$(%s)" T' % body), body)
+
+    def test_a_keyword_reopens_command_position(self):
+        body = 'if true; then case $x in a) cat /etc/passwd;; esac; fi'
+        self.assertEqual([body], bp.command_substitutions('echo "$(%s)" T' % body))
+
+    def test_a_heredoc_in_a_clause_is_reached(self):
+        # The gap this closes: the clause body was never scanned, so a heredoc
+        # written there went with it. An odd quote in that body is a separate
+        # mechanism and still stops the scan -- Q109.
+        body = "case $x in a) cat <<EOF\n$(cat /etc/passwd)\nEOF\n;; esac"
+        self.assertEqual([body], bp.command_substitutions('echo "$(%s)" T' % body))
+
+
 class CommandHeadTests(unittest.TestCase):
     def test_env_prefix_is_peeled(self):
         self.assertEqual(['cmd', 'arg'], bp.strip_env_prefix(['A=1', 'B=2', 'cmd', 'arg']))

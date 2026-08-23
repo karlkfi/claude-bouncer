@@ -4125,6 +4125,71 @@ class QuotedSubstBodyEndToEndTests(unittest.TestCase):
         self._defer('echo "$((1 + 2))"')
 
 
+class CaseClauseSubstEndToEndTests(unittest.TestCase):
+    """Q81: a `case` pattern's `)` must not end the substitution around it.
+
+    Pre-fix the body came back as `case $x in a`, so everything the clause ran
+    was invisible and the string deferred -- no prompt, on a command bash 5.x
+    and zsh run in full. The parenthesised `(a)` form already worked, its
+    opener balancing the terminator, which is what kept the gap to the bare
+    form and out of sight.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = os.path.realpath(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _asks_about_target(self, cmd):
+        out = run_hook(cmd, self.workspace, project_dir=self.workspace)
+        self.assertIsNotNone(out, f"expected a decision, got defer for: {cmd!r}")
+        reason = out["hookSpecificOutput"].get("permissionDecisionReason")
+        self.assertEqual("ask", out["hookSpecificOutput"]["permissionDecision"],
+                         f"for {cmd!r} (reason: {reason!r})")
+        self.assertIn("/etc/q81-fake-target", reason)
+
+    def test_bare_pattern_clause_is_scanned(self):
+        self._asks_about_target(
+            'echo "$(case $x in a) cat /etc/q81-fake-target;; esac)"')
+
+    def test_parenthesised_pattern_clause_agrees(self):
+        # The form that already worked, asserted beside the one that did not so
+        # a later edit cannot fix one and drop the other.
+        self._asks_about_target(
+            'echo "$(case $x in (a) cat /etc/q81-fake-target;; esac)"')
+
+    def test_a_later_clause_is_scanned(self):
+        self._asks_about_target(
+            'echo "$(case $x in a) echo hi;; *) cat /etc/q81-fake-target;; esac)"')
+
+    def test_a_heredoc_in_a_clause_no_longer_hides_the_rest(self):
+        # The row's own measurement: a clause carrying a heredoc was silent,
+        # because the clause was never reached to begin with.
+        self._asks_about_target(
+            'echo "$(case $x in a) cat <<EOF\nplain body\nEOF\n'
+            'cat /etc/q81-fake-target;; esac)"')
+
+    def test_an_odd_quote_in_that_heredoc_still_hides_it(self):
+        # Q109, the residual: `_scan_dollar_paren` tracks quotes but not
+        # heredocs, so the apostrophe opens a run that never closes and the
+        # scan gives up on the whole substitution. Pinned rather than left
+        # unasserted -- the fix for Q109 flips this to an ask, and should have
+        # to say so.
+        cmd = ('echo "$(case $x in a) cat <<EOF\nit\'s fine\nEOF\n'
+               'cat /etc/q81-fake-target;; esac)"')
+        self.assertIsNone(run_hook(cmd, self.workspace, project_dir=self.workspace))
+
+    def test_case_as_an_operand_is_not_a_clause(self):
+        # Reading `case` here as the keyword would swallow the real close and
+        # drop a substitution the hook reads correctly today. Passes either way
+        # -- it is the regression guard on the command-position rule, not a
+        # test of the fix.
+        self._asks_about_target(
+            'echo "$(grep -c case /etc/q81-fake-target)"')
+
+
 class SubstBodyVarPropagationTests(unittest.TestCase):
     """Q66: a substitution body inherits the string's literal variables.
 
