@@ -1397,13 +1397,17 @@ class MsysRootDiscoveryTests(unittest.TestCase):
 
 
 def run_hook(cmd, cwd, project_dir=None, permission_mode=None, session_id=None,
-             env_extra=None):
+             env_extra=None, tool_name=None):
     """Invoke the hook as a subprocess. Returns parsed JSON or None on defer.
 
     `env_extra` overrides/adds environment variables for the subprocess — used
     to exercise `$TMPDIR` resolution and the `WORKSPACE_GUARD_TMP_*` config
     knobs. A value of None deletes the key from the inherited environment so a
-    test can clear an inherited `$TMPDIR`."""
+    test can clear an inherited `$TMPDIR`.
+
+    `tool_name` is omitted from the payload unless given, which is the shape
+    every existing caller sends and routes to Bash handling. Pass it to reach
+    another frontend, or to assert two frontends agree."""
     env = os.environ.copy()
     env["CLAUDE_PROJECT_DIR"] = project_dir or cwd
     for k, v in (env_extra or {}).items():
@@ -1412,6 +1416,8 @@ def run_hook(cmd, cwd, project_dir=None, permission_mode=None, session_id=None,
         else:
             env[k] = v
     data = {"tool_input": {"command": cmd}, "cwd": cwd}
+    if tool_name is not None:
+        data["tool_name"] = tool_name
     if permission_mode is not None:
         data["permission_mode"] = permission_mode
     if session_id is not None:
@@ -9268,6 +9274,99 @@ class PowerShellTaskkillEndToEndTests(PowerShellKillFixture, unittest.TestCase):
     def test_an_offending_taskkill_outranks_a_clean_cmdlet(self):
         # Suppression removes the `allow`; it must not also swallow the deny.
         self._decision(r"Get-Content .\in.txt; taskkill /IM node.exe", "deny")
+
+
+class PowerShellInterpreterSuppressesAllowTests(unittest.TestCase):
+    """PowerShell withholds `allow` from interpreter code, as bash does (Q73).
+
+    Q72 fixed this for bash and the PowerShell frontend kept vouching:
+    `Get-Content .\\README.md; python3 -c '…'` returned `allow`, and `allow`
+    speaks for the WHOLE string, so a clean cmdlet was short-circuiting the
+    user's own permission settings on code the hook cannot read.
+
+    The pairs below are the point. Each asserts the two frontends reach the SAME
+    decision on the same shape, because a divergence is what the item is about
+    -- an assertion naming only PowerShell would pass just as well if bash
+    drifted to meet it.
+
+    Withheld, never escalated: these land on `defer`, which is what bash does.
+    Raising an `ask` would absorb Q74, a separate item. Targets are synthetic
+    (repo rule); nothing here is executed.
+    """
+
+    PY = "import os"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = os.path.realpath(self._tmp.name)
+        os.makedirs(os.path.join(self.workspace, "scripts"))
+        for rel in ("README.md", "scripts/run.py"):
+            with open(os.path.join(self.workspace, rel), "w") as f:
+                f.write("hi\n")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _decision(self, tool, cmd):
+        out = run_hook(cmd, self.workspace, project_dir=self.workspace,
+                       tool_name=tool)
+        if out is None:
+            return "defer"
+        return out["hookSpecificOutput"]["permissionDecision"]
+
+    def _agree(self, ps, bash, expected):
+        got_ps = self._decision("PowerShell", ps)
+        got_sh = self._decision("Bash", bash)
+        self.assertEqual(got_ps, expected, f"PowerShell {ps!r}")
+        self.assertEqual(got_sh, expected, f"Bash {bash!r}")
+
+    def test_inline_code_suppresses_the_allow_on_both(self):
+        self._agree("Get-Content .\\README.md; python3 -c '%s'" % self.PY,
+                    "cat ./README.md; python3 -c '%s'" % self.PY, "defer")
+
+    def test_the_e_spelling_suppresses_too(self):
+        self._agree("Get-Content .\\README.md; node -e 'console.log(1)'",
+                    "cat ./README.md; node -e 'console.log(1)'", "defer")
+
+    def test_a_repl_with_no_operand_suppresses(self):
+        self._agree("Get-Content .\\README.md; python3",
+                    "cat ./README.md; python3", "defer")
+
+    def test_a_stdin_dash_suppresses(self):
+        self._agree("Get-Content .\\README.md; python3 -",
+                    "cat ./README.md; python3 -", "defer")
+
+    def test_a_workspace_resident_script_still_vouches(self):
+        # Repo-resident code is what the boundary already trusts. Without this
+        # exemption the rule costs far more friction than it buys.
+        self._agree("Get-Content .\\README.md; python3 .\\scripts\\run.py",
+                    "cat ./README.md; python3 ./scripts/run.py", "allow")
+
+    def test_a_query_flag_runs_no_code_and_still_vouches(self):
+        self._agree("Get-Content .\\README.md; python3 --version",
+                    "cat ./README.md; python3 --version", "allow")
+
+    def test_interpreter_code_on_another_host_is_left_alone(self):
+        # `ssh h python3 -c …` runs elsewhere, so the local boundary has no
+        # claim on it -- the locality rule `shell_c_bodies` already applies.
+        self._agree("Get-Content .\\README.md; ssh h python3 -c '%s'" % self.PY,
+                    "cat ./README.md; ssh h python3 -c '%s'" % self.PY, "allow")
+
+    def test_a_clean_cmdlet_alone_still_allows(self):
+        # The control: suppression must not reach a string with no interpreter
+        # in it, or the item would read as fixed while having broken the guard.
+        self._agree("Get-Content .\\README.md", "cat ./README.md", "allow")
+
+    def test_windows_spellings_of_the_interpreter_suppress(self):
+        # PowerShell resolves a command name case-insensitively and PATHEXT
+        # makes the extension optional, so these are one command. Matching only
+        # the bare lowercase spelling would leave the defect reachable on the
+        # one platform this frontend runs on.
+        for cmd in ("Get-Content .\\README.md; Python3.exe -c '%s'" % self.PY,
+                    "Get-Content .\\README.md; PYTHON3 -c '%s'" % self.PY,
+                    "Get-Content .\\README.md; .\\venv\\Scripts\\python.exe -c '%s'"
+                    % self.PY):
+            self.assertEqual(self._decision("PowerShell", cmd), "defer", cmd)
 
 
 class PowerShellEndToEndTests(unittest.TestCase):

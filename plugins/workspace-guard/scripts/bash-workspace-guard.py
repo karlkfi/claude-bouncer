@@ -1986,7 +1986,7 @@ def shell_c_bodies(tokens):
     return out
 
 
-def interp_code_source(tokens):
+def interp_code_source(tokens, name=None):
     """What an interpreter group runs, when `allow` must not speak for it.
 
     Returns None when the group runs no interpreter, or is not running one on
@@ -2007,15 +2007,23 @@ def interp_code_source(tokens):
     same reason: the group's command word must be the interpreter itself or a
     LOCAL_SHELL_WRAPPERS entry, so `kubectl exec p -- python3 -c …` and
     `ssh h python3 …` — whose code runs on another filesystem — are left alone.
+
+    `name` reduces a token to the command name to match on, defaulting to
+    `os.path.basename`. The PowerShell frontend passes `ps_command_name`, which
+    also splits a backslash path and drops a `.exe`: the question this answers
+    is identical on both frontends, and the spelling of a command word is not
+    (Q73). Only the name-matching goes through it — a script operand is
+    returned raw, because the caller resolves it as a path.
     """
     if not tokens:
         return None
-    head = os.path.basename(tokens[0])
+    namer = name or os.path.basename
+    head = namer(tokens[0])
     if head not in INTERP_CMDS and head not in SHELL_C_CMDS \
             and head not in LOCAL_SHELL_WRAPPERS:
         return None
     for i, t in enumerate(tokens):
-        base = os.path.basename(t)
+        base = namer(t)
         if base not in INTERP_CMDS and base not in SHELL_C_CMDS:
             continue
         # An interpreter takes its code from `-e`/`-c`; a shell only from `-c`
@@ -4374,6 +4382,38 @@ def ps_strip_head(words):
     return words
 
 
+# PowerShell resolves a command name case-insensitively, and Windows spells an
+# interpreter with an extension, so `Python3.exe` and `python3` are one command.
+# Mapping a token back to the canonical spelling lets the PowerShell frontend
+# reuse `interp_code_source`'s sets instead of keeping case-folded copies that
+# would drift from them (Q73).
+_PS_INTERP_CANON = {c.lower(): c for c in
+                    (INTERP_CMDS | SHELL_C_CMDS | LOCAL_SHELL_WRAPPERS)}
+
+# Extensions PATHEXT makes optional at the prompt. Dropping them can only widen
+# what counts as an interpreter, and a wider reading costs a defer where a
+# narrower one costs a silent `allow` -- the same direction the bash side takes
+# on an ambiguous short-option cluster.
+_PS_EXEC_SUFFIXES = ('.exe', '.cmd', '.bat', '.com')
+
+
+def ps_command_name(tok):
+    """Reduce a PowerShell command token to the name to match a command set on.
+
+    Splits on both separators -- PowerShell accepts either, and `os.path` splits
+    a backslash only when the host is Windows, which the test suite is not --
+    then folds case and drops a PATHEXT suffix. A token matching no known
+    command name comes back merely lowercased, so the caller's own set lookup
+    decides -- this narrows nothing on its own.
+    """
+    base = tok.replace('\\', '/').rsplit('/', 1)[-1].lower()
+    for suf in _PS_EXEC_SUFFIXES:
+        if base.endswith(suf):
+            base = base[:-len(suf)]
+            break
+    return _PS_INTERP_CANON.get(base, base)
+
+
 def ps_pid_list(tok):
     """True when `tok` is a literal pid or a comma-joined list of them."""
     return all(p.isdigit() for p in tok.split(','))
@@ -4517,9 +4557,10 @@ def ps_taskkill_offenders(words, tk, ctx):
 
 
 def ps_analyze_segment(tokens, ctx, cwd, cwd_unknown):
-    """Analyze one pipeline segment. Returns `(offenders, guarded, cwd,
+    """Analyze one pipeline segment. Returns `(offenders, guarded, signal, cwd,
     cwd_unknown)` — the trailing pair carries location tracking to the next
-    segment in the chain."""
+    segment in the chain, and `signal` withholds `allow` for the whole string
+    the way a kill does."""
     files, words, i, n = [], [], 0, len(tokens)
     while i < n:
         kind = tokens[i][0]
@@ -4548,6 +4589,61 @@ def ps_analyze_segment(tokens, ctx, cwd, cwd_unknown):
                 guarded = True
                 files.extend(ps_bind_args(words[1:], spec))
 
+    signal = False
+    if words:
+        # Same suppression the bash side applies, on the same question: `allow`
+        # speaks for the WHOLE string, so a clean `Get-Content` must not vouch
+        # for interpreter code sharing it. Withheld, not escalated -- the bash
+        # side lands such a string on `defer`, and raising an `ask` here would
+        # absorb Q74, which is a separate item with a narrower signal (Q73).
+        src = interp_code_source([w[1] for w in words], name=ps_command_name)
+        if src is not None:
+            kind, tok = src
+            if kind == 'inline':
+                signal = True
+            else:
+                # A script operand is a file the interpreter reads, so it is
+                # checked like any other read, and repo-resident code still
+                # vouches -- exempting it is what keeps this from costing far
+                # more friction than it buys. Only a path that resolves INSIDE
+                # the workspace vouches: an exempt prefix earns silence, not the
+                # hook's word for everything else in the string.
+                exp, quoted = next(((w[2], w[3]) for w in words if w[1] == tok),
+                                   (False, False))
+                files.append((tok, exp, quoted, 'read'))
+                if not ps_operand_inside(tok, exp, quoted, ctx, cwd,
+                                         cwd_unknown):
+                    signal = True
+
+    offenders = ps_file_offenders(files, ctx, cwd, cwd_unknown)
+    return offenders, guarded, signal, cwd, cwd_unknown
+
+
+def ps_operand_inside(tok, exp, quoted, ctx, cwd, cwd_unknown):
+    """True when every path part of `tok` resolves inside the project root.
+
+    Deliberately stricter than "raised no offender": a read under an exempt
+    prefix raises none either, and an exemption is a reason to stay quiet about
+    that path rather than a reason to vouch for the rest of the string.
+    """
+    if exp:
+        return False
+    parts = ps_path_parts(tok, quoted)
+    if not parts:
+        return False
+    for part in parts:
+        p = ps_expand_tilde(part)
+        if p.startswith('~'):
+            return False
+        if not ps_is_absolute(p) and cwd_unknown:
+            return False
+        if path_is_outside(ps_realpath(p, cwd), ctx.proj):
+            return False
+    return True
+
+
+def ps_file_offenders(files, ctx, cwd, cwd_unknown):
+    """Resolve bound file operands to offenders, one entry per path part."""
     offenders = []
     for tok, exp, quoted, role in files:
         if exp:
@@ -4567,7 +4663,7 @@ def ps_analyze_segment(tokens, ctx, cwd, cwd_unknown):
                 disp = part if ps_is_absolute(part) \
                     else offender_display(part, rp)
                 offenders.append((disp, res[0], res[1]))
-    return offenders, guarded, cwd, cwd_unknown
+    return offenders
 
 
 def ps_analyze_command(cmd, ctx, base_cwd, depth=0):
@@ -4605,10 +4701,11 @@ def _ps_analyze_command(cmd, ctx, base_cwd, depth=0):
     for tok in toks + [('op', ';', False, False)]:
         if tok[0] == 'op':
             if seg:
-                off, g, cwd, cwd_unknown = ps_analyze_segment(
+                off, g, sig, cwd, cwd_unknown = ps_analyze_segment(
                     seg, ctx, cwd, cwd_unknown)
                 offenders.extend(off)
                 guarded = guarded or g
+                signal = signal or sig
                 stmt.append(seg)
             seg = []
             # A kill never sets `guarded` itself, and clears anyone else's: an
