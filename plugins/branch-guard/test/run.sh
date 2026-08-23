@@ -715,12 +715,58 @@ git -C "$WORK" checkout -q main
 check "git reset --hard on protected -> ask" ask \
   "$(decision_for "$(bash_cmd 'git reset --hard HEAD~1')" "$WORK")"
 git -C "$WORK" checkout -q claude/x
-#     A tip nothing else reaches keeps the ask even with a clean worktree.
+#     A tip the probe PROVES nothing else reaches denies instead of asking,
+#     in every permission mode: the cause is a fact the model can settle with a
+#     `gh pr view`, which is the case that belongs in a reason rather than in a
+#     prompt. Crossed against the interactive mode, where the guard would
+#     otherwise have a human to ask.
 git -C "$WORK" checkout -q -b reset-orphan
 git -C "$WORK" commit -q --allow-empty -m "unreachable from anything"
-check "git reset --hard on an irrecoverable tip -> ask" ask \
+check "git reset --hard on an irrecoverable tip -> deny" deny \
   "$(decision_for "$(bash_cmd 'git reset --hard HEAD~1')" "$WORK")"
+check "[auto] git reset --hard on an irrecoverable tip -> deny" deny \
+  "$(decision_for "$(push_mode 'git reset --hard HEAD~1' 'auto')" "$WORK")"
+orphan_reason="$(reason_for "$(bash_cmd 'git reset --hard HEAD~1')" "$WORK")"
+#     hook-verdict's order: the runnable check first, the break-glass last. The
+#     deny is a dead end without both.
+check_text "irrecoverable-tip deny names the check that settles it" has \
+  'gh pr view' "$orphan_reason"
+check_text "irrecoverable-tip deny names the break-glass" has \
+  'BRANCH_GUARD_OVERRIDE=<reason>' "$orphan_reason"
+#     The break-glass still lifts it. `reset` is in OVERRIDABLE_GIT and the
+#     loss is the same local one, so promoting the verdict to a deny must not
+#     narrow what the override covers. The existing crossing at 26e is the
+#     `ask-shared` cell, where the lift is supposed to FAIL, so it does not
+#     cover this.
+check "override on reset --hard on an irrecoverable tip -> allow" allow \
+  "$(decision_for "$(bash_payload "BRANCH_GUARD_OVERRIDE='discarding a spent branch' git reset --hard HEAD~1")" "$WORK")"
+#     ...and the all-segments rule holds over the promoted verdict exactly as
+#     it does over the ask, so nothing rides the override in beside it.
+check "override on an irrecoverable-tip reset plus a non-git segment -> deny" deny \
+  "$(decision_for "$(bash_payload "BRANCH_GUARD_OVERRIDE='discarding a spent branch' git reset --hard HEAD~1 && rm -rf junk")" "$WORK")"
+#     A deny outranks a prompt when a command carries both: reporting the ask
+#     would let a human approve the very command the deny exists to stop.
+check "an irrecoverable-tip reset chained after a plain ask -> deny" deny \
+  "$(decision_for "$(bash_cmd 'git restore file.txt && git reset --hard HEAD~1')" "$WORK")"
 git -C "$WORK" checkout -q claude/x
+#     A probe that CANNOT answer keeps the ask, which is the split the deny
+#     above rests on — the guard denies on a fact it established, never on one
+#     it failed to read. An unborn branch is the reachable instance: HEAD is a
+#     symbolic ref git resolves, so the branch name is known, while
+#     `for-each-ref --contains` rejects it as a malformed object name (exit
+#     129), which `tip_is_recoverable` reports as None rather than False.
+#     It lives under the outer repo's gitignored tmp/ so it can perturb no
+#     later fixture, and inside $WORK so the run's own EXIT trap disposes of it.
+mkdir -p "$WORK/tmp/unborn"
+git -C "$WORK/tmp/unborn" init -q -b claude/unborn
+check "git reset --hard on an unborn branch -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git reset --hard HEAD~1')" "$WORK/tmp/unborn")"
+unborn_reason="$(reason_for "$(bash_cmd 'git reset --hard HEAD~1')" "$WORK/tmp/unborn")"
+check_text "the unprovable case does not claim the tip is unreachable" lacks \
+  "isn't reachable" "$unborn_reason"
+check_text "the unprovable case says the guard could not check" has \
+  "couldn't check" "$unborn_reason"
+rm -rf "$WORK/tmp/unborn"
 #     The probes read the session repo, so a foreign one keeps the ask.
 check "git -C other-repo reset --hard -> ask" ask \
   "$(decision_for "$(bash_cmd 'git -C /somewhere/else reset --hard')" "$WORK")"

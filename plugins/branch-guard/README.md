@@ -19,7 +19,9 @@ branch-guard is a `PreToolUse` hook that classifies each `git`/`gh` command,
 **auto-approves the safe ones** (read-only, staging, branch/worktree creation,
 commits and pushes on a feature branch), and **prompts** before anything that
 touches a protected branch (`main`/`master`, plus any you add) or is destructive.
-Everything else defers to your normal permission settings.
+One destructive case it can settle itself it **denies** instead, handing the
+model the check rather than spending your attention on it. Everything else
+defers to your normal permission settings.
 
 ## Contents
 
@@ -40,12 +42,17 @@ Everything else defers to your normal permission settings.
 
 ## What it does
 
-The hook produces one of three outcomes per command:
+The hook produces one of four outcomes per command:
 
 - **allow** — the command runs without a prompt.
 - **ask** — Claude Code shows its standard permission prompt. You approve or
   reject. In a mode with no prompt to show, this becomes **deny** (see
   [Configuration](#configuration)).
+- **deny** — the command is refused and the reason goes to the model rather than
+  to you. Used where the missing input is a fact the model can establish for
+  itself, so the reason carries the check that settles it; today that is one
+  case, a `git reset --hard` onto a tip the guard has proved nothing else
+  reaches. Asking there would spend your attention on a `gh pr view`.
 - **defer** — the hook stays silent; your normal permission settings apply.
 
 It guards the `Bash` tool (for `git` and `gh` commands) and the `Edit`, `Write`,
@@ -105,7 +112,8 @@ the default `strict` [push policy](#push-guard).
 | `git push --force-with-lease=main origin HEAD:main` / `git push --delete --force-with-lease=other origin other` *(protected target; a deletion)* | **ask** |
 | `git push origin v1.3.0` / `git push origin refs/tags/v1.3.0` / `git push --tags` *(publishes a tag, strict policy)* | **ask** |
 | `git push` *(worktree branch, but the base has moved into the same lines this branch edits)* | **ask** |
-| `git reset --hard HEAD~1` *(uncommitted changes to tracked files, or a tip nothing else reaches, or on `main`)* | **ask** |
+| `git reset --hard HEAD~1` *(uncommitted changes to tracked files, or on `main`, or a tip the guard couldn't check)* | **ask** |
+| `git reset --hard HEAD~1` *(clean worktree, feature branch, tip proved to be reachable from nothing else)* | **deny** |
 | `git clean -fd` | **ask** |
 | `git stash drop` / `git stash clear` *(discards a stash)* | **ask** |
 | `git branch -D old` *(tip reachable from nothing else, and the branch carries commits of its own)* | **ask** |
@@ -230,6 +238,20 @@ and the ordinary test applies: an unprotected branch whose tip survives
 elsewhere auto-approves, because putting it back costs one
 `git reset --hard <sha>`.
 
+Where the probe comes back the other way — the tip is reachable from nothing
+else — `reset --hard` is the one command here that is denied rather than
+prompted, in every permission mode. The usual reason for an unreachable tip is a
+squash merge, which leaves a spent branch's tip unreachable by construction
+while its content sits on `main` under another object name, so the question is
+not whether you want the commits: it is whether they are already saved, and
+`gh pr view <n> --json state,mergeCommit` answers that without you. The denial
+carries that command. Where the loss is deliberate,
+[`BRANCH_GUARD_OVERRIDE`](#break-glass-branch_guard_override) lifts it, exactly
+as it lifts the prompt this replaced.
+
+A probe that *cannot* answer keeps its prompt. The guard denies on a fact it
+established, never on one it failed to read.
+
 Untracked and ignored files don't count as dirty, because `reset` never deletes
 them. A stray scratch file in your worktree isn't at risk, so it doesn't earn a
 prompt.
@@ -300,7 +322,8 @@ The **ask** rows assume a session where a prompt can be answered, which
 includes `auto`. In a mode where none can (`dontAsk`, `bypassPermissions`) the
 same commands return **deny** — equally blocking, with recoverable feedback for
 the agent instead of a prompt no one can answer. See
-[Configuration](#configuration).
+[Configuration](#configuration). The **deny** row is not mode-dependent: it
+denies wherever it fires, because its cause is a fact rather than a judgement.
 
 The two paths share the cause and differ in what they offer, so a denial is never
 mistaken for a prompt that is waiting to be answered:
@@ -361,7 +384,8 @@ genuinely ignored file stays exempt.
 ## Break-glass: `BRANCH_GUARD_OVERRIDE`
 
 In `dontAsk` and `bypassPermissions` an **ask** becomes a **deny**, and a deny
-has no answer. That is right for a shared branch and wrong for a scratch one: the
+has no answer. (The prefix also lifts the one deny that fires in every mode, the
+unreachable-tip `reset --hard` — same reasoning, and the same local-only loss.) That is right for a shared branch and wrong for a scratch one: the
 session still has work to do, so it does the work some other way. A session that
 couldn't run `git restore file.txt` edited the file back to its `HEAD` content by
 hand instead — same end state, no atomicity, no guarantee the result matched
@@ -723,7 +747,7 @@ update step and restart.
    `NAME=VALUE` env prefixes (`GIT_AUTHOR_NAME=x git …`) and program global
    options (`git -C path`, `-c k=v`) to find the `git`/`gh` subcommand and its
    arguments. Combined short flags (`git clean -fd`) are decomposed.
-4. **Classify** each segment as `allow` / `ask` / `defer` / non-git:
+4. **Classify** each segment as `allow` / `ask` / `deny` / `defer` / non-git:
    read-only git and gh and harmless mutations (`add`, `restore --staged`,
    `switch -c`, `worktree add`, branch/tag create) allow on any branch;
    branch-sensitive mutations (`commit`, `merge`, `rebase`, `cherry-pick`,
@@ -735,10 +759,12 @@ update step and restart.
    `gh api -X DELETE …/labels/…`; a release/secret/variable/gist/cache via
    `gh <sub> delete` (`secret`/`variable` also accept `remove`; a release asset
    via `gh release delete-asset`); a workflow via
-   `gh workflow disable`) ask; unknown or
+   `gh workflow disable`) ask, except a clean-worktree `reset --hard` onto a
+   tip proved unreachable, which denies; unknown or
    ambiguous forms defer. The branch is resolved with
    `git symbolic-ref` (the session cwd for Bash, the file's own repo for edits).
-5. **Combine** the segment verdicts: any `ask` → ask; else every segment must be
+5. **Combine** the segment verdicts: any `deny` → deny; else any `ask` → ask;
+   else every segment must be
    recognized-safe → allow; else defer. A segment is recognized-safe when it's a
    git/gh `allow` or a **pure read-only filter** piped after one — `head`,
    `tail`, `cat`, `wc`, `nl`, `sort`, `uniq`, `cut`, `column`, `less`, `more`
@@ -756,7 +782,10 @@ update step and restart.
 6. **Fail safe** where no prompt can be shown (`dontAsk`, `bypassPermissions`):
    a would-be `ask` is emitted as `deny`, since no human is present to answer it.
    The reason names the mode and says retrying won't help, so the agent hands off
-   instead of re-running a command that can't be approved from the session.
+   instead of re-running a command that can't be approved from the session. This
+   is the only route by which an `ask` becomes a `deny`; the step-4 deny above is
+   already one in every mode, and its reason names the check rather than the
+   mode.
 
 ## Agent guidance: avoiding prompts
 
@@ -801,6 +830,11 @@ protected branch (main/master) or destructive git commands. To keep work flowing
   forms.
 - **Expect a prompt for destructive commands** (`reset --hard`, `clean -f`,
   `branch -D`, `restore <path>`, `config --global`) — that's by design.
+- **A `reset --hard` onto an unreachable tip is denied, not prompted, and the
+  denial tells you what to check.** Run the `gh pr view` it names: a squash
+  merge leaves a spent branch's tip unreachable while its content is already on
+  `main`, in which case the reset buys nothing. If you still mean it, re-run
+  with `BRANCH_GUARD_OVERRIDE="<reason>"`.
 - **When a destructive command is denied and you meant it, say why rather than
   working around it.** In a non-interactive mode that prompt is a denial with no
   answer, and the tempting workaround — hand-editing a file back to its `HEAD`
@@ -877,7 +911,8 @@ protected branch (main/master) or destructive git commands. To keep work flowing
 
 - **Non-interactive modes** — in `dontAsk` and `bypassPermissions` an `ask` is
   automatically emitted as `deny` so the guard fails safe when no human is
-  present. The denial says so plainly (see [Behavior](#behavior)): there is no
+  present. (One verdict denies in every mode regardless — see
+  [What it does](#what-it-does) — and is unaffected by this.) The denial says so plainly (see [Behavior](#behavior)): there is no
   confirmation to grant in this mode, so the way through is to run the command
   yourself, re-run the session interactively, or — for the narrow set of asks it
   covers — use the
@@ -906,7 +941,8 @@ protected branch (main/master) or destructive git commands. To keep work flowing
   [workspace-guard](#companion-plugins), a companion plugin, guards those Bash
   file commands on a path boundary.
 - It auto-approves a *safe* set of `git`/`gh` subcommands and asks on a
-  *destructive* set; anything outside both (an unknown subcommand, a `git config`
+  *destructive* set (denying within it only where the cause is a fact the model
+  can check); anything outside both (an unknown subcommand, a `git config`
   form it can't classify, most `gh` mutations) **defers** to the normal
   permission flow rather than guessing.
 - Auto-approval is only ever withheld, never granted, by the shell-construct
