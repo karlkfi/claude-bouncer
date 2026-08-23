@@ -698,7 +698,11 @@ SEQUENCED_REASON = (
     "` with `;`, which runs the second whatever the first returned -- the "
     "status is read correctly and then ignored, so a failed check still "
     "publishes. Join them with `&&` so the state change is conditional on the "
-    "check passing." + OVERRIDE_HINT)
+    "check passing. Where the second command has to run even when the first "
+    "fails -- a restore after a gate whose failure is the assertion -- capture "
+    "the status and check it afterwards: "
+    '<MKDIR>cmd > <LOG> 2>&1; rc=$?; restore; [ "$rc" -ne 0 ] || exit 1.'
+    + OVERRIDE_HINT)
 
 
 def decide(cmd, background, reg, scratch='', depth=0):
@@ -743,8 +747,8 @@ def decide(cmd, background, reg, scratch='', depth=0):
 
     gate, mutator = sequenced_mutation(segs, reg)
     if gate:
-        return ('`' + truncate(gate) + SEQUENCED_REASON_HEAD
-                + truncate(mutator) + SEQUENCED_REASON)
+        return with_log_path('`' + truncate(gate) + SEQUENCED_REASON_HEAD
+                             + truncate(mutator) + SEQUENCED_REASON, scratch)
 
     # A gate inside a backtick substitution never reaches the segment loop as a
     # command (backticks are ordinary word characters to shlex), so the bodies
