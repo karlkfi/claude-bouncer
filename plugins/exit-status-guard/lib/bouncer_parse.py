@@ -191,6 +191,54 @@ def strip_comments(cmd):
         out.append(c); i += 1
     return ''.join(out)
 
+def _scan_heredoc_delim(text, i):
+    """Read a heredoc delimiter at ``i`` -- the index just past the ``<<``.
+
+    Returns ``(delim, strip_tabs, quoted, end)``, ``end`` being just past the
+    delimiter word. ``quoted`` records whether any quoting appeared in it,
+    which is bash's expansion switch: `` <<'EOF' `` makes the body literal
+    where `` <<EOF `` leaves its ``$(…)`` live. An empty ``delim`` arms
+    nothing, matching bash on a ``<<`` with no word after it.
+
+    Both raw-string scanners need this grammar -- ``strip_heredoc_bodies`` to
+    drop the body, ``_scan_dollar_paren`` to step over it -- so it lives here
+    once. Two copies would be two readings of where a body starts.
+    """
+    n = len(text)
+    strip_tabs = False
+    if i < n and text[i] == '-':
+        i += 1
+        strip_tabs = True
+    while i < n and text[i] in ' \t':             # optional space before delim
+        i += 1
+    chars = []
+    quoted = False                                # any quoting -> literal body
+    while i < n and text[i] not in ' \t\n;|&()<>':
+        d = text[i]
+        if d == "'":
+            quoted = True
+            i += 1
+            while i < n and text[i] != "'":
+                chars.append(text[i]); i += 1
+            if i < n:
+                i += 1
+        elif d == '"':
+            quoted = True
+            i += 1
+            while i < n and text[i] != '"':
+                if text[i] == '\\' and i + 1 < n:
+                    chars.append(text[i+1]); i += 2
+                    continue
+                chars.append(text[i]); i += 1
+            if i < n:
+                i += 1
+        elif d == '\\' and i + 1 < n:
+            quoted = True
+            chars.append(text[i+1]); i += 2
+        else:
+            chars.append(d); i += 1
+    return ''.join(chars), strip_tabs, quoted, i
+
 def strip_heredoc_bodies(cmd, expanded=None, unterminated=None):
     """Remove heredoc body text from the raw command string, before shlex.
 
@@ -313,41 +361,9 @@ def strip_heredoc_bodies(cmd, expanded=None, unterminated=None):
             if i + 2 < n and cmd[i+2] == '<':     # `<<<` here-string, not heredoc
                 out.append('<<<'); last = '<'; i += 3
                 continue
-            out.append('<<'); i += 2
-            strip_tabs = False
-            if i < n and cmd[i] == '-':
-                out.append('-'); i += 1; strip_tabs = True
-            while i < n and cmd[i] in ' \t':      # optional space before delim
-                out.append(cmd[i]); i += 1
-            delim_chars = []
-            quoted = False                        # any quoting -> literal body
-            while i < n and cmd[i] not in ' \t\n;|&()<>':
-                d = cmd[i]
-                if d == "'":
-                    quoted = True
-                    out.append(d); i += 1
-                    while i < n and cmd[i] != "'":
-                        delim_chars.append(cmd[i]); out.append(cmd[i]); i += 1
-                    if i < n:
-                        out.append(cmd[i]); i += 1
-                elif d == '"':
-                    quoted = True
-                    out.append(d); i += 1
-                    while i < n and cmd[i] != '"':
-                        if cmd[i] == '\\' and i + 1 < n:
-                            delim_chars.append(cmd[i+1])
-                            out.append(cmd[i]); out.append(cmd[i+1]); i += 2
-                            continue
-                        delim_chars.append(cmd[i]); out.append(cmd[i]); i += 1
-                    if i < n:
-                        out.append(cmd[i]); i += 1
-                elif d == '\\' and i + 1 < n:
-                    quoted = True
-                    delim_chars.append(cmd[i+1])
-                    out.append(d); out.append(cmd[i+1]); i += 2
-                else:
-                    delim_chars.append(d); out.append(d); i += 1
-            delim = ''.join(delim_chars)
+            delim, strip_tabs, quoted, end = _scan_heredoc_delim(cmd, i + 2)
+            out.append(cmd[i:end])
+            i = end
             if delim:
                 pending.append((delim, strip_tabs, quoted))
             last = 'x'
@@ -428,11 +444,26 @@ def _scan_dollar_paren(text, start):
     opener: in ``$(case $x in a) cmd;; esac)`` the first ``)`` ends the pattern
     and only the last closes the substitution. Untracked, the body came back as
     ``case $x in`` and nothing the clause ran was ever scanned (Q81). Only bash
-    3.2 agrees with that reading; 5.x and zsh run the clause. An odd quote in a
-    heredoc body inside the substitution still stops the scan, which is a
-    separate mechanism -- Q109. The parenthesised form ``(a)`` already
-    worked, since its opener balanced the terminator, which is what kept the gap
-    to the bare form.
+    3.2 agrees with that reading; 5.x and zsh run the clause. The parenthesised
+    form ``(a)`` already worked, since its opener balanced the terminator, which
+    is what kept the gap to the bare form.
+
+    A heredoc body is stepped over rather than read (Q109). It is data to bash,
+    so an apostrophe in one is text -- read as syntax it opened a quoted run
+    that never closed, and the scan ran off the end and returned no
+    substitution at all. ``strip_heredoc_bodies`` does not always get there
+    first: inside a ``case`` clause its own context tracking ends the
+    substitution at the pattern's ``)``, so the ``<<`` is never reached. A
+    ``<<<`` here-string arms nothing, and ``((…))`` is stepped over whole so a
+    shift is not mistaken for a redirection.
+
+    Only a body whose terminator line is actually present is stepped over, and
+    that is load-bearing rather than tidy. Callers run ``strip_heredoc_bodies``
+    first, so by the time this sees a ``<<WORD`` the body is usually already
+    gone and the operator is all that is left; eating to end-of-input there --
+    which is what bash does to a genuinely unterminated body -- would swallow
+    the ``)`` that closes the substitution and lose it entirely. Declining
+    leaves the scan where it was, so the close is still found.
 
     ``case`` counts only in command position, so the operand in ``echo case``
     stays an operand -- mistaking one for the keyword would swallow the real
@@ -444,6 +475,7 @@ def _scan_dollar_paren(text, start):
     in_single = in_double = False
     cmd_pos = True        # bash reads a command just past the `$(`
     clauses = []          # one entry per open `case`: 'in' | 'pat' | 'body'
+    pending = []          # heredoc delimiters armed, awaiting their bodies
     while i < n:
         c = text[i]
         if in_single:
@@ -460,9 +492,16 @@ def _scan_dollar_paren(text, start):
             i += 1
             continue
         if c in ' \t\n':
+            i += 1
             if c == '\n':
                 cmd_pos = True
-            i += 1
+                while pending and i < n:          # bodies start after this line
+                    delim, strip_tabs = pending.pop(0)
+                    end, closed = _consume_heredoc_body_ex(
+                        text, i, delim, strip_tabs)
+                    if not closed:
+                        break                     # see below -- not ours to eat
+                    i = end
             continue
         if clauses and clauses[-1] == 'pat':
             m = _WORD_RE.match(text, i)
@@ -519,6 +558,10 @@ def _scan_dollar_paren(text, start):
             cmd_pos = cmd_pos and word in _CMD_POS_KEYWORDS
             i = m.end()
             continue
+        if c == '(' and i + 1 < n and text[i+1] == '(':
+            i = _skip_balanced_parens(text, i)    # `((…))` / `$((…))` arithmetic
+            cmd_pos = False
+            continue
         if c == '(':
             depth += 1
             cmd_pos = True
@@ -530,6 +573,15 @@ def _scan_dollar_paren(text, start):
             depth -= 1
             cmd_pos = True
             i += 1
+            continue
+        if c == '<' and i + 1 < n and text[i+1] == '<':
+            if i + 2 < n and text[i+2] == '<':    # `<<<` here-string, not heredoc
+                i += 3
+                continue
+            delim, strip_tabs, _, i = _scan_heredoc_delim(text, i + 2)
+            if delim:
+                pending.append((delim, strip_tabs))
+            cmd_pos = False
             continue
         cmd_pos = c in '&|{'
         i += 1

@@ -4171,28 +4171,45 @@ class CaseClauseSubstEndToEndTests(unittest.TestCase):
             'echo "$(case $x in a) cat <<EOF\nplain body\nEOF\n'
             'cat /etc/q81-fake-target;; esac)"')
 
-    def test_an_odd_quote_in_that_heredoc_still_hides_it(self):
-        # Q109, the residual: `_scan_dollar_paren` tracks quotes but not
-        # heredocs, so the apostrophe opens a run that never closes and the
-        # scan gives up on the whole substitution. Pinned rather than left
-        # unasserted -- the fix for Q109 flips this to an ask, and should have
-        # to say so.
-        cmd = ('echo "$(case $x in a) cat <<EOF\nit\'s fine\nEOF\n'
-               'cat /etc/q81-fake-target;; esac)"')
-        self.assertIsNone(run_hook(cmd, self.workspace, project_dir=self.workspace))
+    def test_an_odd_quote_in_that_heredoc_no_longer_hides_it(self):
+        # Was pinned as a defer by Q81 and flips here: the scanner steps over a
+        # heredoc body rather than reading it as shell syntax, so the
+        # apostrophe no longer opens a run that swallows the substitution.
+        self._asks_about_target(
+            'echo "$(case $x in a) cat <<EOF\nit\'s fine\nEOF\n'
+            'cat /etc/q81-fake-target;; esac)"')
 
-    def test_the_one_shape_this_fix_cost_a_prompt(self):
-        # Also Q109, and the direction worth naming: before clause tracking, a
-        # truncated substitution left the clause tail to be rescanned as
-        # top-level text, so this nested `$(…)` was picked up by accident. The
-        # accurate parse ends that, and the apostrophe then stops the scan, so
-        # `main` asks here and this branch defers. Measured over 12 shapes:
-        # this is the only one that lost a prompt. It needs all four of a
-        # double-quoted `"$(…)"`, the apostrophe, the clause, and the target
-        # nested inside the body -- drop any one and nothing moves.
-        cmd = ('echo "$(case $x in a) cat <<EOF\nit\'s $(cat /etc/q81-fake-target)\n'
+    def test_the_shape_q81_cost_a_prompt_is_restored(self):
+        # The other assertion Q81 pinned, and the reason this item was ranked
+        # where it was: Q81's accurate parse ended an accidental catch here and
+        # left the shape deferring. It asks again, on the mechanism rather than
+        # on the accident -- the substitution is now read whole.
+        self._asks_about_target(
+            'echo "$(case $x in a) cat <<EOF\nit\'s $(cat /etc/q81-fake-target)\n'
+            'EOF\n;; esac)"')
+
+    def test_a_tab_stripped_heredoc_is_stepped_over_too(self):
+        self._asks_about_target(
+            'echo "$(case $x in a) cat <<-EOF\n\tit\'s $(cat /etc/q81-fake-target)\n'
+            '\tEOF\n;; esac)"')
+
+    def test_a_quoted_delimiter_keeps_its_body_literal(self):
+        # bash runs no substitution in a `<<'EOF'` body, so the hook must not
+        # invent an offender from one. Stepping over the body must not turn
+        # into scanning it.
+        cmd = ('echo "$(case $x in a) cat <<\'EOF\'\n$(cat /etc/q81-fake-target)\n'
                'EOF\n;; esac)"')
         self.assertIsNone(run_hook(cmd, self.workspace, project_dir=self.workspace))
+
+    def test_an_arithmetic_shift_arms_no_heredoc(self):
+        # `$((1<<4))` is a shift, not a redirection. Reading it as one would
+        # arm a delimiter and swallow the rest of the clause as body text.
+        self._asks_about_target(
+            'echo "$(case $x in a) n=$((1<<4)); cat /etc/q81-fake-target;; esac)"')
+
+    def test_a_herestring_is_not_a_heredoc(self):
+        self._asks_about_target(
+            'echo "$(case $x in a) grep pat <<< \"$(cat /etc/q81-fake-target)\";; esac)"')
 
     def test_case_as_an_operand_is_not_a_clause(self):
         # Reading `case` here as the keyword would swallow the real close and
