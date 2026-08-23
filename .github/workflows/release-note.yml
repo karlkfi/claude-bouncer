@@ -14,13 +14,25 @@ jobs:
   release-note:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       # Through the environment, never `${{ }}` inside `run:` -- a pull
       # request body is attacker-controlled text and would be interpolated
       # into the shell before it ever reached the script.
       - env:
           BODY: ${{ github.event.pull_request.body }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
+          # Dependabot writes its own body and has no option to template one,
+          # so it cannot answer the block. Exempt rather than skip: the job
+          # still runs and reports, because a skipped check reads as a pass in
+          # the checks list and this repo does not spend that distinction.
+          # `pull_request.user.login`, not `github.actor` -- the actor on an
+          # `edited` event is whoever edited the body, which may be a human.
+          if [ "$AUTHOR" = 'dependabot[bot]' ]; then
+            echo "Dependabot pull request: exempt from the release-note block."
+            echo "The bump itself is the note; see .github/dependabot.yml."
+            exit 0
+          fi
           if ! printf '%s' "$BODY" | python3 scripts/release-note.py; then
             echo
             echo "The '## Release note' block is missing or unanswered."

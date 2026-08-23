@@ -2,7 +2,8 @@
 PYTHON ?= python3
 PLUGINS := workspace-guard branch-guard prod-guard exit-status-guard foreground-guard
 
-.PHONY: check sync sync-check version-check path-filter-check lib-test plugin-tests \
+.PHONY: check sync sync-check version-check path-filter-check action-pin-check \
+        lib-test plugin-tests \
         validate images help backlog backlog-next backlog-lint
 
 help:
@@ -11,6 +12,7 @@ help:
 	@echo "make sync-check        fail if a vendored copy has drifted"
 	@echo "make version-check     fail if a plugin's three version strings disagree"
 	@echo "make path-filter-check fail if a plugin's CI jobs are unfiltered or misfiltered"
+	@echo "make action-pin-check  fail if a workflow action is not pinned to a SHA"
 	@echo "make lib-test          test the shared parser"
 	@echo "make plugin-tests      test every plugin"
 	@echo "make validate          validate the marketplace manifest"
@@ -19,7 +21,8 @@ help:
 	@echo "make backlog-next      the top ready item, as a session prompt"
 	@echo "make backlog-lint      check docs/queue"
 
-check: sync-check version-check path-filter-check backlog-lint lib-test plugin-tests
+check: sync-check version-check path-filter-check action-pin-check backlog-lint \
+       lib-test plugin-tests
 
 sync:
 	$(PYTHON) scripts/sync-lib.py
@@ -40,6 +43,12 @@ version-check:
 # than inside the suite, so a broken workflow fails before the tests it gates.
 path-filter-check:
 	$(PYTHON) scripts/path-filter-check.py
+
+# A tag is a pointer its owner can move, so an unpinned action runs whatever it
+# points at on the day. Pinning alone only freezes that, which is why
+# .github/dependabot.yml is the other half: it turns a pin into a reviewed bump.
+action-pin-check:
+	$(PYTHON) scripts/action-pin-check.py
 
 lib-test:
 	$(PYTHON) -m unittest discover tests
