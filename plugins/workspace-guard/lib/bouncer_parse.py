@@ -82,6 +82,15 @@ MAX_SUBST_DEPTH = 25
 # starts a comment -- what bash sees just inside a `$(` or a backtick.
 SUBST_OPEN = '('
 
+# Reserved words after which bash reads another command, so a `case` following
+# one is the keyword and not an argument (`if x; then case $y in ...`). Any
+# other word ends command position: in `echo case`, `case` is a plain operand.
+_CMD_POS_KEYWORDS = frozenset({
+    'if', 'then', 'elif', 'else', 'while', 'until', 'do', 'time',
+})
+
+_WORD_RE = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
+
 
 # -------------------------------------------------- raw-string preprocessing
 def _skip_balanced_parens(text, start):
@@ -360,18 +369,17 @@ def strip_heredoc_bodies(cmd, expanded=None, unterminated=None):
 
 # ------------------------------------------- command substitution scanning
 
-def _scan_dollar_paren(text, start):
-    """Scan a ``$(`` body from ``start`` (just past ``$(``) to its matching ``)``.
+def _scan_case_pattern(text, start):
+    """Scan a ``case`` pattern list from ``start`` to the ``)`` that ends it.
 
-    Returns ``(body, end)`` — the inner substring and the index just past the
-    close — or ``(None, start)`` if no balanced terminator is found. Paren
-    nesting, single/double quotes, and backslash escapes inside the body are
-    tracked so a ``)`` inside a quoted string or a nested ``(…)``/``$(…)`` does
-    not close early. Quote tracking is flat (it does not recurse into nested
-    substitutions); on the exotic input where that mis-locates the close, the
-    body handed to shlex is unbalanced and analysis defers for it — fail-safe.
+    Returns the index just past that ``)``, or ``None`` when the text runs out
+    first. A leading ``(`` is bash's optional pattern opener and is consumed
+    without nesting, so ``(a)`` and ``a)`` end at the same place; parens written
+    INSIDE the pattern -- an extglob ``@(a|b)`` -- do nest.
     """
     i, n, depth = start, len(text), 0
+    if i < n and text[i] == '(':
+        i += 1
     in_single = in_double = False
     while i < n:
         c = text[i]
@@ -393,22 +401,137 @@ def _scan_dollar_paren(text, start):
             continue
         if c == "'":
             in_single = True
+        elif c == '"':
+            in_double = True
+        elif c == '(':
+            depth += 1
+        elif c == ')':
+            if depth == 0:
+                return i + 1
+            depth -= 1
+        i += 1
+    return None
+
+
+def _scan_dollar_paren(text, start):
+    """Scan a ``$(`` body from ``start`` (just past ``$(``) to its matching ``)``.
+
+    Returns ``(body, end)`` — the inner substring and the index just past the
+    close — or ``(None, start)`` if no balanced terminator is found. Paren
+    nesting, single/double quotes, and backslash escapes inside the body are
+    tracked so a ``)`` inside a quoted string or a nested ``(…)``/``$(…)`` does
+    not close early. Quote tracking is flat (it does not recurse into nested
+    substitutions); on the exotic input where that mis-locates the close, the
+    body handed to shlex is unbalanced and analysis defers for it — fail-safe.
+
+    A ``case`` clause is tracked too, because its pattern's ``)`` needs no
+    opener: in ``$(case $x in a) cmd;; esac)`` the first ``)`` ends the pattern
+    and only the last closes the substitution. Untracked, the body came back as
+    ``case $x in`` and nothing the clause ran was ever scanned (Q81). Only bash
+    3.2 agrees with that reading; 5.x and zsh run the clause. An odd quote in a
+    heredoc body inside the substitution still stops the scan, which is a
+    separate mechanism -- Q109. The parenthesised form ``(a)`` already
+    worked, since its opener balanced the terminator, which is what kept the gap
+    to the bare form.
+
+    ``case`` counts only in command position, so the operand in ``echo case``
+    stays an operand -- mistaking one for the keyword would swallow the real
+    close and drop a substitution that reads fine today. A ``)`` at depth 0
+    still closes whatever the clause state says, which keeps a missed ``esac``
+    costing nothing.
+    """
+    i, n, depth = start, len(text), 0
+    in_single = in_double = False
+    cmd_pos = True        # bash reads a command just past the `$(`
+    clauses = []          # one entry per open `case`: 'in' | 'pat' | 'body'
+    while i < n:
+        c = text[i]
+        if in_single:
+            if c == "'":
+                in_single = False
+            i += 1
+            continue
+        if in_double:
+            if c == '\\':
+                i += 2
+                continue
+            if c == '"':
+                in_double = False
+            i += 1
+            continue
+        if c in ' \t\n':
+            if c == '\n':
+                cmd_pos = True
+            i += 1
+            continue
+        if clauses and clauses[-1] == 'pat':
+            m = _WORD_RE.match(text, i)
+            if m and m.group(0) == 'esac':        # `case $x in esac` -- no clauses
+                clauses.pop()
+                cmd_pos = False
+                i = m.end()
+                continue
+            end = _scan_case_pattern(text, i)
+            if end is None:
+                return (None, start)
+            clauses[-1] = 'body'
+            cmd_pos = True
+            i = end
+            continue
+        if c == '\\':
+            i += 2
+            continue
+        if c == "'":
+            in_single = True
+            cmd_pos = False
             i += 1
             continue
         if c == '"':
             in_double = True
+            cmd_pos = False
             i += 1
+            continue
+        if c == ';':
+            cmd_pos = True
+            if clauses and clauses[-1] == 'body':
+                for term in (';;&', ';;', ';&'):  # longest first
+                    if text.startswith(term, i):
+                        clauses[-1] = 'pat'
+                        i += len(term)
+                        break
+                else:
+                    i += 1
+                continue
+            i += 1
+            continue
+        m = _WORD_RE.match(text, i)
+        if m:
+            word = m.group(0)
+            state = clauses[-1] if clauses else None
+            if state == 'in':
+                if word == 'in':
+                    clauses[-1] = 'pat'
+            elif word == 'esac':
+                if state == 'body':
+                    clauses.pop()
+            elif word == 'case' and cmd_pos:
+                clauses.append('in')
+            cmd_pos = cmd_pos and word in _CMD_POS_KEYWORDS
+            i = m.end()
             continue
         if c == '(':
             depth += 1
+            cmd_pos = True
             i += 1
             continue
         if c == ')':
             if depth == 0:
                 return (text[start:i], i + 1)
             depth -= 1
+            cmd_pos = True
             i += 1
             continue
+        cmd_pos = c in '&|{'
         i += 1
     return (None, start)
 
