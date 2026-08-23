@@ -6,7 +6,7 @@
 
 ![claude-bouncer: five PreToolUse guards for Claude Code, one marketplace](docs/img/social-preview.png)
 
-> A bouncer doesn't care what a command is called. It cares what the command does.
+> The bouncer doesn't care what command is called. It cares what the command does.
 
 Claude Code's permission rules judge a shell command by its name, and a name is a
 bad ID. `Bash(grep:*)` can't tell an in-repo grep from one reading
