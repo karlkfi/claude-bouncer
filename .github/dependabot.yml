@@ -1,0 +1,30 @@
+# Keeps the SHA pins in .github/workflows/ current.
+#
+# `make action-pin-check` fails a mutable ref, so every action here is frozen
+# at a commit. A frozen pin is a dependency nobody looks at again -- a year on
+# it is a known-CVE runner still being fetched every run. This is the channel
+# that turns the freeze back into a reviewed bump, and the two only work
+# together: pinning without it trades one problem for a quieter one.
+#
+# Dependabot reads the trailing `# v4.4.0` comment to know what it is bumping
+# from and rewrites it alongside the SHA, which is why the gate requires one.
+#
+# Grouped into a single pull request: these are all first-party GitHub actions
+# moving together, and five separate PRs a week for them would be reviewed the
+# way five separate PRs a week get reviewed.
+#
+# Dependabot writes its own pull request body and has no option to template
+# one, so it cannot answer the `## Release note` block. The exemption is in
+# .github/workflows/release-note.yml -- keep the two in step.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: chore(repo)

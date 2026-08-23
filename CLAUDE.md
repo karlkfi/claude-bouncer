@@ -64,7 +64,8 @@ Invoke the `session-backlog` skill for any change to the store.
 ## Checks
 
 ```
-make check    # drift, version, path filters, backlog lint, parser tests, all five suites
+make check    # drift, version, path filters, action pins, backlog lint,
+              # parser tests, all five suites
 ```
 
 Run it before proposing a change is done. A change under `lib/` reaches all
@@ -72,11 +73,12 @@ five guards, so say which ones you re-ran.
 
 **The pull request body is gated separately, and `make check` cannot see it.**
 `.github/workflows/release-note.yml` fails a body with no answered
-`## Release note` block. No local target reaches a surface that is not in the
-tree, so a green `make check` and a red pull request are consistent here --
-and `gh pr create --body-file` bypasses the template that would have supplied
-the block, which is how an agent writes a body of any length. Check it before
-you open:
+`## Release note` block -- for every author but Dependabot, which writes its
+own body and has no option to template one. No local target reaches a surface
+that is not in the tree, so a green `make check` and a red pull request are
+consistent here -- and `gh pr create --body-file` bypasses the template that
+would have supplied the block, which is how an agent writes a body of any
+length. Check it before you open:
 
 ```
 python3 scripts/release-note.py < body.md
@@ -93,6 +95,15 @@ recurrence guard: it fails when a plugin has no filter, when a filter omits its
 own directory or the shared anchor, or when a job is gated on the wrong plugin.
 Everything runs unfiltered on push to `main`, which is what makes "tag a green
 one" in the release process mean what it says.
+
+`make action-pin-check` is the other recurrence guard: every `uses:` under
+`.github/workflows/` must name a 40-character commit SHA with the version in a
+trailing comment. A tag is a pointer its owner can move, so an unpinned action
+runs whatever it points at on the day. Pinning alone only freezes that, which
+is why `.github/dependabot.yml` is the second half -- weekly, grouped into one
+pull request, and it rewrites the trailing comment alongside the SHA. Neither
+half is worth much without the other: a pin nobody bumps is a dependency
+nobody looks at again.
 
 Python 3.9 is the floor. exit-status-guard supports it and CI runs the shared
 parser against it, so 3.10+ syntax in `lib/` breaks that job and nothing else,
