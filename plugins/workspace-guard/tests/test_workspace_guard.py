@@ -8858,7 +8858,13 @@ class PowerShellBindArgsTests(unittest.TestCase):
 
     def bind(self, cmdlet, text):
         toks = guard.ps_tokenize(text)
-        return [(t, role) for t, _, _, role in
+        return [(t, role) for t, _, _, role, _entry in
+                guard.ps_bind_args(toks[1:], guard.PS_SPEC[cmdlet])]
+
+    def entries(self, cmdlet, text):
+        """`(token, entry)` per bound operand — the Q76 half of the contract."""
+        toks = guard.ps_tokenize(text)
+        return [(t, entry) for t, _, _, _role, entry in
                 guard.ps_bind_args(toks[1:], guard.PS_SPEC[cmdlet])]
 
     def test_positional_path(self):
@@ -8909,6 +8915,56 @@ class PowerShellBindArgsTests(unittest.TestCase):
         self.assertEqual(
             self.bind("copy-item", r"Copy-Item -Destination C:\d C:\s"),
             [(r"C:\d", "write"), (r"C:\s", "read")])
+
+    # --- the entry flag (Q76) -----------------------------------------------
+
+    def test_remove_item_marks_every_operand_an_entry(self):
+        self.assertEqual(self.entries("remove-item", r"Remove-Item a b c"),
+                         [("a", True), ("b", True), ("c", True)])
+
+    def test_move_item_marks_sources_but_not_the_destination(self):
+        # `Move-Item x dirlink` moves INTO what the link names.
+        self.assertEqual(self.entries("move-item", r"Move-Item src dst"),
+                         [("src", True), ("dst", False)])
+        self.assertEqual(
+            self.entries("move-item", r"Move-Item -Destination dst src"),
+            [("dst", False), ("src", True)])
+
+    def test_copy_item_marks_nothing_an_entry(self):
+        # A copy opens what the link names, so it follows the link.
+        self.assertEqual(self.entries("copy-item", r"Copy-Item src dst"),
+                         [("src", False), ("dst", False)])
+
+    def test_a_read_cmdlet_marks_nothing_an_entry(self):
+        self.assertEqual(self.entries("get-content", r"Get-Content x"),
+                         [("x", False)])
+
+    def test_recurse_withdraws_the_flag_from_every_operand(self):
+        # Q114: the entry role rests on the cmdlet not reaching the link's
+        # target, which `-Recurse` puts in doubt on Windows. Every spelling
+        # PowerShell accepts has to reach the check, or the withdrawal is
+        # decorative -- case folds, prefixes resolve, and the switch may sit
+        # after the operand or beside another switch.
+        for text in (r"Remove-Item -Recurse a", r"Remove-Item -recurse a",
+                     r"Remove-Item -RECURSE a", r"Remove-Item -Rec a",
+                     r"Remove-Item -Recurse:true a", r"Remove-Item a -Recurse",
+                     r"Remove-Item -Force -Recurse a"):
+            self.assertEqual(self.entries("remove-item", text), [("a", False)],
+                             text)
+        # Without it, the operand keeps the entry role.
+        self.assertEqual(self.entries("remove-item", r"Remove-Item -Force a"),
+                         [("a", True)])
+
+    def test_an_expandable_switch_is_not_read_as_recurse(self):
+        # `-Recurse:$true` carries a variable, so the binder cannot read it as
+        # a parameter at all and it falls through to the operand list. The
+        # entry role survives, which looks like a hole and is not: an
+        # expandable operand is an offender in its own right, so the string
+        # denies rather than allowing. Asserted because the reasoning is what
+        # makes the pre-pass's `not exp` test safe to share with the binder's.
+        self.assertEqual(
+            self.entries("remove-item", r"Remove-Item -Recurse:$true a"),
+            [("-Recurse:$true", True), ("a", True)])
 
     def test_pattern_positional_is_not_a_file(self):
         self.assertEqual(self.bind("select-string", r"Select-String foo C:\x"),
@@ -9274,6 +9330,150 @@ class PowerShellTaskkillEndToEndTests(PowerShellKillFixture, unittest.TestCase):
     def test_an_offending_taskkill_outranks_a_clean_cmdlet(self):
         # Suppression removes the `allow`; it must not also swallow the deny.
         self._decision(r"Get-Content .\in.txt; taskkill /IM node.exe", "deny")
+
+
+class PowerShellEntryOperandTests(unittest.TestCase):
+    """PowerShell judges an unlinked symlink by the link, as bash does (Q76).
+
+    `Remove-Item ./link` unlinks the link and cannot reach what it points at,
+    so resolving the final component reported a file the cmdlet never touches
+    and asked about a boundary the command does not cross. `ENTRY_OPERANDS`
+    fixed that for bash; the plan doc left PowerShell to this row.
+
+    Pairs again, for the Q73 reason: each shape runs through both frontends and
+    demands the same decision, so an assertion cannot pass by bash drifting to
+    meet it. The controls carry the weight here — entry semantics must not
+    reach a read, or a symlink could launder itself past the read exemptions.
+
+    The fixture lives under $HOME so an outside sibling is a plain `outside`
+    ask rather than a host-temp deny, and uses forward slashes: PowerShell
+    accepts them, and a backslash is a literal filename character on the POSIX
+    host this suite runs on, so `.\\link` would never resolve to the symlink.
+    """
+
+    def setUp(self):
+        home = guard.resolved_home()
+        self.assertTrue(home and os.path.isdir(home), f"no home: {home!r}")
+        self._tmp = tempfile.TemporaryDirectory(dir=home)
+        self.base = os.path.realpath(self._tmp.name)
+        self.workspace = os.path.join(self.base, "proj")
+        os.makedirs(os.path.join(self.workspace, "sub"))
+        self.outside_dir = os.path.join(self.base, "outside")
+        os.makedirs(self.outside_dir)
+        for path, body in ((os.path.join(self.outside_dir, "secret.txt"), "s"),
+                           (os.path.join(self.workspace, "plain.txt"), "p"),
+                           (os.path.join(self.workspace, "sub/inner.txt"), "i")):
+            with open(path, "w") as f:
+                f.write(body + "\n")
+        os.symlink(os.path.join(self.outside_dir, "secret.txt"),
+                   os.path.join(self.workspace, "link"))
+        os.symlink(os.path.join(self.outside_dir, "gone.txt"),
+                   os.path.join(self.workspace, "dangling"))
+        os.symlink(self.outside_dir, os.path.join(self.workspace, "dirlink"))
+        os.symlink(os.path.join(self.workspace, "plain.txt"),
+                   os.path.join(self.workspace, "inlink"))
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _decision(self, tool, cmd):
+        out = run_hook(cmd, self.workspace, project_dir=self.workspace,
+                       tool_name=tool)
+        return "defer" if out is None \
+            else out["hookSpecificOutput"]["permissionDecision"]
+
+    def _agree(self, ps, bash, expected):
+        self.assertEqual(self._decision("PowerShell", ps), expected, f"PS {ps!r}")
+        self.assertEqual(self._decision("Bash", bash), expected, f"sh {bash!r}")
+
+    # --- the fix ------------------------------------------------------------
+
+    def test_unlinking_an_outward_link_is_judged_by_the_link(self):
+        self._agree("Remove-Item ./link", "rm ./link", "allow")
+
+    def test_a_dangling_link_unlinks_the_same_way(self):
+        # Nothing to resolve to at all; the entry is still the thing removed.
+        self._agree("Remove-Item ./dangling", "rm ./dangling", "allow")
+
+    def test_moving_and_renaming_a_link_are_entries_too(self):
+        self._agree("Move-Item ./link ./new", "mv ./link ./new", "allow")
+        self._agree("Rename-Item ./link new", "mv ./link ./new", "allow")
+
+    def test_array_binding_marks_every_operand(self):
+        self._agree("Remove-Item ./link ./dangling", "rm ./link ./dangling",
+                    "allow")
+
+    def test_literalpath_binds_the_entry_role(self):
+        self._agree("Remove-Item -LiteralPath ./link", "rm ./link", "allow")
+
+    # --- controls: entry must not reach a read or a follow-through write ----
+
+    def test_reading_through_the_link_still_asks(self):
+        # The load-bearing one. `Get-Content` follows the link, so the boundary
+        # question is about the target -- exempting a final component on a read
+        # path is how a symlink launders itself past a read exemption.
+        self._agree("Get-Content ./link", "cat ./link", "ask")
+
+    def test_writing_through_the_link_still_asks(self):
+        self._agree("Set-Content ./link x", "echo x > ./link", "ask")
+
+    def test_copy_reads_through_the_link(self):
+        # `Copy-Item` opens what the link names, so it carries no entry role.
+        self._agree("Copy-Item ./link ./c", "cp ./link ./c", "ask")
+
+    def test_a_destination_keeps_following_links(self):
+        # `Move-Item x dirlink` moves INTO what the link names -- the
+        # `mv: sources` half of ENTRY_OPERANDS.
+        self._agree("Move-Item ./plain.txt ./link", "mv ./plain.txt ./link",
+                    "ask")
+
+    def test_a_directory_link_in_the_middle_still_resolves(self):
+        # Only the FINAL component is left alone.
+        self._agree("Remove-Item ./dirlink/secret.txt",
+                    "rm ./dirlink/secret.txt", "ask")
+
+    # --- controls: ordinary paths unmoved -----------------------------------
+
+    def test_ordinary_paths_are_unaffected(self):
+        self._agree("Remove-Item ./plain.txt", "rm ./plain.txt", "allow")
+        self._agree("Remove-Item ./sub/inner.txt", "rm ./sub/inner.txt", "allow")
+        self._agree("Remove-Item ./inlink", "rm ./inlink", "allow")
+
+    def test_an_outside_operand_and_a_traversal_still_ask(self):
+        # Each frontend gets the path in its OWN quoting. A native Windows path
+        # interpolated bare is read by the POSIX tokenizer as escapes --
+        # `C:\\ws\\x` arrives as `C:wsx`, a relative name that lands back
+        # inside the root and allows. That is what `sh()` and `ps()` are for,
+        # and it is invisible on a POSIX host, where the path has no
+        # backslashes to eat.
+        target = os.path.join(self.outside_dir, "secret.txt")
+        self._agree("Remove-Item %s" % ps(target), "rm %s" % sh(target), "ask")
+        self._agree("Remove-Item ./sub/../../outside/secret.txt",
+                    "rm ./sub/../../outside/secret.txt", "ask")
+
+    def test_a_trailing_separator_names_a_directory_not_an_entry(self):
+        self._agree("Remove-Item ./dirlink/", "rm ./dirlink/", "ask")
+
+    # --- the deliberate divergence (Q114) -----------------------------------
+
+    def test_an_expandable_recurse_switch_still_denies(self):
+        # The bind-level sibling of this asserts `-Recurse:$true` keeps the
+        # entry role, because the binder cannot read a variable as a parameter.
+        # That is only safe if the string still stops here, so pin the decision
+        # rather than the reasoning.
+        self.assertEqual(
+            self._decision("PowerShell", "Remove-Item -Recurse:$true ./dirlink"),
+            "deny")
+
+    def test_recurse_withdraws_the_entry_role(self):
+        # NOT a parity assertion, and not a typo: bash allows both of these.
+        # The entry role rests on the command being unable to reach the link's
+        # target, and `-Recurse` over a directory link is exactly where that
+        # premise is in doubt on Windows. Q114 carries the experiment that
+        # settles it; until then this withholds rather than assumes.
+        self.assertEqual(
+            self._decision("PowerShell", "Remove-Item -Recurse ./dirlink"), "ask")
+        self.assertEqual(self._decision("Bash", "rm -rf ./dirlink"), "allow")
 
 
 class PowerShellInterpreterSuppressesAllowTests(unittest.TestCase):

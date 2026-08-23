@@ -3778,11 +3778,15 @@ _PS_COMMON_SWITCHES = frozenset({'verbose', 'debug', 'whatif', 'confirm'})
 # value, a silent allow. Wrongly declaring one only swallows a token that then
 # resolves cwd-relative, a harmless prompt. So `consume` is enumerated in full
 # from the cmdlet signature; guessing is what breaks it, in the bad direction.
-def _ps_row(files, consume=(), switches=(), positional=()):
+def _ps_row(files, consume=(), switches=(), positional=(), entry=()):
+    """One PS_SPEC row. `entry` names the parameters whose operand is a
+    directory ENTRY rather than the contents of what it points at (Q76) — the
+    PowerShell half of ENTRY_OPERANDS, spelled per parameter because that is
+    what a cmdlet binds by."""
     consume = frozenset(consume) | _PS_COMMON_CONSUME
     switches = frozenset(switches) | _PS_COMMON_SWITCHES
     return {'files': files, 'consume': consume,
-            'positional': list(positional),
+            'positional': list(positional), 'entry': frozenset(entry),
             'names': frozenset(files) | consume | switches}
 
 
@@ -3862,22 +3866,28 @@ PS_SPEC = {
                  'tosession'),
         switches=('container', 'force', 'recurse', 'passthru'),
         positional=('path', 'destination')),
+    # `-Destination` is NOT an entry: `Move-Item x dirlink` moves INTO the
+    # directory the link names, so a destination keeps following links. That is
+    # the `mv: sources` half of ENTRY_OPERANDS.
     'move-item': _ps_row(
         {'path': 'read', 'literalpath': 'read', 'destination': 'write'},
         consume=('filter', 'include', 'exclude', 'credential'),
         switches=('force', 'passthru'),
-        positional=('path', 'destination')),
+        positional=('path', 'destination'),
+        entry=('path', 'literalpath')),
     'remove-item': _ps_row(
         {'path': 'write', 'literalpath': 'write'},
         consume=('filter', 'include', 'exclude', 'credential', 'stream'),
         switches=('recurse', 'force'),
-        positional=('path',)),
+        positional=('path',),
+        entry=('path', 'literalpath')),
     # -NewName is a name, not a path: it can't carry the operand out of root.
     'rename-item': _ps_row(
         {'path': 'write', 'literalpath': 'write'},
         consume=('newname', 'credential'),
         switches=('force', 'passthru'),
-        positional=('path', 'newname')),
+        positional=('path', 'newname'),
+        entry=('path', 'literalpath')),
 }
 
 # Not guarded — `Set-Location` reads no file — but tracked, because without it
@@ -4266,6 +4276,29 @@ def ps_realpath(p, cwd):
     return os.path.realpath(full)
 
 
+def ps_entry_realpath(p, cwd):
+    """`ps_realpath` with the final component left unresolved (Q76).
+
+    An entry operand names a directory entry, so resolving its last component
+    reports a file the cmdlet never touches: `Remove-Item ./link` unlinks the
+    link and cannot reach the target. Everything above it still resolves, which
+    is what keeps a *directory* link in the middle of the path honest —
+    `Remove-Item ./dirlink/x` still lands on the real file inside whatever
+    `dirlink` names.
+
+    Identical to `ps_realpath` when the last component is not a symlink, so no
+    ordinary path moves; identical on a drive-qualified path too, where
+    resolution is lexical and no link can be followed anyway. A trailing
+    separator, `.` and `..` all name a directory rather than an entry within
+    one, and fall back.
+    """
+    full = p if ps_is_absolute(p) else os.path.join(cwd, p)
+    head, tail = os.path.split(full.replace('\\', '/'))
+    if not tail or tail in (os.curdir, os.pardir):
+        return ps_realpath(p, cwd)
+    return os.path.join(ps_realpath(head or os.curdir, cwd), tail)
+
+
 def ps_resolve_param(name, spec):
     """Resolve a parameter name the way PowerShell does — exact match, else an
     unambiguous prefix. An ambiguous or unknown name falls back to itself, where
@@ -4280,8 +4313,10 @@ def ps_resolve_param(name, spec):
 def ps_bind_args(args, spec):
     """Bind a segment's argument tokens to file roles.
 
-    Returns `(token, expandable, quoted, role)` for each operand that names a
-    file, role being 'read' or 'write'.
+    Returns `(token, expandable, quoted, role, entry)` for each operand that
+    names a file — role being 'read' or 'write', and `entry` True where the
+    parameter it bound to names a directory entry rather than the contents of
+    what it points at (Q76).
 
     Two passes, because PowerShell binds by name first and only then fills the
     positional slots that are still free. `Select-String -Pattern foo <file>`
@@ -4289,6 +4324,18 @@ def ps_bind_args(args, spec):
     left-to-right pass would hand it slot 0 (-Pattern), classify a real read as
     a non-file operand, and allow it silently.
     """
+    # `-Recurse` withdraws entry treatment for the whole segment. The entry
+    # role rests on the cmdlet being unable to reach what the link points at,
+    # and that premise is exactly what a recursive delete over a directory link
+    # puts in doubt on Windows -- `rm -rf dirlink` cannot follow the link on
+    # POSIX, but the PowerShell behaviour is a platform question this repo
+    # cannot settle from here (Q114). Declining the exemption costs a prompt on
+    # a rare shape; assuming it away would cost a silent `allow` on a recursive
+    # delete reaching outside the root.
+    recursive = any(
+        not e and len(v) > 1 and v[0] == '-'
+        and ps_resolve_param(v[1:].split(':', 1)[0].lower(), spec) == 'recurse'
+        for _, v, e, _q in args)
     named, positionals, bound, i, n = [], [], set(), 0, len(args)
     while i < n:
         _, val, exp, quoted = args[i]
@@ -4305,11 +4352,12 @@ def ps_bind_args(args, spec):
                 # -Path and -LiteralPath are alternates for one slot, so
                 # binding either has to close it.
                 bound.update(k for k, v in spec['files'].items() if v == role)
+                is_entry = key in spec['entry'] and not recursive
                 if attached is not None:
-                    named.append((attached, exp, quoted, role))
+                    named.append((attached, exp, quoted, role, is_entry))
                 elif i + 1 < n:
                     _, nval, nexp, nquoted = args[i + 1]
-                    named.append((nval, nexp, nquoted, role))
+                    named.append((nval, nexp, nquoted, role, is_entry))
                     i += 1
             else:
                 bound.add(key)
@@ -4330,7 +4378,8 @@ def ps_bind_args(args, spec):
         pos += 1
         role = spec['files'].get(slot)
         if role:
-            named.append((val, exp, quoted, role))
+            named.append((val, exp, quoted, role,
+                          slot in spec['entry'] and not recursive))
     return named
 
 
@@ -4358,7 +4407,7 @@ def ps_apply_location(words, cwd, cwd_unknown):
                if b[3] == 'read']
     if len(targets) != 1:
         return cwd, True
-    tok, exp, _, _ = targets[0]
+    tok, exp, _, _, _entry = targets[0]
     if exp or tok in ('-', '+'):
         return cwd, True
     p = ps_expand_tilde(tok)
@@ -4569,7 +4618,7 @@ def ps_analyze_segment(tokens, ctx, cwd, cwd_unknown):
             # command word is — same as the bash side (Q26).
             if i + 1 < n and tokens[i + 1][0] == 'word':
                 _, val, exp, quoted = tokens[i + 1]
-                files.append((val, exp, quoted, 'write'))
+                files.append((val, exp, quoted, 'write', False))
                 i += 2
                 continue
             i += 1
@@ -4610,7 +4659,7 @@ def ps_analyze_segment(tokens, ctx, cwd, cwd_unknown):
                 # hook's word for everything else in the string.
                 exp, quoted = next(((w[2], w[3]) for w in words if w[1] == tok),
                                    (False, False))
-                files.append((tok, exp, quoted, 'read'))
+                files.append((tok, exp, quoted, 'read', False))
                 if not ps_operand_inside(tok, exp, quoted, ctx, cwd,
                                          cwd_unknown):
                     signal = True
@@ -4645,7 +4694,7 @@ def ps_operand_inside(tok, exp, quoted, ctx, cwd, cwd_unknown):
 def ps_file_offenders(files, ctx, cwd, cwd_unknown):
     """Resolve bound file operands to offenders, one entry per path part."""
     offenders = []
-    for tok, exp, quoted, role in files:
+    for tok, exp, quoted, role, entry in files:
         if exp:
             offenders.append((tok, 'expand', None))
             continue
@@ -4657,7 +4706,7 @@ def ps_file_offenders(files, ctx, cwd, cwd_unknown):
             if not ps_is_absolute(p) and cwd_unknown:
                 offenders.append((part, 'untracked', None))
                 continue
-            rp = ps_realpath(p, cwd)
+            rp = ps_entry_realpath(p, cwd) if entry else ps_realpath(p, cwd)
             res = classify_outside(rp, ctx, is_read=(role == 'read'))
             if res is not None:
                 disp = part if ps_is_absolute(part) \
