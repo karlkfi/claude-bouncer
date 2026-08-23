@@ -49,10 +49,11 @@ The hook produces one of four outcomes per command:
   reject. In a mode with no prompt to show, this becomes **deny** (see
   [Configuration](#configuration)).
 - **deny** — the command is refused and the reason goes to the model rather than
-  to you. Used where the missing input is a fact the model can establish for
-  itself, so the reason carries the check that settles it; today that is one
-  case, a `git reset --hard` onto a tip the guard has proved nothing else
-  reaches. Asking there would spend your attention on a `gh pr view`.
+  to you. Used where the missing input is a fact the session can establish for
+  itself, so the reason carries the check that settles it. Today that is two
+  cases: a `git reset --hard` onto a tip the guard has proved nothing else
+  reaches, and a push onto a base that has moved into this branch's own lines.
+  Asking there would spend your attention on a `gh pr view` or a `git rebase`.
 - **defer** — the hook stays silent; your normal permission settings apply.
 
 It guards the `Bash` tool (for `git` and `gh` commands) and the `Edit`, `Write`,
@@ -111,7 +112,7 @@ the default `strict` [push policy](#push-guard).
 | `git push origin other-branch` *(strict policy — no lease naming the destination)* | **ask** |
 | `git push --force-with-lease=main origin HEAD:main` / `git push --delete --force-with-lease=other origin other` *(protected target; a deletion)* | **ask** |
 | `git push origin v1.3.0` / `git push origin refs/tags/v1.3.0` / `git push --tags` *(publishes a tag, strict policy)* | **ask** |
-| `git push` *(worktree branch, but the base has moved into the same lines this branch edits)* | **ask** |
+| `git push` *(worktree branch, but the base has moved into the same lines this branch edits)* | **deny** |
 | `git reset --hard HEAD~1` *(uncommitted changes to tracked files, or on `main`, or a tip the guard couldn't check)* | **ask** |
 | `git reset --hard HEAD~1` *(clean worktree, feature branch, tip proved to be reachable from nothing else)* | **deny** |
 | `git clean -fd` | **ask** |
@@ -131,6 +132,7 @@ the default `strict` [push policy](#push-guard).
 | `git worktree remove --force ../wt` *(deletes a worktree holding modified or untracked files)* | **ask** |
 | `git config --global user.name x` | **ask** |
 | `BRANCH_GUARD_OVERRIDE=<reason> git restore file.txt` *(break-glass on a local-loss ask — see below)* | allow |
+| `BRANCH_GUARD_OVERRIDE=<reason> git push` *(break-glass on an overlap deny — the policy had already approved this push)* | allow |
 | `BRANCH_GUARD_OVERRIDE=<reason> git push origin other` / `… gh repo delete o/r` / `… git branch -D main` *(the break-glass reaches none of these)* | **ask** |
 | `git pull` / `git pull --rebase` *(on `main` — lands a merge, or rewrites history)* | **ask** |
 | `git rebase`/`git merge` *(onto `main`)* | **ask** |
@@ -322,8 +324,8 @@ The **ask** rows assume a session where a prompt can be answered, which
 includes `auto`. In a mode where none can (`dontAsk`, `bypassPermissions`) the
 same commands return **deny** — equally blocking, with recoverable feedback for
 the agent instead of a prompt no one can answer. See
-[Configuration](#configuration). The **deny** row is not mode-dependent: it
-denies wherever it fires, because its cause is a fact rather than a judgement.
+[Configuration](#configuration). The **deny** rows are not mode-dependent: they
+deny wherever they fire, because the cause is a fact rather than a judgement.
 
 The two paths share the cause and differ in what they offer, so a denial is never
 mistaken for a prompt that is waiting to be answered:
@@ -346,12 +348,6 @@ unattributed "Targets protected branch 'main'" leaves you no way to tell who is
 asking. Sibling guards use the same shape, and foreground-guard's friction
 report reads the deny half as a cross-guard key, so a guard wording it
 differently under-counts its own denies there.
-
-The push-overlap ask returns a second string, `additionalContext`, which reaches
-the model instead of the prompt — see [Push guard](#push-guard). It opens the
-same way, and for a sharper reason: that field arrives in the model's context
-with no prompt and no error around it, so an unprefixed paragraph is
-indistinguishable from the session's own reasoning.
 
 An **allow** carries no opener: it suppresses the prompt and is handed back to
 nobody, so the only thing that reads it is already holding the decision record
@@ -384,9 +380,11 @@ genuinely ignored file stays exempt.
 ## Break-glass: `BRANCH_GUARD_OVERRIDE`
 
 In `dontAsk` and `bypassPermissions` an **ask** becomes a **deny**, and a deny
-has no answer. (The prefix also lifts the one deny that fires in every mode, the
-unreachable-tip `reset --hard` — same reasoning, and the same local-only loss.) That is right for a shared branch and wrong for a scratch one: the
-session still has work to do, so it does the work some other way. A session that
+has no answer. (The prefix also lifts both denies that fire in every mode: the
+unreachable-tip `reset --hard`, on the same reasoning and the same local-only
+loss, and the overlap deny on a push the policy had already approved.) That is
+right for a shared branch and wrong for a scratch one: the session still has
+work to do, so it does the work some other way. A session that
 couldn't run `git restore file.txt` edited the file back to its `HEAD` content by
 hand instead — same end state, no atomicity, no guarantee the result matched
 `HEAD`, and nothing in the log to review. Where no ungated equivalent exists (you
@@ -408,9 +406,11 @@ a `PreToolUse` hook inherits Claude Code's environment, not the one the command 
 about to run in; an env-var override could only be switched on for a whole
 session, by hand, which is the opposite of scoping it to the moment.
 
-**What it reaches.** Only these subcommands, each of which can lose local state
-and nothing else: `restore`, `switch`, `branch`, `tag`, `worktree`, `stash`,
-`reset`, `clean`, `config`, `reflog`, `filter-branch`, `gc`.
+**What it reaches.** These subcommands, each of which can lose local state and
+nothing else: `restore`, `switch`, `branch`, `tag`, `worktree`, `stash`,
+`reset`, `clean`, `config`, `reflog`, `filter-branch`, `gc`. Plus one verdict
+from outside that list, the [overlap deny](#push-guard) on a push the policy had
+already approved — see the exception below.
 
 **What it does not reach**, whatever reason you give:
 
@@ -419,9 +419,14 @@ and nothing else: `restore`, `switch`, `branch`, `tag`, `worktree`, `stash`,
   of verdict is unliftable by construction, not by a list the override consults.
   This includes anything you add to
   [`BRANCH_GUARD_PROTECTED_BRANCHES`](#configuration).
-- **Anything that leaves this machine.** Every `git push` form and every `gh`
-  delete/disable. A push publishes; `gh repo delete` removes something other
-  people can see.
+- **Anything that leaves this machine**, with one exception. Every `gh`
+  delete/disable and every `git push` the policy itself gated — a cross-name
+  push, a tag publish, a protected destination. A push publishes;
+  `gh repo delete` removes something other people can see. The exception is the
+  [overlap deny](#push-guard), where the policy had already approved the push
+  and the check withdrew that approval, so lifting it reinstates a decision
+  rather than granting a new one. It is keyed to that verdict, which is why it
+  spreads to no other push.
 - **A command that reaches further than the subcommand it was granted for.** An
   output redirect to a file (`… > out`), a `git -c`/`--config-env` escape hatch
   (which can run arbitrary code), and a `git -C`/`--git-dir` aimed at another
@@ -500,24 +505,34 @@ nothing about the branch still being built on what it thinks it is. When the bas
 has moved into the same *lines* this branch edits, the merge is going to come out
 wrong — and under a merge queue it comes out wrong late, after the queue has
 validated the candidate and spent a whole check cycle on it. So the auto-approve
-is withdrawn and the push asks, naming the files and the fix:
+is withdrawn and the push is refused, naming the files and the fix:
 
 ```
 branch-guard: 'origin/main' has moved since this branch left it, and its new
 commits edit the same lines this branch does in hooks/branch-guard.py — the merge
 is going to come out wrong, and a merge queue would spend a whole check cycle
-finding that. `git fetch && git rebase origin/main` finds it now — confirm before
-proceeding.
+finding that. `git fetch && git rebase origin/main` finds it now — run that
+rebase and push the result. Retrying the push as given meets the same overlap,
+because the cause is the base this branch is built on rather than the permission
+mode. Re-run it prefixed with `BRANCH_GUARD_OVERRIDE=<reason>` if you mean to
+proceed anyway.
 ```
 
-That reason reaches the person at the keyboard and stops there: on an `ask`,
-Claude Code uses it as the prompt's text and hands the model nothing. Approve,
-and the session pushes onto the stale base it was just told to rebase onto — the
-outcome the check exists to prevent, reached through a prompt somebody said yes
-to. So this verdict also returns the rebase as `additionalContext`, which does
-reach the model, and which Claude Code queues before the prompt is shown, so it
-lands whichever way the answer goes. It is the only verdict here that carries
-one: every other ask is settled by being answered.
+**Why this refuses rather than prompts.** The reason on an `ask` reaches the
+person at the keyboard and stops there — Claude Code uses it as the prompt's
+text and hands the model nothing. So the prompt asked you to answer a question
+whose answer was a command, and approving it pushed onto the stale base the
+prompt had just named. A refusal inverts that: the reason goes to the model,
+which can run the rebase, and your attention is not spent on a decision that was
+never yours to make.
+
+**Where the overlap is yours to merge**, the break-glass lifts it —
+`BRANCH_GUARD_OVERRIDE="<reason>" git push`. This is the one push form the
+prefix reaches, and it is keyed to the *verdict*, not to `push`: the policy had
+already approved this exact push, and the check withdrew that approval. Every
+other push it gates — a cross-name push, a tag publish, anything at a protected
+branch — stays outside the break-glass, as
+[below](#break-glass-branch_guard_override).
 
 Both sides are diffed from the fork point, so both sets of line numbers are
 counted in that shared ancestor and can be compared at all. Hunks are read with
@@ -835,14 +850,20 @@ protected branch (main/master) or destructive git commands. To keep work flowing
   merge leaves a spent branch's tip unreachable while its content is already on
   `main`, in which case the reset buys nothing. If you still mean it, re-run
   with `BRANCH_GUARD_OVERRIDE="<reason>"`.
+- **A push onto a base that has moved into your own lines is denied too, and
+  the denial carries the rebase.** Run the `git fetch && git rebase` it names and
+  push the result; retrying the push unchanged meets the same overlap. If you
+  have read the overlap and mean to merge it yourself, re-run with
+  `BRANCH_GUARD_OVERRIDE="<reason>"` — the one push form that takes it.
 - **When a destructive command is denied and you meant it, say why rather than
   working around it.** In a non-interactive mode that prompt is a denial with no
   answer, and the tempting workaround — hand-editing a file back to its `HEAD`
   content instead of `git restore` — is the unsafe path *and* the ungated one.
   Re-run with a reason instead:
   `BRANCH_GUARD_OVERRIDE="reverting a superseded local change" git restore file.txt`.
-  It works only for losses confined to this machine, so a push, a `gh` deletion,
-  or anything on main/master stays denied — for those, ask the human.
+  It works only for losses confined to this machine, so a `gh` deletion or
+  anything on main/master stays denied — for those, ask the human. The overlap
+  deny above is the single push it reaches.
 ```
 
 ## Configuration
@@ -911,8 +932,9 @@ protected branch (main/master) or destructive git commands. To keep work flowing
 
 - **Non-interactive modes** — in `dontAsk` and `bypassPermissions` an `ask` is
   automatically emitted as `deny` so the guard fails safe when no human is
-  present. (One verdict denies in every mode regardless — see
-  [What it does](#what-it-does) — and is unaffected by this.) The denial says so plainly (see [Behavior](#behavior)): there is no
+  present. (Two verdicts deny in every mode regardless — see
+  [What it does](#what-it-does) — and are unaffected by this.) The denial says
+  so plainly (see [Behavior](#behavior)): there is no
   confirmation to grant in this mode, so the way through is to run the command
   yourself, re-run the session interactively, or — for the narrow set of asks it
   covers — use the
@@ -929,8 +951,8 @@ protected branch (main/master) or destructive git commands. To keep work flowing
 
 - **Break-glass** — `BRANCH_GUARD_OVERRIDE=<reason>` as a command prefix lifts an
   ask whose damage stops at this machine. It is deliberately *not* a
-  `settings.json` variable, and it reaches no protected branch, no push, and no
-  `gh` deletion. See
+  `settings.json` variable, and it reaches no protected branch, no `gh` deletion,
+  and no push except the overlap deny. See
   [Break-glass: `BRANCH_GUARD_OVERRIDE`](#break-glass-branch_guard_override).
 
 ## Limitations
@@ -974,10 +996,12 @@ protected branch (main/master) or destructive git commands. To keep work flowing
   `git fetch` — a base that moved since then looks unmoved, and the push is
   auto-approved. It also compares line *ranges*, not semantics: two edits six
   lines apart are reported as meeting whether or not they interact, and a rename
-  or a moved function reads as unrelated. Treat it as a cheap prompt to rebase,
-  not proof the merge is clean. One shape is deliberately excluded: a release
-  branch is skipped on its *name*, so a topic branch named like a release
-  (`hotfix-typo`) is never checked.
+  or a moved function reads as unrelated. Treat it as a cheap reason to rebase,
+  not proof the merge is clean — and where you have read the overlap and want the
+  push anyway, the break-glass is the answer rather than a rebase you do not
+  need. One shape is deliberately excluded: a release branch is skipped on its
+  *name*, so a topic branch named like a release (`hotfix-typo`) is never
+  checked.
 - The [`git branch` recoverability check](#git-branch-what-the-session-owns-not-how-the-verb-looks)
   reads local refs only, so it trusts your last `git fetch`. A remote-tracking
   ref left stale after the branch was deleted upstream still counts as

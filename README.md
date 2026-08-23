@@ -111,10 +111,12 @@ transcript regardless.
 **A pass doesn't open every door.** It gets you as far as the door it names and
 no further:
 
-- branch-guard's break-glass lifts only an ask whose damage can't leave this
+- branch-guard's break-glass lifts only a verdict whose damage can't leave this
   machine. `restore`, `switch`, `stash`, `reset`, `clean` on a scratch branch,
-  yes. Every `git push` form, every `gh repo delete`, and anything at all on
-  `main`, no, whatever reason you give.
+  yes. Every `gh repo delete`, anything at all on `main`, and every `git push`
+  the policy gated on its own account, no, whatever reason you give. The one
+  push it reaches is the overlap deny, where the policy had already approved
+  the push and the guard withdrew that approval over a stale base.
 - prod-guard and workspace-guard downgrade a deny to an ask, so a human still
   answers before the command runs. exit-status-guard and foreground-guard stand
   aside on a pass, because what's at stake there is your own session's time and
