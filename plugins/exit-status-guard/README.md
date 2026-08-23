@@ -104,6 +104,20 @@ git add .; git commit -m wip    # denied — a failed add commits nothing new
 Here the status is read correctly and then ignored. `&&` is the fix, and is
 never denied.
 
+`&&` is not the fix when the second command has to run whatever the first did.
+A mutation control mutates a file, runs a gate whose failure *is* the
+assertion, and restores; `&&` skips the restore on the expected failure and
+leaves the tree mutated. Capture the status and check it after the restore:
+
+```bash
+make check > <scratchpad>/c.log 2>&1; rc=$?; git checkout -- f; [ "$rc" -ne 0 ] || exit 1
+```
+
+The deny names both forms, `&&` first, because most sequencing denials do want
+it. A restore that is itself a registry mutator — `git reset --hard`, `kubectl
+delete` — is still read as a state change and denied; `EXIT_STATUS_GUARD_OVERRIDE`
+is the way through until the detection can tell a restore from a publish.
+
 ## What it does not deny
 
 The registry is deliberately not "every command". A guard that denies every

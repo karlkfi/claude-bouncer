@@ -633,6 +633,30 @@ class TestPrecedence(unittest.TestCase):
                               pg.decide(cmd, bg, reg))
 
 
+class TestSequencedRemedy(unittest.TestCase):
+    """`&&` is the answer for most sequencing denials, and not for all of them.
+
+    A mutation control mutates a file, runs a gate that is *required* to fail,
+    and restores. `&&` skips the restore on the expected failure and leaves the
+    tree mutated, so the reason names the capture form beside it -- second, and
+    scoped to the case, because the common denial does want `&&`.
+    """
+
+    def setUp(self):
+        self.reason = pg.decide('make check; git push', False,
+                                shipped_registry(), '/scratch')
+
+    def test_the_and_form_still_leads(self):
+        self.assertIn('Join them with `&&`', self.reason)
+        self.assertLess(self.reason.index('Join them with `&&`'),
+                        self.reason.index('rc=$?'),
+                        'the common case has to be read first')
+
+    def test_the_capture_form_is_named(self):
+        self.assertIn('rc=$?; restore; [ "$rc" -ne 0 ] || exit 1',
+                      self.reason)
+
+
 class TestSuggestedLogPath(unittest.TestCase):
     """The rewrite a denied session copies has to be a command that runs.
 
@@ -643,11 +667,11 @@ class TestSuggestedLogPath(unittest.TestCase):
     text verbatim.
     """
 
-    # One denial per reason that names a log file. The sequenced-mutation reason
-    # suggests `&&` and names none.
+    # One denial per reason that names a log file.
     DENIALS = (('make check | tail -5', False),
                ('make check > c.log 2>&1; echo "EXIT=$?"', True),
-               ('echo $PIPESTATUS', False))
+               ('echo $PIPESTATUS', False),
+               ('make check; git push', False))
 
     @classmethod
     def setUpClass(cls):
@@ -655,7 +679,8 @@ class TestSuggestedLogPath(unittest.TestCase):
 
     def test_every_template_carries_both_placeholders(self):
         """A template that loses one names no path, or names one uncreated."""
-        for name in ('PIPESTATUS_REASON', 'PIPED_REASON', 'LOST_STATUS_REASON'):
+        for name in ('PIPESTATUS_REASON', 'PIPED_REASON', 'LOST_STATUS_REASON',
+                     'SEQUENCED_REASON'):
             with self.subTest(name):
                 template = getattr(pg, name)
                 self.assertIn(pg.LOG_PLACEHOLDER, template)
