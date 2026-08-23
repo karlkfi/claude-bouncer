@@ -192,8 +192,9 @@ make backlog ARGS='--label prod-guard'  # one plugin's items
 make backlog-next                       # the top ready item
 ```
 
-The three plugins that had their own `docs/STATUS.md` gave them up on
-2026-08-22; the other two had no backlog at all and now have one.
+Prior to unification day, three plugins had their own backlog table, which conflicted on every update.
+The other two had no backlog at all and just used GitHub issues, tightly coupled with the hosting provider.
+Now they all share a combined backlog with markdown issue files, labels, and git leased IDs that avoid conflicts and preserves history, making metrics collections easy.
 
 ## Development and tests
 
