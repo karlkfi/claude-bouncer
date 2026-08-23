@@ -4181,6 +4181,19 @@ class CaseClauseSubstEndToEndTests(unittest.TestCase):
                'cat /etc/q81-fake-target;; esac)"')
         self.assertIsNone(run_hook(cmd, self.workspace, project_dir=self.workspace))
 
+    def test_the_one_shape_this_fix_cost_a_prompt(self):
+        # Also Q109, and the direction worth naming: before clause tracking, a
+        # truncated substitution left the clause tail to be rescanned as
+        # top-level text, so this nested `$(…)` was picked up by accident. The
+        # accurate parse ends that, and the apostrophe then stops the scan, so
+        # `main` asks here and this branch defers. Measured over 12 shapes:
+        # this is the only one that lost a prompt. It needs all four of a
+        # double-quoted `"$(…)"`, the apostrophe, the clause, and the target
+        # nested inside the body -- drop any one and nothing moves.
+        cmd = ('echo "$(case $x in a) cat <<EOF\nit\'s $(cat /etc/q81-fake-target)\n'
+               'EOF\n;; esac)"')
+        self.assertIsNone(run_hook(cmd, self.workspace, project_dir=self.workspace))
+
     def test_case_as_an_operand_is_not_a_clause(self):
         # Reading `case` here as the keyword would swallow the real close and
         # drop a substitution the hook reads correctly today. Passes either way
