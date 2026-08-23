@@ -6,19 +6,25 @@
 
 ![claude-bouncer: five PreToolUse guards for Claude Code, one marketplace](docs/img/social-preview.png)
 
-> The bouncer doesn't care what command is called. It cares what the command does.
+> The bouncer doesn't care what command is called.
+> It cares what the command does.
 
-Claude Code's permission rules judge a shell command by its name, and a name is a
-bad ID. `Bash(grep:*)` can't tell an in-repo grep from one reading
-`~/.aws/credentials`. `Bash(git push:*)` can't tell `claude/fix-42` from `main`.
-`Bash(kubectl:*)` can't tell the kind cluster you started this morning from the
-one your customers are on. So you trust every command under that name, or you
-answer a prompt for every one.
+Claude Code's permission rules judge a shell command by its name, and a name is a bad ID. 
 
-These five plugins are `PreToolUse` hooks that read the command instead. They
-work five different doors: the workspace boundary, your protected branches, your
-production infrastructure, the exit status of your gates, and the session's own
-main thread.
+- `Bash(grep:*)` can't tell an in-repo grep from one reading `~/.aws/credentials`.
+- `Bash(git push:*)` can't tell `claude/fix-42` from `main`.
+- `Bash(kubectl:*)` can't tell your local kind cluster from the one your customers are on.
+
+So you either trust every command, or you answer a prompt every time.
+
+These five plugins are `PreToolUse` hooks that read the command arguments instead.
+They work five different doors and ask five different questions:
+
+- Are you in the right workspace?
+- Are you in the right branch?
+- Are you in the right infrastructure environment?
+- Are you hiding your exit status?
+- Are you blocking the session's main thread?
 
 ## Install
 
