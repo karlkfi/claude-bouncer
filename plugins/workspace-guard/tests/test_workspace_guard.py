@@ -9440,8 +9440,14 @@ class PowerShellEntryOperandTests(unittest.TestCase):
         self._agree("Remove-Item ./inlink", "rm ./inlink", "allow")
 
     def test_an_outside_operand_and_a_traversal_still_ask(self):
+        # Each frontend gets the path in its OWN quoting. A native Windows path
+        # interpolated bare is read by the POSIX tokenizer as escapes --
+        # `C:\\ws\\x` arrives as `C:wsx`, a relative name that lands back
+        # inside the root and allows. That is what `sh()` and `ps()` are for,
+        # and it is invisible on a POSIX host, where the path has no
+        # backslashes to eat.
         target = os.path.join(self.outside_dir, "secret.txt")
-        self._agree("Remove-Item %s" % target, "rm %s" % target, "ask")
+        self._agree("Remove-Item %s" % ps(target), "rm %s" % sh(target), "ask")
         self._agree("Remove-Item ./sub/../../outside/secret.txt",
                     "rm ./sub/../../outside/secret.txt", "ask")
 
