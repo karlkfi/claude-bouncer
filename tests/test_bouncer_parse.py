@@ -190,9 +190,48 @@ class CasePatternScanTests(unittest.TestCase):
 
     def test_a_heredoc_in_a_clause_is_reached(self):
         # The gap this closes: the clause body was never scanned, so a heredoc
-        # written there went with it. An odd quote in that body is a separate
-        # mechanism and still stops the scan -- Q109.
+        # written there went with it. An odd quote in that body was a second
+        # mechanism, closed since by HeredocInSubstitutionTests below.
         body = "case $x in a) cat <<EOF\n$(cat /etc/passwd)\nEOF\n;; esac"
+        self.assertEqual([body], bp.command_substitutions('echo "$(%s)" T' % body))
+
+
+class HeredocInSubstitutionTests(unittest.TestCase):
+    """A heredoc body inside a `$(…)` is data, so the scan steps over it (Q109).
+
+    Read as shell syntax, an apostrophe in the body opened a single-quoted run
+    that never closed: the scan ran to end-of-input, returned no terminator,
+    and `command_substitutions` yielded nothing -- the whole substitution went
+    unexamined. `strip_heredoc_bodies` does not pre-empt this in a `case`
+    clause, where its own context tracking ends the substitution at the
+    pattern's `)` before the `<<` is reached.
+    """
+    def test_an_apostrophe_in_a_body_does_not_swallow_the_substitution(self):
+        body = "case $x in a) cat <<EOF\nit's fine\nEOF\ncat /etc/passwd;; esac"
+        self.assertEqual([body], bp.command_substitutions('echo "$(%s)" T' % body))
+
+    def test_a_tab_stripped_delimiter_is_recognised(self):
+        body = "case $x in a) cat <<-EOF\n\tit's fine\n\tEOF\ncat /etc/passwd;; esac"
+        self.assertEqual([body], bp.command_substitutions('echo "$(%s)" T' % body))
+
+    def test_a_quoted_delimiter_still_ends_its_body(self):
+        body = "case $x in a) cat <<'EOF'\nit's fine\nEOF\ncat /etc/passwd;; esac"
+        self.assertEqual([body], bp.command_substitutions('echo "$(%s)" T' % body))
+
+    def test_an_unterminated_body_runs_to_the_end(self):
+        # bash swallows a body with no terminator to end-of-input, so no `)`
+        # after it can close the substitution -- returning nothing is correct.
+        self.assertEqual([], bp.command_substitutions(
+            'echo "$(cat <<EOF\nit\'s fine\n)" T'))
+
+    def test_a_herestring_arms_nothing(self):
+        body = 'grep pat <<< "it\'s fine"'
+        self.assertEqual([body], bp.command_substitutions('echo "$(%s)" T' % body))
+
+    def test_an_arithmetic_shift_arms_nothing(self):
+        # `1<<4` is a shift. Armed as a delimiter it would swallow `4));…` as
+        # body text and the substitution would never close.
+        body = 'n=$((1<<4)); cat /etc/passwd'
         self.assertEqual([body], bp.command_substitutions('echo "$(%s)" T' % body))
 
 
