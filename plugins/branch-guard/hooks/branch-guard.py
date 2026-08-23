@@ -70,12 +70,20 @@ classifier reason states only the CAUSE; `confirm()` adds the closing clause, so
 the two paths read honestly — an `ask` offers a confirmation, a `deny` says
 there is none to be had and points at the terminal instead.
 
+One verdict denies in every mode rather than only in an unattended one:
+'deny-unreachable', where a `git reset --hard` would move a branch whose tip the
+guard has PROVED nothing else reaches. That cause is a fact the model can settle
+itself with a `gh pr view`, so the answer belongs in the reason rather than in a
+prompt, and `refuse()` writes it there. Every other `ask` in the file still asks
+a human, including the three `classify_reset` keeps.
+
 That denial is final, which is a dead end for a command the session had a good
 reason to run: with nothing to answer the prompt, work reroutes onto whatever
 ungated path exists (hand-editing a file back to its HEAD content rather than
 `git restore`) or is simply abandoned. So a narrow break-glass exists — the
 command prefix `BRANCH_GUARD_OVERRIDE=<reason>` (`override_reason`), which
-lifts an `ask` whose damage cannot leave this machine: OVERRIDABLE_GIT. It
+lifts an `ask` — or a 'deny-unreachable', whose loss is the same local one —
+whose damage cannot leave this machine: OVERRIDABLE_GIT. It
 reaches no `gh` form, no push, and no protected branch — those asks are tagged
 `ask-shared` and are unliftable by construction. The reason is required, and is
 echoed into the emitted decision so the approval is on the record.
@@ -1414,7 +1422,17 @@ def classify_reset(branch, cwd, probe):
     to the pointer move and the same two questions apply: an unprotected branch
     whose tip survives on a remote-tracking ref or main costs a
     `git reset --hard <sha>` to put back. Shared is answered first, as
-    everywhere else. Every probe that can't answer keeps the `ask`."""
+    everywhere else. Every probe that can't answer keeps the `ask`.
+
+    A tip the probe proves unreachable is the one case here that denies. The
+    missing input is not intent or a blast radius the guard can't see — it is a
+    fact about the world the model can establish for itself, and the commonest
+    way to reach it is a squash merge, which leaves a spent branch's tip
+    unreachable by construction while its content sits on main under another
+    object name. So the answer belongs in the reason rather than in a prompt.
+    `False` and `None` are split for that: `None` means the probe couldn't
+    answer, which is the same class as the `not probe` case above and keeps its
+    `ask`. `classify_branch` already separates the two this way."""
     if branch is None:
         return ('ask', "`git reset --hard` discards changes")
     if is_protected(branch):
@@ -1426,15 +1444,21 @@ def classify_reset(branch, cwd, probe):
     if worktree_is_clean(cwd) is not True:
         return ('ask', "`git reset --hard` discards uncommitted changes to "
                        "tracked files")
-    if tip_is_recoverable(cwd, branch) is not True:
-        return ('ask', f"`git reset --hard` moves branch '{branch}', whose tip "
-                       f"isn't reachable from any remote-tracking branch or main")
+    rec = tip_is_recoverable(cwd, branch)
+    if rec is False:
+        return ('deny-unreachable',
+                f"`git reset --hard` moves branch '{branch}', whose tip isn't "
+                f"reachable from any remote-tracking branch or main")
+    if rec is not True:
+        return ('ask', f"`git reset --hard` moves branch '{branch}', and this "
+                       f"guard couldn't check whether its tip survives "
+                       f"elsewhere")
     return ('allow', None)
 
 
 def classify_git(sub, args, branch, policy, cwd, probe):
-    """Verdict ('allow' | 'ask' | 'ask-shared' | 'ask-rebase' | 'defer', reason)
-    for a `git <sub>` command."""
+    """Verdict ('allow' | 'ask' | 'ask-shared' | 'ask-rebase' |
+    'deny-unreachable' | 'defer', reason) for a `git <sub>` command."""
     flags = {a for a in args if a.startswith('-')}
     short = short_flag_letters(args)
     pos = [a for a in args if not a.startswith('-')]
@@ -1697,9 +1721,15 @@ def override_reason(segments):
 
 def is_overridable(inv, verdict, writes):
     """True if a segment's `ask` is one the break-glass may lift: a plain `ask`
-    — never an `ask-shared`, whose cause is a protected branch — from a git
-    subcommand in OVERRIDABLE_GIT, aimed at this repository, with nothing
-    attached that reaches further than the subcommand itself.
+    or a 'deny-unreachable' — never an `ask-shared`, whose cause is a protected
+    branch — from a git subcommand in OVERRIDABLE_GIT, aimed at this repository,
+    with nothing attached that reaches further than the subcommand itself.
+
+    'deny-unreachable' rides with the plain `ask` because the loss it names is
+    the same loss: local history on this machine, from `reset`, which is in
+    OVERRIDABLE_GIT already. Denying rather than asking changes who answers the
+    question, not how far the damage reaches, so it must not change what the
+    break-glass covers.
 
     Those three exclusions are what keep the override inside the scope it
     claims. An output redirect to a file writes content the classifier never
@@ -1707,7 +1737,8 @@ def is_overridable(inv, verdict, writes):
     (`-c core.pager='!sh …'`); and a `git -C`/`--git-dir` pointing elsewhere
     puts the loss in a checkout this session doesn't own — the one thing
     "damage stops at this machine" has to rule out."""
-    return (verdict == 'ask' and not writes and inv is not None
+    return (verdict in ('ask', 'deny-unreachable') and not writes
+            and inv is not None
             and inv['prog'] == 'git' and inv['sub'] in OVERRIDABLE_GIT
             and not (set(inv['globals']) & GIT_ESCAPE_HATCHES)
             and not targets_other_repo(inv['globals']))
@@ -1715,11 +1746,14 @@ def is_overridable(inv, verdict, writes):
 
 def classify_segment(inv, branch, policy, cwd):
     """Verdict ('nongit' | 'allow' | 'ask' | 'ask-shared' | 'ask-rebase' |
-    'defer', reason) for one segment. 'nongit' marks a segment that isn't a
-    git/gh invocation (so the whole command can't be auto-approved);
-    'ask-shared' is an `ask` whose cause is a protected branch, kept distinct so
-    the break-glass can't lift it; 'ask-rebase' is an `ask` whose cause also has
-    to reach the model, so it emits an `additionalContext` alongside."""
+    'deny-unreachable' | 'defer', reason) for one segment. 'nongit' marks a
+    segment that isn't a git/gh invocation (so the whole command can't be
+    auto-approved); 'ask-shared' is an `ask` whose cause is a protected branch,
+    kept distinct so the break-glass can't lift it; 'ask-rebase' is an `ask`
+    whose cause also has to reach the model, so it emits an `additionalContext`
+    alongside; 'deny-unreachable' denies in every permission mode, because the
+    cause is a fact the model can check for itself — but the break-glass still
+    lifts it, so it travels with the plain `ask` everywhere else."""
     if inv is None:
         return ('nongit', None)
     if inv['prog'] == 'gh':
@@ -1983,6 +2017,34 @@ def confirm(reason, mode, liftable=False, context=None):
     emit('ask', f"{reason} — confirm before proceeding.", context)
 
 
+def refuse(reason, liftable=False):
+    """Emit `deny` for a verdict that denies in every permission mode.
+
+    `confirm()` denies only where the mode has no way to prompt, so its routes
+    are about the session — do it in a terminal, or switch modes. This one's
+    cause is a fact the model can establish for itself, so it denies with a
+    human sitting right there, and the routes are the check that settles the
+    fact instead. Asking would spend the one reviewer that doesn't scale on a
+    `gh pr view` the model can run.
+
+    `liftable` names the break-glass, and only where it would actually be
+    honored — the same rule `confirm()` follows, for the same reason: a hint on
+    something that would be refused a second time is the dead end the wording
+    exists to avoid. Unlike `confirm()`, this path names it on every mode: the
+    prefix is the only route past a denial that no prompt can answer.
+
+    No `additionalContext`. A denial delivers `reason` to the model already,
+    which is the whole argument for denying here."""
+    routes = ("run `gh pr view <n> --json state,mergeCommit` first: a squash "
+              "merge leaves the tip unreachable by construction, so a branch "
+              "spent that way already has its content on main under another "
+              "object name and needs no reset at all.")
+    if liftable:
+        routes += (f" Re-run it prefixed with `{OVERRIDE_VAR}=<reason>` if the "
+                   f"loss is deliberate.")
+    emit('deny', f"{reason} — {routes}")
+
+
 def main():
     try:
         data = json.load(sys.stdin)
@@ -2054,9 +2116,9 @@ def main():
             if verdict == 'ask-shared':
                 confirm(reason, mode)
                 return
-        asks = [(reason, ovr, verdict == 'ask-rebase')
+        asks = [(reason, ovr, verdict)
                 for verdict, reason, ovr in verdicts
-                if verdict in ('ask', 'ask-rebase')]
+                if verdict in ('ask', 'ask-rebase', 'deny-unreachable')]
         if asks:
             # The break-glass lifts a local-loss ask, but only for a command
             # that is otherwise entirely recognized-safe: every other segment
@@ -2065,10 +2127,14 @@ def main():
             # override in, which is the gap the all-segments rule closes for
             # `allow` and has to close here identically.
             # An 'ask-rebase' is never overridable (`is_overridable` takes only a
-            # plain 'ask', and `push` is outside OVERRIDABLE_GIT anyway), so its
-            # presence fails this on both clauses.
+            # plain 'ask' or a 'deny-unreachable', and `push` is outside
+            # OVERRIDABLE_GIT anyway), so its presence fails this on both
+            # clauses. A 'deny-unreachable' passes both: it is liftable and its
+            # subcommand is `reset`, so the override reaches it exactly as it
+            # reaches the plain `ask` it was promoted from.
             liftable = (all(ovr for _, ovr, _ in asks)
-                        and all(v in ('allow', 'filter', 'benign', 'ask')
+                        and all(v in ('allow', 'filter', 'benign', 'ask',
+                                      'deny-unreachable')
                                 for v, _, _ in verdicts)
                         and not has_shell_substitution(tokens))
             override = override_reason(segments) if liftable else None
@@ -2076,9 +2142,18 @@ def main():
                 emit('allow', f"{asks[0][0]} — {OVERRIDE_VAR} is set "
                               f"({override}), so branch-guard allowed it.")
                 return
-            reason, _, rebase = asks[0]
+            # A denial outranks a prompt when both are present: reporting the
+            # ask instead would let a human approve the command the deny exists
+            # to stop. Segment order picks between two of the same rank, as it
+            # always has.
+            reason, _, verdict = next(
+                (a for a in asks if a[2] == 'deny-unreachable'), asks[0])
+            if verdict == 'deny-unreachable':
+                refuse(reason, liftable)
+                return
             confirm(reason, mode, liftable,
-                    push_overlap_context(reason) if rebase else None)
+                    push_overlap_context(reason) if verdict == 'ask-rebase'
+                    else None)
             return
         if all(verdict in ('allow', 'filter', 'benign') for verdict, _, _ in verdicts):
             # A hidden command substitution / process substitution / unrecognized
