@@ -51,8 +51,9 @@ BRANCH_GUARD_PUSH_POLICY.
 A push the policy would auto-approve is checked once more, for whether the base
 has moved into the same LINES this branch edits (`push_overlap`). It is in bounds
 either way; it is also going to merge wrong, so the auto-approve is withdrawn and
-the push asks for a rebase instead. Every probe there fails silent, so a stale
-fetch or a shallow clone costs a missed catch rather than a blocked push.
+the push is denied with the rebase written into the reason. Every probe there
+fails silent, so a stale fetch or a shallow clone costs a missed catch rather
+than a blocked push.
 The protected set is `main`/`master` plus any glob patterns in
 BRANCH_GUARD_PROTECTED_BRANCHES (see `protected_patterns`).
 
@@ -70,12 +71,14 @@ classifier reason states only the CAUSE; `confirm()` adds the closing clause, so
 the two paths read honestly — an `ask` offers a confirmation, a `deny` says
 there is none to be had and points at the terminal instead.
 
-One verdict denies in every mode rather than only in an unattended one:
-'deny-unreachable', where a `git reset --hard` would move a branch whose tip the
-guard has PROVED nothing else reaches. That cause is a fact the model can settle
-itself with a `gh pr view`, so the answer belongs in the reason rather than in a
-prompt, and `refuse()` writes it there. Every other `ask` in the file still asks
-a human, including the three `classify_reset` keeps.
+Two verdicts deny in every mode rather than only in an unattended one, for the
+same reason: the missing input is a fact the session can settle for itself, so
+the answer belongs in the reason rather than in a prompt, and `refuse()` writes
+it there from DENY_ROUTES. 'deny-unreachable' is a `git reset --hard` moving a
+branch whose tip the guard has PROVED nothing else reaches, which a `gh pr view`
+settles; 'deny-rebase' is a push onto a base that has moved into this branch's
+own lines, which a `git rebase` settles. Every other `ask` in the file still
+asks a human, including the three `classify_reset` keeps.
 
 That denial is final, which is a dead end for a command the session had a good
 reason to run: with nothing to answer the prompt, work reroutes onto whatever
@@ -83,10 +86,14 @@ ungated path exists (hand-editing a file back to its HEAD content rather than
 `git restore`) or is simply abandoned. So a narrow break-glass exists — the
 command prefix `BRANCH_GUARD_OVERRIDE=<reason>` (`override_reason`), which
 lifts an `ask` — or a 'deny-unreachable', whose loss is the same local one —
-whose damage cannot leave this machine: OVERRIDABLE_GIT. It
-reaches no `gh` form, no push, and no protected branch — those asks are tagged
-`ask-shared` and are unliftable by construction. The reason is required, and is
-echoed into the emitted decision so the approval is on the record.
+whose damage cannot leave this machine: OVERRIDABLE_GIT. It reaches no `gh`
+form and no protected branch — those asks are tagged `ask-shared` and are
+unliftable by construction. It reaches one push and only through the verdict:
+a 'deny-rebase' is minted after the policy has already approved that exact
+push, so lifting it reinstates a decision that was made rather than granting a
+new one, and every other push form stays outside OVERRIDABLE_GIT. The reason is
+required, and is echoed into the emitted decision so the approval is on the
+record.
 
 Scope note: branch-guard reasons about git/branch *semantics*. The filesystem
 boundary (commands touching paths outside the workspace) is workspace-guard's
@@ -470,9 +477,6 @@ NON_INTERACTIVE_MODES = frozenset({'dontAsk', 'bypassPermissions'})
 GUARD_PREFIX = 'branch-guard: '
 
 # The verdicts GUARD_PREFIX opens: the two that reach a reader as prose.
-# `additionalContext` takes it unconditionally instead of by verdict — it rides
-# an ask only, and it is the one field that lands in the model's context with
-# nothing around it, so an unprefixed paragraph reads as the session's own.
 PREFIXED_DECISIONS = frozenset({'ask', 'deny'})
 
 # Break-glass command prefix: `BRANCH_GUARD_OVERRIDE=<reason> git clean -fd`.
@@ -493,10 +497,35 @@ OVERRIDE_VAR = 'BRANCH_GUARD_OVERRIDE'
 # subcommand, so both locks have to fail before the override reaches a shared
 # ref. Adding an entry needs the same scrutiny as a READONLY_GIT one, pointed
 # the other way: it must be provably unable to reach past this machine.
+#
+# One push is liftable all the same, and deliberately not through this set:
+# `is_overridable` keys the 'deny-rebase' verdict to `push` on its own, because
+# that verdict is minted only after the policy has already approved the push.
+# Adding `push` here would lift every other push ask with it, which is the
+# whole reason the exception is keyed to a verdict rather than a subcommand.
 OVERRIDABLE_GIT = frozenset({
     'restore', 'switch', 'branch', 'tag', 'worktree', 'stash', 'reset',
     'clean', 'config', 'reflog', 'filter-branch', 'gc',
 })
+
+# The verdicts that deny in every permission mode, mapped to what the caller
+# should run instead. Keyed by verdict because the two causes are settled by
+# different commands, and worded in the order `hook-verdict` asks for: the
+# runnable check first, the break-glass last — `refuse()` appends that, and only
+# where it would be honored. The keys are the verdict set as well as the text,
+# so `main()` reads membership here rather than repeating the two names at each
+# of the three sites that need them.
+DENY_ROUTES = {
+    'deny-unreachable': (
+        "run `gh pr view <n> --json state,mergeCommit` first: a squash merge "
+        "leaves the tip unreachable by construction, so a branch spent that "
+        "way already has its content on main under another object name and "
+        "needs no reset at all."),
+    'deny-rebase': (
+        "run that rebase and push the result. Retrying the push as given "
+        "meets the same overlap, because the cause is the base this branch is "
+        "built on rather than the permission mode."),
+}
 
 
 def split_newline_separators(tokens):
@@ -1205,22 +1234,12 @@ def push_overlap(cwd, branch):
 
 
 def push_overlap_reason(base, paths):
-    """The CAUSE clause for an overlap ask; `confirm()` adds the closing one."""
+    """The CAUSE clause for an overlap deny; `refuse()` adds the closing one."""
     return (f"'{base}' has moved since this branch left it, and its new commits "
             f"edit the same lines this branch does in {', '.join(paths)} — the "
             f"merge is going to come out wrong, and a merge queue would spend a "
             f"whole check cycle finding that. "
             f"`git fetch && git rebase {base}` finds it now")
-
-
-def push_overlap_context(reason):
-    """The model-facing half of an overlap ask — see `confirm()` for why this
-    verdict has one and no other does. The cause names work for the model to do,
-    so it has to survive the human answering the prompt. The opener comes from
-    `emit()`, as it does for a reason, so nothing here names the guard."""
-    return (f"this push was stopped to ask about a stale base. {reason}. "
-            f"The prompt goes to the user, not to you — so whichever way it is "
-            f"answered, rebase before treating this branch's merge as sound.")
 
 
 def skips_base(flags, short):
@@ -1457,7 +1476,7 @@ def classify_reset(branch, cwd, probe):
 
 
 def classify_git(sub, args, branch, policy, cwd, probe):
-    """Verdict ('allow' | 'ask' | 'ask-shared' | 'ask-rebase' |
+    """Verdict ('allow' | 'ask' | 'ask-shared' | 'deny-rebase' |
     'deny-unreachable' | 'defer', reason) for a `git <sub>` command."""
     flags = {a for a in args if a.startswith('-')}
     short = short_flag_letters(args)
@@ -1478,10 +1497,10 @@ def classify_git(sub, args, branch, policy, cwd, probe):
         # already asking is disturbed.
         #
         # Note this is not confined to commands that would have been approved:
-        # an `ask` from any segment wins over the all-segments rule, so
-        # `git push && rm -rf x` asks here where it used to defer. That is the
-        # right way round — the overlap is a property of the push, not of what
-        # is chained to it, and a defer would lose the catch entirely in a
+        # a protective verdict from any segment wins over the all-segments rule,
+        # so `git push && rm -rf x` is denied here where it used to defer. That
+        # is the right way round — the overlap is a property of the push, not of
+        # what is chained to it, and a defer would lose the catch entirely in a
         # session that has allowlisted `git push`.
         #
         # `probe` is required for the same reason the `git branch` probes need
@@ -1490,7 +1509,7 @@ def classify_git(sub, args, branch, policy, cwd, probe):
         if decision == 'allow' and probe and not skips_base(flags, short):
             base, paths = push_overlap(cwd, branch)
             if paths:
-                return ('ask-rebase', push_overlap_reason(base, paths))
+                return ('deny-rebase', push_overlap_reason(base, paths))
         return (decision or 'defer', reason)
 
     # Harmless mutations — don't put work onto or rewrite a branch's history.
@@ -1720,10 +1739,12 @@ def override_reason(segments):
 
 
 def is_overridable(inv, verdict, writes):
-    """True if a segment's `ask` is one the break-glass may lift: a plain `ask`
-    or a 'deny-unreachable' — never an `ask-shared`, whose cause is a protected
-    branch — from a git subcommand in OVERRIDABLE_GIT, aimed at this repository,
-    with nothing attached that reaches further than the subcommand itself.
+    """True if a segment's verdict is one the break-glass may lift: a plain
+    `ask` or a 'deny-unreachable' from a git subcommand in OVERRIDABLE_GIT, or a
+    'deny-rebase' from a `push` — never an `ask-shared`, whose cause is a
+    protected branch. Either way the invocation has to be aimed at this
+    repository, with nothing attached that reaches further than the subcommand
+    itself.
 
     'deny-unreachable' rides with the plain `ask` because the loss it names is
     the same loss: local history on this machine, from `reset`, which is in
@@ -1731,29 +1752,45 @@ def is_overridable(inv, verdict, writes):
     question, not how far the damage reaches, so it must not change what the
     break-glass covers.
 
-    Those three exclusions are what keep the override inside the scope it
+    'deny-rebase' is the one verdict lifted from outside OVERRIDABLE_GIT, and
+    the key is the verdict rather than the subcommand. `push` must stay out of
+    that set: a push loses state this machine does not hold, so a cross-name
+    push, a tag publish and a protected destination all have to stay
+    unliftable, and one entry would lift them all. What separates this verdict
+    is where it comes from — it is minted only after `push_decision` returned
+    `allow`, so the policy had already sanctioned this exact push and the
+    overlap check withdrew that approval over a merge that will come out wrong.
+    Lifting it reinstates a decision that was made, on the one cause a caller
+    can genuinely know better than the guard: an overlap they have read and
+    accepted.
+
+    The three exclusions below are what keep the override inside the scope it
     claims. An output redirect to a file writes content the classifier never
     saw; a `git -c`/`--config-env` escape hatch can run arbitrary code
     (`-c core.pager='!sh …'`); and a `git -C`/`--git-dir` pointing elsewhere
     puts the loss in a checkout this session doesn't own — the one thing
     "damage stops at this machine" has to rule out."""
-    return (verdict in ('ask', 'deny-unreachable') and not writes
-            and inv is not None
-            and inv['prog'] == 'git' and inv['sub'] in OVERRIDABLE_GIT
-            and not (set(inv['globals']) & GIT_ESCAPE_HATCHES)
-            and not targets_other_repo(inv['globals']))
+    if inv is None or writes or inv['prog'] != 'git':
+        return False
+    if set(inv['globals']) & GIT_ESCAPE_HATCHES or targets_other_repo(inv['globals']):
+        return False
+    if verdict == 'deny-rebase':
+        return inv['sub'] == 'push'
+    return (verdict in ('ask', 'deny-unreachable')
+            and inv['sub'] in OVERRIDABLE_GIT)
 
 
 def classify_segment(inv, branch, policy, cwd):
-    """Verdict ('nongit' | 'allow' | 'ask' | 'ask-shared' | 'ask-rebase' |
+    """Verdict ('nongit' | 'allow' | 'ask' | 'ask-shared' | 'deny-rebase' |
     'deny-unreachable' | 'defer', reason) for one segment. 'nongit' marks a
     segment that isn't a git/gh invocation (so the whole command can't be
     auto-approved); 'ask-shared' is an `ask` whose cause is a protected branch,
-    kept distinct so the break-glass can't lift it; 'ask-rebase' is an `ask`
-    whose cause also has to reach the model, so it emits an `additionalContext`
-    alongside; 'deny-unreachable' denies in every permission mode, because the
-    cause is a fact the model can check for itself — but the break-glass still
-    lifts it, so it travels with the plain `ask` everywhere else."""
+    kept distinct so the break-glass can't lift it. The two DENY_ROUTES tags
+    deny in every permission mode, because the cause is a fact the session can
+    check for itself — 'deny-unreachable' for a reset onto a tip nothing else
+    reaches, 'deny-rebase' for a push onto a base that has moved into this
+    branch's own lines. The break-glass still lifts both, so they travel with
+    the plain `ask` everywhere else."""
     if inv is None:
         return ('nongit', None)
     if inv['prog'] == 'gh':
@@ -1953,7 +1990,7 @@ def is_protected(branch):
     return any(fnmatch.fnmatchcase(branch, p) for p in protected_patterns())
 
 
-def emit(decision, reason, context=None):
+def emit(decision, reason):
     if decision in PREFIXED_DECISIONS:
         reason = GUARD_PREFIX + reason
     out = {
@@ -1961,12 +1998,10 @@ def emit(decision, reason, context=None):
         "permissionDecision": decision,
         "permissionDecisionReason": reason,
     }
-    if context:
-        out["additionalContext"] = GUARD_PREFIX + context
     print(json.dumps({"hookSpecificOutput": out}))
 
 
-def confirm(reason, mode, liftable=False, context=None):
+def confirm(reason, mode, liftable=False):
     """Emit `ask`, or `deny` when running in a non-interactive permission mode
     where no human is present to answer the prompt (fail safe).
 
@@ -1987,22 +2022,13 @@ def confirm(reason, mode, liftable=False, context=None):
     interactive `ask` never mentions the prefix: a human answering the prompt is
     the shorter route, and advertising a bypass beside it is the wrong nudge.
 
-    `context` rides along on the `ask` only. `reason` reaches the human at the
-    prompt and stops there — measured on Claude Code 2.1.220, an `ask` uses it
-    as the prompt's text and nothing else, so a session whose command is
-    approved never learns what it was stopped for. `additionalContext` is the
-    channel that does reach the model, and it is queued while the hook's output
-    is read, before the prompt exists, so it lands whichever way the human
-    answers. The `deny` path needs none: a denial delivers `reason` to the model
-    already, and repeating it there would only say the same thing twice.
-
-    A context opens with `GUARD_PREFIX` too, and takes it in `emit()` for the
-    same reason a reason does: the attribution belongs to the wire format rather
-    than to whichever helper built the paragraph. This is the one field that
-    lands in the model's context with nothing around it — no prompt, no tool
-    error — so an unprefixed paragraph is indistinguishable from the session's
-    own reasoning or from a sibling guard's. A builder like
-    `push_overlap_context` therefore names the guard nowhere else."""
+    Nothing here reaches the model. `reason` is the prompt's text and stops at
+    the human — measured on Claude Code 2.1.220, an `ask` delivers it nowhere
+    else — so a cause naming work for the model to do cannot be carried on an
+    `ask` at all. That asymmetry is the argument behind `refuse()`: a cause the
+    session can settle for itself denies instead, and a `deny` routes `reason`
+    to the model on its own. The `additionalContext` field this used to pass for
+    the push-overlap ask went when that ask became one of them."""
     if mode in NON_INTERACTIVE_MODES:
         routes = (f"Retrying as-is won't help — re-run it prefixed with "
                   f"`{OVERRIDE_VAR}=<reason>` if the loss is deliberate, or do "
@@ -2014,18 +2040,18 @@ def confirm(reason, mode, liftable=False, context=None):
         emit('deny', f"{reason} — denied because permission mode '{mode}' has "
                      f"no way to prompt for confirmation. {routes}")
         return
-    emit('ask', f"{reason} — confirm before proceeding.", context)
+    emit('ask', f"{reason} — confirm before proceeding.")
 
 
-def refuse(reason, liftable=False):
+def refuse(reason, routes, liftable=False):
     """Emit `deny` for a verdict that denies in every permission mode.
 
     `confirm()` denies only where the mode has no way to prompt, so its routes
-    are about the session — do it in a terminal, or switch modes. This one's
-    cause is a fact the model can establish for itself, so it denies with a
-    human sitting right there, and the routes are the check that settles the
-    fact instead. Asking would spend the one reviewer that doesn't scale on a
-    `gh pr view` the model can run.
+    are about the session — do it in a terminal, or switch modes. These causes
+    are facts the session can establish for itself, so they deny with a human
+    sitting right there, and `routes` — the verdict's DENY_ROUTES entry — is the
+    command that settles the fact instead. Asking would spend the one reviewer
+    that doesn't scale on something the model can run.
 
     `liftable` names the break-glass, and only where it would actually be
     honored — the same rule `confirm()` follows, for the same reason: a hint on
@@ -2035,13 +2061,9 @@ def refuse(reason, liftable=False):
 
     No `additionalContext`. A denial delivers `reason` to the model already,
     which is the whole argument for denying here."""
-    routes = ("run `gh pr view <n> --json state,mergeCommit` first: a squash "
-              "merge leaves the tip unreachable by construction, so a branch "
-              "spent that way already has its content on main under another "
-              "object name and needs no reset at all.")
     if liftable:
-        routes += (f" Re-run it prefixed with `{OVERRIDE_VAR}=<reason>` if the "
-                   f"loss is deliberate.")
+        routes += (f" Re-run it prefixed with `{OVERRIDE_VAR}=<reason>` if you "
+                   f"mean to proceed anyway.")
     emit('deny', f"{reason} — {routes}")
 
 
@@ -2118,7 +2140,7 @@ def main():
                 return
         asks = [(reason, ovr, verdict)
                 for verdict, reason, ovr in verdicts
-                if verdict in ('ask', 'ask-rebase', 'deny-unreachable')]
+                if verdict == 'ask' or verdict in DENY_ROUTES]
         if asks:
             # The break-glass lifts a local-loss ask, but only for a command
             # that is otherwise entirely recognized-safe: every other segment
@@ -2126,15 +2148,14 @@ def main():
             # substitution. Anything less and a second command would ride the
             # override in, which is the gap the all-segments rule closes for
             # `allow` and has to close here identically.
-            # An 'ask-rebase' is never overridable (`is_overridable` takes only a
-            # plain 'ask' or a 'deny-unreachable', and `push` is outside
-            # OVERRIDABLE_GIT anyway), so its presence fails this on both
-            # clauses. A 'deny-unreachable' passes both: it is liftable and its
-            # subcommand is `reset`, so the override reaches it exactly as it
-            # reaches the plain `ask` it was promoted from.
+            # Both DENY_ROUTES verdicts pass this exactly as the plain `ask`
+            # does: `is_overridable` takes each of them — 'deny-unreachable'
+            # through OVERRIDABLE_GIT, 'deny-rebase' keyed to `push` on its own
+            # — so promoting a verdict to a denial leaves the break-glass
+            # covering what it covered before.
             liftable = (all(ovr for _, ovr, _ in asks)
-                        and all(v in ('allow', 'filter', 'benign', 'ask',
-                                      'deny-unreachable')
+                        and all(v in ('allow', 'filter', 'benign', 'ask')
+                                or v in DENY_ROUTES
                                 for v, _, _ in verdicts)
                         and not has_shell_substitution(tokens))
             override = override_reason(segments) if liftable else None
@@ -2147,13 +2168,11 @@ def main():
             # to stop. Segment order picks between two of the same rank, as it
             # always has.
             reason, _, verdict = next(
-                (a for a in asks if a[2] == 'deny-unreachable'), asks[0])
-            if verdict == 'deny-unreachable':
-                refuse(reason, liftable)
+                (a for a in asks if a[2] in DENY_ROUTES), asks[0])
+            if verdict in DENY_ROUTES:
+                refuse(reason, DENY_ROUTES[verdict], liftable)
                 return
-            confirm(reason, mode, liftable,
-                    push_overlap_context(reason) if verdict == 'ask-rebase'
-                    else None)
+            confirm(reason, mode, liftable)
             return
         if all(verdict in ('allow', 'filter', 'benign') for verdict, _, _ in verdicts):
             # A hidden command substitution / process substitution / unrecognized
