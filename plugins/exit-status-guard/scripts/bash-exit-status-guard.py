@@ -267,6 +267,7 @@ class Registry(object):
         self.gates = self._compile(data.get('gates') or [])
         self.exempt = self._compile(data.get('exempt') or [])
         self.mutators = self._compile(data.get('mutators') or [])
+        self.restores = self._compile(data.get('restores') or [])
 
     def _compile(self, patterns):
         out = []
@@ -312,6 +313,15 @@ class Registry(object):
         """Whether these words are a registered state change, screened the same
         way -- a read is not a state change, and neither is a probe."""
         return self._matches(self.mutators, words)
+
+    def is_restore(self, words):
+        """Whether this state change reverts local state rather than publishing.
+
+        Read only after `is_mutator` has already said yes, so the screens have
+        run; what this adds is the direction of the change. `git reset --hard`
+        undoes, `git push` announces.
+        """
+        return self._matches(self.restores, words)
 
 
 DEFAULT_REGISTRY = os.path.join(
@@ -365,7 +375,7 @@ def load_registry(cwd=''):
         merged = local
     else:
         merged = dict(base)
-        for key in ('gates', 'exempt', 'mutators'):
+        for key in ('gates', 'exempt', 'mutators', 'restores'):
             merged[key] = list(base.get(key) or []) + list(local.get(key) or [])
     return Registry(merged)
 
@@ -563,6 +573,56 @@ def lost_background_status(segs, background, reg):
     return first_gate(segs, reg)
 
 
+# A segment that is nothing but `NAME=$?`. Requiring the whole segment is what
+# separates a capture from an inline assignment: `rc=$? make check` sets `rc`
+# for the duration of one command and leaves nothing a later segment can read.
+CAPTURE_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)=\$\?$')
+
+
+def status_captured(segs, gate_at, mutator_at):
+    """The variable a `$?` capture between the gate and the mutator names, or ''.
+
+    Top-level only: a capture inside a subshell dies with it, so `$rc` outside is
+    empty and the recheck it appears to feed tests nothing.
+    """
+    for seg in segs[gate_at + 1:mutator_at]:
+        if seg.depth != 0 or len(seg.tokens) != 1:
+            continue
+        m = CAPTURE_RE.match(seg.tokens[0])
+        if m:
+            return m.group(1)
+    return ''
+
+
+def status_rechecked(segs, mutator_at, var):
+    """Whether any segment after the mutator reads ``var``.
+
+    Reading is enough, the same way a foreground `echo "EXIT=$?"` is: the status
+    reaches somewhere it can be acted on. shlex has already removed the quoting,
+    so the tokens are scanned as plain text.
+    """
+    return any(reads_var(' '.join(seg.tokens), var, quotes=False)
+               for seg in segs[mutator_at + 1:])
+
+
+def restore_form(segs, reg, words, gate_at, mutator_at):
+    """Whether this mutator is the capture-and-restore rewrite SEQUENCED_REASON
+    hands over, rather than a state change the gate should have gated.
+
+    `cmd > <LOG> 2>&1; rc=$?; restore; [ "$rc" -ne 0 ] || exit 1` is what the
+    deny recommends for a gate whose failure is the assertion, and a restore
+    that is itself a registry mutator -- `git reset --hard`, `kubectl delete` --
+    tripped rule 3 on the way back, so the suggestion was denied a second time
+    (Q106). All three conditions are required. Dropping the restore screen would
+    silence `make check > log; rc=$?; git push; [ "$rc" -ne 0 ] || exit 1`, and
+    capturing a status does not make a push conditional on it.
+    """
+    if not reg.is_restore(words):
+        return False
+    var = status_captured(segs, gate_at, mutator_at)
+    return bool(var) and status_rechecked(segs, mutator_at, var)
+
+
 def sequenced_mutation(segs, reg):
     """(gate, mutator) when a gate is sequenced before a state-changing command
     with `;` rather than `&&`, or ('', '').
@@ -571,6 +631,14 @@ def sequenced_mutation(segs, reg):
     it: the push runs whatever the check did. Only top-level segments count --
     inside a subshell the sequence is that subshell's own business -- and only a
     `;`/newline separator, since `&&` is the form that already gates.
+
+    A restore in the capture-and-recheck form is skipped rather than returned,
+    so a publish later in the same command is still caught: in
+    `make check > log; rc=$?; git reset --hard; git push; [ "$rc" -ne 0 ]` the
+    reset is the recommended rewrite and the push is the defect. The skip is a
+    `continue` rather than a fall-through, because most restores are gates too
+    -- letting one become the gate would restart the capture search after it,
+    and a two-step teardown would then deny on its second step.
     """
     gate, gate_at = '', -1
     for i, seg in enumerate(segs):
@@ -578,7 +646,9 @@ def sequenced_mutation(segs, reg):
             continue
         words = head_words(seg)
         if gate_at >= 0 and i > gate_at and reg.is_mutator(words):
-            return gate, ' '.join(words)
+            if not restore_form(segs, reg, words, gate_at, i):
+                return gate, ' '.join(words)
+            continue
         if next_op(seg.post_ops) in (';', '\n') and reg.is_gate(words):
             gate, gate_at = ' '.join(words), i
     return '', ''

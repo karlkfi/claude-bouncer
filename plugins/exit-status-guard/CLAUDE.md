@@ -156,3 +156,18 @@ already screened structurally for every gate, so `git stash list` needs no row;
 `status` is deliberately not one of them, because `kubectl rollout status`
 reports its answer as an exit code and a pipe really does swallow it.
 
+## Adding a restore
+
+`restores` is a subset of `mutators`, read only after a mutator has matched, so
+an entry naming a command `mutators` does not reach is dead — registered, never
+consulted, and silent about it. `TestRegistry` asserts both memberships.
+
+It exists for one shape: the capture-and-restore rewrite `SEQUENCED_REASON`
+itself hands over, where the restore has to run even on the failure the gate was
+asserting. All three conditions are required — a registered restore, a `$?`
+capture before it, a read of that capture after it — so widening the list cannot
+on its own silence a sequence. What widening it *can* do is silence a publish
+mislabelled as a teardown, which is why the test for an entry is whether its
+blast radius is the thing the gate just built: `kubectl delete` undoing a
+`kubectl apply` qualifies, `gh release delete` does not.
+
