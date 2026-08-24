@@ -9107,29 +9107,28 @@ class PowerShellBindArgsTests(unittest.TestCase):
         self.assertEqual(self.entries("get-content", r"Get-Content x"),
                          [("x", False)])
 
-    def test_recurse_withdraws_the_flag_from_every_operand(self):
-        # Q114: the entry role rests on the cmdlet not reaching the link's
-        # target, which `-Recurse` puts in doubt on Windows. Every spelling
-        # PowerShell accepts has to reach the check, or the withdrawal is
-        # decorative -- case folds, prefixes resolve, and the switch may sit
-        # after the operand or beside another switch.
+    def test_recurse_leaves_the_entry_role_on_every_operand(self):
+        # Q114 measured `Remove-Item -Recurse` over a directory link: it unlinks
+        # the entry and leaves the target intact, so the withdrawal this used to
+        # assert had nothing left to protect. Every spelling PowerShell accepts
+        # is still listed, because each has to BIND as a switch -- one read as an
+        # operand would be checked as a file rather than ignored.
         for text in (r"Remove-Item -Recurse a", r"Remove-Item -recurse a",
                      r"Remove-Item -RECURSE a", r"Remove-Item -Rec a",
                      r"Remove-Item -Recurse:true a", r"Remove-Item a -Recurse",
                      r"Remove-Item -Force -Recurse a"):
-            self.assertEqual(self.entries("remove-item", text), [("a", False)],
+            self.assertEqual(self.entries("remove-item", text), [("a", True)],
                              text)
-        # Without it, the operand keeps the entry role.
+        # And the switch changes nothing that was not already true without it.
         self.assertEqual(self.entries("remove-item", r"Remove-Item -Force a"),
                          [("a", True)])
 
     def test_an_expandable_switch_is_not_read_as_recurse(self):
         # `-Recurse:$true` carries a variable, so the binder cannot read it as
-        # a parameter at all and it falls through to the operand list. The
-        # entry role survives, which looks like a hole and is not: an
-        # expandable operand is an offender in its own right, so the string
-        # denies rather than allowing. Asserted because the reasoning is what
-        # makes the pre-pass's `not exp` test safe to share with the binder's.
+        # a parameter at all and it falls through to the operand list. That
+        # costs nothing now that `-Recurse` withdraws nothing, but the operand
+        # itself is expandable, so the string denies on it -- which is what the
+        # end-to-end sibling pins.
         self.assertEqual(
             self.entries("remove-item", r"Remove-Item -Recurse:$true a"),
             [("-Recurse:$true", True), ("a", True)])
@@ -9622,25 +9621,25 @@ class PowerShellEntryOperandTests(unittest.TestCase):
     def test_a_trailing_separator_names_a_directory_not_an_entry(self):
         self._agree("Remove-Item ./dirlink/", "rm ./dirlink/", "ask")
 
-    # --- the deliberate divergence (Q114) -----------------------------------
+    # --- the last divergence Q114 closed ------------------------------------
 
     def test_an_expandable_recurse_switch_still_denies(self):
-        # The bind-level sibling of this asserts `-Recurse:$true` keeps the
-        # entry role, because the binder cannot read a variable as a parameter.
-        # That is only safe if the string still stops here, so pin the decision
-        # rather than the reasoning.
+        # An expandable operand is an offender in its own right, whatever the
+        # switch beside it binds to, so this stops here rather than reaching the
+        # entry question at all. Pinned as a decision rather than as reasoning.
         self.assertEqual(
             self._decision("PowerShell", "Remove-Item -Recurse:$true ./dirlink"),
             "deny")
 
-    def test_recurse_withdraws_the_entry_role(self):
-        # NOT a parity assertion, and not a typo: bash allows both of these.
-        # The entry role rests on the command being unable to reach the link's
-        # target, and `-Recurse` over a directory link is exactly where that
-        # premise is in doubt on Windows. Q114 carries the experiment that
-        # settles it; until then this withholds rather than assumes.
+    def test_recurse_agrees_with_bash(self):
+        # Was the one shape Q76 measured as divergent, and it was a withholding
+        # rather than a finding: `-Recurse` might have walked into the link's
+        # target on Windows, and the repo had not asked. It does not -- CI run
+        # 32692159539, both hosts, both link kinds, target intact every time --
+        # so this is a parity assertion now.
         self.assertEqual(
-            self._decision("PowerShell", "Remove-Item -Recurse ./dirlink"), "ask")
+            self._decision("PowerShell", "Remove-Item -Recurse ./dirlink"),
+            "allow")
         self.assertEqual(self._decision("Bash", "rm -rf ./dirlink"), "allow")
 
 

@@ -4462,18 +4462,15 @@ def ps_bind_args(args, spec):
     left-to-right pass would hand it slot 0 (-Pattern), classify a real read as
     a non-file operand, and allow it silently.
     """
-    # `-Recurse` withdraws entry treatment for the whole segment. The entry
-    # role rests on the cmdlet being unable to reach what the link points at,
-    # and that premise is exactly what a recursive delete over a directory link
-    # puts in doubt on Windows -- `rm -rf dirlink` cannot follow the link on
-    # POSIX, but the PowerShell behaviour is a platform question this repo
-    # cannot settle from here (Q114). Declining the exemption costs a prompt on
-    # a rare shape; assuming it away would cost a silent `allow` on a recursive
-    # delete reaching outside the root.
-    recursive = any(
-        not e and len(v) > 1 and v[0] == '-'
-        and ps_resolve_param(v[1:].split(':', 1)[0].lower(), spec) == 'recurse'
-        for _, v, e, _q in args)
+    # `-Recurse` used to withdraw entry treatment for the whole segment, on the
+    # premise that a recursive delete might walk into what a directory link
+    # points at. It does not: `Remove-Item -Recurse` unlinks the entry and
+    # leaves the target's directory and file intact, on both hosts and for both
+    # link kinds. Measured in CI run 32692159539 by
+    # `tests/test_windows_link_semantics.py` -- eight observations, all `rc=0`
+    # with the target intact, and an inverted copy of each assertion went red on
+    # the same run (Q114). So `-Recurse` takes the entry role like any other
+    # operand, and `Remove-Item -Recurse ./dirlink` matches `rm -rf ./dirlink`.
     named, positionals, bound, i, n = [], [], set(), 0, len(args)
     while i < n:
         _, val, exp, quoted = args[i]
@@ -4489,7 +4486,7 @@ def ps_bind_args(args, spec):
                 # -Path and -LiteralPath are alternates for one slot, so
                 # binding either has to close it.
                 bound.update(k for k, v in spec['files'].items() if v == role)
-                is_entry = key in spec['entry'] and not recursive
+                is_entry = key in spec['entry']
                 if attached is not None:
                     named.append((attached, exp, quoted, role, is_entry))
                 elif i + 1 < n:
@@ -4515,8 +4512,7 @@ def ps_bind_args(args, spec):
         pos += 1
         role = spec['files'].get(slot)
         if role:
-            named.append((val, exp, quoted, role,
-                          slot in spec['entry'] and not recursive))
+            named.append((val, exp, quoted, role, slot in spec['entry']))
     return named
 
 
