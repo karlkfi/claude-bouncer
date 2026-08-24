@@ -3940,6 +3940,27 @@ PS_SPEC = {
         consume=('itemtype', 'type', 'value', 'target', 'name', 'credential'),
         switches=('force',),
         positional=('path',)),
+    # `mkdir` is a FUNCTION over `New-Item -ItemType Directory`, not an alias of
+    # it, so `PS_ALIASES` never saw it and neither did the row above -- the
+    # spelling a session reaches for first was the one still deferring (Q121).
+    # Its parameter set is `New-Item`'s minus `-LiteralPath` and `-ItemType`,
+    # measured on both hosts by `tests/test_windows_mkdir_binding.py`: naming
+    # either here would invent a binding the function rejects. `-Name` IS
+    # present and is consumed, as it is on `New-Item` -- a leaf name appended to
+    # `-Path` rather than a path of its own.
+    #
+    # One positional slot, and that is the half worth measuring rather than
+    # reading: `mkdir two three` is a binding error ("A positional parameter
+    # cannot be found that accepts argument 'three'") on 5.1 and 7 alike, so
+    # `-Value` is named-only. A second operand therefore repeats `-Path` and is
+    # checked, which over-checks a statement PowerShell refuses to run -- the
+    # safe direction, and the reason this is a row rather than the alias entry
+    # Q3 warns against.
+    'mkdir': _ps_row(
+        {'path': 'write'},
+        consume=('value', 'name', 'credential'),
+        switches=('force',),
+        positional=('path',)),
 }
 
 # The same row for a link, where `-Value` -- and `-Target`, which the FileSystem
@@ -4000,6 +4021,7 @@ PS_ALIASES = {
     'erase': 'remove-item', 'rd': 'remove-item', 'rmdir': 'remove-item',
     'rni': 'rename-item', 'ren': 'rename-item',
     'ni': 'new-item',
+    'md': 'mkdir',
     'cd': 'set-location', 'sl': 'set-location', 'chdir': 'set-location',
     'pushd': 'push-location', 'popd': 'pop-location',
     'spps': 'stop-process', 'kill': 'stop-process',

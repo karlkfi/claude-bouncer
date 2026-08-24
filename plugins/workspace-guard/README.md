@@ -295,7 +295,9 @@ names that take entirely different flags.
 Guarded cmdlets: `Get-Content`, `Select-String`, `Import-Csv`, `Import-Clixml`,
 `Set-Content`, `Add-Content`, `Out-File`, `Tee-Object`, `Export-Csv`,
 `Export-Clixml`, `Copy-Item`, `Move-Item`, `Remove-Item`, `Rename-Item`,
-`New-Item`, and their aliases. Output redirects (`>`, `>>`, `2>`) are checked on any command.
+`New-Item`, and their aliases — plus `mkdir` and `md`, which are *functions*
+over `New-Item` rather than aliases of it and so carry a row of their own.
+Output redirects (`>`, `>>`, `2>`) are checked on any command.
 `Stop-Process` (and `kill`, `spps`) is guarded as well, as a process kill, as is
 Windows' own `taskkill`.
 
@@ -314,6 +316,8 @@ Windows' own `taskkill`.
 | `New-Item -ItemType File -Path C:\out\x`      | **ask**  |
 | `New-Item -ItemType SymbolicLink -Path link -Target C:\out\x` | **ask** |
 | `New-Item -ItemType File x -Value C:\out\y` (content) | allow |
+| `mkdir C:\out\x` · `md C:\out\x`             | **ask**  |
+| `mkdir x -Value C:\out\y` (content)           | allow    |
 | `Get-Content -Path in.txt,C:\out\x` (array)    | **ask**  |
 | `Set-Location C:\out; Get-Content secret.txt`  | **ask**  |
 | `Write-Output hi > C:\out\x` (redirect)        | **ask**  |
@@ -1753,12 +1757,10 @@ final output.
   the bash one — see [The PowerShell tool](#the-powershell-tool): `Get-Content`,
   `Select-String`, `Import-Csv`, `Import-Clixml`, `Set-Content`, `Add-Content`,
   `Out-File`, `Tee-Object`, `Export-Csv`, `Export-Clixml`, `Copy-Item`,
-  `Move-Item`, `Remove-Item`, `Rename-Item`, `New-Item`, their aliases (`cat`,
-  `type`, `gc`, `sls`, `sc`, `ac`, `cp`, `mv`, `rm`, `del`, `ni`, …), output
-  redirects, and `Stop-Process` and `taskkill` as process kills.
-  `mkdir` and `md` are PowerShell *functions* over `New-Item`, not aliases of
-  it, so they are not on that list and a directory created outside the root
-  through one is still silent.
+  `Move-Item`, `Remove-Item`, `Rename-Item`, `New-Item`, `mkdir` and `md`, their
+  aliases (`cat`, `type`, `gc`, `sls`, `sc`, `ac`, `cp`, `mv`, `rm`, `del`,
+  `ni`, …), output redirects, and `Stop-Process` and `taskkill` as process
+  kills.
   Everything else — a cmdlet not on that list, a .NET call such as
   `[IO.File]::ReadAllText(…)`, a native `.exe` — is **not checked**, and the
   session gets no signal that it wasn't. The alternative was to prompt on

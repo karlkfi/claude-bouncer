@@ -8770,7 +8770,10 @@ class PowerShellSpecShapeTests(unittest.TestCase):
              "set-content", "add-content", "out-file", "tee-object",
              "export-csv", "export-clixml",
              "copy-item", "move-item", "remove-item", "rename-item",
-             "new-item"},
+             "new-item",
+             # A function over `New-Item` rather than an alias of it, so it
+             # needs a row instead of a PS_ALIASES entry (Q121).
+             "mkdir"},
         )
 
     def test_new_item_specs_agree_on_parameter_names(self):
@@ -9798,6 +9801,99 @@ class PowerShellNewItemTests(unittest.TestCase):
 
     def test_an_in_workspace_creation_still_allows(self):
         self._allows("New-Item -ItemType File -Path made.txt")
+
+
+class PowerShellMkdirTests(unittest.TestCase):
+    """Q121: `mkdir` and `md` are functions over `New-Item`, so its row missed
+    them.
+
+    Q103's row closed `New-Item -ItemType Directory -Path <outside>`, and left
+    deferring the two spellings a session actually reaches for. `mkdir` is a
+    PowerShell FUNCTION that calls the cmdlet rather than an alias of it, so
+    `PS_ALIASES` never resolved it, and `md` is an alias of the function.
+
+    It gets its own PS_SPEC row instead of an alias entry, which is Q3's rule:
+    an alias whose parameter set diverges from the row it points at is the
+    mistake. `mkdir` has no `-LiteralPath` and no `-ItemType`, so `New-Item`'s
+    row would bind two parameters the function rejects.
+
+    Its slot list and its `-Name` are measured rather than read --
+    `tests/test_windows_mkdir_binding.py`, both hosts, CI run 32753995074. The
+    first draft of the row had `positional=('path', 'value')` and omitted
+    `-Name`, both from the documentation, and both were wrong: `mkdir two three`
+    is a binding error, so there is one positional slot, and `-Name` exists. The
+    assertions here are about how the hook reads a string, which is
+    establishable anywhere.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = os.path.realpath(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _decision(self, cmd):
+        out = run_hook(cmd, self.workspace, project_dir=self.workspace,
+                       tool_name="PowerShell")
+        self.assertIsNotNone(out, f"expected a decision, got defer for: {cmd!r}")
+        return out["hookSpecificOutput"]["permissionDecision"]
+
+    def _asks_about_target(self, cmd):
+        out = run_hook(cmd, self.workspace, project_dir=self.workspace,
+                       tool_name="PowerShell")
+        self.assertIsNotNone(out, f"expected a decision, got defer for: {cmd!r}")
+        reason = out["hookSpecificOutput"].get("permissionDecisionReason")
+        self.assertEqual("ask", out["hookSpecificOutput"]["permissionDecision"],
+                         f"for {cmd!r} (reason: {reason!r})")
+        self.assertIn("/q121-fake-target", reason)
+
+    # --- the row's own measurement: both spellings deferred --------------
+
+    def test_mkdir_outside_is_checked(self):
+        self._asks_about_target("mkdir /q121-fake-target")
+
+    def test_the_md_alias_agrees(self):
+        self._asks_about_target("md /q121-fake-target")
+
+    def test_the_named_path_form_binds(self):
+        self._asks_about_target("mkdir -Path /q121-fake-target")
+
+    def test_a_switch_after_the_operand_does_not_displace_it(self):
+        self._asks_about_target("mkdir /q121-fake-target -Force")
+
+    def test_new_item_still_agrees(self):
+        # The row Q103 wrote is untouched; this is the spelling it already had.
+        self._asks_about_target(
+            "New-Item -ItemType Directory -Path /q121-fake-target")
+
+    # --- the divergence from New-Item's row ------------------------------
+
+    def test_a_second_positional_repeats_the_path_slot(self):
+        # One positional slot, so the binder repeats it and checks the second
+        # operand too. PowerShell refuses the statement outright ("A positional
+        # parameter cannot be found that accepts argument ..."), so this is a
+        # prompt on something that cannot run -- the safe way to be wrong, and
+        # the same treatment `New-Item a b` already gets.
+        self._asks_about_target("mkdir inside /q121-fake-target")
+
+    def test_the_named_value_form_is_not_a_path(self):
+        # `-Value` is named-only and is content, so it is consumed.
+        self.assertEqual(self._decision("mkdir inside -Value /q121-fake-target"),
+                         "allow")
+
+    def test_the_named_name_form_is_not_a_path(self):
+        # `-Name` is a leaf name appended to `-Path`, as on `New-Item`. Omitted
+        # from the row's first draft, which left it to fall into the positional
+        # list and be checked as a path of its own.
+        self.assertEqual(self._decision("mkdir inside -Name /q121-fake-target"),
+                         "allow")
+
+    # --- and it still stays quiet in the workspace -----------------------
+
+    def test_an_in_workspace_creation_still_allows(self):
+        self.assertEqual(self._decision("mkdir made"), "allow")
+        self.assertEqual(self._decision("md made"), "allow")
 
 
 class PowerShellNewItemTargetAliasControlTests(unittest.TestCase):
