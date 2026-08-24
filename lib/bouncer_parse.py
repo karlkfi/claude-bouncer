@@ -235,7 +235,8 @@ def _scan_heredoc_delim(text, i):
             chars.append(d); i += 1
     return ''.join(chars), strip_tabs, quoted, i
 
-def strip_heredoc_bodies(cmd, expanded=None, unterminated=None):
+def strip_heredoc_bodies(cmd, expanded=None, unterminated=None,
+                         own_level_only=False):
     """Remove heredoc body text from the raw command string, before shlex.
 
     Bash slurps everything between the newline after a `<<WORD` / `<<-WORD`
@@ -286,6 +287,17 @@ def strip_heredoc_bodies(cmd, expanded=None, unterminated=None):
     inline, the apostrophe in a `don't` would open a quote for the rest of the
     scan and hide a live `$(…)` after it, in that body or on a later command
     line (Q50).
+
+    Pass ``own_level_only`` to consume only the bodies armed at the top level of
+    ``cmd`` and copy a substitution's own heredocs through untouched. A caller
+    re-scanning the raw string for substitution bodies needs both halves: the
+    top level's data gone, since an apostrophe in one opens a quoted run that
+    swallows the rest of the scan, and each body whole, since its terminator is
+    what lets the next strip disarm it cleanly (Q119). The returned string is
+    not itself re-strippable — the top level's own `<<WORD` comes back disarmed,
+    as it does by default — so re-scan the bodies, never the result. The default
+    strips every level, because the callers that hand it to shlex need all of it
+    gone.
     """
     out = []
     i, n = 0, len(cmd)
@@ -366,6 +378,8 @@ def strip_heredoc_bodies(cmd, expanded=None, unterminated=None):
             continue
         if c == '\n':
             out.append('\n'); last = '\n'; i += 1
+            if own_level_only and stack:          # a substitution's own heredoc
+                continue
             while pending and i < n:
                 delim, strip_tabs, quoted = pending.pop(0)
                 end, closed = _consume_heredoc_body_ex(cmd, i, delim, strip_tabs)

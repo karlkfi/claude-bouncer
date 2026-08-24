@@ -4292,6 +4292,85 @@ class StrippedSubstBodyHeredocTests(unittest.TestCase):
         self.assertIsNone(run_hook(cmd, self.workspace, project_dir=self.workspace))
 
 
+class RawSubstScanHeredocTests(unittest.TestCase):
+    """Q119: an apostrophe in an earlier heredoc body hid the raw scan's work.
+
+    Q113 recovers a substitution body from the raw command string, and matched
+    it by re-scanning that string flat. An apostrophe in a top-level heredoc
+    body opened a quoted run that swallowed the rest of the scan (the Q50
+    mechanism), so no body was found, none was swapped, and the Q113 defect ran
+    on -- returning `allow` rather than a defer, because the first `cat` is
+    guarded and reads stdin, so the string was vouched for on the strength of a
+    substitution whose outside read was never seen.
+
+    The scan now runs over an own-level strip, which drops those bodies and
+    leaves each substitution's own heredocs with their terminators.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = os.path.realpath(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _asks_about_target(self, cmd):
+        out = run_hook(cmd, self.workspace, project_dir=self.workspace)
+        self.assertIsNotNone(out, f"expected a decision, got defer for: {cmd!r}")
+        decision = out["hookSpecificOutput"]["permissionDecision"]
+        reason = out["hookSpecificOutput"].get("permissionDecisionReason")
+        self.assertEqual("ask", decision, f"for {cmd!r} (reason: {reason!r})")
+        self.assertIn("/etc/q119-fake-target", reason)
+
+    def test_an_apostrophe_in_an_earlier_body_no_longer_hides_the_read(self):
+        # The row's own measurement, which returned `allow`.
+        self._asks_about_target(
+            "cat <<EOF\ndon't\nEOF\necho \"$(cat <<X\nb\nX\n"
+            "cat /etc/q119-fake-target)\"")
+
+    def test_the_same_command_without_the_apostrophe_is_unchanged(self):
+        # The control the row measured at `ask`, pinned so a regression cannot
+        # move both arms together and look consistent.
+        self._asks_about_target(
+            'cat <<EOF\nplain\nEOF\necho "$(cat <<X\nb\nX\n'
+            'cat /etc/q119-fake-target)"')
+
+    def test_an_unbalanced_double_quote_in_an_earlier_body_behaves_the_same(self):
+        # `"` is the character the strip exists for (issue 83), so the shape
+        # belongs beside the apostrophe -- but it asks either way, because a
+        # double-quoted run reopens at the `"` before the substitution. Kept as
+        # the control that says the apostrophe is what armed this, not "an odd
+        # quote in a body".
+        self._asks_about_target(
+            'cat <<EOF\nsay "hi\nEOF\necho "$(cat <<X\nb\nX\n'
+            'cat /etc/q119-fake-target)"')
+
+    def _allows(self, cmd):
+        # These strings open with a guarded `cat` reading stdin, so a scan that
+        # finds nothing outside earns an `allow` rather than a defer. That is
+        # the same verdict Q119 measured, reached the other way -- from a clean
+        # substitution instead of an unread one -- which is why both controls
+        # assert on the reason as well.
+        out = run_hook(cmd, self.workspace, project_dir=self.workspace)
+        self.assertIsNotNone(out, f"expected a decision, got defer for: {cmd!r}")
+        self.assertEqual("allow", out["hookSpecificOutput"]["permissionDecision"],
+                         f"for {cmd!r}")
+        self.assertIn("workspace", out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_a_literal_body_is_still_not_scanned(self):
+        # The own-level strip must not turn heredoc data into commands. This is
+        # the direction that would cost a false prompt, so it is pinned beside
+        # the fix rather than left to the Q113 class.
+        self._allows("cat <<EOF\ndon't\nEOF\necho \"$(cat <<'X'\n"
+                     "$(cat /etc/q119-fake-target)\nX\n)\"")
+
+    def test_an_in_workspace_read_still_earns_no_prompt(self):
+        with open(os.path.join(self.workspace, "in.txt"), "w") as f:
+            f.write("x\n")
+        self._allows(
+            "cat <<EOF\ndon't\nEOF\necho \"$(cat <<X\nb\nX\ncat in.txt)\"")
+
+
 class SubstBodyVarPropagationTests(unittest.TestCase):
     """Q66: a substitution body inherits the string's literal variables.
 

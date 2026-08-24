@@ -235,6 +235,56 @@ class HeredocInSubstitutionTests(unittest.TestCase):
         self.assertEqual([body], bp.command_substitutions('echo "$(%s)" T' % body))
 
 
+class OwnLevelHeredocStripTests(unittest.TestCase):
+    """`own_level_only` drops the top level's bodies and copies the rest (Q119).
+
+    A caller re-scanning the raw string for substitution bodies needs the top
+    level's heredoc data gone -- an apostrophe in one opens a quoted run that
+    swallows the scan -- and needs each substitution's own heredocs left whole,
+    terminators included, because that is the text the recursion strips next.
+    Stripping every level gives it a body whose `<<WORD` has lost its
+    terminator, which is the Q113 trap the recovery exists to avoid.
+    """
+    def test_a_top_level_body_is_dropped(self):
+        self.assertEqual("cat <<EOF\necho after",
+                         bp.strip_heredoc_bodies("cat <<EOF\nbody\nEOF\necho after",
+                                                 own_level_only=True))
+
+    def test_a_substitutions_own_body_is_copied_through(self):
+        cmd = 'echo "$(cat <<X\nb\nX\ncat /outside)"'
+        self.assertEqual(cmd, bp.strip_heredoc_bodies(cmd, own_level_only=True))
+
+    def test_the_default_still_strips_every_level(self):
+        self.assertEqual('echo "$(cat <<X\ncat /outside)"',
+                         bp.strip_heredoc_bodies(
+                             'echo "$(cat <<X\nb\nX\ncat /outside)"'))
+
+    def test_an_apostrophe_above_no_longer_hides_the_substitution(self):
+        # The row's mechanism at parser level: flat, the `'` in the first body
+        # opens a run that swallows the `$(…)` and the scan returns nothing.
+        cmd = "cat <<EOF\ndon't\nEOF\necho \"$(cat <<X\nb\nX\ncat /outside)\""
+        self.assertEqual(["cat <<X\nb\nX\ncat /outside"],
+                         bp.command_substitutions(
+                             bp.strip_heredoc_bodies(cmd, own_level_only=True)))
+        self.assertEqual([], bp.command_substitutions(cmd))
+
+    def test_a_yielded_body_survives_the_full_strip_the_recursion_runs(self):
+        # The property the recovery rests on, and it is about the BODIES rather
+        # than the returned string: each still carries its terminator, so the
+        # full strip that follows drops the data and leaves the read after it.
+        # The returned string itself is not re-strippable -- the top level's own
+        # `<<EOF` is disarmed there exactly as the default strip disarms it, and
+        # a second pass would swallow the rest (the Q113 trap, one level up).
+        cmd = "cat <<EOF\ndon't\nEOF\necho \"$(cat <<X\nb\nX\ncat /outside)\""
+        body, = bp.command_substitutions(
+            bp.strip_heredoc_bodies(cmd, own_level_only=True))
+        self.assertEqual("cat <<X\ncat /outside", bp.strip_heredoc_bodies(body))
+
+    def test_a_backtick_substitution_keeps_its_body_too(self):
+        cmd = "echo \"`cat <<X\nb\nX\ncat /outside`\""
+        self.assertEqual(cmd, bp.strip_heredoc_bodies(cmd, own_level_only=True))
+
+
 class CommandHeadTests(unittest.TestCase):
     def test_env_prefix_is_peeled(self):
         self.assertEqual(['cmd', 'arg'], bp.strip_env_prefix(['A=1', 'B=2', 'cmd', 'arg']))
