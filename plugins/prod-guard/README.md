@@ -392,6 +392,9 @@ The scope is deliberately narrow:
   record in the command line, and an unprefixed prod mutation still denies.
 - **Only explicit targets are grantable.** Ambient-context denies,
   shared-state switch denies, and unknown-target asks re-prompt every time.
+  A deny names this form only when a grant could actually be minted from it,
+  so a reason that offers only `PROD_GUARD_OVERRIDE` is telling you the batch
+  form would re-prompt anyway.
 - **A grant can only be minted by a human approval.** The recording hook
   fires only if the command actually ran, and in `bypassPermissions` mode
   the first use is a hard deny — unattended sessions can't self-grant.
