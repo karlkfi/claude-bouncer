@@ -46,11 +46,11 @@ Then install whichever you want. They're independent and work in any combination
 
 | | Plugin | Version | What it stops at the door |
 | --- | --- | --- | --- |
-| <img src="plugins/workspace-guard/docs/img/favicon-48.png" width="24" height="24" alt=""> | [workspace-guard](plugins/workspace-guard) | 1.10.0 | `grep`/`sed`/`jq`/`cat` reading or writing outside the workspace, and blind process kills |
-| <img src="plugins/branch-guard/docs/img/favicon-48.png" width="24" height="24" alt=""> | [branch-guard](plugins/branch-guard) | 1.9.0 | Commits and pushes to a protected branch, and destructive `git`/`gh` commands. Auto-approves the safe ones |
+| <img src="plugins/workspace-guard/docs/img/favicon-48.png" width="24" height="24" alt=""> | [workspace-guard](plugins/workspace-guard) | 1.11.0 | `grep`/`sed`/`jq`/`cat` reading or writing outside the workspace, and blind process kills |
+| <img src="plugins/branch-guard/docs/img/favicon-48.png" width="24" height="24" alt=""> | [branch-guard](plugins/branch-guard) | 1.10.0 | Commits and pushes to a protected branch, and destructive `git`/`gh` commands. Auto-approves the safe ones |
 | <img src="plugins/prod-guard/docs/img/favicon-48.png" width="24" height="24" alt=""> | [prod-guard](plugins/prod-guard) | 2.5.1 | Mutating `kubectl`/`helm`/`terraform`/`gcloud`/`aws` aimed at production, or relying on ambient context that can change under it |
-| <img src="plugins/exit-status-guard/docs/img/favicon-48.png" width="24" height="24" alt=""> | [exit-status-guard](plugins/exit-status-guard) | 2.0.0 | A gate whose failure reads as success: piped into a filter, backgrounded behind an `echo`, or sequenced before a state change with `;` |
-| <img src="plugins/foreground-guard/docs/img/favicon-48.png" width="24" height="24" alt=""> | [foreground-guard](plugins/foreground-guard) | 0.5.1 | Polling and watching on the main thread, and slow commands about to be killed by too short a timeout |
+| <img src="plugins/exit-status-guard/docs/img/favicon-48.png" width="24" height="24" alt=""> | [exit-status-guard](plugins/exit-status-guard) | 2.0.1 | A gate whose failure reads as success: piped into a filter, backgrounded behind an `echo`, or sequenced before a state change with `;` |
+| <img src="plugins/foreground-guard/docs/img/favicon-48.png" width="24" height="24" alt=""> | [foreground-guard](plugins/foreground-guard) | 0.6.0 | Polling and watching on the main thread, and slow commands about to be killed by too short a timeout |
 
 Each plugin's README covers its rules, its config file, its override, and its
 `/friction-report` command. Start there. This page is the map.

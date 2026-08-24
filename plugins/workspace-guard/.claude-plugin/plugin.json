@@ -1,6 +1,6 @@
 {
   "name": "workspace-guard",
-  "version": "1.10.0",
+  "version": "1.11.0",
   "description": "Workspace-boundary shell permissions for Claude Code.",
   "author": {
     "name": "Karl",

@@ -10,7 +10,7 @@
     {
       "name": "workspace-guard",
       "description": "Prompt before grep/sed/jq/awk/cat/head/tail touch files outside the workspace; deny blind process kills.",
-      "version": "1.10.0",
+      "version": "1.11.0",
       "author": {
         "name": "Karl Isenberg",
         "url": "https://github.com/karlkfi"
@@ -22,7 +22,7 @@
     {
       "name": "branch-guard",
       "description": "Cut routine git/gh approval prompts: auto-approve safe commands (read-only, staging, branch/worktree create, feature-branch commits & pushes) and confirm protected-branch or destructive ones.",
-      "version": "1.9.0",
+      "version": "1.10.0",
       "author": {
         "name": "Karl Isenberg",
         "url": "https://github.com/karlkfi"
@@ -46,7 +46,7 @@
     {
       "name": "exit-status-guard",
       "description": "Deny a gate piped into a filter, backgrounded behind an echo, or sequenced before a state change with `;` \u2014 every shape where a failure reads as success.",
-      "version": "2.0.0",
+      "version": "2.0.1",
       "author": {
         "name": "Karl Isenberg",
         "url": "https://github.com/karlkfi"
@@ -58,7 +58,7 @@
     {
       "name": "foreground-guard",
       "description": "Prompt before foreground polling/watching (gh run watch, tail -f, sleep-loops) and before known-slow commands run with an inadequate timeout.",
-      "version": "0.5.1",
+      "version": "0.6.0",
       "author": {
         "name": "Karl Isenberg",
         "url": "https://github.com/karlkfi"

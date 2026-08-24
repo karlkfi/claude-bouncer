@@ -1,6 +1,6 @@
 {
   "name": "foreground-guard",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "Main-thread time guard for Claude Code Bash commands: catch foreground polling/watching and slow commands about to be killed by an inadequate timeout.",
   "author": {
     "name": "Karl",
