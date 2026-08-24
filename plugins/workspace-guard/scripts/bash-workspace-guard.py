@@ -3921,7 +3921,50 @@ PS_SPEC = {
         switches=('force', 'passthru'),
         positional=('path', 'newname'),
         entry=('path', 'literalpath')),
+    # Creation (Q103). This is the row for every item type BUT a link: `-Value`
+    # is the new file's content, so it is consumed rather than checked. `-Name`
+    # is a leaf name appended to `-Path`, like `Rename-Item`'s `-NewName`.
+    # `New-Item` binds only `-Path` positionally, so a second positional is
+    # another element of its array rather than the value.
+    'new-item': _ps_row(
+        {'path': 'write', 'literalpath': 'write'},
+        consume=('itemtype', 'type', 'value', 'target', 'name', 'credential'),
+        switches=('force',),
+        positional=('path',)),
 }
+
+# The same row for a link, where `-Value` -- and `-Target`, which the FileSystem
+# provider takes as its alias -- names the path the link will point at. That is
+# `ln`'s source operand, so it is checked, and checked in WRITE context for the
+# reason Q80 gives on the bash side: a hard link hands the source inode a second
+# name inside the workspace, and a later write through that name resolves to a
+# path the guard reads as in-workspace.
+#
+# Two write slots in one row is new, and `ps_bind_args` closes every slot
+# sharing a role when it binds one -- so `-Target` marks `-Path` bound. It comes
+# out right because `-Path` is the only positional slot and the loop repeats the
+# last one, and named binding never consults the bound set at all. A second
+# positional slot here would need that conflation fixed first.
+#
+# Staging is deliberately absent. `classify_ln`'s half of Q80 records the link's
+# resolved path so a later read THROUGH it is caught, and the PowerShell
+# frontend has no staging at all -- porting it is its own item, not a rider on
+# this one.
+PS_NEW_ITEM_LINK_SPEC = _ps_row(
+    {'path': 'write', 'literalpath': 'write',
+     'value': 'write', 'target': 'write'},
+    consume=('itemtype', 'type', 'name', 'credential'),
+    switches=('force',),
+    positional=('path',))
+
+# `-ItemType File` and `-ItemType Directory` are the two the FileSystem provider
+# fills from `-Value`. Everything else leaves `-Value`/`-Target` naming a path:
+# the three link types, an abbreviation of one, another provider's type, or a
+# value the hook cannot expand. Deciding it that way round means an unreadable
+# `-ItemType $t` costs a prompt on content that looks like an outside path,
+# rather than losing a link target silently.
+PS_NEW_ITEM_CONTENT_TYPES = ('file', 'directory')
+PS_NEW_ITEM_LINK_TYPES = ('symboliclink', 'hardlink', 'junction')
 
 # Not guarded — `Set-Location` reads no file — but tracked, because without it
 # `Set-Location C:\out; Get-Content secrets.txt` resolves the relative operand
@@ -3947,6 +3990,7 @@ PS_ALIASES = {
     'ri': 'remove-item', 'rm': 'remove-item', 'del': 'remove-item',
     'erase': 'remove-item', 'rd': 'remove-item', 'rmdir': 'remove-item',
     'rni': 'rename-item', 'ren': 'rename-item',
+    'ni': 'new-item',
     'cd': 'set-location', 'sl': 'set-location', 'chdir': 'set-location',
     'pushd': 'push-location', 'popd': 'pop-location',
     'spps': 'stop-process', 'kill': 'stop-process',
@@ -4343,6 +4387,58 @@ def ps_resolve_param(name, spec):
     return hits[0] if len(hits) == 1 else name
 
 
+def _ps_is_param(val, exp):
+    """True when an argument token is a parameter name rather than an operand.
+
+    A leading `-` followed by a digit or a `.` is a negative number, and an
+    expandable token is a value the hook cannot read as a name.
+    """
+    return len(val) > 1 and val[0] == '-' and not exp \
+        and not val[1].isdigit() and val[1] != '.'
+
+
+def ps_new_item_makes_link(args, spec):
+    """True when a `New-Item` could be creating a link, so `-Value`/`-Target`
+    names a path rather than the new file's content.
+
+    False only where `-ItemType` resolves unambiguously to a content type: it is
+    a prefix of `File` or `Directory` and of no link type, which is how
+    PowerShell's own abbreviation reads (`-ItemType d`). Absent `-ItemType` is
+    False too -- the FileSystem provider cannot create a link without one, so
+    there is nothing uncertain about that case.
+
+    Everything else is True, including an `-ItemType $t` the hook cannot expand.
+    See PS_NEW_ITEM_CONTENT_TYPES for why that direction.
+
+    The scan does not consume other parameters' values, so a value that is
+    itself spelled `-ItemType` would be read as the parameter. That reads a
+    content type as a link, which costs a prompt rather than a miss.
+    """
+    i, n = 0, len(args)
+    while i < n:
+        _, val, exp, _quoted = args[i]
+        if val == '--%':
+            break                       # stop-parsing: the rest is verbatim
+        if _ps_is_param(val, exp):
+            name, attached = val[1:], None
+            if ':' in name:
+                name, attached = name.split(':', 1)
+            if ps_resolve_param(name.lower(), spec) in ('itemtype', 'type'):
+                if attached is None:
+                    if i + 1 >= n:
+                        return True     # `-ItemType` with nothing after it
+                    _, attached, vexp, _q = args[i + 1]
+                    if vexp:
+                        return True     # unexpandable -> treat as a link
+                v = attached.lower()
+                return not (v and any(t.startswith(v)
+                                      for t in PS_NEW_ITEM_CONTENT_TYPES)
+                            and not any(t.startswith(v)
+                                        for t in PS_NEW_ITEM_LINK_TYPES))
+        i += 1
+    return False
+
+
 def ps_bind_args(args, spec):
     """Bind a segment's argument tokens to file roles.
 
@@ -4374,8 +4470,7 @@ def ps_bind_args(args, spec):
         _, val, exp, quoted = args[i]
         if val == '--%':
             break                       # stop-parsing: the rest is verbatim
-        if len(val) > 1 and val[0] == '-' and not exp \
-                and not val[1].isdigit() and val[1] != '.':
+        if _ps_is_param(val, exp):
             name, attached = val[1:], None
             if ':' in name:             # `-Path:C:\x` binds without a space
                 name, attached = name.split(':', 1)
@@ -4668,6 +4763,14 @@ def ps_analyze_segment(tokens, ctx, cwd, cwd_unknown):
         else:
             spec = PS_SPEC.get(name)
             if spec is not None:
+                # `New-Item` is the one row whose operand roles depend on
+                # another parameter's value: `-Value`/`-Target` is a path for a
+                # link and content for anything else (Q103). Both specs carry
+                # the same `names`, so parameter resolution is unaffected by
+                # which one is in hand when `-ItemType` is read.
+                if name == 'new-item' \
+                        and ps_new_item_makes_link(words[1:], spec):
+                    spec = PS_NEW_ITEM_LINK_SPEC
                 guarded = True
                 files.extend(ps_bind_args(words[1:], spec))
 

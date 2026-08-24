@@ -8674,6 +8674,13 @@ def ps(path):
     return "'" + path.replace("'", "''") + "'"
 
 
+def _ps_rows():
+    """Every row the binder can be handed, PS_SPEC plus the `New-Item` variant
+    the swap in `ps_analyze_segment` reaches. A row outside PS_SPEC is bound by
+    the same code, so the shape invariants have to cover it too."""
+    return dict(guard.PS_SPEC, __new_item_link__=guard.PS_NEW_ITEM_LINK_SPEC)
+
+
 class PowerShellSpecShapeTests(unittest.TestCase):
     """Invariants the PS_SPEC table has to hold for the binder to be correct."""
 
@@ -8683,14 +8690,30 @@ class PowerShellSpecShapeTests(unittest.TestCase):
             {"get-content", "select-string", "import-csv", "import-clixml",
              "set-content", "add-content", "out-file", "tee-object",
              "export-csv", "export-clixml",
-             "copy-item", "move-item", "remove-item", "rename-item"},
+             "copy-item", "move-item", "remove-item", "rename-item",
+             "new-item"},
         )
+
+    def test_new_item_specs_agree_on_parameter_names(self):
+        # `ps_new_item_makes_link` reads `-ItemType` through whichever spec is
+        # in hand, before the swap. Prefix resolution is a property of `names`,
+        # so the two rows have to carry the same one or an abbreviation could
+        # resolve one way before the swap and another way after.
+        self.assertEqual(guard.PS_SPEC["new-item"]["names"],
+                         guard.PS_NEW_ITEM_LINK_SPEC["names"])
+
+    def test_the_link_row_moves_value_and_target_into_files(self):
+        base, link = guard.PS_SPEC["new-item"], guard.PS_NEW_ITEM_LINK_SPEC
+        for param in ("value", "target"):
+            self.assertIn(param, base["consume"], f"-{param} in the base row")
+            self.assertEqual(link["files"].get(param), "write",
+                             f"-{param} in the link row")
 
     def test_positional_slots_are_declared_parameter_names(self):
         # A slot is a parameter name, not a role: binding `-Pattern` by name has
         # to close slot 0 so the file lands in slot 1. A typo'd slot name would
         # silently never match a file parameter and never be checked.
-        rows = dict(guard.PS_SPEC, __location__=guard.PS_LOCATION_SPEC)
+        rows = dict(_ps_rows(), __location__=guard.PS_LOCATION_SPEC)
         for name, row in rows.items():
             for slot in row["positional"]:
                 self.assertIn(slot, row["names"],
@@ -8698,14 +8721,14 @@ class PowerShellSpecShapeTests(unittest.TestCase):
                               f"declared parameter")
 
     def test_file_roles_are_read_or_write(self):
-        for name, row in guard.PS_SPEC.items():
+        for name, row in _ps_rows().items():
             for param, role in row["files"].items():
                 self.assertIn(role, ("read", "write"), f"{name}.-{param}")
 
     def test_file_and_consume_are_disjoint(self):
         # A parameter declared both ways would have its path swallowed as a
         # value — the silent-allow direction.
-        for name, row in guard.PS_SPEC.items():
+        for name, row in _ps_rows().items():
             self.assertFalse(set(row["files"]) & row["consume"],
                              f"{name}: parameter is both a file and a value")
 
@@ -9540,6 +9563,272 @@ class PowerShellEntryOperandTests(unittest.TestCase):
         self.assertEqual(
             self._decision("PowerShell", "Remove-Item -Recurse ./dirlink"), "ask")
         self.assertEqual(self._decision("Bash", "rm -rf ./dirlink"), "allow")
+
+
+class PowerShellNewItemTests(unittest.TestCase):
+    """Q103: `New-Item` had no PS_SPEC row, so neither operand was seen.
+
+    The bash counterpart is Q80's `ln_operands` half -- sources and destination
+    both checked, both in write context, because a hard link hands the source
+    inode a second name inside the workspace. `New-Item` needs the same two
+    halves plus one the bash side does not: `-Value` is the new file's content
+    for every item type but a link, where the FileSystem provider takes it (and
+    its `-Target` alias) as the path the link points at. So the role of one
+    operand is decided by another parameter's value, which is why a PS_SPEC row
+    alone could not do it.
+
+    The row was written about the link forms. Ordinary creation was silent too
+    -- `New-Item -ItemType File -Path <outside>` is a plain outside write with
+    no link in it -- and one row closes both, so both are asserted here.
+
+    No PowerShell on the host that measured this (`command -v pwsh powershell`
+    exits 1 on macOS), so the parameter grammar is asserted as the hook reads
+    it, not as PowerShell was observed to bind it. The Windows jobs run these
+    fixtures but drive the same hook, so they do not settle it either.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = os.path.realpath(self._tmp.name)
+        with open(os.path.join(self.workspace, "notes.md"), "w") as f:
+            f.write("n\n")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _asks_about_target(self, cmd):
+        out = run_hook(cmd, self.workspace, project_dir=self.workspace,
+                       tool_name="PowerShell")
+        self.assertIsNotNone(out, f"expected a decision, got defer for: {cmd!r}")
+        reason = out["hookSpecificOutput"].get("permissionDecisionReason")
+        self.assertEqual("ask", out["hookSpecificOutput"]["permissionDecision"],
+                         f"for {cmd!r} (reason: {reason!r})")
+        self.assertIn("/q103-fake-target", reason)
+
+    def _allows(self, cmd):
+        out = run_hook(cmd, self.workspace, project_dir=self.workspace,
+                       tool_name="PowerShell")
+        self.assertIsNotNone(out, f"expected allow, got defer for: {cmd!r}")
+        reason = out["hookSpecificOutput"].get("permissionDecisionReason")
+        self.assertEqual("allow", out["hookSpecificOutput"]["permissionDecision"],
+                         f"for {cmd!r} (reason: {reason!r})")
+
+    # --- the link's target, the row's own measurement --------------------
+
+    def test_symlink_target_outside_is_checked(self):
+        self._asks_about_target(
+            "New-Item -ItemType SymbolicLink -Path link "
+            "-Target /q103-fake-target")
+
+    def test_hardlink_target_outside_is_checked(self):
+        self._asks_about_target(
+            "New-Item -ItemType HardLink -Path link -Target /q103-fake-target")
+
+    def test_junction_target_outside_is_checked(self):
+        self._asks_about_target(
+            "New-Item -ItemType Junction -Path link -Target /q103-fake-target")
+
+    def test_the_ni_alias_agrees(self):
+        self._asks_about_target(
+            "ni -ItemType SymbolicLink -Path link -Target /q103-fake-target")
+
+    def test_value_is_the_target_under_a_link_type(self):
+        # `-Target` is the FileSystem provider's alias for `-Value`, so the two
+        # spellings have to reach the same check.
+        self._asks_about_target(
+            "New-Item -ItemType SymbolicLink -Path link "
+            "-Value /q103-fake-target")
+
+    def test_the_target_binds_before_the_positional_path(self):
+        # `-Target` and `-Path` share the write role, and the binder closes
+        # every slot sharing a role when it binds one -- so this shape leans on
+        # the positional loop repeating its last slot. Asserted because the
+        # conflation would otherwise drop the link's own path silently.
+        self._asks_about_target(
+            "New-Item -ItemType SymbolicLink -Target /q103-fake-target link")
+
+    def test_a_positional_link_path_with_a_named_target(self):
+        self._asks_about_target(
+            "New-Item -ItemType SymbolicLink link -Target /q103-fake-target")
+
+    def test_the_colon_attached_form_binds(self):
+        self._asks_about_target(
+            "New-Item -ItemType:SymbolicLink -Path link "
+            "-Target:/q103-fake-target")
+
+    def test_the_type_alias_names_the_item_type(self):
+        self._asks_about_target(
+            "New-Item -Type SymbolicLink -Path link -Target /q103-fake-target")
+
+    def test_an_abbreviated_link_type_still_reads_as_a_link(self):
+        self._asks_about_target(
+            "New-Item -ItemType Symbolic -Path link -Target /q103-fake-target")
+
+    def test_an_unreadable_item_type_is_treated_as_a_link(self):
+        # The secure direction: an `-ItemType $t` the hook cannot expand costs a
+        # prompt on content that looks like a path, rather than losing a link
+        # target silently.
+        self._asks_about_target(
+            "New-Item -ItemType $t -Path link -Target /q103-fake-target")
+
+    # --- the link's own path --------------------------------------------
+
+    def test_the_link_path_outside_is_checked(self):
+        self._asks_about_target(
+            "New-Item -ItemType SymbolicLink -Path /q103-fake-target "
+            "-Target notes.md")
+
+    # --- ordinary creation, which the row understated --------------------
+
+    def test_creating_a_file_outside_is_checked(self):
+        self._asks_about_target("New-Item -ItemType File -Path /q103-fake-target")
+
+    def test_creating_a_directory_outside_is_checked(self):
+        self._asks_about_target(
+            "New-Item -ItemType Directory -Path /q103-fake-target")
+
+    def test_a_positional_path_binds_without_the_parameter(self):
+        self._asks_about_target("New-Item /q103-fake-target -ItemType File")
+
+    def test_an_abbreviated_content_type_still_checks_the_path(self):
+        self._asks_about_target("New-Item -ItemType d -Path /q103-fake-target")
+
+    def test_an_array_operand_is_split(self):
+        self._asks_about_target(
+            "New-Item -ItemType File -Path a.txt,/q103-fake-target")
+
+    # --- controls: content is not a path --------------------------------
+
+    def test_value_under_a_content_type_is_not_a_path(self):
+        # The direction that would cost friction rather than safety: file
+        # content that happens to look like an outside path must not prompt.
+        self._allows(
+            "New-Item -ItemType File -Path made.txt -Value /q103-fake-target")
+
+    def test_value_under_a_directory_type_is_not_a_path(self):
+        self._allows(
+            "New-Item -ItemType Directory -Path sub -Value /q103-fake-target")
+
+    def test_value_under_an_abbreviated_content_type_is_not_a_path(self):
+        self._allows(
+            "New-Item -ItemType f -Path made.txt -Value /q103-fake-target")
+
+    def test_no_item_type_cannot_be_a_link(self):
+        # The FileSystem provider cannot create a link without `-ItemType`, so
+        # this is decided rather than uncertain.
+        self._allows("New-Item -Path made.txt -Value /q103-fake-target")
+
+    def test_an_in_workspace_creation_still_allows(self):
+        self._allows("New-Item -ItemType File -Path made.txt")
+
+
+class PowerShellNewItemTargetAliasControlTests(unittest.TestCase):
+    """Measures PowerShell, not the hook (Q103).
+
+    `PS_NEW_ITEM_LINK_SPEC` gives `-Value` and `-Target` one role because the
+    FileSystem provider takes the second as an alias of the first, and the
+    README says so. Every other assertion in this file is about how the hook
+    reads a string, which a POSIX host can establish; this premise is about how
+    PowerShell BINDS one, and nothing on a POSIX host can establish it at all.
+    So it is asserted here and demonstrated only by the Windows jobs.
+
+    The assertion is that the two spellings AGREE, which is the property being
+    claimed and is robust to whether the runner can create a link at all: if
+    both are refused for want of privilege they still agree, and the pair that
+    would disprove the alias is one succeeding while the other does not. Where
+    both succeed, the link each produced is checked to point at the same target,
+    so agreement cannot be satisfied by two identical failures in the direction
+    that matters.
+
+    A runner that refuses to create a link at all skips, and the skip caps are
+    deliberately left alone: `--max-skips 3` on the Git Bash job has no room for
+    it, so "could not measure" comes back as a visible red rather than a green
+    run that proved nothing. The orchestrating session measured the runner
+    allowing `New-Item -ItemType SymbolicLink` on 2026-08-23, so it should not
+    fire; if it does, that measurement is what has changed.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.shell = shutil.which("pwsh") or shutil.which("powershell")
+        if not cls.shell:
+            raise unittest.SkipTest("no pwsh/powershell on this host")
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = os.path.realpath(self._tmp.name)
+        self.target = os.path.join(self.dir, "target.txt")
+        with open(self.target, "w") as f:
+            f.write("t\n")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _new_link(self, param, name):
+        """Create a link with `-Target` or `-Value`. Returns (rc, combined)."""
+        link = os.path.join(self.dir, name)
+        script = ("$ErrorActionPreference='Stop'; "
+                  "New-Item -ItemType SymbolicLink "
+                  f"-Path '{link}' -{param} '{self.target}'")
+        r = subprocess.run([self.shell, "-NoProfile", "-Command", script],
+                           capture_output=True, text=True, timeout=60)
+        return r.returncode, (r.stdout + r.stderr), link
+
+    def test_target_and_value_bind_the_same_parameter(self):
+        t_rc, t_out, t_link = self._new_link("Target", "by-target")
+        v_rc, v_out, v_link = self._new_link("Value", "by-value")
+        self.assertEqual(
+            t_rc == 0, v_rc == 0,
+            "-Target and -Value disagree, so they are not aliases: "
+            f"-Target rc={t_rc} ({t_out.strip()!r}); "
+            f"-Value rc={v_rc} ({v_out.strip()!r})")
+        if t_rc != 0:
+            self.skipTest(
+                "the runner refused to create a symlink for both spellings, "
+                f"so the alias holds vacuously here: {t_out.strip()!r}")
+        for link in (t_link, v_link):
+            self.assertTrue(os.path.islink(link) or os.path.exists(link), link)
+            self.assertEqual(os.path.realpath(link),
+                             os.path.realpath(self.target), link)
+
+
+class PowerShellNewItemLinkClassifierTests(unittest.TestCase):
+    """`ps_new_item_makes_link` on its own, where the end-to-end cases cannot
+    separate "read the item type wrong" from "bound the operand wrong"."""
+
+    def _makes_link(self, cmd):
+        tokens = guard.ps_tokenize(cmd)
+        words = guard.ps_strip_head([t for t in tokens if t[0] == "word"])
+        return guard.ps_new_item_makes_link(words[1:],
+                                            guard.PS_SPEC["new-item"])
+
+    def test_link_types(self):
+        for t in ("SymbolicLink", "symboliclink", "HardLink", "Junction",
+                  "sym", "h", "j", "SYMBOLICLINK"):
+            self.assertTrue(self._makes_link(f"New-Item -ItemType {t} x"),
+                            f"-ItemType {t}")
+
+    def test_content_types(self):
+        for t in ("File", "file", "Directory", "dir", "d", "f", "FILE"):
+            self.assertFalse(self._makes_link(f"New-Item -ItemType {t} x"),
+                             f"-ItemType {t}")
+
+    def test_absent_item_type_is_not_a_link(self):
+        self.assertFalse(self._makes_link("New-Item -Path x -Value y"))
+
+    def test_an_unreadable_item_type_is_a_link(self):
+        self.assertTrue(self._makes_link("New-Item -ItemType $t -Path x"))
+
+    def test_a_trailing_item_type_with_no_value_is_a_link(self):
+        self.assertTrue(self._makes_link("New-Item -Path x -ItemType"))
+
+    def test_an_unknown_type_is_a_link(self):
+        # Another provider's type, or a typo. Checking `-Value` as a path there
+        # costs a prompt at worst; the reverse loses a target.
+        self.assertTrue(self._makes_link("New-Item -ItemType Key x"))
+
+    def test_stop_parsing_ends_the_scan(self):
+        self.assertFalse(self._makes_link("New-Item x --% -ItemType SymbolicLink"))
 
 
 class PowerShellInterpreterSuppressesAllowTests(unittest.TestCase):

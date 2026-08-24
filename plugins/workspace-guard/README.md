@@ -294,8 +294,8 @@ names that take entirely different flags.
 
 Guarded cmdlets: `Get-Content`, `Select-String`, `Import-Csv`, `Import-Clixml`,
 `Set-Content`, `Add-Content`, `Out-File`, `Tee-Object`, `Export-Csv`,
-`Export-Clixml`, `Copy-Item`, `Move-Item`, `Remove-Item`, `Rename-Item`, and
-their aliases. Output redirects (`>`, `>>`, `2>`) are checked on any command.
+`Export-Clixml`, `Copy-Item`, `Move-Item`, `Remove-Item`, `Rename-Item`,
+`New-Item`, and their aliases. Output redirects (`>`, `>>`, `2>`) are checked on any command.
 `Stop-Process` (and `kill`, `spps`) is guarded as well, as a process kill, as is
 Windows' own `taskkill`.
 
@@ -311,6 +311,9 @@ Windows' own `taskkill`.
 | `Set-Content -Encoding UTF8 C:\out\x "hi"`     | **ask**  |
 | `Out-File -FilePath C:\out\x`                  | **ask**  |
 | `Copy-Item .\in.txt C:\out\x`                  | **ask**  |
+| `New-Item -ItemType File -Path C:\out\x`      | **ask**  |
+| `New-Item -ItemType SymbolicLink -Path link -Target C:\out\x` | **ask** |
+| `New-Item -ItemType File x -Value C:\out\y` (content) | allow |
 | `Get-Content -Path in.txt,C:\out\x` (array)    | **ask**  |
 | `Set-Location C:\out; Get-Content secret.txt`  | **ask**  |
 | `Write-Output hi > C:\out\x` (redirect)        | **ask**  |
@@ -335,6 +338,18 @@ ordered. `Set-Location` and `Push-Location` are followed so a later relative
 operand resolves against the right directory; anything the hook can't follow
 (a bare `cd`, a `$var` target, `Pop-Location`) drops tracking and prompts on
 relative operands rather than guessing.
+
+`New-Item` is the one row whose operand roles depend on another parameter. Its
+`-Value` is the new file's content for every item type but a link, and for
+`SymbolicLink`, `HardLink` or `Junction` the FileSystem provider takes it — and
+its `-Target` alias — as the path the link will point at. So the link's own path
+and its target are both checked, both as writes, which is the rule `ln` gets on
+the bash side: a hard link hands the source inode a second name inside the
+workspace, and a later write through that name resolves to a path that reads as
+in-workspace. An `-ItemType` the hook cannot expand is read as a link, since
+that costs a prompt on content rather than losing a target. Unlike `ln`, the new
+link's resolved path is **not** staged, so a read *through* it later in the same
+string is not yet caught.
 
 `Stop-Process` and `taskkill` are guarded as process kills rather than as file
 operations — see [Unanchored process-kill deny](#unanchored-process-kill-deny)
@@ -1738,9 +1753,12 @@ final output.
   the bash one — see [The PowerShell tool](#the-powershell-tool): `Get-Content`,
   `Select-String`, `Import-Csv`, `Import-Clixml`, `Set-Content`, `Add-Content`,
   `Out-File`, `Tee-Object`, `Export-Csv`, `Export-Clixml`, `Copy-Item`,
-  `Move-Item`, `Remove-Item`, `Rename-Item`, their aliases (`cat`, `type`, `gc`,
-  `sls`, `sc`, `ac`, `cp`, `mv`, `rm`, `del`, …), output redirects, and
-  `Stop-Process` and `taskkill` as process kills.
+  `Move-Item`, `Remove-Item`, `Rename-Item`, `New-Item`, their aliases (`cat`,
+  `type`, `gc`, `sls`, `sc`, `ac`, `cp`, `mv`, `rm`, `del`, `ni`, …), output
+  redirects, and `Stop-Process` and `taskkill` as process kills.
+  `mkdir` and `md` are PowerShell *functions* over `New-Item`, not aliases of
+  it, so they are not on that list and a directory created outside the root
+  through one is still silent.
   Everything else — a cmdlet not on that list, a .NET call such as
   `[IO.File]::ReadAllText(…)`, a native `.exe` — is **not checked**, and the
   session gets no signal that it wasn't. The alternative was to prompt on
