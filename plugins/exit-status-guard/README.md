@@ -45,7 +45,8 @@ rewrite rather than in a permission prompt you have to answer.
 
 ## What it does
 
-Three ways a status disappears, all of which turn a failure into a false green.
+Three ways a status disappears, all of which turn a failure into a false green —
+and one where the status is honest and answers the wrong question.
 
 ### 1. Piped into a filter
 
@@ -121,6 +122,72 @@ before it, and the capture has to be read after it; drop any one and the deny
 comes back. A publish is never a restore, so
 `make check > c.log 2>&1; rc=$?; git push; [ "$rc" -ne 0 ] || exit 1` still
 denies — capturing a status does not make a push conditional on it.
+
+### 4. A zsh modifier eating the rest of the word
+
+```bash
+git show $ref:tests/x.py        # denied — runs `git show origin/main`
+git show $ref:docs/x.py         # allowed — `d` is not a modifier, so this is fine
+git show ${ref}:tests/x.py      # allowed — braces are the fix
+```
+
+zsh reads the `:` after an **unbraced** `$name` as a history modifier, not as a
+separator. `:s` substitutes, `:h` is dirname, `:t` basename, `:r` strips the
+extension — and the modifier swallows the rest of the word, so the command runs
+against the variable's bare value.
+
+The damage is that it usually **succeeds**. `git show $ref:path | wc -l` prints
+the commit instead of the blob: well-formed output of the wrong object, at exit
+0. A line count that happens to look plausible is believed. Measured across the
+13 modifiers against four realistic path tails, 48 of 52 combinations expand
+silently to the wrong value; the other 4 fail loudly as `bad substitution`, all
+of them `:s` with a substitution that never terminates (`chown $user:staff`).
+Both are the same defect and both get the same rewrite, so both are denied.
+
+The 52 ASCII letters fall into three groups. Measured against zsh 5.9 over all
+52×52 two-letter openers, each case a fresh `zsh -c` on literal script text —
+**not** through `eval`, which adds an expansion pass and does not describe what a
+typed command does:
+
+| Group | Letters | Behaviour |
+|---|---|---|
+| Diverge always | `a c e h l q r s t u A P Q` (13) | `$ref:tests/x` is broken at the `t` |
+| Iterate | `f g w F` (4) | inert alone; apply the modifier that **follows** — `$ref:frontend/app.tsx` is `f` iterating `r` |
+| Never | the other 35 | the colon survives |
+
+13 + 4 + 35 = 52, and the test suite asserts every one of the 2,704 ordered
+pairs against that table.
+
+The middle group is why `git show $ref:frontend/app.tsx` is denied while
+`git show $ref:foo/bar` is not: `r` is a modifier and `o` is not. `W` is
+deliberately **not** in it — it diverges on no second letter at all, so treating
+it as an iterator would deny thirteen legitimate shapes.
+
+`F` additionally diverges on `g`, `o` and `x`: it takes a numeric argument and
+errors on a non-numeric one. Those three pairs are knowingly uncovered, and they
+are acceptable because all three are **loud** — `bad math expression`, exit 1 —
+rather than plausible wrong answers. Modelling zsh's argument grammar to reach
+them is the hand-rolled shell parsing this guard avoids; the suite asserts the
+gap, so closing it later fails the test rather than passing quietly.
+
+That is why the check is follower-specific rather than "an unbraced `$var` before
+a colon", and why a port (`$host:8080`), a `PATH`-like assignment
+(`$dir:/usr/bin`) and a `sed` script (`s:$a:$b:`) are all silent: their follower
+is not a modifier, so zsh leaves the colon alone. It also means
+`git show $ref:docs/x` is genuinely correct while `git show $ref:tests/x` is
+genuinely broken — the guard denies the one that is wrong, not the shape.
+
+**Double-quoting does not rescue it**, which is what makes this worse than the
+usual expansion traps: the defensive reflex produces the same wrong answer. Only
+braces do. The deny names both rewrites, because the two readings need different
+ones — `${name}:rest` when the colon was a separator, `${name:h}` when the
+modifier was meant. Single quotes suppress the expansion entirely, so a `$v:x`
+there is text and is never denied; so is a heredoc body whose delimiter is
+quoted.
+
+Measured over 95,843 real Bash commands from local session transcripts: 42
+commands trip this rule, every one a `<rev>:<path>` or `<image>:<tag>` shape, and
+no URL, `PATH` assignment or `sed` script among them.
 
 ## What it does not deny
 

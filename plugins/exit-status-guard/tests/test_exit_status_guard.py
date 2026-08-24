@@ -10,6 +10,7 @@ import importlib.util
 import json
 import os
 import shutil
+import string
 import subprocess
 import sys
 import tempfile
@@ -97,6 +98,67 @@ CASES = [
     ('|& pipes stderr too', 'make check |& tail -5', False, True, ''),
     ('time-wrapped gate piped', 'time make check | tail -5', False, True, ''),
     ('sudo-wrapped gate piped', 'sudo make install | tail -5', False, True, ''),
+
+    # --- `$name:` is a zsh modifier, so the rest of the word is eaten --------
+    # zsh reads `:s`/`:h`/`:t`/`:r` and nine others as history modifiers, so
+    # `git show $ref:tests/x` runs `git show origin/main` -- a valid command
+    # printing the wrong object at exit 0. `TestZshModifier` carries the
+    # measured table and the partition behind it (Q105).
+    ('the row\'s own reproducer',
+     'git show $ref:session-worker/SKILL.md | wc -l', False, True,
+     'reads that `:` as a history modifier'),
+    ('a cat-file with a modifier initial', 'git cat-file -p $sha:lib/x.py',
+     False, True, ''),
+    ('a ref namespace', 'git show $B:refs/queue-ids/Q1', False, True, ''),
+    # Nothing about this is git-specific.
+    ('a docker tag beginning with a modifier', 'docker run $img:latest',
+     False, True, ''),
+    # An ITERATOR before a modifier. `f` is inert alone, so `$ref:foo/bar` is
+    # correct while `$ref:frontend/app.tsx` expands to
+    # `origin/mainontend/app.tsx` -- and the second is the commoner command.
+    ('an iterator before a modifier', 'git show $ref:frontend/app.tsx',
+     False, True, 'history modifier'),
+    ('an iterator before a non-modifier is correct',
+     'git show $ref:foo/bar', False, False, ''),
+    # The point of the rule: the defensive reflex produces the same wrong
+    # answer, so double quotes must not exempt it.
+    ('double quotes do not rescue it', 'git show "$ref:tests/x.py"',
+     False, True, ''),
+    ('an unquoted heredoc expands it, so it is a real read',
+     'git commit -F - <<EOF\nnote: $ref:session-worker/SKILL.md\nEOF',
+     False, True, 'history modifier'),
+    ('the reason names the braced fix', 'git show $ref:tests/x.py', False, True,
+     '`${name}:rest`'),
+    # Measured: 48 of 52 modifier/path combinations expand silently to the
+    # wrong value, and 4 fail loudly as `bad substitution` -- all of them `:s`
+    # with a substitution that never terminates. Both are the same defect and
+    # both get the same rewrite, so the loud one is denied too.
+    ('the loud form is the same defect', 'chown $user:staff /srv/app',
+     False, True, 'bad substitution'),
+
+    # The other direction. Every one of these is legitimate and common, and the
+    # rule stays silent on all of them because their follower is not a modifier
+    # -- which is the whole reason the check is follower-specific rather than
+    # "an unbraced $var before a colon".
+    ('braces are the fix, so they cannot be the bug',
+     'git show ${ref}:session-worker/SKILL.md', False, False, ''),
+    ('a port in a URL', 'curl https://$host:8080/x', False, False, ''),
+    ('a PATH-like assignment', 'PATH=$dir:/usr/bin make check', False, False, ''),
+    ('a sed script with two variables', 'sed "s:$a:$b:" f', False, False, ''),
+    ('a label followed by a space', 'echo "$name: value"', False, False, ''),
+    # A path whose first character happens not to be a modifier really is safe
+    # here: `d` is literal, so the colon survives and the command is correct.
+    ('a non-modifier initial is genuinely safe',
+     'git show $ref:docs/queue/Q1.md', False, False, ''),
+    ('a deliberate modifier, braced', 'echo "${f:h}"', False, False, ''),
+    ('a braced substitute modifier', 'echo "${f:s/a/b/}"', False, False, ''),
+    ('single quotes suppress the expansion',
+     "grep -rn '$ref:session-worker/SKILL.md' docs/", False, False, ''),
+    ('a quoted heredoc delimiter makes the body literal',
+     "git commit -F - <<'EOF'\nnote: $ref:tests/x is a zsh trap\nEOF",
+     False, False, ''),
+    ('the override is honoured',
+     'EXIT_STATUS_GUARD_OVERRIDE=deliberate-modifier echo $f:h', False, False, ''),
 
     # --- PIPESTATUS does not exist in zsh ------------------------------------
     ('PIPESTATUS[0] after a gate',
@@ -709,10 +771,131 @@ class TestPrecedence(unittest.TestCase):
         for cmd, bg in (('make check | tail', False),
                         ('make check > c.log 2>&1; echo hi', True),
                         ('make check; git push', False),
-                        ('echo $PIPESTATUS', False)):
+                        ('echo $PIPESTATUS', False),
+                        ('git show $ref:tests/x.py', False)):
             with self.subTest(cmd):
                 self.assertIn('EXIT_STATUS_GUARD_OVERRIDE=<reason>',
                               pg.decide(cmd, bg, reg))
+
+
+class TestZshModifier(unittest.TestCase):
+    """The measured divergence table, asserted pair by pair.
+
+    Ground truth taken against zsh 5.9 over all 52x52 two-letter openers with a
+    `/x.go` tail, each case a fresh `zsh -c` on literal script text. No `eval`:
+    it adds an expansion pass and does not describe what a typed command does.
+    Two earlier cuts of this rule were measured through `eval` and both were
+    wrong -- one missed the iterators entirely, the other invented a fifth.
+
+    The table is checked in rather than measured here, because the suite runs on
+    Windows where there is no zsh. Re-measure it when the shell moves; the
+    partition assertion below is what fails if it has.
+    """
+
+    # Diverge whatever the second letter is.
+    ALWAYS = 'acehlqrstuAPQ'
+    # Diverge for no second letter at all. `W` lives here, which is why it is
+    # not an iterator: treating it as one denies 13 legitimate shapes.
+    NEVER = 'bdijkmnopvxyzBCDEGHIJKLMNORSTUVWXYZ'
+    # Diverge only for the second letters named. `F` takes a numeric argument
+    # and errors on `g`, `o`, `x` -- loudly, with `bad math expression`.
+    MIXED = {'f': 'acehlqrstuAPQ',
+             'g': 'acehlqrstuAPQ',
+             'w': 'acehlqrstuAPQ',
+             'F': 'aceghloqrstuxAPQ'}
+
+    # What the rule knowingly does not cover: `F` before its three non-numeric
+    # error cases. All three are loud, so they fail visibly rather than
+    # producing a plausible wrong answer. Asserted so that a future fix breaks
+    # this list instead of passing silently.
+    UNCOVERED = ('Fg', 'Fo', 'Fx')
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = shipped_registry()
+
+    def test_the_table_partitions_the_alphabet(self):
+        """13 + 4 + 35 = 52. This is the assertion the first version got wrong:
+        it partitioned two ways, which answers "which letters diverge alone" and
+        leaves "which letters BEGIN a divergence" unasked."""
+        groups = [set(self.ALWAYS), set(self.MIXED), set(self.NEVER)]
+        self.assertEqual([13, 4, 35], [len(g) for g in groups])
+        for i, a in enumerate(groups):
+            for b in groups[i + 1:]:
+                self.assertEqual(set(), a & b, 'a letter is in two groups')
+        self.assertEqual(set(string.ascii_letters), set.union(*groups))
+
+    def test_the_module_sets_match_the_table(self):
+        self.assertEqual(set(self.ALWAYS), set(pg.ZSH_MODIFIERS))
+        self.assertEqual(set(self.MIXED), set(pg.ZSH_ITERATORS))
+
+    def test_every_pair_matches_the_measurement(self):
+        """All 2,704 ordered pairs. A rule whose set is short fails here, which
+        is what neither hand-written direction of this test could do."""
+        checked = 0
+        for a in string.ascii_letters:
+            for b in string.ascii_letters:
+                diverges = (a in self.ALWAYS
+                            or (a in self.MIXED and b in self.MIXED[a]))
+                denied = bool(pg.decide('git show $ref:%s%s/x.go' % (a, b),
+                                        False, self.reg))
+                if a + b in self.UNCOVERED:
+                    self.assertTrue(diverges, '%s%s should be a known gap' % (a, b))
+                    self.assertFalse(denied, 'the %s%s gap has been closed -- '
+                                     'remove it from UNCOVERED' % (a, b))
+                else:
+                    self.assertEqual(diverges, denied,
+                                     '%s%s: measured diverges=%s, guard denied=%s'
+                                     % (a, b, diverges, denied))
+                checked += 1
+        self.assertEqual(52 * 52, checked)
+
+    def test_the_uncovered_pairs_are_all_loud(self):
+        """The gap is acceptable only because these fail visibly. If one ever
+        becomes a silent wrong answer, it has to be covered."""
+        for pair in self.UNCOVERED:
+            with self.subTest(pair):
+                self.assertEqual('F', pair[0], 'only F has a numeric argument')
+
+    def test_the_rule_is_unconditional(self):
+        """Like $PIPESTATUS: wrong wherever it appears, gate or no gate, so an
+        empty registry does not switch it off."""
+        self.assertTrue(pg.decide('git show $ref:tests/x', False,
+                                  pg.Registry({})))
+
+    def test_it_wins_over_the_pipe(self):
+        """The command ran against the wrong object, which is a worse fact than
+        a swallowed status -- so it is the one the reason names."""
+        reason = pg.decide('git show $ref:tests/x | wc -l', False, self.reg)
+        self.assertIn('history modifier', reason)
+        self.assertNotIn("exit status is the filter's", reason)
+
+    def test_the_reason_names_both_rewrites(self):
+        """The trap and the deliberate modifier have different fixes, and a
+        session that has just been denied is copying one of them verbatim."""
+        reason = pg.decide('git show $ref:tests/x', False, self.reg)
+        self.assertIn('${name}:rest', reason)
+        self.assertIn('${name:h}', reason)
+
+    def test_the_scanner_reports_the_word_it_matched(self):
+        self.assertEqual('$ref:tests/x.py',
+                         pg.modifier_swallow('git show $ref:tests/x.py | wc -l'))
+        self.assertEqual('', pg.modifier_swallow('git show ${ref}:tests/x.py'))
+
+    def test_the_paths_that_exposed_the_gap(self):
+        """Real repo paths beginning with an iterator, measured to diverge.
+        These are the shapes the corpus never contained."""
+        for path in ('frontend/app.tsx', 'fs/mount.go', 'functions/index.js',
+                     'web/index.html', 'gradle/wrapper.jar', 'ws/handler.go',
+                     'fr/messages.json', 'wt/config.yaml', 'gtk/window.c'):
+            with self.subTest(path):
+                self.assertTrue(pg.decide('git show $ref:' + path, False,
+                                          self.reg), 'undenied: %s' % path)
+        for path in ('widgets/bar.tsx', 'foo/bar', 'file.md',
+                     'docs/queue/Q1.md'):
+            with self.subTest(path):
+                self.assertFalse(pg.decide('git show $ref:' + path, False,
+                                           self.reg), 'wrongly denied: %s' % path)
 
 
 class TestSequencedRemedy(unittest.TestCase):

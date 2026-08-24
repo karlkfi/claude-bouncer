@@ -13,6 +13,19 @@ a status goes missing, all of which turn a failure into a green:
   3. Sequenced before a state-changing command with `;`. The status is read
      correctly and then ignored: `make check; git push` pushes either way.
 
+And two bash-isms zsh evaluates differently, which is a neighbouring failure
+rather than a fourth way of losing a status -- the status is honest, and it
+answers a question nobody asked:
+
+  4. `$PIPESTATUS`, which zsh does not have. It expands to empty, so the test
+     against it reads as success whatever the pipeline did.
+  5. `$name:` followed by a modifier character. zsh reads `:s`/`:h`/`:t` and ten
+     others as history modifiers, and `:f`/`:g`/`:w`/`:F` iterate whichever one
+     follows them -- so `git show $ref:tests/x` and
+     `git show $ref:frontend/app.tsx` both run `git show origin/main`, a valid
+     command printing the wrong object at exit 0. Braces are the only fix;
+     double-quoting is not.
+
 Every verdict is a `deny`, never an `ask`. A deny's reason is shown to the
 model, so the fix lands where the command gets rewritten; an ask goes to the
 user and the model never sees the hint. The break-glass is a command prefix,
@@ -424,6 +437,97 @@ def reads_var(text, name, quotes=True):
     return False
 
 
+# zsh's modifiers, restricted to the ones that bind to an UNBRACED `$name:`.
+#
+# Measured against zsh 5.9 over all 52x52 two-letter openers, each case a fresh
+# `zsh -c` on literal script text -- no `eval`, which adds an expansion pass and
+# does not describe what a typed command does. The braced form is the control:
+# it is what the author meant, so a difference is the modifier firing. Both
+# earlier cuts of this rule were measured through `eval` and both were wrong,
+# in opposite directions.
+#
+# The partition is 13 + 4 + 35 = 52, and `tests/test_exit_status_guard.py`
+# carries the table and asserts every pair against it. The three groups are the
+# two frozensets below and the 35 letters in neither.
+#
+# bash has no modifiers at all, so every match here is a `:` the author wrote
+# as a separator and zsh reads as an operator.
+
+# Diverge whatever follows: `$ref:tests/x` is already broken at the `t`.
+ZSH_MODIFIERS = frozenset('acehlqrstuAPQ')
+
+# Iteration modifiers: inert alone, and they apply the modifier that FOLLOWS
+# them. `$ref:frontend/app.tsx` is `f` iterating `r` and expands to
+# `origin/mainontend/app.tsx`, while `$ref:foo/bar` is correct because `o` is
+# not a modifier. A measurement that puts a non-modifier spacer after each
+# candidate letter reports all four as literal -- the spacer blocks the
+# iteration it was meant to isolate -- which is how the first cut missed them.
+#
+# `W` is deliberately NOT here: it diverges on no second letter at all, so
+# including it would deny thirteen legitimate shapes. `F` additionally diverges
+# on `g`, `o` and `x`, because it takes a numeric argument and errors on a
+# non-numeric one; those three are left uncovered and are LOUD
+# (`bad math expression`), and modelling zsh's argument grammar to reach them
+# is the hand-rolled shell parsing this guard is not allowed to grow.
+ZSH_ITERATORS = frozenset('fgwF')
+
+VAR_NAME_RE = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
+
+# Where the swallowed word ends. Whitespace and the shell metacharacters that
+# would end a word anyway; the quote characters are in here because the scanner
+# tracks them itself and must not run past one.
+WORD_END = frozenset(' \t\n;|&()<>"\'')
+
+
+def modifier_swallow(text, quotes=True):
+    """The `$name:...` word whose colon zsh eats as a modifier, or ''.
+
+    Scans the raw string with quote state, for the reason `reads_var` does:
+    single quotes suppress expansion, so `'$v:x'` is literal text, while double
+    quotes suppress nothing -- which is what makes this survive the defensive
+    reflex of quoting it. A braced `${name}:x` or `${name:h}` is unambiguous in
+    either shell and never matches, because the brace is the fix and so cannot
+    also be the bug.
+    """
+    i, n = 0, len(text)
+    in_single = in_double = False
+    while i < n:
+        c = text[i]
+        if in_single:
+            if c == "'":
+                in_single = False
+            i += 1
+            continue
+        if c == '\\':
+            i += 2
+            continue
+        if quotes and c == "'" and not in_double:
+            in_single = True
+            i += 1
+            continue
+        if quotes and c == '"':
+            in_double = not in_double
+            i += 1
+            continue
+        if c == '$':
+            m = VAR_NAME_RE.match(text, i + 1)
+            # `${...}` fails the match on the brace, which is the whole screen.
+            if m and m.end() < n and text[m.end()] == ':':
+                nxt = m.end() + 1
+                first = text[nxt] if nxt < n else ''
+                second = text[nxt + 1] if nxt + 1 < n else ''
+                if first in ZSH_MODIFIERS or (
+                        first in ZSH_ITERATORS and second in ZSH_MODIFIERS):
+                    end = nxt
+                    while end < n and text[end] not in WORD_END:
+                        end += 1
+                    return text[i:end]
+                i = m.end() + 1
+                continue
+        i += 1
+    return ''
+
+
 def sets_pipefail(segs):
     """Whether any segment is `set -o pipefail`, in any of its spellings
     (including a combined `set -euo pipefail`)."""
@@ -748,6 +852,23 @@ PIPESTATUS_REASON = (
     "1-indexed); better still, redirect and read the status directly: "
     '<MKDIR>cmd > <LOG> 2>&1; echo "EXIT=$?".' + OVERRIDE_HINT)
 
+ZSH_MODIFIER_REASON = (
+    " -- zsh, the shell the Bash tool runs, reads that `:` as a history "
+    "modifier rather than as a separator (`:s` substitutes, `:h` is dirname, "
+    "`:t` basename, `:r` strips the extension), so the colon and everything "
+    "after it are consumed and the command runs against the variable's bare "
+    "value. It usually SUCCEEDS at that: `git show $ref:path | wc -l` prints "
+    "the commit instead of the blob, well-formed and at exit 0. Where the "
+    "modifier does not parse you get `bad substitution` instead, which is the "
+    "same bug arriving loudly. bash has no "
+    "modifiers, so this is a zsh-only reading, and double-quoting does not "
+    "rescue it -- only braces do. Write `${name}:rest` for a literal colon, or "
+    "`${name:h}` if the modifier was what you meant."
+    # Not OVERRIDE_HINT: its sentence is about a status that does not matter,
+    # which is the wrong question here and the exact defect Q106 was about.
+    " If the modifier is deliberate and the braced form will not express it, "
+    "re-run prefixed with " + OVERRIDE_VAR + "=<reason>." + OVERRIDE_TAIL)
+
 PIPED_REASON = (
     " is piped into a filter, so this call's exit status is the filter's, not "
     "the gate's -- a failure reads exactly like a pass, and zsh (the shell the "
@@ -800,6 +921,16 @@ def decide(cmd, background, reg, scratch='', depth=0):
     if reads_var(cleaned, 'PIPESTATUS') or any(
             reads_var(body, 'PIPESTATUS', quotes=False) for body in heredocs):
         return with_log_path(PIPESTATUS_REASON, scratch)
+
+    # The same class as $PIPESTATUS and read the same way: bash syntax that zsh
+    # evaluates differently, yielding a plausible answer to a question nobody
+    # asked. Unconditional, gate or no gate -- there is no reading of
+    # `$ref:path` under which the swallowed colon was wanted.
+    word = modifier_swallow(cleaned)
+    for body in heredocs:
+        word = word or modifier_swallow(body, quotes=False)
+    if word:
+        return '`' + truncate(word) + '`' + ZSH_MODIFIER_REASON
 
     # `pipefail` propagates the failure and zsh's `$pipestatus` recovers each
     # stage's status. Neither mitigates a status the last statement discarded,

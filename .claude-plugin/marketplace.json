@@ -45,7 +45,7 @@
     },
     {
       "name": "exit-status-guard",
-      "description": "Deny a gate piped into a filter, backgrounded behind an echo, or sequenced before a state change with `;` \u2014 every shape where a failure reads as success.",
+      "description": "Deny a gate piped into a filter, backgrounded behind an echo, or sequenced before a state change with `;`, and the zsh-only expansions that read as success on their own \u2014 every shape where a failure reads as success.",
       "version": "2.0.0",
       "author": {
         "name": "Karl Isenberg",
