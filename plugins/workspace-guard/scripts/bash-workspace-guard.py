@@ -2951,14 +2951,23 @@ def _unstripped_subst_bodies(cmd, subs):
     A raw body is matched to a stripped one by stripping it back down, which is
     what keeps the two scans' disagreements out: a body only the RAW scan finds
     (the `` <<'EOF' `` literal) has no stripped counterpart to replace, and one
-    only the stripped scan finds (hidden behind an apostrophe) has no raw match
-    and is left as it is — the Q113 defect survives in that compound shape, and
-    a false positive on heredoc data would be worse.
+    only the stripped scan finds has no raw match and is left as it is, since a
+    false positive on heredoc data would be worse.
+
+    The raw scan runs over an own-level strip rather than over ``cmd`` itself.
+    Scanning the raw string flat, an apostrophe in an EARLIER top-level heredoc
+    body opened a quoted run that swallowed the rest of it (the Q50 mechanism),
+    so the scan returned nothing, no body had a counterpart to swap in, and the
+    Q113 defect survived with the hook returning `allow` for a substitution
+    whose outside read it never saw (Q119). Dropping the top-level bodies first
+    removes that text while leaving each substitution's own heredocs — the
+    terminators the recursion needs — in place.
     """
     if '<<' not in cmd:
         return subs
     raw = {}
-    for body in command_substitutions(cmd):
+    for body in command_substitutions(strip_heredoc_bodies(cmd,
+                                                           own_level_only=True)):
         raw.setdefault(strip_heredoc_bodies(body), body)
     return [raw.get(b, b) for b in subs]
 
