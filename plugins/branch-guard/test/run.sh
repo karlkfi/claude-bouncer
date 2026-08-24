@@ -1366,6 +1366,47 @@ check "[configured] git branch -D a scratch test-merge -> ask" ask \
 check "[dontAsk] git branch -D a scratch test-merge -> allow" allow \
   "$(decision_for "$(push_mode 'git branch -D testmerge' 'dontAsk')" "$WORK")"
 
+#     The reset side of the same tier, on the same fixtures so the pair reads
+#     side by side. What the merge probe establishes is about a ref MOVE, so the
+#     verb it covered was an accident of its one caller: `testmerge` in this
+#     exact state answered `allow` to `git branch -D` and `deny` to
+#     `git reset --hard`. Crossed the same two ways as the delete, since a
+#     relaxation that reached past the protected check or stopped short of the
+#     unanswerable mode would be a different contract.
+git -C "$WORK" checkout -q testmerge
+check "git reset --hard on a scratch test-merge -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git reset --hard HEAD~1')" "$WORK")"
+check "[dontAsk] git reset --hard on a scratch test-merge -> allow" allow \
+  "$(decision_for "$(push_mode 'git reset --hard HEAD~1' 'dontAsk')" "$WORK")"
+check "[configured] git reset --hard on a scratch test-merge -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git reset --hard HEAD~1')" "$WORK" \
+     'BRANCH_GUARD_PROTECTED_BRANCHES=testmerge')"
+#     Each negative orphans something the probe cannot account for, so each
+#     keeps its deny. Without them the relaxation would read as "an unreachable
+#     tip is fine after all", which is the opposite of what it proves.
+git -C "$WORK" checkout -q testmerge-plus
+check "git reset --hard on a test-merge carrying its own commit -> deny" deny \
+  "$(decision_for "$(bash_cmd 'git reset --hard HEAD~1')" "$WORK")"
+git -C "$WORK" checkout -q resolved
+check "git reset --hard on a hand-resolved merge -> deny" deny \
+  "$(decision_for "$(bash_cmd 'git reset --hard HEAD~1')" "$WORK")"
+git -C "$WORK" checkout -q octo
+check "git reset --hard on an octopus merge -> deny" deny \
+  "$(decision_for "$(bash_cmd 'git reset --hard HEAD~1')" "$WORK")"
+#     What survives both questions really did lose content, and a scratch branch
+#     that never opened a pull request is half of that set -- `gh pr view`
+#     returns nothing there, which is the other answer rather than a failed
+#     check. A reason naming only the squash case routes half the denies it
+#     prints, so assert both halves and the command that reads the loss.
+merge_deny_reason="$(reason_for "$(bash_cmd 'git reset --hard HEAD~1')" "$WORK")"
+check_text "the surviving deny keeps the squash check" has \
+  'gh pr view' "$merge_deny_reason"
+check_text "the surviving deny says what no pull request means" has \
+  'No pull request is the other answer' "$merge_deny_reason"
+check_text "the surviving deny names how to read what the move drops" has \
+  'git log --oneline <branch> --not --remotes' "$merge_deny_reason"
+git -C "$WORK" checkout -q claude/x
+
 #     Force move/copy: creating a new ref loses nothing; moving an existing one
 #     depends on whether its CURRENT tip survives elsewhere.
 check "git branch -f creating a backup ref -> allow" allow \

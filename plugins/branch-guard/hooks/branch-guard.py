@@ -75,10 +75,12 @@ Two verdicts deny in every mode rather than only in an unattended one, for the
 same reason: the missing input is a fact the session can settle for itself, so
 the answer belongs in the reason rather than in a prompt, and `refuse()` writes
 it there from DENY_ROUTES. 'deny-unreachable' is a `git reset --hard` moving a
-branch whose tip the guard has PROVED nothing else reaches, which a `gh pr view`
-settles; 'deny-rebase' is a push onto a base that has moved into this branch's
-own lines, which a `git rebase` settles. Every other `ask` in the file still
-asks a human, including the three `classify_reset` keeps.
+branch whose tip the guard has PROVED nothing else reaches AND whose orphaned
+commits it could not prove reproducible, which a `gh pr view` settles in either
+direction — a merged pull request says the content is already on main, and no
+pull request says it is not; 'deny-rebase' is a push onto a base that has moved
+into this branch's own lines, which a `git rebase` settles. Every other `ask` in
+the file still asks a human, including the three `classify_reset` keeps.
 
 That denial is final, which is a dead end for a command the session had a good
 reason to run: with nothing to answer the prompt, work reroutes onto whatever
@@ -520,7 +522,10 @@ DENY_ROUTES = {
         "run `gh pr view <n> --json state,mergeCommit` first: a squash merge "
         "leaves the tip unreachable by construction, so a branch spent that "
         "way already has its content on main under another object name and "
-        "needs no reset at all."),
+        "needs no reset at all. No pull request is the other answer, not a "
+        "failed check — the commits are only here, so read what the move "
+        "drops with `git log --oneline <branch> --not --remotes` before "
+        "deciding."),
     'deny-rebase': (
         "run that rebase and push the result. Retrying the push as given "
         "meets the same overlap, because the cause is the base this branch is "
@@ -1443,7 +1448,24 @@ def classify_reset(branch, cwd, probe):
     `git reset --hard <sha>` to put back. Shared is answered first, as
     everywhere else. Every probe that can't answer keeps the `ask`.
 
-    A tip the probe proves unreachable is the one case here that denies. The
+    An unreachable tip asks the second question too, and only a branch that
+    fails both denies. `orphans_only_reproducible_merges` establishes what a ref
+    move off this branch would orphan, which is the reset's question as much as
+    the delete's — it was scoped to `-D` by its one caller rather than by what
+    it proves, and the same branch in the same state answering `allow` to
+    `git branch -D` and `deny` to `git reset --hard` was the whole defect. The
+    proof is taken over what deleting the ref would orphan, because the reset's
+    target revision belongs to the command rather than to the branch and this
+    classifier never sees it. That errs the safe way: what a reset orphans is a
+    subset of what a delete would, so a proof over the larger set covers the
+    smaller one whatever the target turns out to be.
+
+    It costs nothing on the auto-approved path — a recoverable tip returns above
+    it — and lands only where the verdict was already a deny. Measured on a
+    four-commit repo (git 2.55, macOS): 18ms on the merge case it converts, 6ms
+    on a non-merge orphan, against the 13ms the reset probes above already pay.
+
+    What survives both questions is a branch that really did lose content. The
     missing input is not intent or a blast radius the guard can't see — it is a
     fact about the world the model can establish for itself, and the commonest
     way to reach it is a squash merge, which leaves a spent branch's tip
@@ -1465,6 +1487,12 @@ def classify_reset(branch, cwd, probe):
                        "tracked files")
     rec = tip_is_recoverable(cwd, branch)
     if rec is False:
+        # The same second chance `classify_branch`'s `-D` path takes, on the
+        # same question: a scratch ref whose only unshared commit is a clean
+        # test-merge orphans nothing a plain `git merge` would not produce
+        # again, whichever verb moves the ref off it.
+        if orphans_only_reproducible_merges(cwd, branch):
+            return ('allow', None)
         return ('deny-unreachable',
                 f"`git reset --hard` moves branch '{branch}', whose tip isn't "
                 f"reachable from any remote-tracking branch or main")
@@ -1874,8 +1902,13 @@ def tip_is_recoverable(cwd, name):
 
 
 def orphans_only_reproducible_merges(cwd, name):
-    """True when deleting branch <name> would orphan nothing that isn't already
-    derivable from the refs outliving it.
+    """True when moving branch <name> off its tip would orphan nothing that
+    isn't already derivable from the refs outliving it.
+
+    Scoped to what losing the whole ref would orphan, which is exact for
+    `git branch -D` and an over-approximation for `git reset --hard`, whose
+    target revision this can't see. Conservative either way: a reset orphans a
+    subset of what a delete would, so a proof over the larger set covers it.
 
     `tip_is_recoverable` asks whether the tip itself survives, which a scratch
     branch carrying a test-merge (`switch -c tmp; merge origin/main`) can never
