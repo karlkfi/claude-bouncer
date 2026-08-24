@@ -2935,6 +2935,34 @@ def resolve_native_path(raw, cwd):
 KillFacts = collections.namedtuple('KillFacts', ['signal', 'launder', 'patterns'])
 
 
+def _unstripped_subst_bodies(cmd, subs):
+    """Swap each substitution body in ``subs`` for its text in the raw ``cmd``.
+
+    ``subs`` comes from the heredoc-stripped string, which is the only scan that
+    reads Q35 and Q50 right: a `` <<'EOF' `` body is literal, so a `$(…)` in one
+    must not be found, and an apostrophe in an expanded body must not hide a
+    real `$(…)` after it. Stripping leaves the `<<WORD` operator behind, though,
+    and a body carrying a disarmed one is mis-read when the recursion strips it
+    a second time — the operator re-arms, its terminator line is long gone, and
+    everything after the newline is swallowed as an unterminated body, so
+    ``echo "$(cat <<EOF … EOF … cat /outside)"`` lost the read entirely (Q113).
+
+    The raw text still has its terminator, so the recursion strips it correctly.
+    A raw body is matched to a stripped one by stripping it back down, which is
+    what keeps the two scans' disagreements out: a body only the RAW scan finds
+    (the `` <<'EOF' `` literal) has no stripped counterpart to replace, and one
+    only the stripped scan finds (hidden behind an apostrophe) has no raw match
+    and is left as it is — the Q113 defect survives in that compound shape, and
+    a false positive on heredoc data would be worse.
+    """
+    if '<<' not in cmd:
+        return subs
+    raw = {}
+    for body in command_substitutions(cmd):
+        raw.setdefault(strip_heredoc_bodies(body), body)
+    return [raw.get(b, b) for b in subs]
+
+
 def analyze_command(cmd, ctx, base_cwd, depth=0):
     """Analyze one command string against the workspace boundary.
 
@@ -3600,9 +3628,14 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
     # are scanned as their own units, with `quotes=False` — inside a heredoc
     # body bash applies no quoting, so an apostrophe there is text, not the
     # start of a quoted run that would swallow a later `$(…)`. (Q50)
+    #
+    # Each body then goes back to its raw text before the recursion sees it, so
+    # the `<<WORD` the strip left behind does not re-arm and swallow the rest of
+    # the body (Q113). See `_unstripped_subst_bodies`.
     if subst_depth < MAX_SUBST_DEPTH:
         heredocs = []
         subs = command_substitutions(strip_heredoc_bodies(cmd, expanded=heredocs))
+        subs = _unstripped_subst_bodies(cmd, subs)
         for hd in heredocs:
             subs.extend(command_substitutions(hd, quotes=False))
         for body in subs:
