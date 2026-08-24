@@ -372,6 +372,8 @@ class BuildReportTests(unittest.TestCase):
              "command": "PROD_GUARD_OVERRIDE=x kubectl delete ns y"},
         ])
         self.assertEqual(r["overrides"], 1)
+        self.assertEqual(r["command_overrides"], 1)
+        self.assertEqual(r["session_overrides"], 0)
         self.assertEqual(r["decisions"]["ask"], 1)
 
     def test_session_override_counted(self):
@@ -381,6 +383,24 @@ class BuildReportTests(unittest.TestCase):
              "command": "PROD_GUARD_SESSION_OVERRIDE=x kubectl delete ns y"},
         ])
         self.assertEqual(r["overrides"], 1)
+        self.assertEqual(r["session_overrides"], 1)
+        self.assertEqual(r["command_overrides"], 0)
+
+    def test_the_two_variables_are_counted_apart(self):
+        """The whole of Q129: one downgrade of each form, and a reader sizing
+        either variable gets that variable rather than the sum."""
+        r = self._report([
+            {"plugin": "prod-guard", "decision": "ask", "reason": REASON_OVERRIDE,
+             "command": "PROD_GUARD_OVERRIDE=x kubectl delete ns y"},
+            {"plugin": "prod-guard", "decision": "ask",
+             "reason": REASON_SESSION_OVERRIDE,
+             "command": "PROD_GUARD_SESSION_OVERRIDE=x kubectl delete ns z"},
+        ])
+        self.assertEqual(r["command_overrides"], 1)
+        self.assertEqual(r["session_overrides"], 1)
+        # 'overrides' keeps meaning the total, so an existing reader of the
+        # --json surface reads the number it read before.
+        self.assertEqual(r["overrides"], 2)
 
     def test_legacy_override_wording_still_counted(self):
         """Transcripts predating the colon are still in the analyzed window."""
@@ -393,6 +413,8 @@ class BuildReportTests(unittest.TestCase):
              "command": "PROD_GUARD_SESSION_OVERRIDE=x kubectl delete ns y"},
         ])
         self.assertEqual(r["overrides"], 2)
+        self.assertEqual(r["command_overrides"], 1)
+        self.assertEqual(r["session_overrides"], 1)
 
     def test_foreign_guard_override_not_counted(self):
         r = self._report([
@@ -595,6 +617,34 @@ class PrintTests(unittest.TestCase):
              "command": "PROD_GUARD_OVERRIDE=x kubectl delete ns y"},
         ], "prod-guard")
         self.assertIn("PROD_GUARD_OVERRIDE downgrades: 1", out)
+        # The per-command line is not the session line's prefix, so a reader
+        # of either sees only its own variable.
+        self.assertNotIn("PROD_GUARD_SESSION_OVERRIDE", out)
+
+    def test_each_override_variable_gets_its_own_line(self):
+        out = self._print([
+            {"plugin": "prod-guard", "decision": "ask", "reason": REASON_OVERRIDE,
+             "command": "PROD_GUARD_OVERRIDE=x kubectl delete ns y"},
+            {"plugin": "prod-guard", "decision": "ask",
+             "reason": REASON_SESSION_OVERRIDE,
+             "command": "PROD_GUARD_SESSION_OVERRIDE=x kubectl delete ns z"},
+            {"plugin": "prod-guard", "decision": "ask",
+             "reason": REASON_SESSION_OVERRIDE,
+             "command": "PROD_GUARD_SESSION_OVERRIDE=x kubectl delete ns w"},
+        ], "prod-guard")
+        self.assertIn("PROD_GUARD_OVERRIDE downgrades: 1", out)
+        self.assertIn("PROD_GUARD_SESSION_OVERRIDE downgrades: 2", out)
+        # The defect: three downgrades under one variable's name.
+        self.assertNotIn("PROD_GUARD_OVERRIDE downgrades: 3", out)
+
+    def test_session_only_prints_no_per_command_line(self):
+        out = self._print([
+            {"plugin": "prod-guard", "decision": "ask",
+             "reason": REASON_SESSION_OVERRIDE,
+             "command": "PROD_GUARD_SESSION_OVERRIDE=x kubectl delete ns y"},
+        ], "prod-guard")
+        self.assertIn("PROD_GUARD_SESSION_OVERRIDE downgrades: 1", out)
+        self.assertNotIn("PROD_GUARD_OVERRIDE downgrades", out)
 
     def test_header_names_scope_under_plugin_all(self):
         out = self._print([
@@ -655,6 +705,7 @@ class PrintTests(unittest.TestCase):
              "command": "FOREGROUND_GUARD_OVERRIDE=x sleep 600"},
         ], "all")
         self.assertNotIn("PROD_GUARD_OVERRIDE downgrades", out)
+        self.assertNotIn("PROD_GUARD_SESSION_OVERRIDE downgrades", out)
 
 
 class EndToEndTests(unittest.TestCase):
