@@ -173,6 +173,7 @@ old one. A different project's scratch still asks entirely.
 | `echo "$(cat /etc/passwd)"` (quoted subst read) | **ask** |
 | `cat > doc.md <<EOF` … `$(cat /etc/x)` … `EOF` (expanded body) | **ask** |
 | `cat > doc.md <<EOF` … `don't` … `$(cat /etc/x)` … `EOF` (apostrophe first) | **ask** |
+| `echo "$(cat <<EOF` … `EOF` … `cat /etc/x)"` (read after a heredoc in a substitution) | **ask** |
 | `LC_ALL=C cat /etc/passwd`           | **ask**  |
 | `until grep -q x /etc/passwd; do :; done` | **ask** |
 | `if cat /etc/passwd; then :; fi`     | **ask**  |
@@ -1503,7 +1504,11 @@ final output.
   delimiter (`<<'EOF'`, `<<"EOF"`, `<<\EOF`, or any partly quoted word) makes
   the body literal, so a `$(…)` there is documentation and is ignored; an
   unquoted `<<EOF` body is expanded by bash and is still analyzed — on its own,
-  with quoting off, since a heredoc body has none.
+  with quoting off, since a heredoc body has none. A substitution body is then
+  taken from the *raw* command string before it is analyzed, since the stripped
+  one keeps a `<<TAG` whose body and terminator are already gone: read a second
+  time it arms again, and everything after it on the line — a guarded read
+  included — disappears as an unterminated body.
 - Literal variable propagation is deliberately narrow. Only standalone
   `NAME=value` / `export NAME=value` assignments whose value is a plain
   literal after quote removal (non-empty; no `$`, backticks, glob characters,

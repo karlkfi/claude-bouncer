@@ -4226,6 +4226,72 @@ class CaseClauseSubstEndToEndTests(unittest.TestCase):
             'echo "$(grep -c case /etc/q81-fake-target)"')
 
 
+class StrippedSubstBodyHeredocTests(unittest.TestCase):
+    """Q113: a stripped heredoc leaves a `<<WORD` that a second strip re-arms.
+
+    The substitution body handed to the recursion came off the stripped string,
+    so its `<<WORD` had lost its body and its terminator line. The recursion
+    stripped again, found no terminator, and swallowed the rest of the body as
+    an unterminated heredoc -- the guarded read simply was not there by the time
+    anything looked, and the string deferred. Q109's clause shapes were spared
+    because the top-level strip stops at the pattern's `)` and never disarms
+    anything, which is what kept this out of `CaseClauseSubstEndToEndTests`.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = os.path.realpath(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _asks_about_target(self, cmd):
+        out = run_hook(cmd, self.workspace, project_dir=self.workspace)
+        self.assertIsNotNone(out, f"expected a decision, got defer for: {cmd!r}")
+        reason = out["hookSpecificOutput"].get("permissionDecisionReason")
+        self.assertEqual("ask", out["hookSpecificOutput"]["permissionDecision"],
+                         f"for {cmd!r} (reason: {reason!r})")
+        self.assertIn("/etc/q113-fake-target", reason)
+
+    def test_read_after_a_stripped_heredoc_is_still_checked(self):
+        # The row's own measurement.
+        self._asks_about_target(
+            'echo "$(cat <<EOF\nbody\nEOF\ncat /etc/q113-fake-target)"')
+
+    def test_a_quoted_delimiter_behaves_the_same(self):
+        # Neither an odd quote nor an unquoted delimiter is what arms the trap,
+        # which is what separates this from Q50 and Q109.
+        self._asks_about_target(
+            'echo "$(cat <<\'EOF\'\nbody\nEOF\ncat /etc/q113-fake-target)"')
+
+    def test_a_backtick_substitution_behaves_the_same(self):
+        self._asks_about_target(
+            'echo "`cat <<EOF\nbody\nEOF\ncat /etc/q113-fake-target`"')
+
+    def test_two_stripped_heredocs_leave_two_armed_operators(self):
+        # The second `<<B` re-arms inside what the first already swallowed, so
+        # one recovered body has to answer for both.
+        self._asks_about_target(
+            'echo "$(cat <<A\na\nA\ncat <<B\nb\nB\ncat /etc/q113-fake-target)"')
+
+    def test_a_literal_body_is_still_not_scanned(self):
+        # The raw text a body is recovered from carries the heredoc content, so
+        # the recursion has to strip it back out. Reading a `<<'EOF'` body as
+        # commands would fabricate an offender from data bash never runs.
+        # Passes either way -- it is the guard on the recovery, not a test of
+        # it, and the direction it guards is the one that costs a false prompt.
+        cmd = 'echo "$(cat <<\'EOF\'\n$(cat /etc/q113-fake-target)\nEOF\n)"'
+        self.assertIsNone(run_hook(cmd, self.workspace, project_dir=self.workspace))
+
+    def test_an_in_workspace_read_still_earns_no_prompt(self):
+        # The recovery must not turn a clean substitution into a decision.
+        # Passes either way, for the same reason as the case above.
+        with open(os.path.join(self.workspace, "in.txt"), "w") as f:
+            f.write("x\n")
+        cmd = 'echo "$(cat <<EOF\nbody\nEOF\ncat in.txt)"'
+        self.assertIsNone(run_hook(cmd, self.workspace, project_dir=self.workspace))
+
+
 class SubstBodyVarPropagationTests(unittest.TestCase):
     """Q66: a substitution body inherits the string's literal variables.
 
