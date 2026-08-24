@@ -355,6 +355,64 @@ CASES = [
     ('sequence named in a commit message',
      'git commit -m "docs: never write make check; git push"', False, False, ''),
 
+    # --- The capture-and-restore rewrite the deny itself recommends ----------
+    # SEQUENCED_REASON hands over `cmd > log; rc=$?; restore; [ "$rc" -ne 0 ]
+    # || exit 1` for a gate whose failure is the assertion. Where the restore is
+    # itself a registry mutator the guard used to deny its own suggestion, so a
+    # session copying it verbatim was denied a second time (Q106).
+    ('the recommended restore form with git reset',
+     'make check > tmp/c.log 2>&1; rc=$?; git reset --hard; [ "$rc" -ne 0 ] || exit 1',
+     False, False, ''),
+    ('the recommended restore form with kubectl delete',
+     'make check > tmp/c.log 2>&1; rc=$?; kubectl delete -f f.yaml; '
+     '[ "$rc" -ne 0 ] || exit 1', False, False, ''),
+    ('a restore whose capture is read by an echo',
+     'make check > tmp/c.log 2>&1; rc=$?; helm uninstall rel; echo "EXIT=$rc"',
+     False, False, ''),
+    # shlex removes the quoting, so the defensive spelling is the same capture.
+    ('a quoted capture is the same capture',
+     'make check > tmp/c.log 2>&1; rc="$?"; git reset --hard; echo "EXIT=$rc"',
+     False, False, ''),
+    # A two-step teardown. Most restores are gates too, so the second step is
+    # what regresses if a skipped restore is allowed to become the new gate:
+    # the capture search would restart after it and find nothing.
+    ('a teardown of more than one step',
+     'make check > tmp/c.log 2>&1; rc=$?; git reset --hard; '
+     'kubectl delete -f x.yaml; [ "$rc" -ne 0 ] || exit 1', False, False, ''),
+
+    # The other direction, one condition dropped at a time. Each of the three
+    # is load-bearing on its own, which is what keeps the exemption from
+    # widening into "a sequence with an assignment in it".
+    ('a restore with no capture at all',
+     'make check; git reset --hard', False, True, 'is sequenced before'),
+    ('a capture the restore is not followed by a read of',
+     'make check > tmp/c.log 2>&1; rc=$?; git reset --hard', False, True, ''),
+    ('a recheck with no capture to read',
+     'make check > tmp/c.log 2>&1; git reset --hard; [ "$rc" -ne 0 ] || exit 1',
+     False, True, ''),
+    # The screen that matters most: capturing a status does not make a publish
+    # conditional on it, so the same shape around `git push` still denies.
+    ('a publish in the capture form is not a restore',
+     'make check > tmp/c.log 2>&1; rc=$?; git push; [ "$rc" -ne 0 ] || exit 1',
+     False, True, 'git push'),
+    ('a publish after a legitimate restore still denies',
+     'make check > tmp/c.log 2>&1; rc=$?; git reset --hard; git push; '
+     '[ "$rc" -ne 0 ] || exit 1', False, True,
+     '`make check` is sequenced before `git push`'),
+    # An inline assignment sets a variable for one command and leaves nothing
+    # for a later segment to read, so it is not a capture.
+    # A capture inside a subshell dies with it, so `$rc` outside is empty and
+    # the recheck it appears to feed tests nothing.
+    ('a capture inside a subshell escapes nothing',
+     'make check; (rc=$?); git reset --hard; echo "EXIT=$rc"', False, True, ''),
+    ('an inline assignment is not a capture',
+     'make check > tmp/c.log 2>&1; rc=$? git reset --hard; [ "$rc" -ne 0 ] || exit 1',
+     False, True, ''),
+    # A restore is a mutator first: the screens still run, so a read of the
+    # same subcommand is neither.
+    ('kubectl rollout undo is a restore, not a free pass',
+     'make check; kubectl rollout undo deploy/foo', False, True, ''),
+
     # --- Read forms of a subcommand that also writes -------------------------
     # `git tag` and `kubectl rollout` each have a read form and a write form
     # under one subcommand, so a head match alone casts the read as the publish
@@ -502,11 +560,35 @@ class TestRegistry(unittest.TestCase):
         starts matching text that merely mentions a command."""
         with open(REGISTRY, encoding='utf-8') as fh:
             data = json.load(fh)
-        for key in ('gates', 'exempt', 'mutators'):
+        for key in ('gates', 'exempt', 'mutators', 'restores'):
             for p in data.get(key) or []:
                 with self.subTest(p):
                     self.assertTrue(p.startswith('^'),
                                     'pattern not anchored to command position')
+
+    def test_every_restore_is_also_a_mutator(self):
+        """`is_restore` is consulted only after `is_mutator` has said yes, so a
+        restore naming a command the mutator list misses is a dead entry --
+        registered, never reached, and silent about it."""
+        reg = shipped_registry()
+        self.assertTrue(reg.restores, 'registry lists no restores')
+        for cmd in ('git reset --hard', 'kubectl delete -f x.yaml',
+                    'kubectl rollout undo deploy/foo', 'helm uninstall rel',
+                    'helm rollback rel 1', 'terraform destroy -auto-approve',
+                    'tofu destroy'):
+            words = cmd.split()
+            with self.subTest(cmd):
+                self.assertTrue(reg.is_restore(words), 'not matched as a restore')
+                self.assertTrue(reg.is_mutator(words),
+                                'a restore the mutator list does not reach')
+
+    def test_a_restore_that_is_not_registered_stays_a_plain_mutator(self):
+        """The other direction: `git push` is a mutator and must never read as
+        a restore, whatever shape it is sequenced in."""
+        reg = shipped_registry()
+        for cmd in ('git push', 'npm publish', 'kubectl apply -f x.yaml'):
+            with self.subTest(cmd):
+                self.assertFalse(reg.is_restore(cmd.split()))
 
     def test_empty_registry_never_denies(self):
         """Detection is driven by the registry, not by an incidental match."""

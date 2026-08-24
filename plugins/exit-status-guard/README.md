@@ -115,8 +115,12 @@ make check > <scratchpad>/c.log 2>&1; rc=$?; git checkout -- f; [ "$rc" -ne 0 ] 
 
 The deny names both forms, `&&` first, because most sequencing denials do want
 it. A restore that is itself a registry mutator — `git reset --hard`, `kubectl
-delete` — is still read as a state change and denied; `EXIT_STATUS_GUARD_OVERRIDE`
-is the way through until the detection can tell a restore from a publish.
+delete` — is passed over rather than denied, so the suggestion above runs as
+written. The restore has to be in `restores`, the status has to be captured
+before it, and the capture has to be read after it; drop any one and the deny
+comes back. A publish is never a restore, so
+`make check > c.log 2>&1; rc=$?; git push; [ "$rc" -ne 0 ] || exit 1` still
+denies — capturing a status does not make a push conditional on it.
 
 ## What it does not deny
 
@@ -407,7 +411,8 @@ A project extends them with its own `.claude/exit-status-guard.json`:
 {
   "gates": ["^bazelisk(\\s|$)"],
   "exempt": ["^make\\s+print-config(\\s|$)"],
-  "mutators": ["^\\./deploy\\.sh(\\s|$)"]
+  "mutators": ["^\\./deploy\\.sh(\\s|$)"],
+  "restores": ["^\\./teardown\\.sh(\\s|$)"]
 }
 ```
 
@@ -416,6 +421,7 @@ A project extends them with its own `.claude/exit-status-guard.json`:
 | `gates` | Commands whose exit status **is** the answer. Drives all three rules. |
 | `exempt` | Wins over **both** `gates` and `mutators`. For informational targets whose output, not status, is the point (`make print-config`). Read forms need no row when a read verb names them. |
 | `mutators` | State-changing commands. Drives rule 3 only — the `;`-before-a-state-change case. |
+| `restores` | The subset of `mutators` that reverts local state rather than publishing. Lets the capture-and-restore rewrite through; read only after `mutators` has matched, so an entry naming anything else is dead. |
 | `replace` | `true` takes full control instead of extending the defaults. |
 
 Project entries are **added** to the defaults, so naming one extra gate does not
