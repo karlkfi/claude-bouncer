@@ -52,7 +52,8 @@ The hook produces one of four outcomes per command:
   to you. Used where the missing input is a fact the session can establish for
   itself, so the reason carries the check that settles it. Today that is two
   cases: a `git reset --hard` onto a tip the guard has proved nothing else
-  reaches, and a push onto a base that has moved into this branch's own lines.
+  reaches and proved to be carrying more than a reproducible merge, and a push
+  onto a base that has moved into this branch's own lines.
   Asking there would spend your attention on a `gh pr view` or a `git rebase`.
 - **defer** — the hook stays silent; your normal permission settings apply.
 
@@ -103,6 +104,7 @@ the default `strict` [push policy](#push-guard).
 | `git branch -D tmp-basecheck` *(scratch ref whose only unshared commit is a merge git reproduces)* | allow |
 | `git branch -f backup claude/x` *(the ref doesn't exist yet — a create)* | allow |
 | `git reset --hard origin/main` *(clean worktree, feature branch whose tip survives elsewhere)* | allow |
+| `git reset --hard HEAD~1` *(clean worktree, scratch ref whose only unshared commit is a merge git reproduces)* | allow |
 | `git stash` / `git stash pop` *(any branch — adds no commit, rewrites no history, recoverable by design)* | allow |
 | `git commit -m "fix"` *(on `main`)* | **ask** |
 | editing a file whose repo is on `main` *(Edit/Write/MultiEdit/NotebookEdit)* | **ask** |
@@ -114,7 +116,7 @@ the default `strict` [push policy](#push-guard).
 | `git push origin v1.3.0` / `git push origin refs/tags/v1.3.0` / `git push --tags` *(publishes a tag, strict policy)* | **ask** |
 | `git push` *(worktree branch, but the base has moved into the same lines this branch edits)* | **deny** |
 | `git reset --hard HEAD~1` *(uncommitted changes to tracked files, or on `main`, or a tip the guard couldn't check)* | **ask** |
-| `git reset --hard HEAD~1` *(clean worktree, feature branch, tip proved to be reachable from nothing else)* | **deny** |
+| `git reset --hard HEAD~1` *(clean worktree, feature branch, tip proved to be reachable from nothing else, and its orphaned commits not proved reproducible)* | **deny** |
 | `git clean -fd` | **ask** |
 | `git stash drop` / `git stash clear` *(discards a stash)* | **ask** |
 | `git branch -D old` *(tip reachable from nothing else, and the branch carries commits of its own)* | **ask** |
@@ -241,13 +243,23 @@ elsewhere auto-approves, because putting it back costs one
 `git reset --hard <sha>`.
 
 Where the probe comes back the other way — the tip is reachable from nothing
-else — `reset --hard` is the one command here that is denied rather than
-prompted, in every permission mode. The usual reason for an unreachable tip is a
-squash merge, which leaves a spent branch's tip unreachable by construction
-while its content sits on `main` under another object name, so the question is
-not whether you want the commits: it is whether they are already saved, and
-`gh pr view <n> --json state,mergeCommit` answers that without you. The denial
-carries that command. Where the loss is deliberate,
+else — the same second question `git branch -D` asks applies, and for the same
+reason: a scratch ref whose only unshared commit is a merge git can reproduce
+has an unreachable tip *because* it merged, and loses nothing when the pointer
+moves off it. That check is about a ref move rather than about a verb, so it now
+runs on both. It costs nothing on the auto-approved path, because a surviving
+tip has already returned above it.
+
+A branch that fails both questions is denied rather than prompted, in every
+permission mode — the one command here that is. The usual reason for an
+unreachable tip is a squash merge, which leaves a spent branch's tip unreachable
+by construction while its content sits on `main` under another object name, so
+the question is not whether you want the commits: it is whether they are already
+saved, and `gh pr view <n> --json state,mergeCommit` answers that without you.
+A scratch branch that never opened a pull request is the other half of that set,
+and there the same command answers too — nothing found means the commits really
+are only here, so the denial also names the `git log` that shows you what the
+move would drop. Where the loss is deliberate,
 [`BRANCH_GUARD_OVERRIDE`](#break-glass-branch_guard_override) lifts it, exactly
 as it lifts the prompt this replaced.
 
@@ -775,7 +787,8 @@ update step and restart.
    `gh <sub> delete` (`secret`/`variable` also accept `remove`; a release asset
    via `gh release delete-asset`); a workflow via
    `gh workflow disable`) ask, except a clean-worktree `reset --hard` onto a
-   tip proved unreachable, which denies; unknown or
+   tip proved unreachable that is also proved to orphan more than a
+   reproducible merge, which denies; unknown or
    ambiguous forms defer. The branch is resolved with
    `git symbolic-ref` (the session cwd for Bash, the file's own repo for edits).
 5. **Combine** the segment verdicts: any `deny` → deny; else any `ask` → ask;
@@ -848,8 +861,11 @@ protected branch (main/master) or destructive git commands. To keep work flowing
 - **A `reset --hard` onto an unreachable tip is denied, not prompted, and the
   denial tells you what to check.** Run the `gh pr view` it names: a squash
   merge leaves a spent branch's tip unreachable while its content is already on
-  `main`, in which case the reset buys nothing. If you still mean it, re-run
-  with `BRANCH_GUARD_OVERRIDE="<reason>"`.
+  `main`, in which case the reset buys nothing. No pull request is the other
+  answer rather than a dead end — the commits are only here, and the denial
+  names the `git log` that lists them. If you still mean it, re-run with
+  `BRANCH_GUARD_OVERRIDE="<reason>"`. A scratch branch whose only unshared
+  commit is a merge git can re-run is not denied at all.
 - **A push onto a base that has moved into your own lines is denied too, and
   the denial carries the rebase.** Run the `git fetch && git rebase` it names and
   push the result; retrying the push unchanged meets the same overlap. If you
