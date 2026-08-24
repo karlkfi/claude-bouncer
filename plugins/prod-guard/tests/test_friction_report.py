@@ -10,6 +10,10 @@ transcript files (attachment records + matching Bash tool_use blocks) and assert
 the report's categorization, target extraction, and joins — never touching a real
 transcript.
 
+LiveCategoryTests is the exception to the literals: it runs the hook itself and
+categorizes what comes back, so a reworded reason fails here rather than in six
+weeks of transcripts silently counted as 'other'.
+
 Fixture rule (same as test_prod_guard.py): synthetic names only
 (`gke_acme_prod-us`, `kind-ci`, `bluefin`) — never real production targets.
 """
@@ -33,34 +37,54 @@ _spec = util.spec_from_file_location("friction_report", SCRIPT)
 fr = util.module_from_spec(_spec)
 _spec.loader.exec_module(fr)
 
+# The sibling suite's subprocess harness, for the live-output tests below.
+# Imported as a module rather than by name: `from ... import *` would bind its
+# TestCases here too and unittest would collect the whole prod-guard suite a
+# second time.
+import test_prod_guard as pg  # noqa: E402
 
-# Real reason strings the hook emits, one per builder (see bash-prod-guard.py).
+
+# The reason strings the hook emits, one per builder, transcribed from a real
+# run. LiveCategoryTests re-derives them from the hook and fails if a reword
+# leaves these behind; they stay literals so the report tests below can build
+# transcripts without paying for a subprocess each.
 REASON_DENY_PROD = (
-    "prod-guard: `kubectl delete ns` targets kube-context "
-    "'gke_acme_prod-us', which matches a production pattern. Mutating commands "
-    "against production targets are blocked. If this is intentional, prefix the "
-    "command with PROD_GUARD_OVERRIDE=<reason> to downgrade the block to a "
-    "confirmation prompt. Patterns: built-ins plus .claude/prod-guard.json "
-    "(see the prod-guard README).")
-REASON_ASK_UNKNOWN = (
-    "prod-guard: `aws s3 rm` targets aws profile 'bluefin', which matches "
-    "neither a production nor a non-production pattern — unknown targets are "
-    "never silently allowed. Confirm it is safe, or add a nonprod pattern to "
-    ".claude/prod-guard.json to classify it. Patterns: built-ins plus "
+    "prod-guard: `kubectl delete ns x` targets kube-context "
+    "'gke_acme_prod-us' (from --context), which matches a production pattern. "
+    "Mutating commands against production targets are blocked. If this is "
+    "intentional, prefix the command with PROD_GUARD_OVERRIDE=<reason> to "
+    "downgrade the block to a confirmation prompt. Patterns: built-ins plus "
     ".claude/prod-guard.json (see the prod-guard README).")
+REASON_ASK_UNKNOWN = (
+    "prod-guard: `aws s3 rm s3://b` targets aws profile 'bluefin', which "
+    "matches neither a production nor a non-production pattern — unknown "
+    "targets are never silently allowed. Confirm it is safe, or add a nonprod "
+    "pattern to .claude/prod-guard.json to classify it. Patterns: built-ins "
+    "plus .claude/prod-guard.json (see the prod-guard README).")
 REASON_DENY_AMBIENT = (
     "prod-guard: `kubectl apply` relies on the ambient kube-context (currently "
-    "'staging-west') — shared mutable state that a parallel session can repoint "
+    "'kind-ci') — shared mutable state that a parallel session can repoint "
     "before this command runs, so the true target is ambiguous at run time. "
     "Mutating commands must pin their target explicitly: add kubectl --context "
     "<ctx> and retry. To run against the ambient target anyway, prefix the "
     "command with PROD_GUARD_OVERRIDE=<reason> for a confirmation prompt.")
-REASON_ASK_SWITCH = (
+# deny_switch and ask_switch both carry 'is shared by every session', so only
+# deny_switch's 'Switching shared state is blocked' separates them and the
+# CATEGORY_PATTERNS iteration order decides which wins. Both are pinned against
+# live output below.
+REASON_DENY_SWITCH = (
     "prod-guard: `kubectx bluefin` repoints the shared kubeconfig "
     "current-context, which is shared by every session on this machine — "
     "parallel sessions relying on ambient context will silently follow it. "
-    "Prefer per-command pinning (--context/--project/--profile) over switching "
-    "shared state.")
+    "Switching shared state is blocked: pin the target per command with "
+    "kubectl --context <ctx> instead. If the switch is genuinely intended, "
+    "prefix the command with PROD_GUARD_OVERRIDE=<reason> for a confirmation "
+    "prompt.")
+REASON_ASK_SWITCH = (
+    "prod-guard: `kubectx -d` writes the shared kubeconfig, which is shared by "
+    "every session on this machine — parallel sessions relying on ambient "
+    "context will silently follow it. Prefer per-command pinning "
+    "(--context/--project/--profile) over switching shared state.")
 REASON_OVERRIDE = (
     "prod-guard: override acknowledged (PROD_GUARD_OVERRIDE is set) — downgraded "
     "from deny to a confirmation prompt. " + REASON_DENY_PROD)
@@ -184,6 +208,7 @@ class CategoryTests(unittest.TestCase):
         self.assertEqual(fr.category_of(REASON_DENY_PROD), "deny-prod")
         self.assertEqual(fr.category_of(REASON_ASK_UNKNOWN), "ask-unknown")
         self.assertEqual(fr.category_of(REASON_DENY_AMBIENT), "deny-ambient")
+        self.assertEqual(fr.category_of(REASON_DENY_SWITCH), "deny-switch")
         self.assertEqual(fr.category_of(REASON_ASK_SWITCH), "ask-switch")
 
     def test_unmatched_is_other(self):
@@ -197,6 +222,64 @@ class CategoryTests(unittest.TestCase):
         # The session-override first-use ask carries the same 'override
         # acknowledged' signature, so it counts as an override downgrade too.
         self.assertEqual(fr.category_of(REASON_SESSION_OVERRIDE), "deny-prod")
+
+
+# One command per category, with whatever ambient config that path reads. The
+# category is decided by the reason string the hook prints, so these are the
+# only cases that measure CATEGORY_PATTERNS against the thing it parses.
+LIVE_CASES = (
+    ("deny-prod",    "kubectl delete ns x --context gke_acme_prod-us", {}),
+    ("ask-unknown",  "aws s3 rm s3://b --profile bluefin", {}),
+    ("deny-ambient", "kubectl apply -f x.yaml", {"kubeconfig": pg.KUBECONFIG_KIND}),
+    ("deny-switch",  "kubectx bluefin", {"kubeconfig": pg.KUBECONFIG_KIND}),
+    ("ask-switch",   "kubectx -d bluefin", {"kubeconfig": pg.KUBECONFIG_KIND}),
+)
+
+LITERAL_BY_CATEGORY = {
+    "deny-prod":    REASON_DENY_PROD,
+    "ask-unknown":  REASON_ASK_UNKNOWN,
+    "deny-ambient": REASON_DENY_AMBIENT,
+    "deny-switch":  REASON_DENY_SWITCH,
+    "ask-switch":   REASON_ASK_SWITCH,
+}
+
+
+class LiveCategoryTests(unittest.TestCase):
+    """CATEGORY_PATTERNS against what the hook prints, not against a copy of it.
+
+    A literal fixture pins the wording whoever wrote it transcribed. Only the
+    subprocess pins the wording the hook emits, and the two drift silently: a
+    reworded reason still parses, so both suites stay green while every real
+    transcript falls through to 'other'.
+    """
+
+    def _live(self, command, home_kwargs):
+        _decision, reason = pg.run_hook(command, home=pg.make_home(**home_kwargs))
+        self.assertTrue(reason, "hook stayed silent on %r" % command)
+        return reason
+
+    def test_each_category_from_live_output(self):
+        for want, command, home_kwargs in LIVE_CASES:
+            with self.subTest(category=want):
+                self.assertEqual(
+                    fr.category_of(self._live(command, home_kwargs)), want)
+
+    def test_every_pattern_has_a_live_case(self):
+        # A pattern added without a command that provokes it is a pattern
+        # nothing measures — which is the state deny-switch was in.
+        self.assertEqual(sorted(c for c, _cmd, _kw in LIVE_CASES),
+                         sorted(fr.CATEGORY_PATTERNS))
+
+    def test_literal_fixtures_are_what_the_hook_emits(self):
+        # The fixtures at the top of this file are transcribed by hand, which is
+        # how one of them came to be a string no emit path produces: deny_switch's
+        # opener spliced onto ask_switch's tail. It categorized as ask-switch and
+        # was asserted green for as long as it stood. Equality is what keeps them
+        # honest — on a deliberate reword, paste the new reason in.
+        for want, command, home_kwargs in LIVE_CASES:
+            with self.subTest(category=want):
+                self.assertEqual(LITERAL_BY_CATEGORY[want],
+                                 self._live(command, home_kwargs))
 
 
 class TargetExtractionTests(unittest.TestCase):
