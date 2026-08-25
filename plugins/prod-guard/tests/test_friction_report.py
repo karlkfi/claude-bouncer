@@ -53,8 +53,10 @@ REASON_DENY_PROD = (
     "'gke_acme_prod-us' (from --context), which matches a production pattern. "
     "Mutating commands against production targets are blocked. If this is "
     "intentional, prefix the command with PROD_GUARD_OVERRIDE=<reason> to "
-    "downgrade the block to a confirmation prompt. Patterns: built-ins plus "
-    ".claude/prod-guard.json (see the prod-guard README).")
+    "downgrade the block to a confirmation prompt. For a batch against this "
+    "target, PROD_GUARD_SESSION_OVERRIDE=<reason> prompts once and then admits "
+    "later commands carrying that same prefix for 8 h. Patterns: built-ins "
+    "plus .claude/prod-guard.json (see the prod-guard README).")
 REASON_ASK_UNKNOWN = (
     "prod-guard: `aws s3 rm s3://b` targets aws profile 'bluefin', which "
     "matches neither a production nor a non-production pattern — unknown "

@@ -2822,6 +2822,67 @@ class SessionOverrideTests(unittest.TestCase):
         self.assertEqual(decision, "ask")
 
 
+class SessionOverrideAdvertisedTests(unittest.TestCase):
+    """The deny reason names PROD_GUARD_SESSION_OVERRIDE exactly where a grant
+    could be minted from it, and nowhere else.
+
+    The reason is the only in-band channel: an agent that never read the README
+    learns the batch form here or not at all. Advertising it on a deny that can
+    never grant would be worse than silence — it would send the agent back with
+    a prefix that re-prompts every command, which is the shape a human reads as
+    the guard ignoring their approval.
+    """
+
+    SESSION_VAR = "PROD_GUARD_SESSION_OVERRIDE"
+
+    def test_grantable_deny_names_both_forms(self):
+        _sev, reason, grants = guard.deny_prod(
+            "kubectl delete ns", "kube-context 'gke_acme_prod-us'",
+            ("gke_acme_prod-us",))
+        self.assertIn(self.SESSION_VAR, reason)
+        self.assertIn("PROD_GUARD_OVERRIDE=<reason>", reason)
+        self.assertEqual(grants, ("gke_acme_prod-us",))
+
+    def test_ungrantable_deny_prod_names_only_the_per_command_form(self):
+        # deny_prod is reached without grant_targets too (switch-shaped and
+        # ambient-resolved denies route through it), so the clause is gated on
+        # the argument rather than on the builder.
+        _sev, reason, grants = guard.deny_prod(
+            "kubectl delete ns", "kube-context 'gke_acme_prod-us'")
+        self.assertNotIn(self.SESSION_VAR, reason)
+        self.assertIn("PROD_GUARD_OVERRIDE=<reason>", reason)
+        self.assertIsNone(grants)
+
+    def test_other_deny_builders_never_offer_the_batch_form(self):
+        # Ambient resolutions and shared-state switches are deliberately not
+        # session-grantable; their reasons must keep advertising the
+        # per-command form alone.
+        builders = {
+            "deny_ambient": ("kubectl delete ns", "the ambient kube-context",
+                             "kubectl --context <ctx>"),
+            "deny_switch": ("kubectx bluefin", "the shared kubeconfig",
+                            "kubectl --context <ctx>"),
+        }
+        for name, args in builders.items():
+            with self.subTest(builder=name):
+                _sev, reason, grants = getattr(guard, name)(*args)
+                self.assertNotIn(self.SESSION_VAR, reason)
+                self.assertIn("PROD_GUARD_OVERRIDE=<reason>", reason)
+                self.assertIsNone(grants)
+
+    def test_end_to_end_explicit_pin_deny_advertises_the_batch_form(self):
+        _d, reason = run_hook(
+            "kubectl --context gke_acme_prod-us delete ns app")
+        self.assertEqual(_d, "deny")
+        self.assertIn(self.SESSION_VAR, reason)
+
+    def test_end_to_end_ambient_deny_does_not(self):
+        _d, reason = run_hook("kubectl delete ns app",
+                              home=make_home(kubeconfig=KUBECONFIG_PROD))
+        self.assertEqual(_d, "deny")
+        self.assertNotIn(self.SESSION_VAR, reason)
+
+
 class SessionGrantStoreTests(unittest.TestCase):
     """Unit tests for the grant store: every infrastructure failure must fail
     toward MORE prompts (no grants loaded / nothing recorded), never fewer."""

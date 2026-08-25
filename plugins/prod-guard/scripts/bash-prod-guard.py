@@ -1228,13 +1228,22 @@ def deny_prod(action, target_desc, grant_targets=None):
     """`grant_targets` (tuple of target strings) marks the finding as
     session-grantable: it is passed only when the prod classification came
     from an explicit pin, never for ambient resolutions or shared-state
-    switches — those must re-prompt every time."""
+    switches — those must re-prompt every time. It also gates the session
+    clause below: the reason offers the batch form only where a grant could
+    actually be recorded, so the other deny builders — which pass none — go
+    on advertising the per-command form alone."""
+    session_hint = ''
+    if grant_targets:
+        session_hint = (
+            ' For a batch against this target, PROD_GUARD_SESSION_OVERRIDE=<reason> '
+            'prompts once and then admits later commands carrying that same '
+            'prefix for %d h.' % (SESSION_GRANT_TTL // 3600))
     return (DENY,
             'prod-guard: `%s` targets %s, which matches a production pattern. '
             'Mutating commands against production targets are blocked. If this '
             'is intentional, prefix the command with PROD_GUARD_OVERRIDE=<reason> '
-            'to downgrade the block to a confirmation prompt. %s'
-            % (action, target_desc, CONFIG_HINT),
+            'to downgrade the block to a confirmation prompt.%s %s'
+            % (action, target_desc, session_hint, CONFIG_HINT),
             tuple(grant_targets) if grant_targets else None)
 
 
