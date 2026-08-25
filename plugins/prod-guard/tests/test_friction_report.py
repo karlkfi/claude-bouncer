@@ -61,6 +61,12 @@ REASON_ASK_UNKNOWN = (
     "targets are never silently allowed. Confirm it is safe, or add a nonprod "
     "pattern to .claude/prod-guard.json to classify it. Patterns: built-ins "
     "plus .claude/prod-guard.json (see the prod-guard README).")
+REASON_ASK_UNKNOWN_VAR = (
+    "prod-guard: `kubectl apply` targets kube-context '$CTX' (from --context), "
+    "which matches neither a production nor a non-production pattern — unknown "
+    "targets are never silently allowed. Confirm it is safe, or add a nonprod "
+    "pattern to .claude/prod-guard.json to classify it. Patterns: built-ins "
+    "plus .claude/prod-guard.json (see the prod-guard README).")
 REASON_DENY_AMBIENT = (
     "prod-guard: `kubectl apply` relies on the ambient kube-context (currently "
     "'kind-ci') — shared mutable state that a parallel session can repoint "
@@ -270,6 +276,16 @@ class LiveCategoryTests(unittest.TestCase):
         self.assertEqual(sorted(c for c, _cmd, _kw in LIVE_CASES),
                          sorted(fr.CATEGORY_PATTERNS))
 
+    def test_unresolvable_variable_reaches_the_reason(self):
+        # REASON_ASK_UNKNOWN_VAR is hand-transcribed like its neighbours, and
+        # the shape it stands for is the one Q128 measured: the assignment is
+        # in the same command string but outside the nested quote context, so
+        # the hook cannot resolve it and prints the variable name.
+        reason = self._live(
+            'C=gke_acme_prod-us; bash -c "kubectl --context $C delete pod x"', {})
+        self.assertEqual(fr.category_of(reason), "ask-unknown")
+        self.assertIn("$C", fr.targets_of(reason))
+
     def test_literal_fixtures_are_what_the_hook_emits(self):
         # The fixtures at the top of this file are transcribed by hand, which is
         # how one of them came to be a string no emit path produces: deny_switch's
@@ -290,6 +306,14 @@ class TargetExtractionTests(unittest.TestCase):
     def test_drops_placeholder(self):
         seg = "prod-guard: `docker push` targets image ref '<unresolved>'"
         self.assertEqual(fr.targets_of(seg), [])
+
+    def test_variable_target_is_extracted(self):
+        # targets_of still yields it — 'Top targets' ranks the friction.
+        self.assertIn("$CTX", fr.targets_of(REASON_ASK_UNKNOWN_VAR))
+
+    def test_pattern_candidate(self):
+        self.assertTrue(fr.is_pattern_candidate("bluefin"))
+        self.assertFalse(fr.is_pattern_candidate("$CTX"))
 
     def test_tool_of(self):
         self.assertEqual(fr.tool_of(REASON_DENY_PROD), "kubectl")
@@ -328,6 +352,17 @@ class BuildReportTests(unittest.TestCase):
         ])
         self.assertEqual(r2["unknown_targets"].get("gke_acme_prod-us"), None)
         self.assertEqual(r2["targets"]["gke_acme_prod-us"], 1)
+
+    def test_variable_target_is_not_a_pattern_gap(self):
+        """A nonprod pattern for '$CTX' would classify every context held in
+        that variable, so the section that solicits one must not list it."""
+        r = self._report([
+            {"plugin": "prod-guard", "decision": "ask",
+             "reason": REASON_ASK_UNKNOWN_VAR,
+             "command": 'CTX=gke_acme_prod-us; bash -c "kubectl --context $CTX apply -f x"'},
+        ])
+        self.assertEqual(r["unknown_targets"].get("$CTX"), None)
+        self.assertEqual(r["targets"]["$CTX"], 1)
 
     def test_override_counted(self):
         r = self._report([

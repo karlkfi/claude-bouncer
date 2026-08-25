@@ -322,6 +322,14 @@ def targets_of(segment):
     return [t for t in _QUOTED.findall(segment) if t and not t.startswith('<')]
 
 
+def is_pattern_candidate(target):
+    """Whether a nonprod pattern could answer this target. A '$'-prefixed one
+    is a variable name the hook could not resolve, so a pattern matching it
+    would classify every command holding a target in that variable —
+    production ones included."""
+    return not target.startswith('$')
+
+
 def tool_of(reason):
     """First word of the leading backtick action, e.g. `kubectl delete ns`
     -> 'kubectl'. None if the reason has no action."""
@@ -359,7 +367,10 @@ def build_report(decisions):
             cats[cat] += 1
             for t in targets_of(seg):
                 targets[t] += 1
-                if cat == 'ask-unknown':
+                # 'Top targets' ranks repeated friction, so an unresolved
+                # target belongs there; the pattern-gap list is a config edit
+                # to act on, and there is no pattern to write for one.
+                if cat == 'ask-unknown' and is_pattern_candidate(t):
                     unknown_targets[t] += 1
         if d['command']:
             cmds[' '.join(d['command'].split())[:100]] += 1
