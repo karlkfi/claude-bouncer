@@ -34,7 +34,7 @@
     {
       "name": "prod-guard",
       "description": "Block mutating kubectl/helm/terraform/gcloud/aws/az/docker commands aimed at production; prompt when they rely on clobber-prone ambient context.",
-      "version": "2.5.1",
+      "version": "2.5.2",
       "author": {
         "name": "Karl Isenberg",
         "url": "https://github.com/karlkfi"
