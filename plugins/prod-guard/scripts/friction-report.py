@@ -68,7 +68,10 @@ CATEGORY_HINT = {
 # The colon is optional because these two reasons gained it only once the deny
 # they become under bypassPermissions had to be attributable; the bare form is
 # still present in older transcripts and still counts.
-OVERRIDE_SIG = re.compile(r'prod-guard:? (?:session )?override acknowledged')
+# 'session ' is captured rather than skipped: the two variables are separate
+# decisions to a reader sizing either, and one pattern deciding both membership
+# and which of the two it was cannot disagree with itself.
+OVERRIDE_SIG = re.compile(r'prod-guard:? (session )?override acknowledged')
 
 # The hook joins up to three finding reasons with ' | '.
 _JOIN = ' | '
@@ -349,6 +352,8 @@ def build_report(decisions):
     targets = collections.Counter()
     cmds = collections.Counter()
     overrides = 0
+    session_overrides = 0
+    command_overrides = 0
     total = 0
     for d in decisions:
         total += 1
@@ -357,8 +362,13 @@ def build_report(decisions):
         if d['decision'] not in ('ask', 'deny'):
             continue
         reason = d['reason']
-        if OVERRIDE_SIG.search(reason):
+        override = OVERRIDE_SIG.search(reason)
+        if override:
             overrides += 1
+            if override.group(1):
+                session_overrides += 1
+            else:
+                command_overrides += 1
         tool = tool_of(reason)
         if tool:
             tools[tool] += 1
@@ -377,6 +387,8 @@ def build_report(decisions):
     return {
         'total': total, 'decisions': decs, 'plugins': plugins,
         'categories': cats, 'tools': tools, 'overrides': overrides,
+        'session_overrides': session_overrides,
+        'command_overrides': command_overrides,
         'unknown_targets': unknown_targets, 'targets': targets, 'commands': cmds,
     }
 
@@ -402,10 +414,17 @@ def print_text(r, top, plugin='prod-guard', stale=None):
     print(f"  outcomes: {', '.join(parts)}")
     pct = (100 * asks / total) if total else 0
     print(f"  friction (ask+deny): {asks} ({pct:.0f}% of decisions)")
-    # Only prod-guard's own downgrades are counted, so the line has no place in
-    # an all-guards header — --plugin prod-guard (the default) reports it.
-    if r['overrides'] and plugin != 'all':
-        print(f"  PROD_GUARD_OVERRIDE downgrades: {r['overrides']}")
+    # Only prod-guard's own downgrades are counted, so these have no place in
+    # an all-guards header — --plugin prod-guard (the default) reports them.
+    # One line per variable: the combined total under either name is a number
+    # nobody can act on, and which of the two a batch reached for is the
+    # question the counter exists to answer.
+    if plugin != 'all':
+        if r['command_overrides']:
+            print(f"  PROD_GUARD_OVERRIDE downgrades: {r['command_overrides']}")
+        if r['session_overrides']:
+            print("  PROD_GUARD_SESSION_OVERRIDE downgrades: "
+                  f"{r['session_overrides']}")
     print()
 
     print_staleness(stale)
@@ -477,6 +496,8 @@ def main():
             'categories': dict(report['categories']),
             'tools': dict(report['tools']),
             'overrides': report['overrides'],
+            'command_overrides': report['command_overrides'],
+            'session_overrides': report['session_overrides'],
             'top_unknown_targets': report['unknown_targets'].most_common(args.top),
             'top_targets': report['targets'].most_common(args.top),
             'top_commands': report['commands'].most_common(args.top),
