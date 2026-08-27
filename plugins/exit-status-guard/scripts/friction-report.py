@@ -44,10 +44,15 @@ GUARD_ALIASES = {THIS_GUARD: (THIS_GUARD, 'pipe-guard')}
 
 # Each rule's reason carries a phrase no other rule uses. Matching on those
 # rather than on a prefix keeps the categories stable when the advice text is
-# reworded, which it is more often than the diagnosis.
+# reworded, which it is more often than the diagnosis -- except where the
+# diagnosis was the wrong half. `pipestatus` once read "does not exist in zsh",
+# a claim about a shell the Bash tool does not run; the alternation keeps
+# decisions recorded before that correction in their own bucket, for the same
+# reason GUARD_ALIASES keeps the pre-rename label.
 REASON_PATTERNS = {
     'piped':      re.compile(r"exit status is the filter's"),
-    'pipestatus': re.compile(r"does not exist in zsh"),
+    'pipestatus': re.compile(r"reads \$PIPESTATUS to recover"
+                             r"|does not exist in zsh"),
     'background': re.compile(r"runs in the background, but this call's exit"),
     'sequenced':  re.compile(r"runs the second whatever the first returned"),
 }

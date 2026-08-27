@@ -17,10 +17,12 @@ that silently deletes the answer.
 | `gate > log; echo "EXIT=$?"` backgrounded | `echo`'s | the gate's |
 | `gate; git push` | the push's | the gate's, as a precondition |
 
-zsh matters here. Claude Code's Bash tool runs zsh, and `PIPESTATUS` is a
-bash-ism: in zsh it expands to **empty**, so `[ "${PIPESTATUS[0]}" -eq 0 ]`
-does not fail loudly, it reads as success. The recovery people reach for is
-itself a false green.
+The shell matters here. `PIPESTATUS` is a bash feature, and under a shell
+without it — zsh among them — it expands to **empty**, so
+`[ "${PIPESTATUS[0]}" -eq 0 ]` does not fail loudly, it reads as success. The
+recovery people reach for can itself be a false green. Which shell the Bash
+tool runs is a per-machine setting (`CLAUDE_CODE_SHELL`), and the guard reads
+none of it, so every reason it prints has to hold in either shell.
 
 ## Why deny rather than ask
 
