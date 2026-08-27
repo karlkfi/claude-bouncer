@@ -98,12 +98,12 @@ CASES = [
     ('time-wrapped gate piped', 'time make check | tail -5', False, True, ''),
     ('sudo-wrapped gate piped', 'sudo make install | tail -5', False, True, ''),
 
-    # --- PIPESTATUS does not exist in zsh ------------------------------------
+    # --- PIPESTATUS is not portable across shells ----------------------------
     ('PIPESTATUS[0] after a gate',
      'make check 2>&1 | tail -5; echo "EXIT=${PIPESTATUS[0]}"', False, True,
-     'does not exist in zsh'),
+     'reads $PIPESTATUS to recover'),
     ('bare $PIPESTATUS, no gate', 'ls -l | wc -l; echo $PIPESTATUS', False, True,
-     'does not exist in zsh'),
+     'reads $PIPESTATUS to recover'),
 
     # --- The correct forms ---------------------------------------------------
     ('redirect then echo $?', 'make check > tmp/check.log 2>&1; echo "EXIT=$?"',
@@ -115,7 +115,7 @@ CASES = [
      False, False, ''),
     ('set -euo pipefail counts', 'set -euo pipefail; make check 2>&1 | tail -30',
      False, False, ''),
-    ('zsh $pipestatus recovers it',
+    ("zsh's $pipestatus suppresses the pipe verdict",
      'make check 2>&1 | tail -5; echo "EXIT=${pipestatus[1]}"', False, False, ''),
     ('no pipe at all', 'make check', False, False, ''),
     ('gate on the RIGHT keeps its status',
@@ -141,10 +141,10 @@ CASES = [
      "git commit -F - <<'EOF'\nnote: ${PIPESTATUS[0]} is a bash-ism\nEOF",
      False, False, ''),
     # An UNquoted delimiter expands, so the same text really does read the
-    # variable -- and in zsh it expands to empty. Denying is correct here.
+    # variable, which is the read the rule is about. Denying is correct here.
     ('PIPESTATUS inside an unquoted heredoc is a real read',
      'git commit -F - <<EOF\nnote: ${PIPESTATUS[0]} was empty\nEOF', False, True,
-     'does not exist in zsh'),
+     'reads $PIPESTATUS to recover'),
     # A heredoc opened inside `"$(…)"` -- how a multi-paragraph commit message
     # gets written without quoting every line. Bash reopens quoting inside the
     # substitution, so the `<<` is unquoted to the shell; read flat, the body
@@ -165,7 +165,7 @@ CASES = [
     # inside the substitution expands, so a real read there is a real read.
     ('PIPESTATUS in an unquoted heredoc inside a quoted substitution',
      'git commit -aqF "$(cat <<MSG\nnote: ${PIPESTATUS[0]} was empty\nMSG\n)"',
-     False, True, 'does not exist in zsh'),
+     False, True, 'reads $PIPESTATUS to recover'),
     ('a gate piped inside a quoted substitution',
      'echo "$(make check | tail -30)"', False, True, 'piped into a filter'),
     ('a shift inside a quoted substitution is not a heredoc',
@@ -702,7 +702,7 @@ class TestPrecedence(unittest.TestCase):
     def test_pipestatus_wins_over_the_pipe(self):
         reason = pg.decide('make check | tail; echo ${PIPESTATUS[0]}', False,
                            shipped_registry())
-        self.assertIn('does not exist in zsh', reason)
+        self.assertIn('reads $PIPESTATUS to recover', reason)
 
     def test_every_reason_carries_the_override(self):
         reg = shipped_registry()
@@ -713,6 +713,28 @@ class TestPrecedence(unittest.TestCase):
             with self.subTest(cmd):
                 self.assertIn('EXIT_STATUS_GUARD_OVERRIDE=<reason>',
                               pg.decide(cmd, bg, reg))
+
+    def test_no_reason_names_the_shell_the_tool_runs(self):
+        """Which shell the Bash tool runs is a per-machine setting the guard
+        never reads, so a reason that names one is wrong wherever the setting
+        differs -- and a remedy derived from it is worse than none. Both
+        PIPESTATUS reasons asserted zsh and prescribed `$pipestatus`, which is
+        not an array in bash and expands to empty.
+
+        `zsh` is the whole assertion because it is the only shell either reason
+        ever named; `bash` is not, since a reason may legitimately say the
+        array is a bash feature.
+        """
+        reg = shipped_registry()
+        for cmd, bg in (('make check | tail', False),
+                        ('make check > c.log 2>&1; echo hi', True),
+                        ('make check; git push', False),
+                        ('echo $PIPESTATUS', False),
+                        ('make check | tail; echo ${PIPESTATUS[0]}', False)):
+            with self.subTest(cmd):
+                reason = pg.decide(cmd, bg, reg)
+                self.assertTrue(reason)
+                self.assertNotIn('zsh', reason.lower())
 
 
 class TestSequencedRemedy(unittest.TestCase):

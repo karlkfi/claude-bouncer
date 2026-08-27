@@ -13,9 +13,9 @@ make check 2>&1 | tail -30; echo "EXIT=$?"
 ```
 
 That prints `EXIT=0` for a failing gate. A pipeline reports its **last stage's**
-status, so what you read is `tail`'s. And zsh — the shell Claude Code's Bash
-tool runs — has no `PIPESTATUS` to recover it, so the usual rescue expands to
-empty and reads as success too.
+status, so what you read is `tail`'s. Recovering the gate's own status from
+the pipeline is not portable — `PIPESTATUS` is a bash feature, and under a
+shell without it the usual rescue expands to empty and reads as success too.
 
 Nothing here is a lie. The command ran, the exit status was read, the number was
 reported accurately. The evidence was just incapable of showing failure. That is
@@ -69,9 +69,10 @@ fresh checkout. Where there is no scratchpad to name, the suggestion carries its
 own `mkdir -p tmp &&` instead.
 
 `set -o pipefail` earlier in the same command suppresses this, and so does
-reading zsh's `$pipestatus` (lowercase, 1-indexed). Reading `$PIPESTATUS`
-(uppercase) is denied on its own, gate or no gate — it does not exist in zsh, so
-it expands to empty and every test against it reads as success.
+reading `$pipestatus` (lowercase, 1-indexed), which is zsh's spelling. Reading
+`$PIPESTATUS` (uppercase) is denied on its own, gate or no gate — the array is
+a bash feature, so under a shell without it the read expands to empty and every
+test against it reads as success.
 
 ### 2. Backgrounded behind something that cannot carry failure
 

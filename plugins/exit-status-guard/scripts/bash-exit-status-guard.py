@@ -5,8 +5,8 @@ Reads the hook JSON on stdin, emits a PreToolUse decision on stdout. Three ways
 a status goes missing, all of which turn a failure into a green:
 
   1. Piped into a filter. A pipeline reports its LAST stage's status, so
-     `make check 2>&1 | tail -30` reports `tail`'s 0. zsh -- the shell the Bash
-     tool runs -- has no `PIPESTATUS` to recover it.
+     `make check 2>&1 | tail -30` reports `tail`'s 0, and recovering the
+     gate's own status from the pipeline is not portable across shells.
   2. Backgrounded with something else running last. A `;`-list yields its last
      statement's status, so a backgrounded `cmd > log 2>&1; echo "EXIT=$?"`
      notifies `completed (exit code 0)` for a failed command.
@@ -742,16 +742,16 @@ OVERRIDE_HINT = (
     + OVERRIDE_VAR + "=<reason>." + OVERRIDE_TAIL)
 
 PIPESTATUS_REASON = (
-    "This reads $PIPESTATUS, which does not exist in zsh -- the shell the Bash "
-    "tool runs. It expands to empty, so the test against it reads as success "
-    "whatever the pipeline did. zsh spells it $pipestatus (lowercase, "
-    "1-indexed); better still, redirect and read the status directly: "
-    '<MKDIR>cmd > <LOG> 2>&1; echo "EXIT=$?".' + OVERRIDE_HINT)
+    "This reads $PIPESTATUS to recover a stage's status from a pipeline, "
+    "which is not portable -- the array is a bash feature, and under a shell "
+    "without it the read expands to empty, so the test against it reads as "
+    "success whatever the pipeline did. Redirect and read the status "
+    'directly: <MKDIR>cmd > <LOG> 2>&1; echo "EXIT=$?".' + OVERRIDE_HINT)
 
 PIPED_REASON = (
     " is piped into a filter, so this call's exit status is the filter's, not "
-    "the gate's -- a failure reads exactly like a pass, and zsh (the shell the "
-    "Bash tool runs) has no PIPESTATUS to recover it. Redirect instead, then "
+    "the gate's -- a failure reads exactly like a pass, and a pipeline's "
+    "per-stage status is not portably recoverable. Redirect instead, then "
     "reconcile status against output: "
     "<MKDIR>cmd > <LOG> 2>&1; echo \"EXIT=$?\"; "
     "grep -E 'FAILED|Error [0-9]|^make:' <LOG>." + OVERRIDE_HINT)
@@ -801,9 +801,10 @@ def decide(cmd, background, reg, scratch='', depth=0):
             reads_var(body, 'PIPESTATUS', quotes=False) for body in heredocs):
         return with_log_path(PIPESTATUS_REASON, scratch)
 
-    # `pipefail` propagates the failure and zsh's `$pipestatus` recovers each
-    # stage's status. Neither mitigates a status the last statement discarded,
-    # so the suppression is scoped to the pipe verdict.
+    # `pipefail` propagates the failure, and where the shell provides it
+    # `$pipestatus` recovers each stage's status. Neither mitigates a status
+    # the last statement discarded, so the suppression is scoped to the pipe
+    # verdict.
     if not sets_pipefail(segs) and not reads_var(cleaned, 'pipestatus'):
         gate = piped_gate(segs, reg)
         if gate:
