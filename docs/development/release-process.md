@@ -187,10 +187,24 @@ moves a decision under a `chore:` subject. Read the commits under a `hold`.
      --notes-file plugins/workspace-guard/docs/releases/v1.10.1.md
    ```
 
-   `--latest=false` on every release here. The repository-level Latest badge
-   points at one release, and whichever plugin it names is the wrong answer
-   for the other four. The title drops the slash because it reads better in
-   the list. The tag keeps it.
+   `--latest=false` on every release here. It stops this release *claiming*
+   the badge; it cannot leave the repository without one. `make_latest` takes
+   `true`, `false` or `legacy` and has no value meaning "this repository has
+   no latest release", so GitHub computes a holder from the non-draft,
+   non-prerelease set however the five releases are flagged.
+
+   Measured 2026-08-26, every release here having been published
+   `--latest=false`: the badge sits on `prod-guard/v2.5.2`, which took it from
+   `workspace-guard/v1.11.0` on publishing five hours later. A single cut
+   moves it, so expect it to name a plugin that released recently — but treat
+   exactly which as arbitrary rather than as a rule, because the four tags
+   published together on 2026-08-24 handed it to the earliest of the four and
+   not the newest. Leave it where it lands. Marking releases `prerelease`
+   would clear the badge, and trades a cosmetic problem for a false statement
+   about five shipping plugins.
+
+   The title drops the slash because it reads better in the list. The tag
+   keeps it.
 
 ## Harvesting the notes
 
@@ -296,8 +310,10 @@ queries nothing.
   decisions moved.
 - **A bare `#NNN` in notes for anything merged before the move.** It links to
   the wrong repository's PR numbering.
-- **`--latest`.** It hands the repository's Latest badge to one of five
-  plugins.
+- **`--latest`.** It pins the repository's Latest badge to one of five
+  plugins, which is worse than the rotation it replaces — the badge then names
+  that plugin however recently the other four shipped. Pass `--latest=false`
+  and let the badge follow the newest cut; step 5 has the measurement.
 - **Writing the body anywhere but the notes file.** An inline `--notes`, a
   `--generate-notes`, or a fix typed into the web form all ship prose nobody
   reviewed, and the next `--notes-file` publish reverts the fix silently.
