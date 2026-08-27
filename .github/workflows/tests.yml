@@ -115,6 +115,10 @@ jobs:
       # A tag is a pointer its owner can move, so an unpinned action makes
       # every job here depend on a third party not rewriting one.
       - run: python3 scripts/action-pin-check.py
+      # The five retired repositories still serve, so a stale install
+      # instruction resolves and reads correctly -- a link checker passes on
+      # every one of them.
+      - run: python3 scripts/install-ref-check.py
       - run: python3 -m unittest discover tests
 
   # --------------------------------------------------------- workspace-guard

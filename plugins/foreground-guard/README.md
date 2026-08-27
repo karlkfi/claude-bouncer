@@ -2,7 +2,7 @@
 
 **Main-thread time guard rails for Claude Code Bash commands.**
 
-[![tests](https://img.shields.io/github/actions/workflow/status/karlkfi/claude-bouncer/tests.yml?branch=main&label=tests)](https://github.com/karlkfi/claude-bouncer/actions/workflows/tests.yml) [![License: MIT](https://img.shields.io/github/license/karlkfi/claude-bouncer.svg)](LICENSE) [![Claude Code plugin](https://img.shields.io/badge/Claude_Code-plugin-7e57c2)](#install)
+[![release](https://img.shields.io/github/v/release/karlkfi/claude-bouncer?filter=foreground-guard%2F*)](https://github.com/karlkfi/claude-bouncer/releases?q=foreground-guard) [![tests](https://img.shields.io/github/actions/workflow/status/karlkfi/claude-bouncer/tests.yml?branch=main&label=tests)](https://github.com/karlkfi/claude-bouncer/actions/workflows/tests.yml) [![License: MIT](https://img.shields.io/github/license/karlkfi/claude-bouncer.svg)](LICENSE) [![Claude Code plugin](https://img.shields.io/badge/Claude_Code-plugin-7e57c2)](#install)
 
 ![foreground-guard: main-thread time guard rails for Claude Code Bash commands](docs/img/social-preview.png)
 
@@ -134,7 +134,7 @@ CLI, the IDE extensions, or **Claude Code for Claude Desktop**.
 **Claude Code for Claude Desktop** — use the **Customize** tab:
 
 1. Open the **Customize** tab and go to its plugins / marketplaces section.
-2. Add `karlkfi/claude-foreground-guard` as a marketplace.
+2. Add `karlkfi/claude-bouncer` as a marketplace.
 3. Find **foreground-guard** in that marketplace, install it, and enable it.
 
 After installing with either method:
@@ -148,7 +148,7 @@ After installing with either method:
   ```json
   {
     "extraKnownMarketplaces": {
-      "foreground-guard": {
+      "claude-bouncer": {
         "source": { "source": "git", "url": "https://github.com/karlkfi/claude-bouncer.git" },
         "autoUpdate": true
       }
@@ -177,7 +177,7 @@ until you either enable auto-update or update it by hand.
 ```json
 {
   "extraKnownMarketplaces": {
-    "foreground-guard": {
+    "claude-bouncer": {
       "source": { "source": "git", "url": "https://github.com/karlkfi/claude-bouncer.git" },
       "autoUpdate": true
     }

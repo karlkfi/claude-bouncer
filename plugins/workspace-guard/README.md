@@ -2,7 +2,7 @@
 
 **Workspace-boundary shell permissions for Claude Code.**
 
-[![release](https://img.shields.io/github/v/release/karlkfi/claude-workspace-guard)](https://github.com/karlkfi/claude-workspace-guard/releases) [![tests](https://img.shields.io/github/actions/workflow/status/karlkfi/claude-bouncer/tests.yml?branch=main&label=tests)](https://github.com/karlkfi/claude-bouncer/actions/workflows/tests.yml) [![License: MIT](https://img.shields.io/github/license/karlkfi/claude-bouncer.svg)](LICENSE) [![Claude Code plugin](https://img.shields.io/badge/Claude_Code-plugin-7e57c2)](#install)
+[![release](https://img.shields.io/github/v/release/karlkfi/claude-bouncer?filter=workspace-guard%2F*)](https://github.com/karlkfi/claude-bouncer/releases?q=workspace-guard) [![tests](https://img.shields.io/github/actions/workflow/status/karlkfi/claude-bouncer/tests.yml?branch=main&label=tests)](https://github.com/karlkfi/claude-bouncer/actions/workflows/tests.yml) [![License: MIT](https://img.shields.io/github/license/karlkfi/claude-bouncer.svg)](LICENSE) [![Claude Code plugin](https://img.shields.io/badge/Claude_Code-plugin-7e57c2)](#install)
 
 ![workspace-guard: workspace-boundary shell permissions for Claude Code](docs/img/social-preview.png)
 
@@ -684,8 +684,7 @@ the same marketplace and plugin.
 **Claude Code for Claude Desktop** — use the **Customize** tab:
 
 1. Open the **Customize** tab and go to its plugins / marketplaces section.
-2. Add `karlkfi/claude-workspace-guard` as a marketplace (the repo at
-   `https://github.com/karlkfi/claude-bouncer.git`).
+2. Add `karlkfi/claude-bouncer` as a marketplace.
 3. Find **workspace-guard** in that marketplace, install it, and make sure it's
    enabled.
 
@@ -697,7 +696,7 @@ so new releases reach you automatically.
 
 ```json
 "extraKnownMarketplaces": {
-  "workspace-guard": {
+  "claude-bouncer": {
     "source": { "source": "git", "url": "https://github.com/karlkfi/claude-bouncer.git" },
     "autoUpdate": true
   }
@@ -741,7 +740,7 @@ restart Claude Code:
 
 ```json
 "extraKnownMarketplaces": {
-  "workspace-guard": {
+  "claude-bouncer": {
     "source": { "source": "git", "url": "https://github.com/karlkfi/claude-bouncer.git" },
     "autoUpdate": true
   }
@@ -787,7 +786,7 @@ After upgrading either way:
   restart Claude Code.
 - Confirm the new version is live: the `/plugin` menu lists the installed
   version — compare it against the
-  [latest release](https://github.com/karlkfi/claude-workspace-guard/releases).
+  [latest release](https://github.com/karlkfi/claude-bouncer/releases?q=workspace-guard).
 
 ## How it works
 

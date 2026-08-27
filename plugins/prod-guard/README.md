@@ -2,7 +2,7 @@
 
 **Production-target guard rails for Claude Code Bash commands.**
 
-[![release](https://img.shields.io/github/v/release/karlkfi/claude-prod-guard)](https://github.com/karlkfi/claude-prod-guard/releases) [![tests](https://img.shields.io/github/actions/workflow/status/karlkfi/claude-bouncer/tests.yml?branch=main&label=tests)](https://github.com/karlkfi/claude-bouncer/actions/workflows/tests.yml) [![License: MIT](https://img.shields.io/github/license/karlkfi/claude-bouncer.svg)](LICENSE) [![Claude Code plugin](https://img.shields.io/badge/Claude_Code-plugin-7e57c2)](#install)
+[![release](https://img.shields.io/github/v/release/karlkfi/claude-bouncer?filter=prod-guard%2F*)](https://github.com/karlkfi/claude-bouncer/releases?q=prod-guard) [![tests](https://img.shields.io/github/actions/workflow/status/karlkfi/claude-bouncer/tests.yml?branch=main&label=tests)](https://github.com/karlkfi/claude-bouncer/actions/workflows/tests.yml) [![License: MIT](https://img.shields.io/github/license/karlkfi/claude-bouncer.svg)](LICENSE) [![Claude Code plugin](https://img.shields.io/badge/Claude_Code-plugin-7e57c2)](#install)
 
 ![prod-guard: production-target guard rails for Claude Code Bash commands](docs/img/social-preview.png)
 
@@ -159,7 +159,7 @@ CLI, the IDE extensions, or **Claude Code for Claude Desktop**.
 **Claude Code for Claude Desktop** — use the **Customize** tab:
 
 1. Open the **Customize** tab and go to its plugins / marketplaces section.
-2. Add `karlkfi/claude-prod-guard` as a marketplace.
+2. Add `karlkfi/claude-bouncer` as a marketplace.
 3. Find **prod-guard** in that marketplace, install it, and enable it.
 
 After installing with either method:
@@ -175,7 +175,7 @@ After installing with either method:
   ```json
   {
     "extraKnownMarketplaces": {
-      "prod-guard": {
+      "claude-bouncer": {
         "source": { "source": "git", "url": "https://github.com/karlkfi/claude-bouncer.git" },
         "autoUpdate": true
       }
@@ -207,7 +207,7 @@ version behind, missing the shell-variable-expansion classifier and more.)
 ```json
 {
   "extraKnownMarketplaces": {
-    "prod-guard": {
+    "claude-bouncer": {
       "source": { "source": "git", "url": "https://github.com/karlkfi/claude-bouncer.git" },
       "autoUpdate": true
     }
@@ -228,7 +228,7 @@ state, so they update a Desktop install too (Desktop has no `/plugin` slash
 command). On the CLI or an IDE extension you can equivalently run
 `/plugin marketplace update claude-bouncer` then `/plugin install prod-guard@claude-bouncer`.
 Compare the installed version against the
-[latest release](https://github.com/karlkfi/claude-prod-guard/releases) after
+[latest release](https://github.com/karlkfi/claude-bouncer/releases?q=prod-guard) after
 updating.
 
 ## Covered tools

@@ -2,7 +2,7 @@
 
 **Branch-aware git permissions for Claude Code.**
 
-[![release](https://img.shields.io/github/v/release/karlkfi/claude-branch-guard)](https://github.com/karlkfi/claude-branch-guard/releases) [![tests](https://img.shields.io/github/actions/workflow/status/karlkfi/claude-bouncer/tests.yml?branch=main&label=tests)](https://github.com/karlkfi/claude-bouncer/actions/workflows/tests.yml) [![License: MIT](https://img.shields.io/github/license/karlkfi/claude-bouncer.svg)](LICENSE) [![Claude Code plugin](https://img.shields.io/badge/Claude_Code-plugin-7e57c2)](#install)
+[![release](https://img.shields.io/github/v/release/karlkfi/claude-bouncer?filter=branch-guard%2F*)](https://github.com/karlkfi/claude-bouncer/releases?q=branch-guard) [![tests](https://img.shields.io/github/actions/workflow/status/karlkfi/claude-bouncer/tests.yml?branch=main&label=tests)](https://github.com/karlkfi/claude-bouncer/actions/workflows/tests.yml) [![License: MIT](https://img.shields.io/github/license/karlkfi/claude-bouncer.svg)](LICENSE) [![Claude Code plugin](https://img.shields.io/badge/Claude_Code-plugin-7e57c2)](#install)
 
 ![branch-guard: branch-aware git permissions for Claude Code](docs/img/social-preview.png)
 
@@ -607,8 +607,7 @@ the IDE extensions, or **Claude Code for Claude Desktop**.
 **Claude Code for Claude Desktop** — use the **Customize** tab:
 
 1. Open the **Customize** tab and go to its plugins / marketplaces section.
-2. Add `karlkfi/claude-branch-guard` as a marketplace (the repo at
-   `https://github.com/karlkfi/claude-bouncer.git`).
+2. Add `karlkfi/claude-bouncer` as a marketplace.
 3. Find **branch-guard** in that marketplace, install it, and make sure it's
    enabled.
 
@@ -636,7 +635,7 @@ time is the moment to decide — add the marketplace with `autoUpdate` on in
 ```json
 {
   "extraKnownMarketplaces": {
-    "branch-guard": {
+    "claude-bouncer": {
       "source": { "source": "git", "url": "https://github.com/karlkfi/claude-bouncer.git" },
       "autoUpdate": true
     }
@@ -658,8 +657,8 @@ add it as a `directory` marketplace in `~/.claude/settings.json`:
 ```json
 {
   "extraKnownMarketplaces": {
-    "claude-branch-guard": {
-      "source": { "source": "directory", "path": "~/workspace/claude-branch-guard" }
+    "claude-bouncer": {
+      "source": { "source": "directory", "path": "~/workspace/claude-bouncer" }
     }
   },
   "enabledPlugins": {
@@ -688,7 +687,7 @@ this to `~/.claude/settings.json` (the same block works from the
 ```json
 {
   "extraKnownMarketplaces": {
-    "branch-guard": {
+    "claude-bouncer": {
       "source": { "source": "git", "url": "https://github.com/karlkfi/claude-bouncer.git" },
       "autoUpdate": true
     }
