@@ -64,8 +64,8 @@ Invoke the `session-backlog` skill for any change to the store.
 ## Checks
 
 ```
-make check    # drift, version, path filters, action pins, backlog lint,
-              # parser tests, all five suites
+make check    # drift, version, path filters, action pins, install refs,
+              # backlog lint, parser tests, all five suites
 ```
 
 Run it before proposing a change is done. A change under `lib/` reaches all
@@ -96,7 +96,7 @@ own directory or the shared anchor, or when a job is gated on the wrong plugin.
 Everything runs unfiltered on push to `main`, which is what makes "tag a green
 one" in the release process mean what it says.
 
-`make action-pin-check` is the other recurrence guard: every `uses:` under
+`make action-pin-check` is the second recurrence guard: every `uses:` under
 `.github/workflows/` must name a 40-character commit SHA with the version in a
 trailing comment. A tag is a pointer its owner can move, so an unpinned action
 runs whatever it points at on the day. Pinning alone only freezes that, which
@@ -104,6 +104,20 @@ is why `.github/dependabot.yml` is the second half -- weekly, grouped into one
 pull request, and it rewrites the trailing comment alongside the SHA. Neither
 half is worth much without the other: a pin nobody bumps is a dependency
 nobody looks at again.
+
+`make install-ref-check` is the third: every install instruction in the root
+README and in `plugins/*/README.md` must name the marketplace in
+`.claude-plugin/marketplace.json`. The five retired repositories are still
+served, so a stale badge, Desktop step or "latest release" link resolves and
+renders correctly while sending the reader to a marketplace that will never
+publish again -- a link checker passes on every one of them, which is why this
+compares against a file in the tree instead. An `uninstall` or a
+`marketplace remove` is exempt: it names what the reader is getting rid of
+rather than where they are going. The references the repository keeps on
+purpose are a table in the script, reconciled in both directions -- an
+exemption that matches nothing fails, and the pass line says how many are held
+back. It does not read `plugins/*/docs/releases/`, which record what shipped at
+that version.
 
 Python 3.9 is the floor. exit-status-guard supports it and CI runs the shared
 parser against it, so 3.10+ syntax in `lib/` breaks that job and nothing else,

@@ -3,7 +3,7 @@ PYTHON ?= python3
 PLUGINS := workspace-guard branch-guard prod-guard exit-status-guard foreground-guard
 
 .PHONY: check sync sync-check version-check path-filter-check action-pin-check \
-        lib-test plugin-tests \
+        install-ref-check lib-test plugin-tests \
         validate images help backlog backlog-next backlog-lint
 
 help:
@@ -13,6 +13,7 @@ help:
 	@echo "make version-check     fail if a plugin's three version strings disagree"
 	@echo "make path-filter-check fail if a plugin's CI jobs are unfiltered or misfiltered"
 	@echo "make action-pin-check  fail if a workflow action is not pinned to a SHA"
+	@echo "make install-ref-check fail if a README names a retired repo or marketplace"
 	@echo "make lib-test          test the shared parser"
 	@echo "make plugin-tests      test every plugin"
 	@echo "make validate          validate the marketplace manifest"
@@ -21,8 +22,8 @@ help:
 	@echo "make backlog-next      the top ready item, as a session prompt"
 	@echo "make backlog-lint      check docs/queue"
 
-check: sync-check version-check path-filter-check action-pin-check backlog-lint \
-       lib-test plugin-tests
+check: sync-check version-check path-filter-check action-pin-check \
+       install-ref-check backlog-lint lib-test plugin-tests
 
 sync:
 	$(PYTHON) scripts/sync-lib.py
@@ -49,6 +50,13 @@ path-filter-check:
 # .github/dependabot.yml is the other half: it turns a pin into a reviewed bump.
 action-pin-check:
 	$(PYTHON) scripts/action-pin-check.py
+
+# The retired repositories are still served, so a stale install instruction
+# resolves and renders correctly while sending the reader to a marketplace
+# that will never publish again. Reachability cannot see it; agreement with
+# the manifest can.
+install-ref-check:
+	$(PYTHON) scripts/install-ref-check.py
 
 lib-test:
 	$(PYTHON) -m unittest discover tests
