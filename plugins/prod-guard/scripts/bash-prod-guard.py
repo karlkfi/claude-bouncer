@@ -393,8 +393,53 @@ def tokenize(raw):
         return None
 
 
+class QuotedStr(str):
+    """A token, carrying the quote characters it was built from.
+
+    posix-mode shlex strips quotes, so `'kubectl --context $C'` and
+    `"kubectl --context $C"` come back as the same string -- and for a shell's
+    `-c` body those two mean opposite things about who expands `$C`. Subclassing
+    `str` keeps every existing token consumer working unchanged; only the caller
+    that needs the quoting reads `.quotes`."""
+    quotes = frozenset()
+
+
+class _QuoteTrackingLexer(shlex.shlex):
+    """shlex that records which quote characters each token was built from.
+
+    `read_token` assigns the quote character to `self.state` on entering a
+    quoted run and leaves it on exit, so recording every assignment across one
+    call names that token's quoting. A token built from no quoted run at all
+    gets the empty set."""
+
+    def __init__(self, *args, **kwargs):
+        self._seen_quotes = set()
+        super().__init__(*args, **kwargs)
+
+    def _get_state(self):
+        return self._state
+
+    def _set_state(self, value):
+        # `state` also takes 'a', 'c', ' ' and None (end of file); only a quote
+        # character says anything about how the token was written.
+        if value and value in getattr(self, 'quotes', ''):
+            self._seen_quotes.add(value)
+        self._state = value
+
+    state = property(_get_state, _set_state)
+
+    def read_token(self):
+        self._seen_quotes = set()
+        token = super().read_token()
+        if token is None or token is self.eof:
+            return token
+        out = QuotedStr(token)
+        out.quotes = frozenset(self._seen_quotes)
+        return out
+
+
 def _lex_semicolons(raw):
-    lex = shlex.shlex(raw, posix=True, punctuation_chars=';()<>|&\n')
+    lex = _QuoteTrackingLexer(raw, posix=True, punctuation_chars=';()<>|&\n')
     lex.whitespace_split = True
     return list(lex)
 
@@ -2394,10 +2439,15 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None):
     #     `P=x` segment (a shell var, not exported) accumulates here so a later
     #     segment on the same line resolves it.
     #   exported   — what a CHILD process inherits. Bare assignments do NOT go
-    #     here; only `export NAME=val` does. A nested `sh -c` body is expanded
-    #     against this, never against bare shell vars — under-expanding a nested
-    #     body is safe (unresolved target → prompt/deny); over-expanding it
-    #     could turn a genuinely-unpinned command into a false defer.
+    #     here; only `export NAME=val` does. A SINGLE-QUOTED nested `sh -c`
+    #     body is expanded against this, never against bare shell vars —
+    #     under-expanding a nested body is safe (unresolved target →
+    #     prompt/deny); over-expanding it could turn a genuinely-unpinned
+    #     command into a false defer. A body written in double quotes is a
+    #     different case: the parent expands it against `shell_env` while
+    #     building the argument, so the resolved value reaches the tool whether
+    #     or not the name was exported (Q131). The `-c` branch below reads the
+    #     quoting off the token to tell the two apart.
     if exported is None:
         exported = dict(os.environ)
     shell_env = dict(exported)
@@ -2435,9 +2485,22 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None):
             continue
         if tool in SHELL_NAMES:
             # bash -c 'kubectl ...': evaluate the -c body as its own command,
-            # inheriting only exported vars.
+            # inheriting only exported vars. That holds for a single-quoted
+            # body, which reaches the child verbatim. A body with no
+            # single-quoted run was expanded by the PARENT while building the
+            # argument, so its `$C` resolves against this shell's vars whether
+            # or not the name was exported -- do that here and let the child
+            # re-expand what is left. Mixed quoting keeps the child's env:
+            # only some runs were parent-expanded, and under-expanding is the
+            # safe direction (unresolved target -> prompt).
             body = first_flag_value(argv_raw, ('-c',))
             if body:
+                # The default stands in for a body that reached here as a
+                # plain str rather than a token (`-c=…`, which flag_values
+                # splits): unknown quoting reads as single, so it expands in
+                # the child and nothing new resolves.
+                if "'" not in getattr(body, 'quotes', "'"):
+                    body = expand_vars(body, same_shell)
                 sub_f, sub_o, sub_s = evaluate_command_string(body, ctx, depth + 1, child_env)
                 findings += sub_f
                 override = override or sub_o

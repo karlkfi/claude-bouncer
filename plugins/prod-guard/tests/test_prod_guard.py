@@ -257,6 +257,25 @@ class ParsingTests(unittest.TestCase):
     def test_unbalanced_quotes_return_none(self):
         self.assertIsNone(guard.tokenize("kubectl delete 'oops"))
 
+    def test_token_records_its_quoting(self):
+        # posix shlex strips quotes, so the `-c` body of these two commands is
+        # the same string; only `.quotes` separates them (Q131).
+        dq = guard.tokenize('bash -c "kubectl --context $C get pods"')
+        sq = guard.tokenize("bash -c 'kubectl --context $C get pods'")
+        self.assertEqual(str(dq[-1]), str(sq[-1]))
+        self.assertEqual(dq[-1].quotes, frozenset({'"'}))
+        self.assertEqual(sq[-1].quotes, frozenset({"'"}))
+
+    def test_literal_quotes_inside_a_run_are_not_quoting(self):
+        # A `'` inside a double-quoted run is a literal character, not a
+        # quoted run -- the shape every measured Q131 prompt took.
+        toks = guard.tokenize(
+            'bash -c "kubectl get -o json | jq \'del(.x)\'"')
+        self.assertEqual(toks[-1].quotes, frozenset({'"'}))
+
+    def test_unquoted_token_records_no_quoting(self):
+        self.assertEqual(guard.tokenize("kubectl get pods")[0].quotes, frozenset())
+
     def test_env_prefix_extraction(self):
         env, argv = guard.extract_env_prefix(
             ["TF_WORKSPACE=dev", "PROD_GUARD_OVERRIDE=x", "terraform", "apply"])
@@ -481,6 +500,50 @@ class VariableExpansionDecisionTests(unittest.TestCase):
         decision, _ = run_hook(
             "CTX=kind-ci bash -c 'kubectl --context $CTX delete ns x'")
         self.assertIsNone(decision)
+
+    # --- Q131: who expands a `-c` body depends on how it was quoted ---------
+    # A single-quoted body reaches the child verbatim, so only exported names
+    # resolve. A double-quoted one is expanded by the PARENT while building the
+    # argument, so a bare shell var resolves and its value reaches the tool.
+
+    def test_double_quoted_child_body_resolves_bare_parent_var(self):
+        # bash runs this against gke_acme_prod-us, so the guard must too.
+        decision, reason = run_hook(
+            'CTX=gke_acme_prod-us; bash -c "kubectl --context $CTX delete ns x"')
+        self.assertEqual(decision, "deny")
+        self.assertIn("gke_acme_prod-us", reason)
+
+    def test_double_quoted_child_body_nonprod_defers(self):
+        # The same expansion the row above relies on, resolving the other way:
+        # a nonprod value must stop prompting, not merely deny more often.
+        decision, _ = run_hook(
+            'CTX=kind-ci; bash -c "kubectl --context $CTX delete ns x"')
+        self.assertIsNone(decision)
+
+    def test_single_quoted_child_body_keeps_exported_only(self):
+        # The other side of the same branch: a bare var is NOT visible to a
+        # single-quoted body, so `$CTX` stays literal and the target is UNKNOWN.
+        # Expanding here would be the over-expansion the two-scope model
+        # exists to prevent.
+        decision, reason = run_hook(
+            "CTX=gke_acme_prod-us; bash -c 'kubectl --context $CTX delete ns x'")
+        self.assertEqual(decision, "ask")
+        self.assertIn("$CTX", reason)
+
+    def test_unquoted_child_body_resolves_bare_parent_var(self):
+        decision, reason = run_hook(
+            "CTX=gke_acme_prod-us; bash -c kubectl\\ --context\\ $CTX\\ delete\\ ns\\ x")
+        self.assertEqual(decision, "deny")
+        self.assertIn("gke_acme_prod-us", reason)
+
+    def test_mixed_quoting_child_body_under_expands(self):
+        # `'...'"$CTX"'...'` glues into one token whose quoting no longer says
+        # which runs the parent expanded. Keeping the child's env under-expands
+        # (ask, not deny), which is the safe direction -- bash does reach the
+        # prod context here, so this is a deliberate floor rather than parity.
+        decision, _ = run_hook(
+            "CTX=gke_acme_prod-us; bash -c 'kubectl --context '\"$CTX\"' delete ns x'")
+        self.assertEqual(decision, "ask")
 
 
 class KubectlDecisionTests(unittest.TestCase):

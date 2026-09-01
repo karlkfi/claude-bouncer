@@ -280,13 +280,18 @@ class LiveCategoryTests(unittest.TestCase):
 
     def test_unresolvable_variable_reaches_the_reason(self):
         # REASON_ASK_UNKNOWN_VAR is hand-transcribed like its neighbours, and
-        # the shape it stands for is the one Q128 measured: the assignment is
-        # in the same command string but outside the nested quote context, so
-        # the hook cannot resolve it and prints the variable name.
+        # the shape it stands for is a variable the hook genuinely cannot
+        # resolve, so it prints the name. This used to be provoked with an
+        # assignment in the same command string ahead of a double-quoted
+        # `bash -c` body, on the reading that the nested quote context hid it
+        # from the hook. Q131 measured that reading and it holds for no such
+        # command -- the parent expands a double-quoted body, so the hook now
+        # resolves it and denies. A name assigned nowhere is unresolvable in
+        # any shell, which is the property this case is actually for.
         reason = self._live(
-            'C=gke_acme_prod-us; bash -c "kubectl --context $C delete pod x"', {})
+            'bash -c "kubectl --context $CTX apply -f m.yaml"', {})
         self.assertEqual(fr.category_of(reason), "ask-unknown")
-        self.assertIn("$C", fr.targets_of(reason))
+        self.assertIn("$CTX", fr.targets_of(reason))
 
     def test_literal_fixtures_are_what_the_hook_emits(self):
         # The fixtures at the top of this file are transcribed by hand, which is
