@@ -648,6 +648,26 @@ class SlowCommandPositionTests(unittest.TestCase):
         self.assert_runs("/repo/scripts/gate.sh")
         self.assert_runs("timeout 600 scripts/gate.sh")
 
+    def test_parse_only_run_defers(self):
+        # `-n` is noexec: the shell parses the script and runs nothing, so it
+        # cannot be slow. Both directions, because a fix that drops every
+        # `bash <script>` segment would pass the defer half alone.
+        self.assert_mention("bash -n scripts/gate.sh")
+        self.assert_mention("bash --norc -n scripts/gate.sh")
+        self.assert_mention("bash -en scripts/gate.sh")
+        self.assert_mention("bash -n -- scripts/gate.sh")
+        self.assert_mention("sh -n scripts/gate.sh")
+        self.assert_mention("zsh -n scripts/gate.sh")
+        self.assert_mention("bash -n -c 'scripts/gate.sh --all'")
+        self.assert_runs("bash scripts/gate.sh")
+        self.assert_runs("bash -c 'scripts/gate.sh --all'")
+
+    def test_script_own_dash_n_still_runs(self):
+        # `-n` past the script name belongs to the script, not to bash, so
+        # these execute and must stay denied.
+        self.assert_runs("bash scripts/gate.sh -n")
+        self.assert_runs("bash -c 'scripts/gate.sh -n'")
+
     def test_mentions_do_not_match(self):
         self.assert_mention('grep -n "read -p" scripts/gate.sh')
         self.assert_mention("wc -l scripts/gate.sh")

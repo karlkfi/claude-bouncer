@@ -644,12 +644,28 @@ def analyze_class_a(raw, cfg, depth=0):
 # Class B analysis
 # ---------------------------------------------------------------------------
 
+def shell_noexec(argv):
+    """True when the interpreter options in `argv` carry `-n` (noexec): the
+    shell parses the script and executes nothing, so the segment can never be
+    slow however it is registered. Only the option words ahead of the script
+    or the `-c` body are read, so `bash gate.sh -n` — where `-n` belongs to
+    the script — is still a real run. `-o noexec` is not read here; that form
+    already loses its segment to the option peel below, for the wrong reason."""
+    for tok in argv[1:]:
+        if tok == '--' or tok == '-' or not tok.startswith('-'):
+            return False
+        if not tok.startswith('--') and 'n' in tok[1:]:
+            return True
+    return False
+
+
 def simple_commands(raw, depth=0):
     """Every simple command in `raw` as an argv, starting at its command word:
     heredoc bodies stripped, env prefixes and launcher wrappers peeled, `bash
-    -c '...'` / `eval ...` bodies recursed into (bounded), and a plain `bash
-    script.sh` reduced to the script. Returns None when the string does not
-    tokenize — the caller defers rather than guess."""
+    -c '...'` / `eval ...` bodies recursed into (bounded), a plain `bash
+    script.sh` reduced to the script, and a parse-only `bash -n ...` dropped.
+    Returns None when the string does not tokenize — the caller defers rather
+    than guess."""
     if depth > 3:
         return []
     tokens = tokenize(strip_heredoc_bodies(raw))
@@ -663,6 +679,8 @@ def simple_commands(raw, depth=0):
         if not argv:
             continue
         if os.path.basename(argv[0]) in SHELL_NAMES:
+            if shell_noexec(argv):
+                continue  # parse-only: nothing under it runs
             body = None
             for i, tok in enumerate(argv[1:-1], start=1):
                 if tok == '-c':
