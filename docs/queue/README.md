@@ -69,3 +69,25 @@ invariants that still hold when the skill is not available, are in
 The short version: take the next unused ID, compute a rank with
 `scripts/queue.py rank`, write the file, and lint. Completing an item deletes
 its file — git is the archive.
+
+## What the next release admits, and what it is for
+
+These are two questions and only one of them lives in a file.
+
+**The ceiling is computed, never written down.** Each plugin carries its own
+SemVer line, so "the next release" is five of them, and
+`python3 scripts/release.py status` reports each plugin's current version, its
+verdict, and the commits since its last tag. Read it rather than recording the
+answer here — a written list of pending cuts is stale the moment one is tagged,
+and this one is not. Where every verdict is a patch, no `feature` row is in
+scope for any of them until somebody opens a minor.
+
+**The emphasis is not recorded, deliberately.** What a release is *for* within
+that ceiling — a parity push, the cleanup tail, one plugin's turn — is a
+maintainer's call, and nothing here should assert one. A coordinating session
+dispatching a batch asks it and holds the answer for that run only; see
+`session-orchestrator`, which reads a scope record and is forbidden to write
+one, because a run ends and so can never retire what it wrote.
+
+So a batch selected against this store gets its ceiling from `release.py status`
+and its emphasis from whoever is running the batch.
