@@ -10096,6 +10096,15 @@ class PowerShellInterpreterSuppressesAllowTests(unittest.TestCase):
         self._agree("Get-Content .\\README.md; python3 -",
                     "cat ./README.md; python3 -", "defer")
 
+    def test_a_module_operand_suppresses_on_both(self):
+        # `-m` is read inside `interp_code_source`, which both frontends call,
+        # so the fix reaches PowerShell without a second code path. Asserted as
+        # a pair anyway: this class exists because Q72 landed on bash alone, and
+        # a PowerShell-only assertion would pass just as well if bash drifted to
+        # meet it. (Q143)
+        self._agree("Get-Content .\\README.md; python3 -m unittest",
+                    "cat ./README.md; python3 -m unittest", "defer")
+
     def test_a_workspace_resident_script_still_vouches(self):
         # Repo-resident code is what the boundary already trusts. Without this
         # exemption the rule costs far more friction than it buys.
