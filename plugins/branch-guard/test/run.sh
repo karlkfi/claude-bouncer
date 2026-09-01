@@ -1426,6 +1426,46 @@ check "git branch -m from protected -> ask" ask \
 check "git branch -C onto an irrecoverable branch -> ask" ask \
   "$(decision_for "$(bash_cmd 'git branch -C merged orphan')" "$WORK")"
 
+#     The overwrite side of the same tier. `overwrite_verdict` serves `-f`,
+#     `-M` and `-C` from one body, so the arm is crossed once -- positives,
+#     negatives, the protected check, the unattended mode -- and each spelling
+#     is then shown reaching it. `-M`/`-C` probe their DESTINATION, so the
+#     test-merge has to be the name being written onto; renaming one onto a
+#     free name never reaches the probe, which is why the `-M brand-new` case
+#     above proves nothing about this arm.
+check "git branch -f onto a scratch test-merge -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git branch -f testmerge main')" "$WORK")"
+check "git branch -M onto a scratch test-merge -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git branch -M merged testmerge')" "$WORK")"
+check "git branch -C onto a scratch test-merge -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git branch -C merged testmerge')" "$WORK")"
+#     Each negative orphans something the probe cannot account for, so each
+#     keeps its ask. Without them the relaxation would read as "an unreachable
+#     tip is fine after all", which is the opposite of what it proves. The
+#     non-merge orphan is the `-f`/`-M`/`-C` onto `orphan` trio above.
+check "git branch -f onto a test-merge carrying its own commit -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git branch -f testmerge-plus main')" "$WORK")"
+check "git branch -f onto a hand-resolved merge -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git branch -f resolved main')" "$WORK")"
+check "git branch -f onto an octopus merge -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git branch -f octo main')" "$WORK")"
+#     Reproducible and shared are independent, and only the second is the
+#     plugin's to judge -- so the proof must not reach past the protected
+#     check. The allow above is this pair's unset control.
+check "[configured] git branch -f onto a scratch test-merge -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git branch -f testmerge main')" "$WORK" \
+     'BRANCH_GUARD_PROTECTED_BRANCHES=testmerge')"
+#     The unattended mode is what the widening is worth most in: an `ask` there
+#     converts to a deny, so the reported case was a wall rather than a prompt.
+check "[dontAsk] git branch -f onto a scratch test-merge -> allow" allow \
+  "$(decision_for "$(push_mode 'git branch -f testmerge main' 'dontAsk')" "$WORK")"
+#     What survives the second question keeps the tip-reachability wording --
+#     the same fragment the `-D` arm prints, since the two answer one question
+#     and a reader following them must not meet two accounts of it.
+check_text "the surviving overwrite ask names the unreachable tip" has \
+  "tip isn't reachable from any remote-tracking branch or main" \
+  "$(reason_for "$(bash_cmd 'git branch -f resolved main')" "$WORK")"
+
 #     Unprovable cases keep today's `ask`: a branch that doesn't exist can't be
 #     shown recoverable, and a `-C` global points the command at another repo
 #     than the one the probes read.
