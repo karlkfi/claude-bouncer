@@ -1837,6 +1837,16 @@ INTERP_CMDS = frozenset({
 # Python's verbose, and both still run code.
 INTERP_QUERY_FLAGS = frozenset({'--version', '--help', '-V'})
 
+# Interpreters whose `-m` takes a module name resolved on the import path. Only
+# Python spells it that way: perl's `-m` takes its module attached (`-Mstrict`),
+# php's lists modules and exits, and node has none — so widening this set would
+# consume a real operand for a flag that never had one. `-m` is deliberately the
+# only option here. Several others take a non-path operand too, and each is its
+# own question: a set grown by guesswork is where a read that SHOULD prompt
+# quietly stops prompting, which is the one failure a scope review cannot see.
+# (Q143)
+INTERP_MODULE_CMDS = frozenset({'python', 'python2', 'python3'})
+
 # Command words that run a shell `-c` body in THIS filesystem. The body is only
 # re-analyzed under one of these, because a path in it means nothing unless the
 # shell it names is the host's: `docker exec c sh -c 'cat /var/lib/…'` and
@@ -1991,10 +2001,11 @@ def interp_code_source(tokens, name=None):
 
     Returns None when the group runs no interpreter, or is not running one on
     this host. Otherwise ``('inline', None)`` for code the hook can never read —
-    a `-c`/`-e` operand, a heredoc, a bare stdin `-`, or a REPL — or
-    ``('script', tok)`` for a script path the caller resolves, since a script
-    *inside* the workspace is repo-resident code the boundary already trusts
-    (`docs/design.md`, "Sandboxing the workspace from itself" is a non-goal).
+    a `-c`/`-e` operand, a Python `-m` module, a heredoc, a bare stdin `-`, or
+    a REPL — or ``('script', tok)`` for a script path the caller resolves, since
+    a script *inside* the workspace is repo-resident code the boundary already
+    trusts (`docs/design.md`, "Sandboxing the workspace from itself" is a
+    non-goal).
 
     This is `shell_c_group`'s rule one layer out. A shell's `-c` body is not the
     only opaque token a clean guarded command can end up vouching for:
@@ -2027,10 +2038,15 @@ def interp_code_source(tokens, name=None):
         if base not in INTERP_CMDS and base not in SHELL_C_CMDS:
             continue
         # An interpreter takes its code from `-e`/`-c`; a shell only from `-c`
-        # (`bash -e` is errexit). Both are read off short-option clusters, so
-        # `perl -pe`, `perl -0pi -e` and `sh -lc` all fire. Over-reporting here
-        # costs a defer rather than a silent allow, which is the safe direction.
-        inline = 'ce' if base in INTERP_CMDS else 'c'
+        # (`bash -e` is errexit). Python additionally takes it from `-m`, whose
+        # operand is a module name the interpreter resolves on `sys.path` and
+        # never a file beside the cwd. All are read off short-option clusters,
+        # so `perl -pe`, `perl -0pi -e`, `sh -lc` and `python3 -Bm` all fire.
+        # Over-reporting here costs a defer rather than a silent allow, which is
+        # the safe direction.
+        inline = 'c'
+        if base in INTERP_CMDS:
+            inline = 'cem' if base in INTERP_MODULE_CMDS else 'ce'
         operand = None
         for u in tokens[i+1:]:
             if u == '-' or not u.startswith('-'):

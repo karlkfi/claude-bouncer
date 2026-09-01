@@ -1091,8 +1091,10 @@ through the same boundary rules and produce the same reasons. Symlink staging
    whole string. A shell `-c` body suppresses it the same way: it arrives as one
    token, and even once step 15 has read it the hook has no basis to vouch for a
    construct it reads at one remove. **Interpreter code suppresses it on the same
-   grounds** — `python3 -c`, `perl -e`, a heredoc fed to `python3`, or a script
-   resolving outside the root, in the Bash tool. Interpreters are not guarded
+   grounds** — `python3 -c`, `python3 -m <module>`, `perl -e`, a heredoc fed to
+   `python3`, or a script resolving outside the root, in the Bash tool. A `-m`
+   operand is a module name resolved on `sys.path`, so it is code the hook
+   cannot read rather than a file beside the cwd. Interpreters are not guarded
    commands and a bare `python3 x.py` still defers to your own permission rules;
    what the hook withdraws is only its willingness to *vouch* for them, so
    `cat README.md && python3 -c '…'` no longer runs silently. A script path that
@@ -1495,9 +1497,9 @@ final output.
   withholds `allow` and so protects nothing under `auto`, `acceptEdits`, or
   `bypassPermissions` — see
   [`docs/permission-modes.md`](docs/permission-modes.md).
-  Residuals, all erring toward silence: inline code (`python3 -c`, a heredoc)
-  carries no path to check, `python3 -m <module>` is not treated as inline, and
-  the PowerShell tool does not yet apply the suppression.
+  Residuals, all erring toward silence: inline code (`python3 -c`, `python3 -m`,
+  a heredoc) carries no path to check, and the PowerShell tool does not yet
+  apply the suppression.
 - A leading `~`/`~/…` is expanded to your home directory (bash does this
   deterministically), so a home path inside the root is allowed. Tokens that
   bash would expand *unpredictably* at runtime — `~user`/`~+`/`~-`, or a `$`

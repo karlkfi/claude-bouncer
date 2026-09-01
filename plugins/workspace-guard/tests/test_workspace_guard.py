@@ -6932,6 +6932,37 @@ class InterpreterSuppressesAllowTests(unittest.TestCase):
         self._decision("cat in.txt && ssh host python3 /q72-fake-target/x.py",
                        "allow")
 
+    def test_a_python_module_operand_suppresses_the_allow(self):
+        # `-m` resolves its operand on `sys.path`, so the code is as unreadable
+        # as a `-c` body and `allow` must not speak for it. Measured at 1.11.0:
+        # `cat in.txt && python3 -m unittest` returned `allow`, because the
+        # module name resolved as an in-workspace path and vouched. The cluster
+        # form goes through the same short-option scan `-pe` does. (Q143)
+        for cmd in ("cat in.txt && python3 -m unittest",
+                    "cat in.txt && python3 -m pytest tests/unit",
+                    "cat in.txt && python3 -Bm unittest",
+                    "cat in.txt && timeout 5 python3 -m unittest"):
+            self._decision(cmd, "defer")
+
+    def test_a_python_module_name_is_not_read_as_a_path(self):
+        # The row's own reproduction. `unittest` has never been a file, so
+        # joining it to the tracked cwd reported an outside path that does not
+        # exist — a reason with no in-root literal to substitute, which the
+        # operator can only approve blind. (Q143)
+        out = run_hook("cd /q72-fake-target && python3 -m unittest discover"
+                       " -s tests", self.workspace, project_dir=self.workspace)
+        self.assertIsNone(out, f"expected defer, got {out!r}")
+
+    def test_the_module_operand_rule_is_python_only(self):
+        # `-m` takes a following module name only for Python: perl's is
+        # attached (`-Mstrict`), php's lists modules and exits, and node has
+        # none. So for every other interpreter the operand is still a script
+        # path, checked like any other read. This is what pins the narrowing --
+        # widened to INTERP_CMDS, these would stop asking. (Q143)
+        for cmd in ("ruby -m /q72-fake-target/x.rb",
+                    "node -m /q72-fake-target/app.js"):
+            self._decision(cmd, "ask")
+
 
 class InstalledExtensionReadExemptionTests(unittest.TestCase):
     """Installed plugin/skill code is read-exempt (Q72).
@@ -10064,6 +10095,15 @@ class PowerShellInterpreterSuppressesAllowTests(unittest.TestCase):
     def test_a_stdin_dash_suppresses(self):
         self._agree("Get-Content .\\README.md; python3 -",
                     "cat ./README.md; python3 -", "defer")
+
+    def test_a_module_operand_suppresses_on_both(self):
+        # `-m` is read inside `interp_code_source`, which both frontends call,
+        # so the fix reaches PowerShell without a second code path. Asserted as
+        # a pair anyway: this class exists because Q72 landed on bash alone, and
+        # a PowerShell-only assertion would pass just as well if bash drifted to
+        # meet it. (Q143)
+        self._agree("Get-Content .\\README.md; python3 -m unittest",
+                    "cat ./README.md; python3 -m unittest", "defer")
 
     def test_a_workspace_resident_script_still_vouches(self):
         # Repo-resident code is what the boundary already trusts. Without this
