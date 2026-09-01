@@ -525,6 +525,20 @@ def expand_argv(argv, env):
     return [expand_vars(tok, env) for tok in argv]
 
 
+def is_command_lookup(operands):
+    """Whether `command`'s flags make this a lookup rather than an invocation.
+
+    `-v` and `-V` both report where a name resolves and execute nothing. Flags
+    may be bundled (`-pv`), and `--` ends them, after which a `-v` is an operand
+    of whatever runs."""
+    for tok in operands:
+        if not tok.startswith('-') or tok in ('-', '--'):
+            return False
+        if 'v' in tok[1:] or 'V' in tok[1:]:
+            return True
+    return False
+
+
 def strip_wrappers(argv, env):
     """Remove leading launcher commands (sudo, env, timeout, xargs, ...) so
     the covered tool underneath is classified, not the wrapper. `env`
@@ -565,6 +579,16 @@ def strip_wrappers(argv, env):
                     return rest[i:]
             return []
         elif head in PLAIN_WRAPPERS:
+            # `command -v`/`-V` reports where a name resolves and runs
+            # nothing, so its operands are names rather than a command to
+            # guard. Stripped like a wrapper, the first operand becomes the
+            # tool and the rest its verb: `command -v kubectl kubeconform`
+            # reads as `kubectl kubeconform`, a verb in no read-only table and
+            # so mutating (Q142). Leaving `command` in place defers instead.
+            # `command` is the only one of these wrappers with a flag that
+            # means "do not run"; a `-v` elsewhere still runs the command.
+            if head == 'command' and is_command_lookup(argv[1:]):
+                break
             argv = argv[1:]
             while argv and argv[0].startswith('-'):
                 argv = argv[1:]

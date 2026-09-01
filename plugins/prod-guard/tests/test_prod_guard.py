@@ -298,6 +298,29 @@ class ParsingTests(unittest.TestCase):
             ["aws", "s3", "ls"])
         self.assertEqual(env, {"AWS_PROFILE": "dev"})
 
+    def test_command_wrapper_strips_only_an_invocation(self):
+        # `command kubectl delete` runs kubectl, so the wrapper comes off.
+        self.assertEqual(
+            guard.strip_wrappers(["command", "kubectl", "delete", "ns"], {}),
+            ["kubectl", "delete", "ns"])
+        self.assertEqual(
+            guard.strip_wrappers(["command", "-p", "kubectl", "delete", "ns"], {}),
+            ["kubectl", "delete", "ns"])
+        # `command -v` runs nothing, so the operands are names rather than a
+        # command: leaving `command` in place makes the segment uncovered (Q142).
+        self.assertEqual(
+            guard.strip_wrappers(["command", "-v", "kubectl", "kubeconform"], {}),
+            ["command", "-v", "kubectl", "kubeconform"])
+
+    def test_is_command_lookup(self):
+        self.assertTrue(guard.is_command_lookup(["-v", "kubectl"]))
+        self.assertTrue(guard.is_command_lookup(["-V", "kubectl"]))
+        self.assertTrue(guard.is_command_lookup(["-pv", "kubectl"]))
+        self.assertFalse(guard.is_command_lookup(["kubectl", "delete"]))
+        self.assertFalse(guard.is_command_lookup(["-p", "kubectl", "delete"]))
+        # `--` ends the flags, so the `-v` after it is the guarded command's.
+        self.assertFalse(guard.is_command_lookup(["--", "kubectl", "-v"]))
+
     def test_flag_values_both_forms(self):
         argv = ["kubectl", "--context=a", "delete", "--namespace", "b"]
         self.assertEqual(guard.first_flag_value(argv, ("--context",)), "a")
@@ -2258,6 +2281,41 @@ class AmbientFixtureTests(unittest.TestCase):
 
 
 class SpecialCaseTests(unittest.TestCase):
+    # --- Q142: `command -v` is a lookup, not a kubectl invocation ---------
+    # Arity is what made this easy to miss: the one-argument form anyone would
+    # reach for while testing already deferred, because a lone `kubectl` is a
+    # bare tool name. A second operand became the verb.
+
+    def test_command_v_probe_defers_whatever_its_arity(self):
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        for probe in ("command -v kubectl",
+                      "command -v kubectl kubeconform",
+                      "command -v kubectl kubeconform yamllint",
+                      "command -v kubectl kubeconform yamllint 2>&1",
+                      "command -V kubectl kubeconform",
+                      "command -pv kubectl kubeconform"):
+            with self.subTest(probe=probe):
+                decision, _ = run_hook(probe, home=home)
+                self.assertIsNone(decision)
+
+    def test_command_still_strips_for_a_real_invocation(self):
+        # The wrapper must keep working: this one does run kubectl.
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        for cmd in ("command kubectl delete ns foo",
+                    "command -p kubectl delete ns foo",
+                    "command -- kubectl delete ns foo"):
+            with self.subTest(cmd=cmd):
+                decision, reason = run_hook(cmd, home=home)
+                self.assertEqual(decision, "deny")
+                self.assertIn("kubectl delete", reason)
+
+    def test_which_and_type_are_unchanged(self):
+        # Named in Q142 as the fixtures to match: both already defer.
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        for cmd in ("which kubectl", "type kubectl"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(run_hook(cmd, home=home)[0])
+
     """Branches for commands that mutate shared local state (kubeconfig
     writers, credential/context switchers) and registry-classified pushes."""
 
