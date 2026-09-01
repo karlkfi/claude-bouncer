@@ -103,6 +103,7 @@ the default `strict` [push policy](#push-guard).
 | `git branch -D old` *(tip survives on a remote-tracking branch or `main`)* | allow |
 | `git branch -D tmp-basecheck` *(scratch ref whose only unshared commit is a merge git reproduces)* | allow |
 | `git branch -f backup claude/x` *(the ref doesn't exist yet — a create)* | allow |
+| `git branch -f tmp-basecheck main` / `git branch -M x tmp-basecheck` *(the ref being overwritten holds only a merge git reproduces)* | allow |
 | `git reset --hard origin/main` *(clean worktree, feature branch whose tip survives elsewhere)* | allow |
 | `git reset --hard HEAD~1` *(clean worktree, scratch ref whose only unshared commit is a merge git reproduces)* | allow |
 | `git stash` / `git stash pop` *(any branch — adds no commit, rewrites no history, recoverable by design)* | allow |
@@ -122,7 +123,7 @@ the default `strict` [push policy](#push-guard).
 | `git branch -D old` *(tip reachable from nothing else, and the branch carries commits of its own)* | **ask** |
 | `git branch -D tmp-conflict` *(its merge was resolved by hand, so that tree exists nowhere else)* | **ask** |
 | `git branch -d main` / `git branch -D main` / `git branch -m x main` *(protected branch, any spelling)* | **ask** |
-| `git branch -f old main` / `git branch -M x old` *(moves an existing branch off commits nothing else reaches)* | **ask** |
+| `git branch -f old main` / `git branch -M x old` *(moves an existing branch off commits nothing else reaches, and that re-running a merge doesn't account for)* | **ask** |
 | `gh pr close 5 --delete-branch` / `gh pr close 5 -d` *(deletes a branch whose work was never merged)* | **ask** |
 | `gh repo delete owner/repo` / `gh label delete bug` *(deletes a resource)* | **ask** |
 | `gh release delete v1` / `gh release delete-asset v1 file.zip` / `gh secret delete X` / `gh variable delete Y` / `gh gist delete abc` / `gh cache delete 1` *(deletes a resource; `secret`/`variable` also via the `remove` alias)* | **ask** |
@@ -218,8 +219,8 @@ matches the tree the commit records, the commit holds nothing a plain
 does **not** reproduce — that tree is authored work living nowhere else — so it
 keeps prompting, as does a branch carrying any ordinary commit of its own, an
 octopus merge, or a git too old for `merge-tree --write-tree` (2.38, 2022).
-Only `-D` and `--delete --force` get this; the force move/copy forms still ask
-on an unreachable tip.
+Every force form gets this: `-D` and `--delete --force`, and `-f`/`-M`/`-C`
+when the ref they overwrite is the one whose tip survives nowhere.
 
 The checks are local `git` queries and never touch the network. They can
 only ever turn a prompt into an approval, and only on a positive answer — if git
@@ -246,9 +247,10 @@ Where the probe comes back the other way — the tip is reachable from nothing
 else — the same second question `git branch -D` asks applies, and for the same
 reason: a scratch ref whose only unshared commit is a merge git can reproduce
 has an unreachable tip *because* it merged, and loses nothing when the pointer
-moves off it. That check is about a ref move rather than about a verb, so it now
-runs on both. It costs nothing on the auto-approved path, because a surviving
-tip has already returned above it.
+moves off it. That check is about a ref move rather than about a verb, so it
+runs on all three: the delete, this reset, and the `-f`/`-M`/`-C` overwrite. It
+costs nothing on the auto-approved path, because a surviving tip has already
+returned above it.
 
 A branch that fails both questions is denied rather than prompted, in every
 permission mode — the one command here that is. The usual reason for an

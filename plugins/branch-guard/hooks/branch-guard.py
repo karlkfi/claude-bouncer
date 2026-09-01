@@ -16,9 +16,9 @@ destructive the verb looks (`classify_branch`). A target is in bounds when it is
 recoverable — its tip is reachable from a remote-tracking ref or a local
 integration branch (RECOVERY_REF_PATTERNS), so the worst case is a
 `git reset --hard <sha>` — and private, meaning not in the protected set. A
-force-delete has one more way to be in bounds: when every commit it would
-orphan is a merge that `git merge-tree` reproduces from its parents, the branch
-holds nothing original to lose (`orphans_only_reproducible_merges`). This
+force form has one more way to be in bounds: when every commit the ref move
+would orphan is a merge that `git merge-tree` reproduces from its parents, the
+branch holds nothing original to lose (`orphans_only_reproducible_merges`). This
 only ever relaxes a would-be `ask` into an `allow`, and only on proof from a
 local git query: a foreign repo (`git -C`), an unreachable git, or a branch that
 won't resolve all keep asking. The non-force spellings need no query, because
@@ -1278,8 +1278,9 @@ def overwrite_verdict(cwd, name, what, probe):
     """Verdict for a `git branch` form that would overwrite branch <name>'s
     current tip. Creating a ref that doesn't exist yet loses nothing; moving one
     whose tip survives on a remote-tracking ref or main costs a
-    `git reset --hard <sha>`. Everything else — including every case the probes
-    can't answer — keeps the `ask`."""
+    `git reset --hard <sha>`; and a tip surviving nowhere is still in bounds
+    when everything the move would orphan is a merge git re-runs. Everything
+    else — including every case the probes can't answer — keeps the `ask`."""
     if not probe:
         return ('ask', f"{what} can move an existing branch pointer, and a "
                        f"`git -C`/`--git-dir` option points at another "
@@ -1295,6 +1296,13 @@ def overwrite_verdict(cwd, name, what, probe):
     if rec is True:
         return ('allow', None)
     if rec is False:
+        # The second chance `-D` and `git reset --hard` already take, on the
+        # same question: what the ref move orphans, rather than whether the tip
+        # survives it. Taken over what losing the whole ref would orphan — the
+        # start-point belongs to the command and never reaches here, so this
+        # over-approximates an overwrite the way it does a reset.
+        if orphans_only_reproducible_merges(cwd, name):
+            return ('allow', None)
         return ('ask', f"{what} moves existing branch '{name}', whose current "
                        f"tip isn't reachable from any remote-tracking branch "
                        f"or main")
@@ -1347,9 +1355,8 @@ def classify_branch(flags, short, pos, current, cwd, probe):
     Recoverability is a property of the tip, and a force-delete cares about
     something slightly wider: what the branch would orphan. The two differ for
     one shape — a scratch branch that merged an integration ref — which
-    `orphans_only_reproducible_merges` handles for `-D` alone. The force
-    move/copy forms keep the tip-only question; the same widening would fit
-    them, and is deliberately not made here.
+    `orphans_only_reproducible_merges` answers for every force form: `-D`
+    below, and `-f`/`-M`/`-C` through `overwrite_verdict`.
 
     This can only ever relax a would-be `ask` into an `allow`, and only on
     proof: every form the probes can't answer for keeps asking, so an
@@ -1906,9 +1913,10 @@ def orphans_only_reproducible_merges(cwd, name):
     isn't already derivable from the refs outliving it.
 
     Scoped to what losing the whole ref would orphan, which is exact for
-    `git branch -D` and an over-approximation for `git reset --hard`, whose
-    target revision this can't see. Conservative either way: a reset orphans a
-    subset of what a delete would, so a proof over the larger set covers it.
+    `git branch -D` and an over-approximation for every form whose destination
+    revision this can't see — `git reset --hard`, and the `-f`/`-M`/`-C`
+    overwrites. Conservative either way: each of those orphans a subset of what
+    a delete would, so a proof over the larger set covers them.
 
     `tip_is_recoverable` asks whether the tip itself survives, which a scratch
     branch carrying a test-merge (`switch -c tmp; merge origin/main`) can never
