@@ -43,6 +43,18 @@ The command being parsed is adversarial input. If the parser tries to *guess* wh
 
 The hook is a guardrail, not a wall. False positives — legitimate reads of `/etc/os-release`, system configs, the user's `~/.zshrc` — are routine, and a `deny` default would erode trust until the user disabled the hook entirely. `ask` puts the human in the loop, which is the right cost for the rare outside-workspace read. Hard-blocking is available as a one-line local edit, documented in the README.
 
+### What the boundary is for, and how it moves
+
+The boundary serves two purposes and they are not equal. The larger one is keeping the session out of things it should neither read nor modify — credentials, an unrelated project's tree, machine state the work does not touch. The smaller one is keeping concurrent sessions off each other's checkouts. Where the two disagree the first wins, and a rule serving only the second is the first one to relax.
+
+That ranking has teeth. A second worktree of the *same* repository is inside the repo, so it does not engage the larger purpose at all; it engages the smaller one, and not even that when no peer session owns the tree.
+
+Work outside the worktree is legitimate and routine — installing a tool, editing the operator's global `CLAUDE.md`, reading a machine fact the task turns on. Those are `ask` by design rather than gaps in the boundary, and an approved `ask` is the system working rather than failing.
+
+**What is wrong is asking again.** The cost lands on the boundary being re-litigated every call, not on the boundary being drawn. So the direction of travel is to audit what denies and asks in practice, judge which of those are safe, and widen the zone of trust to cover them — without moving a boundary, wherever that is possible.
+
+**Ask-then-remember is what makes that possible.** A shape the operator approves is allowed for the rest of that session and asked again in the next one. The check keeps its strictness and the repetition goes, which is the only reduction that costs no boundary at all. It is session-scoped because the answer is often session-specific: whether a session may write into a given directory can legitimately differ from one run to the next, so a persistent grant would be answering a question nobody asked.
+
 ### Why defer on uncertainty
 
 Unparseable commands, commands not in `SPEC`, empty input — all return no decision. Control hands back to Claude Code's normal permission rules, i.e. the same behavior as if the hook weren't installed. This is the only fail mode that doesn't surprise the user:
