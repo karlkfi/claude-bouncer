@@ -2109,6 +2109,10 @@ git -C "$OVL" switch -q claude/x
 # between the guards. Every invocation still goes through decision_for, so the
 # launcher stays the single entry point -- and `none` is exactly the assertion
 # for "a PostToolUse hook emits no decision".
+#
+# Expected paths go through nat(): the hook records a RESOLVED NATIVE path, so
+# under Git Bash on Windows it writes D:\a\... where the harness's own
+# `pwd -P` yields /d/a/.... Comparing the two forms fails on Windows alone.
 post_payload() {
   jq -nc --arg cmd "$1" --arg cwd "$2" \
     '{tool_name: "Bash", hook_event_name: "PostToolUse",
@@ -2127,7 +2131,8 @@ check "[grants] PostToolUse emits no decision" none \
   "$(decision_for "$(post_payload 'git worktree add ../wt-grant feature' "$(nat "$WORK")")" \
      "$WORK" HOME="$GRANT_HOME" BRANCH_GUARD_WORKTREE_GRANTS=1)"
 check "[grants] PostToolUse records the created checkout, resolved" \
-  "$(cd "$WORK" && cd .. && pwd -P)/wt-grant" "$(grant_target "$GRANT_HOME")"
+  "$(nat "$(cd "$WORK" && cd .. && pwd -P)/wt-grant")" \
+  "$(grant_target "$GRANT_HOME")"
 
 # The unset control: with the flag off nothing is written at all, so the store's
 # absence is the assertion. Without it the case above would pass against a hook
@@ -2153,7 +2158,8 @@ GRANT_HOME_B="$(mktemp -d "$REPO_ROOT/tmp/grant-b.XXXXXX")"
 decision_for "$(post_payload 'git worktree add -b topic ../wt-b' "$(nat "$WORK")")" \
   "$WORK" HOME="$GRANT_HOME_B" BRANCH_GUARD_WORKTREE_GRANTS=1 >/dev/null
 check "[grants] add -b records the path, not the branch name" \
-  "$(cd "$WORK" && cd .. && pwd -P)/wt-b" "$(grant_target "$GRANT_HOME_B")"
+  "$(nat "$(cd "$WORK" && cd .. && pwd -P)/wt-b")" \
+  "$(grant_target "$GRANT_HOME_B")"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 
