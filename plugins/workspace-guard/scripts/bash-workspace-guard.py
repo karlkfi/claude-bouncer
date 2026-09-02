@@ -2752,7 +2752,8 @@ def finish(decision, reason, offenders, data):
         if not post:
             emit(decision, reason)
         return
-    shapes = grant_shapes(offenders) if offenders else None
+    shapes = grant_shapes(offenders, data.get('cwd') or os.getcwd()) \
+        if offenders else None
     if post:
         # The tool ran, so an `ask` on these shapes was approved.
         if decision == 'ask' and shapes:
@@ -2795,7 +2796,14 @@ def session_grants_enabled():
     return os.environ.get('WORKSPACE_GUARD_SESSION_GRANTS') == '1'
 
 
-def grant_shape(token, cat, detail):
+def _rooted(token):
+    """True when a token names a location rather than a relative step: it has
+    a drive, or it starts at a separator."""
+    drive, rest = os.path.splitdrive(token)
+    return bool(drive) or rest[:1] in ('/', os.sep)
+
+
+def grant_shape(token, cat, detail, cwd):
     """The key an approval is remembered under: the decision's category plus
     the directory it landed in, never the command string, which differs on
     every call and would remember nothing. Categories the hook merely failed to
@@ -2806,9 +2814,18 @@ def grant_shape(token, cat, detail):
     if cat == 'sibling' and detail:
         root = detail.get('root')
         return 'sibling:%s' % root if root else None
-    rp = os.path.realpath(token) if os.path.isabs(token) else None
-    if rp is None:
+    if not _rooted(token):
+        # A relative token resolves against whatever cwd the command had after
+        # any `cd`, which this function cannot see. Refusing to key one is the
+        # conservative direction: it costs a prompt, where guessing the wrong
+        # directory would grant one the operator never approved.
         return None
+    # join(), not isabs(): on Windows a leading-slash path is DRIVE-relative,
+    # and since Python 3.13 os.path.isabs() reports it False -- which silently
+    # keyed nothing at all there, so no approval was ever remembered. Joining
+    # against cwd roots it on the right drive and is a no-op for a genuinely
+    # absolute path on either platform.
+    rp = os.path.realpath(os.path.join(cwd, token))
     return '%s:%s' % (cat, os.path.dirname(rp))
 
 
@@ -2823,8 +2840,8 @@ def granted_worktrees(session_id):
                                  ttl=SESSION_GRANT_TTL))
 
 
-def grant_shapes(offenders):
-    shapes = {grant_shape(tok, cat, detail) for tok, cat, detail in offenders}
+def grant_shapes(offenders, cwd):
+    shapes = {grant_shape(tok, cat, detail, cwd) for tok, cat, detail in offenders}
     return None if None in shapes else shapes
 
 

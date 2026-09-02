@@ -13,6 +13,7 @@ Three layers:
 """
 import contextlib
 import json
+import ntpath
 import os
 import re
 import shlex
@@ -10345,9 +10346,14 @@ class SessionGrantTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.home = os.path.join(self.tmp, "home")
         os.makedirs(self.home)
+        # Rooted on the running drive rather than at a bare "/": on Windows a
+        # leading slash is DRIVE-relative, so a bare "/x" resolves differently
+        # in the hook process than in this one and the fixture stops measuring
+        # what it names. Empty on POSIX, so the paths there are unchanged.
         tag = "q139-%d" % os.getpid()
-        self.proj = "/%s-proj" % tag
-        self.outside = "/%s-outside" % tag
+        self.drive = os.path.splitdrive(os.getcwd())[0]
+        self.proj = "%s%s%s-proj" % (self.drive, os.sep, tag)
+        self.outside = "%s%s%s-outside" % (self.drive, os.sep, tag)
         self.target = os.path.join(self.outside, "notes.md")
 
     def run_hook(self, command, event="PreToolUse", enabled=True,
@@ -10380,6 +10386,54 @@ class SessionGrantTests(unittest.TestCase):
             return None
         return json.loads(out)["hookSpecificOutput"]["permissionDecision"]
 
+    # --- how a grant is keyed ------------------------------------------------
+
+    def test_a_rooted_token_is_keyed_whatever_isabs_says(self):
+        """The Windows regression, pinned so it cannot go quiet again.
+
+        Since Python 3.13 `os.path.isabs()` reports False for a leading-slash
+        path on Windows, because it is drive-relative there. Keying on isabs
+        therefore returned None for every token on that platform, so nothing
+        was ever recorded and no approval was ever remembered -- and the whole
+        class passed on POSIX, where isabs says True. Joining against cwd is
+        what makes the key right on both.
+        """
+        shape = guard.grant_shape("/q139-rooted/notes.md", "outside", None,
+                                  os.getcwd())
+        self.assertIsNotNone(shape)
+        self.assertTrue(shape.startswith("outside:"), shape)
+        self.assertTrue(shape.endswith("q139-rooted"), shape)
+
+    def test_a_rooted_token_is_keyed_under_windows_path_semantics(self):
+        """The same rule, exercised where it actually broke.
+
+        The case above passes on POSIX with the bug present, because
+        `os.path.isabs` says True there -- so on its own it would have gone on
+        being green everywhere except the one job that failed. Swapping the
+        path module to `ntpath` runs the Windows rules on any host, which is
+        what makes this a gate rather than a note.
+        """
+        with mock.patch.object(guard.os, "path", ntpath):
+            shape = guard.grant_shape("/q139-rooted/notes.md", "outside", None,
+                                      "D:\\work")
+        self.assertEqual("outside:D:\\q139-rooted", shape)
+
+    def test_a_relative_token_is_not_keyed(self):
+        """The conservative direction, and the reason the check is rootedness
+        rather than "resolve everything": a relative token resolves against
+        whatever cwd the command had after any `cd`, which this function cannot
+        see. Guessing would grant a directory nobody approved."""
+        self.assertIsNone(guard.grant_shape("notes.md", "outside", None,
+                                            os.getcwd()))
+        self.assertIsNone(guard.grant_shape("../up/notes.md", "outside", None,
+                                            os.getcwd()))
+
+    def test_an_unparseable_token_is_not_keyed(self):
+        """A token the hook could not expand has no resolved home at all, so
+        it stays askable rather than being remembered under a guess."""
+        for cat in sorted(guard.UNPARSED_CATS):
+            self.assertIsNone(guard.grant_shape("$f", cat, None, os.getcwd()))
+
     # --- the shape-grant lifecycle -----------------------------------------
 
     def test_first_read_asks_and_a_repeat_defers_after_the_tool_ran(self):
@@ -10405,7 +10459,8 @@ class SessionGrantTests(unittest.TestCase):
         self.assertIsNone(self.run_hook("cat %s" % shlex.quote(sibling)))
 
     def test_a_different_directory_still_asks(self):
-        far = "/q139-%d-further/f.md" % os.getpid()
+        far = os.path.join("%s%s" % (self.drive, os.sep),
+                           "q139-%d-further" % os.getpid(), "f.md")
         self.run_hook("cat %s" % shlex.quote(self.target))
         self.run_hook("cat %s" % shlex.quote(self.target), event="PostToolUse")
         self.assertEqual("ask", self.run_hook("cat %s" % shlex.quote(far)))
@@ -10472,6 +10527,10 @@ class SessionGrantTests(unittest.TestCase):
 
     # --- the worktree grant --------------------------------------------------
 
+    def _synthetic(self, name):
+        """A rooted path that need not exist, on the drive this run uses."""
+        return "%s%s%s-%d-%s" % (self.drive, os.sep, "q139", os.getpid(), name)
+
     def _stored_grants(self, namespace, session="sess-1"):
         """Every grant target on record, straight off disk."""
         path = os.path.join(self.home, ".claude", namespace, "session-grants",
@@ -10503,7 +10562,7 @@ class SessionGrantTests(unittest.TestCase):
         nothing left to object to emits nothing. A shape grant is the other
         act, withdrawing one objection, and defers instead; the case below
         pins that."""
-        wt = "/q139-%d-wt" % os.getpid()
+        wt = self._synthetic("wt")
         inside = os.path.join(wt, "f.md")
         self.assertEqual("ask", self.run_hook("cat %s" % shlex.quote(inside)))
         self._grant_worktree(wt)
@@ -10520,14 +10579,14 @@ class SessionGrantTests(unittest.TestCase):
         self.assertIsNone(self.run_hook(cmd))
 
     def test_a_worktree_grant_does_not_leak_to_a_sibling_path(self):
-        wt = "/q139-%d-wt" % os.getpid()
-        outside_file = "/q139-%d-wt-other/f.md" % os.getpid()
+        wt = self._synthetic("wt")
+        outside_file = os.path.join(self._synthetic("wt-other"), "f.md")
         self._grant_worktree(wt)
         self.assertEqual("ask",
                          self.run_hook("cat %s" % shlex.quote(outside_file)))
 
     def test_a_worktree_grant_is_inert_with_the_feature_off(self):
-        wt = "/q139-%d-wt" % os.getpid()
+        wt = self._synthetic("wt")
         inside = os.path.join(wt, "f.md")
         self._grant_worktree(wt)
         self.assertEqual("ask", self.run_hook("cat %s" % shlex.quote(inside),
