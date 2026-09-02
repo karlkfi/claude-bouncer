@@ -80,7 +80,7 @@ the default `strict` [push policy](#push-guard).
 | `git status` / `git diff` / `git log` | allow |
 | `git add -A` | allow |
 | `git switch -c claude/y` / `git checkout -b claude/y` | allow |
-| `git worktree add ../wt feature` | allow |
+| `git worktree add ../wt feature` | allow *(**ask** with [`BRANCH_GUARD_WORKTREE_GRANTS=1`](#configuration))* |
 | `git worktree remove ../wt` *(git refuses one holding modified or untracked files)* | allow |
 | `git commit -m "fix"` *(feature branch)* | allow |
 | `git add -A && git commit -m x && git push` *(feature branch)* | allow |
@@ -892,6 +892,25 @@ protected branch (main/master) or destructive git commands. To keep work flowing
 
   ```json
   { "env": { "BRANCH_GUARD_PUSH_POLICY": "protected" } }
+  ```
+
+- **Worktree grants** — off by default. Set `BRANCH_GUARD_WORKTREE_GRANTS=1` and
+  `git worktree add` asks once instead of being auto-approved. Approving it
+  records the created checkout for the session, which is what lets
+  [workspace-guard](https://github.com/karlkfi/claude-bouncer/tree/main/plugins/workspace-guard)
+  stop prompting on reads inside it and stop blocking writes to it. The ask is
+  not about danger — creating a checkout is safe — it is the only moment that
+  identifies the new tree as *yours* rather than a peer session's.
+
+  **It needs `WORKSPACE_GUARD_SESSION_GRANTS=1` on the other side to be worth
+  anything**: this half only adds a prompt, and that half is what spends it. In
+  a mode where no prompt can be shown (`dontAsk`, `bypassPermissions`) the ask is
+  skipped and `git worktree add` is auto-approved as before — no human, no grant,
+  and denying a safe command to capture an approval nobody can give would only
+  block the work.
+
+  ```json
+  { "env": { "BRANCH_GUARD_WORKTREE_GRANTS": "1" } }
   ```
 
 - **Protected branches** — `main` and `master` are always protected. Protect more

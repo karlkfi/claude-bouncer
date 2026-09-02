@@ -1299,6 +1299,45 @@ same flags work:
 /workspace-guard:friction-report --raw --top 20
 ```
 
+## Session grants: stop re-answering the same prompt
+
+Off by default. With `WORKSPACE_GUARD_SESSION_GRANTS=1`, a prompt you approve is
+not asked again for the rest of that session.
+
+The guard cannot see your answer — a `PreToolUse` hook returns `ask` and is never
+told what you said — so nothing is recorded when it asks. A `PostToolUse` hook
+fires only when the command actually ran, which means you approved it, and *that*
+is what records the grant. Decline, and nothing is written.
+
+Two things follow from how it is keyed, both deliberate:
+
+- **A grant covers the directory, not the one file.** Approving a read of
+  `~/.claude/CLAUDE.md` also covers `~/.claude/settings.json`. Keying on the file
+  would re-ask for every neighbour, which is most of the repetition.
+- **A covered call defers; it is never upgraded to `allow`.** The guard withdraws
+  its own objection and hands the decision back to your normal permission rules,
+  rather than speaking for the whole command.
+
+Grants are per session, expire after 8 hours, and live in
+`~/.claude/workspace-guard/session-grants/`. Delete that directory at any time.
+A `deny` is never recorded and never suppressed: nobody was asked, so there is no
+approval to remember.
+
+### Worktree grants
+
+A second checkout of your own repository — `git worktree add` for a review, a
+bisect, a build against another commit — is outside this session's workspace, so
+reads of it prompt and writes to it are blocked as sibling-checkout writes.
+
+With this setting on, and `BRANCH_GUARD_WORKTREE_GRANTS=1` set for
+[branch-guard](https://github.com/karlkfi/claude-bouncer/tree/main/plugins/branch-guard),
+the `git worktree add` itself asks once. Approving it records the checkout, and
+the whole tree is then readable and writable for the rest of the session.
+
+**Both settings are needed.** branch-guard asks and records; workspace-guard is
+what honours the record. Turning on only the first adds a prompt and nothing
+else; only the second changes nothing at all.
+
 ## Configuration
 
 The set of guarded commands lives in the `SPEC` and `ALIASES` tables at the top

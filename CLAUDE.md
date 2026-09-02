@@ -8,10 +8,13 @@ the root README, so the runbook is `docs/development/release-process.md` and
 there is no per-plugin one. The backlog is another — one store for all five,
 below.
 
-## Never edit a vendored parser copy
+## Never edit a vendored library copy
 
-`lib/bouncer_parse.py` is the shared shell parser. Every plugin carries a copy
-at `plugins/<name>/lib/bouncer_parse.py`, written by `scripts/sync-lib.py`.
+`lib/` holds the shared modules: `bouncer_parse.py`, the shell parser, and
+`bouncer_grants.py`, the session-grant store. Every plugin carries a copy of
+each at `plugins/<name>/lib/`, written by `scripts/sync-lib.py`, which syncs
+every module named in its `MODULES` tuple. Adding a module there is what makes
+it shared — a file dropped in `lib/` and not named is vendored nowhere.
 
 Edit the root copy, then run `make sync`. A vendored copy is overwritten
 without warning, so an edit made there is lost at the next sync, and until then
@@ -39,6 +42,14 @@ Add to the shared surface only when a second guard needs the same behaviour.
 Extend additively when a guard needs more: `strip_heredoc_bodies` grew an
 `unterminated` out-parameter that way, and the guards that do not pass one are
 unaffected.
+
+`bouncer_grants.py` is the worked example of the split. Three guards now keep
+session-scoped grants and they agree on the *mechanics* — a session-keyed file,
+a first-grant timestamp that never slides, an atomic replace, every error
+failing toward more prompts — and on nothing else. What a grant *means* stays in
+each guard: prod-guard grants an exact target string, workspace-guard a decision
+shape, and the worktree grant a path prefix. Migrating those semantics into
+`lib/` would produce an abstraction wrong for all three.
 
 ## One backlog, five plugins
 

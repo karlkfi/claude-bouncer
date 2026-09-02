@@ -27,7 +27,18 @@ ships as a single Python script that uses only the standard library.
 - To detect sibling worktree checkouts of the same repo, it reads a few small
   **git metadata** files locally (`.git`, `commondir`, `HEAD`) under the target
   path and the session root. These are git's own bookkeeping, not your source.
-- Nothing is logged, stored, or written to disk by the plugin.
+- Nothing is logged or sent anywhere. The plugin writes exactly one kind of
+  file, and only when you turn session grants on with
+  `WORKSPACE_GUARD_SESSION_GRANTS=1`:
+  `~/.claude/workspace-guard/session-grants/<session-id>.json` — created only
+  when you approve an outside-workspace prompt. Each file holds the directories
+  you approved, a fixed reason string, and a timestamp; grants expire after 8
+  hours, stale files are cleaned up automatically, and you can delete the
+  directory at any time. With the setting off — the default — the plugin writes
+  nothing to disk at all. Nothing leaves your machine.
+- It also *reads* `~/.claude/bouncer/session-grants/<session-id>.json` when that
+  setting is on. branch-guard writes it when you approve a `git worktree add`,
+  and it holds the paths of checkouts you approved this session.
 
 ## Third parties
 
