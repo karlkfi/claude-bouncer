@@ -10335,16 +10335,20 @@ class SessionGrantTests(unittest.TestCase):
     """
 
     def setUp(self):
+        # Only $HOME is a real directory, because the store writes there. The
+        # guarded paths are SYNTHETIC absolute paths that need not exist -- the
+        # hook resolves them lexically -- and they must not live under a temp
+        # root: `/tmp` is a built-in host-temp root that no env var can clear,
+        # so a fixture there denies as host-temp on Linux and measures that
+        # rule instead of this one. The pid keeps parallel shards apart.
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.home = os.path.join(self.tmp, "home")
-        self.proj = os.path.join(self.tmp, "proj")
-        self.outside = os.path.join(self.tmp, "elsewhere")
-        for d in (self.home, self.proj, self.outside):
-            os.makedirs(d)
+        os.makedirs(self.home)
+        tag = "q139-%d" % os.getpid()
+        self.proj = "/%s-proj" % tag
+        self.outside = "/%s-outside" % tag
         self.target = os.path.join(self.outside, "notes.md")
-        with open(self.target, "w") as f:
-            f.write("x\n")
 
     def run_hook(self, command, event="PreToolUse", enabled=True,
                  session="sess-1", tool=None, file_path=None):
@@ -10396,18 +10400,12 @@ class SessionGrantTests(unittest.TestCase):
 
     def test_the_grant_covers_the_directory_not_just_the_one_file(self):
         sibling = os.path.join(self.outside, "other.md")
-        with open(sibling, "w") as f:
-            f.write("y\n")
         self.run_hook("cat %s" % shlex.quote(self.target))
         self.run_hook("cat %s" % shlex.quote(self.target), event="PostToolUse")
         self.assertIsNone(self.run_hook("cat %s" % shlex.quote(sibling)))
 
     def test_a_different_directory_still_asks(self):
-        other_dir = os.path.join(self.tmp, "further")
-        os.makedirs(other_dir)
-        far = os.path.join(other_dir, "f.md")
-        with open(far, "w") as f:
-            f.write("z\n")
+        far = "/q139-%d-further/f.md" % os.getpid()
         self.run_hook("cat %s" % shlex.quote(self.target))
         self.run_hook("cat %s" % shlex.quote(self.target), event="PostToolUse")
         self.assertEqual("ask", self.run_hook("cat %s" % shlex.quote(far)))
@@ -10505,11 +10503,8 @@ class SessionGrantTests(unittest.TestCase):
         nothing left to object to emits nothing. A shape grant is the other
         act, withdrawing one objection, and defers instead; the case below
         pins that."""
-        wt = os.path.join(self.tmp, "wt")
-        os.makedirs(wt)
+        wt = "/q139-%d-wt" % os.getpid()
         inside = os.path.join(wt, "f.md")
-        with open(inside, "w") as f:
-            f.write("q\n")
         self.assertEqual("ask", self.run_hook("cat %s" % shlex.quote(inside)))
         self._grant_worktree(wt)
         self.assertEqual("allow", self.run_hook("cat %s" % shlex.quote(inside)))
@@ -10525,23 +10520,15 @@ class SessionGrantTests(unittest.TestCase):
         self.assertIsNone(self.run_hook(cmd))
 
     def test_a_worktree_grant_does_not_leak_to_a_sibling_path(self):
-        wt = os.path.join(self.tmp, "wt")
-        neighbour = os.path.join(self.tmp, "wt-other")
-        os.makedirs(wt)
-        os.makedirs(neighbour)
-        outside_file = os.path.join(neighbour, "f.md")
-        with open(outside_file, "w") as f:
-            f.write("q\n")
+        wt = "/q139-%d-wt" % os.getpid()
+        outside_file = "/q139-%d-wt-other/f.md" % os.getpid()
         self._grant_worktree(wt)
         self.assertEqual("ask",
                          self.run_hook("cat %s" % shlex.quote(outside_file)))
 
     def test_a_worktree_grant_is_inert_with_the_feature_off(self):
-        wt = os.path.join(self.tmp, "wt")
-        os.makedirs(wt)
+        wt = "/q139-%d-wt" % os.getpid()
         inside = os.path.join(wt, "f.md")
-        with open(inside, "w") as f:
-            f.write("q\n")
         self._grant_worktree(wt)
         self.assertEqual("ask", self.run_hook("cat %s" % shlex.quote(inside),
                                               enabled=False))
