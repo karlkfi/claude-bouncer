@@ -13,6 +13,7 @@ Three layers:
 """
 import contextlib
 import json
+import ntpath
 import os
 import re
 import shlex
@@ -20,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from importlib import util
 from pathlib import Path
@@ -10323,6 +10325,272 @@ class PowerShellEndToEndTests(unittest.TestCase):
         # target rather than the fixture path: quoting it would suppress the
         # split this is about, and the check is lexical either way.
         self._decide("Get-Content -Path in.txt,%s" % self.OUT, "ask")
+
+
+class SessionGrantTests(unittest.TestCase):
+    """The remembered-approval loop (Q139) and the worktree grant (Q144).
+
+    Every case drives the real script over a real store, because the whole
+    mechanism is two hook invocations agreeing about a file: a unit test over
+    either half alone would pass with the other half disconnected.
+    """
+
+    def setUp(self):
+        # Only $HOME is a real directory, because the store writes there. The
+        # guarded paths are SYNTHETIC absolute paths that need not exist -- the
+        # hook resolves them lexically -- and they must not live under a temp
+        # root: `/tmp` is a built-in host-temp root that no env var can clear,
+        # so a fixture there denies as host-temp on Linux and measures that
+        # rule instead of this one. The pid keeps parallel shards apart.
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.home = os.path.join(self.tmp, "home")
+        os.makedirs(self.home)
+        # Rooted on the running drive rather than at a bare "/": on Windows a
+        # leading slash is DRIVE-relative, so a bare "/x" resolves differently
+        # in the hook process than in this one and the fixture stops measuring
+        # what it names. Empty on POSIX, so the paths there are unchanged.
+        tag = "q139-%d" % os.getpid()
+        self.drive = os.path.splitdrive(os.getcwd())[0]
+        self.proj = "%s%s%s-proj" % (self.drive, os.sep, tag)
+        self.outside = "%s%s%s-outside" % (self.drive, os.sep, tag)
+        self.target = os.path.join(self.outside, "notes.md")
+
+    def run_hook(self, command, event="PreToolUse", enabled=True,
+                 session="sess-1", tool=None, file_path=None):
+        env = dict(os.environ)
+        env["HOME"] = self.home
+        env["CLAUDE_PROJECT_DIR"] = self.proj
+        env.pop("WORKSPACE_GUARD_READ_ALLOW_PREFIXES", None)
+        # The fixtures sit under the inherited $TMPDIR, which the guard would
+        # otherwise classify as host temp and deny -- a venue artifact that has
+        # nothing to do with what these cases measure.
+        env.pop("TMPDIR", None)
+        if enabled:
+            env["WORKSPACE_GUARD_SESSION_GRANTS"] = "1"
+        else:
+            env.pop("WORKSPACE_GUARD_SESSION_GRANTS", None)
+        data = {"cwd": self.proj, "session_id": session,
+                "hook_event_name": event}
+        if tool:
+            data["tool_name"] = tool
+            data["tool_input"] = {"file_path": file_path}
+        else:
+            data["tool_input"] = {"command": command}
+        r = subprocess.run([sys.executable, str(SCRIPT)],
+                           input=json.dumps(data), capture_output=True,
+                           text=True, env=env, timeout=20)
+        self.assertEqual(0, r.returncode, r.stderr)
+        out = r.stdout.strip()
+        if not out:
+            return None
+        return json.loads(out)["hookSpecificOutput"]["permissionDecision"]
+
+    # --- how a grant is keyed ------------------------------------------------
+
+    def test_a_rooted_token_is_keyed_whatever_isabs_says(self):
+        """The Windows regression, pinned so it cannot go quiet again.
+
+        Since Python 3.13 `os.path.isabs()` reports False for a leading-slash
+        path on Windows, because it is drive-relative there. Keying on isabs
+        therefore returned None for every token on that platform, so nothing
+        was ever recorded and no approval was ever remembered -- and the whole
+        class passed on POSIX, where isabs says True. Joining against cwd is
+        what makes the key right on both.
+        """
+        shape = guard.grant_shape("/q139-rooted/notes.md", "outside", None,
+                                  os.getcwd())
+        self.assertIsNotNone(shape)
+        self.assertTrue(shape.startswith("outside:"), shape)
+        self.assertTrue(shape.endswith("q139-rooted"), shape)
+
+    def test_a_rooted_token_is_keyed_under_windows_path_semantics(self):
+        """The same rule, exercised where it actually broke.
+
+        The case above passes on POSIX with the bug present, because
+        `os.path.isabs` says True there -- so on its own it would have gone on
+        being green everywhere except the one job that failed. Swapping the
+        path module to `ntpath` runs the Windows rules on any host, which is
+        what makes this a gate rather than a note.
+        """
+        with mock.patch.object(guard.os, "path", ntpath):
+            shape = guard.grant_shape("/q139-rooted/notes.md", "outside", None,
+                                      "D:\\work")
+        self.assertEqual("outside:D:\\q139-rooted", shape)
+
+    def test_a_relative_token_is_not_keyed(self):
+        """The conservative direction, and the reason the check is rootedness
+        rather than "resolve everything": a relative token resolves against
+        whatever cwd the command had after any `cd`, which this function cannot
+        see. Guessing would grant a directory nobody approved."""
+        self.assertIsNone(guard.grant_shape("notes.md", "outside", None,
+                                            os.getcwd()))
+        self.assertIsNone(guard.grant_shape("../up/notes.md", "outside", None,
+                                            os.getcwd()))
+
+    def test_an_unparseable_token_is_not_keyed(self):
+        """A token the hook could not expand has no resolved home at all, so
+        it stays askable rather than being remembered under a guess."""
+        for cat in sorted(guard.UNPARSED_CATS):
+            self.assertIsNone(guard.grant_shape("$f", cat, None, os.getcwd()))
+
+    # --- the shape-grant lifecycle -----------------------------------------
+
+    def test_first_read_asks_and_a_repeat_defers_after_the_tool_ran(self):
+        cmd = "cat %s" % shlex.quote(self.target)
+        self.assertEqual("ask", self.run_hook(cmd))
+        self.assertIsNone(self.run_hook(cmd, event="PostToolUse"))
+        self.assertIsNone(self.run_hook(cmd))
+
+    def test_an_approved_ask_is_what_mints_a_grant(self):
+        """The other side of the deny case: the store is empty until the tool
+        runs, and holds exactly the approved directory afterwards."""
+        cmd = "cat %s" % shlex.quote(self.target)
+        self.run_hook(cmd)
+        self.assertEqual(set(), self._stored_grants("workspace-guard"))
+        self.run_hook(cmd, event="PostToolUse")
+        self.assertEqual({"outside:%s" % os.path.realpath(self.outside)},
+                         self._stored_grants("workspace-guard"))
+
+    def test_the_grant_covers_the_directory_not_just_the_one_file(self):
+        sibling = os.path.join(self.outside, "other.md")
+        self.run_hook("cat %s" % shlex.quote(self.target))
+        self.run_hook("cat %s" % shlex.quote(self.target), event="PostToolUse")
+        self.assertIsNone(self.run_hook("cat %s" % shlex.quote(sibling)))
+
+    def test_a_different_directory_still_asks(self):
+        far = os.path.join("%s%s" % (self.drive, os.sep),
+                           "q139-%d-further" % os.getpid(), "f.md")
+        self.run_hook("cat %s" % shlex.quote(self.target))
+        self.run_hook("cat %s" % shlex.quote(self.target), event="PostToolUse")
+        self.assertEqual("ask", self.run_hook("cat %s" % shlex.quote(far)))
+
+    def test_another_session_does_not_inherit_the_grant(self):
+        cmd = "cat %s" % shlex.quote(self.target)
+        self.run_hook(cmd)
+        self.run_hook(cmd, event="PostToolUse")
+        self.assertEqual("ask", self.run_hook(cmd, session="sess-2"))
+
+    def test_with_the_feature_off_nothing_is_recorded_and_nothing_changes(self):
+        """The control that makes every case above mean something: the same
+        two calls, feature off, and the third still asks."""
+        cmd = "cat %s" % shlex.quote(self.target)
+        self.assertEqual("ask", self.run_hook(cmd, enabled=False))
+        self.assertIsNone(self.run_hook(cmd, event="PostToolUse",
+                                        enabled=False))
+        self.assertEqual("ask", self.run_hook(cmd, enabled=False))
+        self.assertFalse(os.path.exists(os.path.join(self.home, ".claude",
+                                                     "workspace-guard")))
+
+    def test_post_tool_use_never_emits_a_decision(self):
+        """A PostToolUse hook that printed a PreToolUse verdict would have
+        Claude Code apply a decision to a call that already ran."""
+        for enabled in (True, False):
+            self.assertIsNone(
+                self.run_hook("cat %s" % shlex.quote(self.target),
+                              event="PostToolUse", enabled=enabled))
+
+    def test_a_deny_is_never_remembered(self):
+        """A deny never reached a human, so there is no approval to record.
+        A sibling-checkout write denies; running the PostToolUse branch over
+        it must not grant the path."""
+        repo = os.path.join(self.tmp, "repo")
+        os.makedirs(repo)
+        subprocess.run(["git", "init", "-q", "-b", "main", repo], check=True)
+        subprocess.run(["git", "-C", repo, "config", "user.email", "a@b.c"],
+                       check=True)
+        subprocess.run(["git", "-C", repo, "config", "user.name", "t"],
+                       check=True)
+        with open(os.path.join(repo, "f.txt"), "w") as f:
+            f.write("hi\n")
+        subprocess.run(["git", "-C", repo, "add", "-A"], check=True)
+        subprocess.run(["git", "-C", repo, "commit", "-qm", "i"], check=True)
+        wt_a = os.path.join(repo, "wt-a")
+        wt_b = os.path.join(repo, "wt-b")
+        subprocess.run(["git", "-C", repo, "worktree", "add", "-q",
+                        "-b", "a", wt_a], check=True)
+        subprocess.run(["git", "-C", repo, "worktree", "add", "-q",
+                        "--detach", wt_b], check=True)
+        self.proj = wt_a
+        victim = os.path.join(wt_b, "f.txt")
+        self.assertEqual("deny", self.run_hook(
+            None, tool="Edit", file_path=victim))
+        self.run_hook(None, event="PostToolUse", tool="Edit",
+                      file_path=victim)
+        # Assert the STORE, not the next verdict. A deny is never suppressed
+        # whatever the store holds, so re-running the call passes with or
+        # without the bug -- the question is whether a grant was minted with
+        # no human approval behind it, and only the file answers that.
+        self.assertEqual(set(), self._stored_grants("workspace-guard"))
+        self.assertEqual("deny", self.run_hook(
+            None, tool="Edit", file_path=victim))
+
+    # --- the worktree grant --------------------------------------------------
+
+    def _synthetic(self, name):
+        """A rooted path that need not exist, on the drive this run uses."""
+        return "%s%s%s-%d-%s" % (self.drive, os.sep, "q139", os.getpid(), name)
+
+    def _stored_grants(self, namespace, session="sess-1"):
+        """Every grant target on record, straight off disk."""
+        path = os.path.join(self.home, ".claude", namespace, "session-grants",
+                            session + ".json")
+        if not os.path.exists(path):
+            return set()
+        with open(path) as f:
+            return {g["target"] for g in json.load(f).get("grants", [])}
+
+    def _grant_worktree(self, path, session="sess-1"):
+        """Stand in for branch-guard, which is what writes this namespace.
+
+        The path is stored resolved because that is what the producer stores
+        (`worktree_add_path` returns a realpath). It matters on macOS, where
+        the fixtures live under /var/folders and the guard resolves that to
+        /private/var/folders -- an unresolved grant would silently never match.
+        """
+        store = os.path.join(self.home, ".claude", "bouncer", "session-grants")
+        os.makedirs(store, exist_ok=True)
+        with open(os.path.join(store, session + ".json"), "w") as f:
+            json.dump({"grants": [{"target": os.path.realpath(path),
+                                   "reason": "t", "ts": time.time()}]}, f)
+
+    def test_a_granted_worktree_is_readable_and_writable(self):
+        """The two verdicts differ on purpose. A worktree grant is an
+        exemption -- it puts the path in-workspace -- so a bash command whose
+        every operand is now in-workspace gets the same `allow` the session
+        scratchpad and the read prefixes already get, while a native tool with
+        nothing left to object to emits nothing. A shape grant is the other
+        act, withdrawing one objection, and defers instead; the case below
+        pins that."""
+        wt = self._synthetic("wt")
+        inside = os.path.join(wt, "f.md")
+        self.assertEqual("ask", self.run_hook("cat %s" % shlex.quote(inside)))
+        self._grant_worktree(wt)
+        self.assertEqual("allow", self.run_hook("cat %s" % shlex.quote(inside)))
+        self.assertIsNone(self.run_hook(None, tool="Edit", file_path=inside))
+
+    def test_a_shape_grant_defers_rather_than_allowing(self):
+        """The control for the case above: an `allow` speaks for the whole
+        command and short-circuits the operator's own permission rules, which
+        is wider than the approval they gave to one prompt."""
+        cmd = "cat %s" % shlex.quote(self.target)
+        self.run_hook(cmd)
+        self.run_hook(cmd, event="PostToolUse")
+        self.assertIsNone(self.run_hook(cmd))
+
+    def test_a_worktree_grant_does_not_leak_to_a_sibling_path(self):
+        wt = self._synthetic("wt")
+        outside_file = os.path.join(self._synthetic("wt-other"), "f.md")
+        self._grant_worktree(wt)
+        self.assertEqual("ask",
+                         self.run_hook("cat %s" % shlex.quote(outside_file)))
+
+    def test_a_worktree_grant_is_inert_with_the_feature_off(self):
+        wt = self._synthetic("wt")
+        inside = os.path.join(wt, "f.md")
+        self._grant_worktree(wt)
+        self.assertEqual("ask", self.run_hook("cat %s" % shlex.quote(inside),
+                                              enabled=False))
 
 
 if __name__ == "__main__":

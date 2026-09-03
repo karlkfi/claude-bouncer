@@ -109,6 +109,7 @@ import sys, os, json, re, shlex, subprocess, fnmatch
 # copy under this plugin's `lib/` is vendored; see scripts/sync-lib.py.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 from bouncer_parse import ASSIGNMENT_RE, PUNCT_CHARS, lex     # noqa: E402
+from bouncer_grants import record_grants                      # noqa: E402
 
 # Branch names protected no matter what the environment says. Configuration only
 # ever ADDS to this set (see `protected_patterns`), so a typo — or an empty or
@@ -839,6 +840,81 @@ def command_segments(tokens):
     return segments
 
 
+# --- Worktree grants (Q144) --------------------------------------------------
+# `git worktree add` is the only moment that carries OWNERSHIP of a second
+# checkout: workspace-guard cannot tell a checkout this session made from a peer
+# session's, and an approval at first *use* would not either. So the approval is
+# taken here and recorded for the session, and workspace-guard is what honours
+# it. The namespace is shared because two guards must agree on it -- this one
+# writes and never reads, that one reads and never writes.
+#
+# Off unless BRANCH_GUARD_WORKTREE_GRANTS=1. On its own this only ADDS a prompt;
+# the payoff needs WORKSPACE_GUARD_SESSION_GRANTS=1 on the other side, so
+# enabling one without the other is friction with no return.
+
+WORKTREE_NAMESPACE = 'bouncer'
+WORKTREE_ADD_VALUE_OPTS = frozenset({'-b', '-B', '--reason', '--lock-reason'})
+
+
+def worktree_grants_enabled():
+    return os.environ.get('BRANCH_GUARD_WORKTREE_GRANTS') == '1'
+
+
+def worktree_add_path(inv, cwd):
+    """The directory `git worktree add` would create, absolute, or None.
+
+    Flags are skipped the same way `parse_invocation` skips globals, with the
+    value-taking ones consuming their argument -- `add -b topic ../wt` names
+    `../wt`, not `topic`.
+    """
+    args = (inv.get('args') or [])[1:]          # drop the 'add' word itself
+    i = 0
+    while i < len(args):
+        t = args[i]
+        if t == '--':
+            i += 1
+            break
+        if not t.startswith('-'):
+            break
+        i += 2 if t in WORKTREE_ADD_VALUE_OPTS else 1
+    if i >= len(args):
+        return None
+    path = args[i]
+    if not os.path.isabs(path):
+        path = os.path.join(cwd, path)
+    return os.path.realpath(path)
+
+
+def record_worktree_grant(data):
+    """The command RAN, so the operator approved the ask. Record the checkouts
+    it created. Emits nothing: a PostToolUse hook has no decision to make."""
+    if not worktree_grants_enabled():
+        return
+    if (data.get('tool_name') or '') != 'Bash':
+        return
+    cmd = (data.get('tool_input') or {}).get('command') or ''
+    if not cmd.strip():
+        return
+    try:
+        tokens = tokenize(strip_heredocs(cmd))
+    except ValueError:
+        return
+    cwd = data.get('cwd') or os.getcwd()
+    paths = set()
+    for seg, _writes in command_segments(tokens):
+        inv = parse_invocation(seg)
+        if not inv or inv.get('prog') != 'git' or inv.get('sub') != 'worktree':
+            continue
+        args = inv.get('args') or []
+        if not args or args[0] != 'add':
+            continue
+        path = worktree_add_path(inv, cwd)
+        if path:
+            paths.add(path)
+    record_grants(WORKTREE_NAMESPACE, data.get('session_id'), paths,
+                  'approved `git worktree add`')
+
+
 def parse_invocation(tokens):
     """If a segment is a `git` or `gh` invocation, return
     {'prog', 'sub', 'args', 'globals'}; otherwise None. Strips leading env
@@ -1510,7 +1586,7 @@ def classify_reset(branch, cwd, probe):
     return ('allow', None)
 
 
-def classify_git(sub, args, branch, policy, cwd, probe):
+def classify_git(sub, args, branch, policy, cwd, probe, mode=''):
     """Verdict ('allow' | 'ask' | 'ask-shared' | 'deny-rebase' |
     'deny-unreachable' | 'defer', reason) for a `git <sub>` command."""
     flags = {a for a in args if a.startswith('-')}
@@ -1572,6 +1648,22 @@ def classify_git(sub, args, branch, policy, cwd, probe):
             return ('ask', "Deleting a git tag")
         return ('allow', None)            # list or create
     if sub == 'worktree':
+        if first == 'add' and worktree_grants_enabled() \
+                and mode not in NON_INTERACTIVE_MODES:
+            # Creating a checkout is safe, so this is not a safety ask: it is
+            # the only moment that carries OWNERSHIP. workspace-guard cannot
+            # tell a checkout this session made from a peer session's, and an
+            # approval at first *use* would not either — the operator letting a
+            # session read a path says nothing about who made it. Approving
+            # here records the path, and the tree is then this session's to use.
+            # Off by default, because without the grant this is pure added
+            # friction. Skipped where no human can answer: confirm() would turn
+            # this into a deny, and denying a SAFE command to capture an
+            # approval nobody is there to give blocks the work and records
+            # nothing. No human, no grant, today's allow. (Q144)
+            return ('ask', "`git worktree add` creates a second checkout — "
+                           "approving records it for this session, so reading "
+                           "and writing inside it will not prompt again")
         if first in ('add', 'list', 'lock', 'unlock'):
             return ('allow', None)
         if first == 'remove':
@@ -1815,7 +1907,7 @@ def is_overridable(inv, verdict, writes):
             and inv['sub'] in OVERRIDABLE_GIT)
 
 
-def classify_segment(inv, branch, policy, cwd):
+def classify_segment(inv, branch, policy, cwd, mode=''):
     """Verdict ('nongit' | 'allow' | 'ask' | 'ask-shared' | 'deny-rebase' |
     'deny-unreachable' | 'defer', reason) for one segment. 'nongit' marks a
     segment that isn't a git/gh invocation (so the whole command can't be
@@ -1833,7 +1925,8 @@ def classify_segment(inv, branch, policy, cwd):
     if inv['sub'] is None:
         return ('defer', None)            # bare `git`
     verdict, reason = classify_git(inv['sub'], inv['args'], branch, policy,
-                                   cwd, not targets_other_repo(inv['globals']))
+                                   cwd, not targets_other_repo(inv['globals']),
+                                   mode)
     # An inline-config escape hatch blocks auto-allow, but must not weaken a
     # protective `ask` (e.g. `git -c k=v commit` on main still asks).
     if verdict == 'allow' and (set(inv['globals']) & GIT_ESCAPE_HATCHES):
@@ -2116,6 +2209,11 @@ def main():
     if not isinstance(data, dict):
         return
 
+    # PostToolUse only records; it never decides, and never emits.
+    if data.get('hook_event_name') == 'PostToolUse':
+        record_worktree_grant(data)
+        return
+
     tool = data.get('tool_name') or ''
     tool_input = data.get('tool_input') or {}
     mode = data.get('permission_mode') or ''
@@ -2159,7 +2257,8 @@ def main():
                 else:
                     verdicts.append(('nongit', None, False))
             else:
-                verdict, reason = classify_segment(inv, branch, policy, cwd)
+                verdict, reason = classify_segment(inv, branch, policy, cwd,
+                                                   mode)
                 # An output redirect to a file is a write side-effect the
                 # classifier can't see (`git log --format=… > f` writes
                 # possibly-attacker-influenced content). Downgrade a would-be

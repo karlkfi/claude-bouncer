@@ -656,6 +656,11 @@ git -C "$WORK" checkout -q claude/x
 # 12. Read-only git allowlist — auto-allow on any branch.
 bash_cmd() { printf '{"tool_name":"Bash","tool_input":{"command":"%s"}}' "$1"; }
 
+bash_mode() {
+  jq -nc --arg cmd "$1" --arg mode "$2" \
+    '{tool_name: "Bash", tool_input: {command: $cmd}, permission_mode: $mode}'
+}
+
 for c in "git diff" "git log --oneline -5" "git show HEAD" "git branch" \
          "git rev-parse HEAD" "git fetch origin" "git remote -v" \
          "git stash list" "git config --get user.name" "git status && git log"; do
@@ -672,6 +677,44 @@ check "git checkout -b new -> allow" allow \
   "$(decision_for "$(bash_cmd 'git checkout -b newbranch')" "$WORK")"
 check "git worktree add -> allow" allow \
   "$(decision_for "$(bash_cmd 'git worktree add ../wt feature')" "$WORK")"
+
+# Worktree grants (Q144). `git worktree add` is safe, so this ask is not about
+# danger -- it is the only moment that carries ownership of the new checkout,
+# and approving it is what lets workspace-guard stop prompting inside it. Off
+# unless BRANCH_GUARD_WORKTREE_GRANTS=1, so every case below is paired with the
+# unset control that makes the config the cause rather than the command.
+check "[grants] git worktree add -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git worktree add ../wt feature')" "$WORK" \
+     BRANCH_GUARD_WORKTREE_GRANTS=1)"
+check "[unset] git worktree add -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git worktree add ../wt feature')" "$WORK")"
+check "[grants=0] git worktree add -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git worktree add ../wt feature')" "$WORK" \
+     BRANCH_GUARD_WORKTREE_GRANTS=0)"
+# Only `add` moves. The other worktree forms keep the verdicts they had, or the
+# flag would read as "worktree commands prompt now".
+check "[grants] git worktree list -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git worktree list')" "$WORK" \
+     BRANCH_GUARD_WORKTREE_GRANTS=1)"
+check "[grants] git worktree remove -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git worktree remove ../wt')" "$WORK" \
+     BRANCH_GUARD_WORKTREE_GRANTS=1)"
+check "[grants] git worktree prune -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git worktree prune')" "$WORK" \
+     BRANCH_GUARD_WORKTREE_GRANTS=1)"
+# No human, no grant, so no ask: confirm() would turn this into a deny, and
+# denying a safe command to capture an approval nobody can give blocks the work
+# and records nothing. Paired with the `auto` control, which does ask -- without
+# it the case would pass with the mode check removed entirely.
+check "[grants,dontAsk] git worktree add -> allow" allow \
+  "$(decision_for "$(bash_mode 'git worktree add ../wt feature' dontAsk)" \
+     "$WORK" BRANCH_GUARD_WORKTREE_GRANTS=1)"
+check "[grants,bypassPermissions] git worktree add -> allow" allow \
+  "$(decision_for "$(bash_mode 'git worktree add ../wt feature' bypassPermissions)" \
+     "$WORK" BRANCH_GUARD_WORKTREE_GRANTS=1)"
+check "[grants,auto] git worktree add -> ask" ask \
+  "$(decision_for "$(bash_mode 'git worktree add ../wt feature' auto)" \
+     "$WORK" BRANCH_GUARD_WORKTREE_GRANTS=1)"
 check "git restore --staged -> allow" allow \
   "$(decision_for "$(bash_cmd 'git restore --staged file.txt')" "$WORK")"
 check "git checkout <ambiguous> -> none (defer)" none \
@@ -1585,10 +1628,6 @@ check "[configured] leased rewrite of release/1.2 -> ask" ask \
 #
 #     bash_mode COMMAND MODE -> a Bash payload carrying a permission_mode, with
 #     COMMAND json-encoded — the reason strings here contain spaces and quotes.
-bash_mode() {
-  jq -nc --arg cmd "$1" --arg mode "$2" \
-    '{tool_name: "Bash", tool_input: {command: $cmd}, permission_mode: $mode}'
-}
 OVR="BRANCH_GUARD_OVERRIDE='reverting a superseded local change'"
 
 #     26a. The case from the issue: `git restore` discarding worktree changes.
@@ -2061,6 +2100,66 @@ git -C "$OVL" switch -q main
 check "[overlap] the break-glass does not lift a protected push -> ask" ask \
   "$(decision_for "$(push "$OVL_OVR git push origin main")" "$OVL")"
 git -C "$OVL" switch -q claude/x
+
+# --- Worktree grant recording (Q144) -----------------------------------------
+# The PreToolUse ask above and workspace-guard's exemption are two halves of one
+# contract, and each is green on its own with the other disconnected. This is
+# the join: the PostToolUse hook must WRITE the created checkout's resolved path
+# into the shared namespace, because that file is the only thing that passes
+# between the guards. Every invocation still goes through decision_for, so the
+# launcher stays the single entry point -- and `none` is exactly the assertion
+# for "a PostToolUse hook emits no decision".
+#
+# Expected paths go through nat(): the hook records a RESOLVED NATIVE path, so
+# under Git Bash on Windows it writes D:\a\... where the harness's own
+# `pwd -P` yields /d/a/.... Comparing the two forms fails on Windows alone.
+post_payload() {
+  jq -nc --arg cmd "$1" --arg cwd "$2" \
+    '{tool_name: "Bash", hook_event_name: "PostToolUse",
+      session_id: "sess-a", cwd: $cwd, tool_input: {command: $cmd}}'
+}
+grant_target() {
+  jq -r '.grants[0].target' \
+    "$1/.claude/bouncer/session-grants/sess-a.json" 2>/dev/null
+}
+grant_dir_state() {
+  [[ -e "$1/.claude/bouncer" ]] && printf 'present' || printf 'absent'
+}
+
+GRANT_HOME="$(mktemp -d "$REPO_ROOT/tmp/grant-home.XXXXXX")"
+check "[grants] PostToolUse emits no decision" none \
+  "$(decision_for "$(post_payload 'git worktree add ../wt-grant feature' "$(nat "$WORK")")" \
+     "$WORK" HOME="$GRANT_HOME" BRANCH_GUARD_WORKTREE_GRANTS=1)"
+check "[grants] PostToolUse records the created checkout, resolved" \
+  "$(nat "$(cd "$WORK" && cd .. && pwd -P)/wt-grant")" \
+  "$(grant_target "$GRANT_HOME")"
+
+# The unset control: with the flag off nothing is written at all, so the store's
+# absence is the assertion. Without it the case above would pass against a hook
+# that recorded unconditionally.
+GRANT_HOME_OFF="$(mktemp -d "$REPO_ROOT/tmp/grant-off.XXXXXX")"
+decision_for "$(post_payload 'git worktree add ../wt-off feature' "$(nat "$WORK")")" \
+  "$WORK" HOME="$GRANT_HOME_OFF" >/dev/null
+check "[unset] PostToolUse records nothing" absent \
+  "$(grant_dir_state "$GRANT_HOME_OFF")"
+
+# A command that creates no worktree mints no grant, or the recorder is keying
+# on the session rather than on what actually ran.
+GRANT_HOME_NOOP="$(mktemp -d "$REPO_ROOT/tmp/grant-noop.XXXXXX")"
+decision_for "$(post_payload 'git status' "$(nat "$WORK")")" \
+  "$WORK" HOME="$GRANT_HOME_NOOP" BRANCH_GUARD_WORKTREE_GRANTS=1 >/dev/null
+check "[grants] a non-worktree command records nothing" absent \
+  "$(grant_dir_state "$GRANT_HOME_NOOP")"
+
+# `add -b <branch> <path>` puts a branch name where the path would otherwise be.
+# Recording `topic` would grant a directory that does not exist and leave the
+# real checkout guarded, which is the silent half of getting this wrong.
+GRANT_HOME_B="$(mktemp -d "$REPO_ROOT/tmp/grant-b.XXXXXX")"
+decision_for "$(post_payload 'git worktree add -b topic ../wt-b' "$(nat "$WORK")")" \
+  "$WORK" HOME="$GRANT_HOME_B" BRANCH_GUARD_WORKTREE_GRANTS=1 >/dev/null
+check "[grants] add -b records the path, not the branch name" \
+  "$(nat "$(cd "$WORK" && cd .. && pwd -P)/wt-b")" \
+  "$(grant_target "$GRANT_HOME_B")"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 

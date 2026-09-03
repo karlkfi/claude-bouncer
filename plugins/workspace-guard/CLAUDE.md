@@ -40,6 +40,7 @@ Before introducing a new pattern or abstraction, check whether the existing `SPE
 - The `SPEC` table is the contract. Adding a guarded command means adding a row with explicit `consume` / `file_flags` / `prog` / `prog_suppressed_by` entries — do not "infer" flag behavior at runtime.
 - On any parsing uncertainty (unbalanced quotes, unknown shell construct, empty input), the hook **defers silently** (returns nothing) so normal permissions apply. Never fail closed without an explicit reason.
 - Default decision for outside-workspace paths is `ask`, not `deny`. Hard-blocking is opt-in via a local edit, documented in `README.md`.
+- **Session grants are off unless `WORKSPACE_GUARD_SESSION_GRANTS=1`, and a covered call defers — never `allow`.** The store is `lib/bouncer_grants.py` (shared; edit the root copy, `make sync`); this guard owns only what a grant *means*. `finish()` is the single exit every handler takes, so the record/suppress rules cannot drift between them: only an `ask` is remembered, and `PostToolUse` records because it fires only when the tool ran. The worktree exemption in `classify_outside` is the exception that ends in `allow`, because it says where the workspace *is* rather than withdrawing one objection — see `docs/design.md`.
 
 ### Bash (if any helper scripts are added)
 

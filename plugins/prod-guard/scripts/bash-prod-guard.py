@@ -78,6 +78,7 @@ import sys
 # plugin's `lib/` is vendored from the repository root; see scripts/sync-lib.py.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 from bouncer_parse import ASSIGNMENT_RE, PUNCT_CHARS, strip_heredoc_bodies  # noqa: E402
+from bouncer_grants import grants_path, load_grants, record_grants  # noqa: E402
 import time
 
 # ---------------------------------------------------------------------------
@@ -1185,88 +1186,28 @@ def pulumi_selected_stack(seg_env, cwd):
 # shared-state switches clobber every parallel session).
 
 SESSION_GRANT_TTL = 8 * 3600      # a grant outlives a workday session, not a resumed one
-_GRANT_FILE_MAX_AGE = 7 * 86400   # stale session files swept opportunistically
+
+# The store itself is lib/bouncer_grants.py, shared with the other guards; what
+# a grant *means* stays here, because the guards do not agree on that. Under
+# this namespace a grant is an exact prod target string.
+GRANT_NAMESPACE = 'prod-guard'
 
 
 def _session_grants_path(session_id):
-    """State file for one session's grants, or None when it can't exist
-    (no HOME, no usable session id)."""
-    home = os.environ.get('HOME')
-    if not home or not isinstance(session_id, str) or not session_id.strip():
-        return None
-    slug = re.sub(r'[^A-Za-z0-9._-]', '_', session_id.strip())[:80]
-    return os.path.join(home, '.claude', 'prod-guard', 'session-grants',
-                        slug + '.json')
+    """This guard's grant file for one session. A thin alias over the shared
+    store, kept because the store's own tests address it by this name."""
+    return grants_path(GRANT_NAMESPACE, session_id)
 
 
 def load_session_grants(session_id, now=None):
-    """The session's unexpired granted targets as a set. Any error — missing
-    file, bad JSON, wrong shape — returns the empty set: a broken store means
-    more prompts, never fewer (fail closed on the security decision)."""
-    path = _session_grants_path(session_id)
-    if path is None:
-        return set()
-    try:
-        with open(path, encoding='utf-8') as f:
-            data = json.load(f)
-        grants = data.get('grants', [])
-    except (OSError, ValueError, AttributeError):
-        return set()
-    now = time.time() if now is None else now
-    out = set()
-    for g in grants:
-        if not isinstance(g, dict):
-            continue
-        target, ts = g.get('target'), g.get('ts')
-        if isinstance(target, str) and isinstance(ts, (int, float)) \
-                and 0 <= now - ts <= SESSION_GRANT_TTL:
-            out.add(target)
-    return out
+    """The session's unexpired granted targets as a set."""
+    return load_grants(GRANT_NAMESPACE, session_id, now=now,
+                       ttl=SESSION_GRANT_TTL)
 
 
 def record_session_grants(session_id, targets, reason, now=None):
-    """Append grants for `targets` not already on record (first-grant timestamp
-    is kept — the TTL never slides). Atomic replace so a torn write can't
-    corrupt the store; any failure is silent and loses only the recording
-    (the next command re-prompts)."""
-    path = _session_grants_path(session_id)
-    if path is None or not targets:
-        return
-    now = time.time() if now is None else now
-    try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        try:
-            with open(path, encoding='utf-8') as f:
-                data = json.load(f)
-            grants = [g for g in data.get('grants', []) if isinstance(g, dict)]
-        except (OSError, ValueError, AttributeError):
-            grants = []
-        have = {g.get('target') for g in grants}
-        for t in sorted(targets):
-            if t not in have:
-                grants.append({'target': t, 'reason': reason, 'ts': now})
-        tmp = path + '.tmp'
-        with open(tmp, 'w', encoding='utf-8') as f:
-            json.dump({'grants': grants}, f)
-        os.replace(tmp, path)
-        _sweep_stale_grant_files(os.path.dirname(path), now)
-    except OSError:
-        return
-
-
-def _sweep_stale_grant_files(dirpath, now):
-    """Best-effort hygiene: drop session files old enough that their grants
-    all expired long ago."""
-    try:
-        for name in os.listdir(dirpath):
-            p = os.path.join(dirpath, name)
-            try:
-                if now - os.path.getmtime(p) > _GRANT_FILE_MAX_AGE:
-                    os.unlink(p)
-            except OSError:
-                continue
-    except OSError:
-        return
+    """Record grants for the explicit prod targets a command actually hit."""
+    record_grants(GRANT_NAMESPACE, session_id, targets, reason, now=now)
 
 
 # ---------------------------------------------------------------------------

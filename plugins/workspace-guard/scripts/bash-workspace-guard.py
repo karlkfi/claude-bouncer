@@ -19,6 +19,7 @@ from bouncer_parse import (                                    # noqa: E402
     split_operator_runs, strip_comments, strip_env_prefix,
     strip_heredoc_bodies, strip_sh_keywords,
 )
+from bouncer_grants import load_grants, record_grants  # noqa: E402
 
 # --- Literal variable propagation (issue 58) --------------------------------
 # `SP=/path; tail $SP/x` binds SP to a literal earlier in the same command
@@ -2739,6 +2740,111 @@ def emit(decision, reason):
         "permissionDecisionReason": reason}}))
 
 
+def finish(decision, reason, offenders, data):
+    """Emit a PreToolUse decision, record a PostToolUse approval, or stay quiet.
+
+    The one exit every handler takes, so the grant rules cannot drift between
+    them. Only an `ask` is ever remembered: a `deny` never reached a human, so
+    there is no approval to record, and an `allow` had nothing to object to.
+    """
+    post = data.get('hook_event_name') == 'PostToolUse'
+    if not session_grants_enabled():
+        if not post:
+            emit(decision, reason)
+        return
+    shapes = grant_shapes(offenders, data.get('cwd') or os.getcwd()) \
+        if offenders else None
+    if post:
+        # The tool ran, so an `ask` on these shapes was approved.
+        if decision == 'ask' and shapes:
+            record_grants(GRANT_NAMESPACE, data.get('session_id'), shapes,
+                          'approved outside-workspace access', now=None)
+        return
+    if decision == 'ask' and shapes:
+        granted = load_grants(GRANT_NAMESPACE, data.get('session_id'),
+                              ttl=SESSION_GRANT_TTL)
+        if shapes <= granted:
+            return                 # approved earlier this session -> defer
+    emit(decision, reason)
+
+
+# --- Session-scoped grants ---------------------------------------------------
+# A PreToolUse hook is never told whether its own `ask` was approved, so it
+# records nothing here and everything in PostToolUse, which fires only when the
+# tool actually ran. Two grant kinds, deliberately in different namespaces:
+#
+#   * shape grants (this guard's own) -- 'outside:/Users/karl/.claude' and the
+#     like, so an approval covers the directory rather than the one file, which
+#     is what stops the same question arriving 21 times a week.
+#   * worktree grants (shared with branch-guard, hence the shared namespace) --
+#     an absolute path branch-guard recorded when the operator approved the
+#     `git worktree add` that created it. Its whole subtree is then this
+#     session's to read and write.
+#
+# Both are OFF unless WORKSPACE_GUARD_SESSION_GRANTS=1: looser behaviour ships
+# opt-in and the secure default does not move. A covered call DEFERS rather than
+# returning `allow` -- an `allow` speaks for the whole command and short-circuits
+# the operator's own permission rules, which is a wider grant than the one they
+# gave.
+
+GRANT_NAMESPACE = 'workspace-guard'
+WORKTREE_NAMESPACE = 'bouncer'
+SESSION_GRANT_TTL = 8 * 3600
+
+
+def session_grants_enabled():
+    return os.environ.get('WORKSPACE_GUARD_SESSION_GRANTS') == '1'
+
+
+def _rooted(token):
+    """True when a token names a location rather than a relative step: it has
+    a drive, or it starts at a separator."""
+    drive, rest = os.path.splitdrive(token)
+    return bool(drive) or rest[:1] in ('/', os.sep)
+
+
+def grant_shape(token, cat, detail, cwd):
+    """The key an approval is remembered under: the decision's category plus
+    the directory it landed in, never the command string, which differs on
+    every call and would remember nothing. Categories the hook merely failed to
+    parse are unkeyable -- their token has no resolved home -- and return None,
+    which keeps them asking."""
+    if cat in UNPARSED_CATS:
+        return None
+    if cat == 'sibling' and detail:
+        root = detail.get('root')
+        return 'sibling:%s' % root if root else None
+    if not _rooted(token):
+        # A relative token resolves against whatever cwd the command had after
+        # any `cd`, which this function cannot see. Refusing to key one is the
+        # conservative direction: it costs a prompt, where guessing the wrong
+        # directory would grant one the operator never approved.
+        return None
+    # join(), not isabs(): on Windows a leading-slash path is DRIVE-relative,
+    # and since Python 3.13 os.path.isabs() reports it False -- which silently
+    # keyed nothing at all there, so no approval was ever remembered. Joining
+    # against cwd roots it on the right drive and is a no-op for a genuinely
+    # absolute path on either platform.
+    rp = os.path.realpath(os.path.join(cwd, token))
+    return '%s:%s' % (cat, os.path.dirname(rp))
+
+
+def granted_worktrees(session_id):
+    """Absolute paths of checkouts this session created and the operator
+    approved. branch-guard records them when it asks on the `git worktree add`;
+    this guard is the one that has to honour them, which is why they sit in a
+    namespace neither guard owns alone."""
+    if not session_grants_enabled():
+        return frozenset()
+    return frozenset(load_grants(WORKTREE_NAMESPACE, session_id,
+                                 ttl=SESSION_GRANT_TTL))
+
+
+def grant_shapes(offenders, cwd):
+    shapes = {grant_shape(tok, cat, detail, cwd) for tok, cat, detail in offenders}
+    return None if None in shapes else shapes
+
+
 # --- Shared decision core ----------------------------------------------------
 # The per-invocation config and the resolved-path classification live here, at
 # module level, so every tool handler (Bash, the Read/Grep/Glob readers, and the
@@ -2751,7 +2857,10 @@ def emit(decision, reason):
 Ctx = collections.namedtuple('Ctx', [
     'proj', 'cwd', 'session_id', 'session_tmp_root', 'session_proj_dir',
     'tmp_roots', 'tmp_allow', 'tmp_action', 'read_prefixes', 'session_wt',
-    'override', 'kill_anchor'])
+    'override', 'kill_anchor', 'worktree_grants'],
+    # Absent means no grants, which is the safe reading: a caller that has not
+    # loaded them gets today's boundary rather than a wider one.
+    defaults=(frozenset(),))
 
 
 def build_context(data):
@@ -2787,7 +2896,8 @@ def build_context(data):
         read_prefixes=allowed_read_prefixes(cwd),
         session_wt=resolve_session_worktree(proj),
         override=guard_override(),
-        kill_anchor=workspace_anchor_re(proj))
+        kill_anchor=workspace_anchor_re(proj),
+        worktree_grants=granted_worktrees(session_id))
 
 
 def path_is_outside(rp, proj):
@@ -2811,6 +2921,18 @@ def classify_outside(rp, ctx, is_read):
     # Claude Code's own per-session task-output/scratch — the agent reading back
     # its own background output, not the boundary we guard. (Q21)
     if is_session_tmp_path(rp, ctx.session_id, ctx.session_tmp_root):
+        return None
+    # A checkout this session created and the operator approved. Above the
+    # outside test, so it covers the write deny as well as the read ask: the
+    # approval was for the tree, and half a tree is no use. This is an
+    # EXEMPTION -- it puts the path in-workspace, like the session scratchpad
+    # above it -- so a bash command with nothing else outside then allows.
+    # That differs from a shape grant in `finish`, which withdraws one
+    # objection and defers, and the difference is the act rather than an
+    # inconsistency: this says where the workspace is, that says which
+    # question was already answered. (Q144)
+    if ctx.worktree_grants \
+            and any(path_at_or_under(rp, w) for w in ctx.worktree_grants):
         return None
     if not path_is_outside(rp, ctx.proj):
         return None
@@ -3749,7 +3871,7 @@ def handle_bash(data):
         decision, reason = decide(outside, ctx, bypass)
     else:
         decision, reason = "allow", "Guarded commands target workspace/pipe only"
-    emit(decision, reason)
+    finish(decision, reason, outside, data)
 
 
 def handle_edit(data):
@@ -3772,7 +3894,7 @@ def handle_edit(data):
         return                                    # in-workspace / exempt -> defer
     bypass = data.get("permission_mode") == "bypassPermissions"
     decision, reason = decide([(raw, res[0], res[1])], ctx, bypass)
-    emit(decision, reason)
+    finish(decision, reason, [(raw, res[0], res[1])], data)
 
 
 def handle_read_tool(data):
@@ -3795,7 +3917,7 @@ def handle_read_tool(data):
         return                                    # in-workspace / exempt -> defer
     bypass = data.get("permission_mode") == "bypassPermissions"
     decision, reason = decide([(raw, res[0], res[1])], ctx, bypass)
-    emit(decision, reason)
+    finish(decision, reason, [(raw, res[0], res[1])], data)
 
 
 # --- PowerShell tool --------------------------------------------------------
@@ -4975,11 +5097,11 @@ def handle_powershell(data):
     """
     ti = data.get('tool_input')
     if not isinstance(ti, dict) or not isinstance(ti.get('command'), str):
-        emit("ask", ATTRIBUTION + "could not read the PowerShell tool's "
+        finish("ask", ATTRIBUTION + "could not read the PowerShell tool's "
                     "command (tool_input.command), so nothing about this "
                     "command's file access was checked. Approve only if you "
                     "have read the command yourself, and please report this — "
-                    "the guard is meant to check every shell command.")
+                    "the guard is meant to check every shell command.", [], data)
         return
     cmd = ti['command']
     if not cmd.strip():
@@ -4993,11 +5115,16 @@ def handle_powershell(data):
         decision, reason = decide(outside, ctx, bypass)
     else:
         decision, reason = "allow", "Guarded cmdlets target workspace only"
-    emit(decision, reason)
+    finish(decision, reason, outside, data)
 
 
 def main():
     data = json.load(sys.stdin)
+    # PostToolUse exists only to record an approval, so with grants off there is
+    # nothing for it to do -- and a PostToolUse hook must never emit a decision.
+    if data.get('hook_event_name') == 'PostToolUse' \
+            and not session_grants_enabled():
+        return
     tool = data.get('tool_name') or ''
     # PowerShell is checked FIRST and never falls through. The default branch is
     # Bash handling, and routing a PowerShell command into the POSIX tokenizer

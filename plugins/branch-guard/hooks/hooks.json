@@ -7,6 +7,14 @@
           { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-python-hook.cmd\" branch-guard.py", "timeout": 60 }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-python-hook.cmd\" branch-guard.py", "timeout": 60 }
+        ]
+      }
     ]
   }
 }

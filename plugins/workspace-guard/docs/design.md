@@ -55,6 +55,14 @@ Work outside the worktree is legitimate and routine — installing a tool, editi
 
 **Ask-then-remember is what makes that possible.** A shape the operator approves is allowed for the rest of that session and asked again in the next one. The check keeps its strictness and the repetition goes, which is the only reduction that costs no boundary at all. It is session-scoped because the answer is often session-specific: whether a session may write into a given directory can legitimately differ from one run to the next, so a persistent grant would be answering a question nobody asked.
 
+### Why a remembered approval defers rather than allowing
+
+Session grants (`WORKSPACE_GUARD_SESSION_GRANTS=1`) turn the section above into a mechanism: an approval the operator has already given is not asked again for the rest of that session. The hook cannot see the answer — `PreToolUse` returns `ask` and is never told what came back — so nothing is recorded there, and a `PostToolUse` hook, which fires only when the tool actually ran, records it instead. The failure direction falls the right way: forgetting costs one more prompt, while remembering takes positive evidence that the call went through. A `deny` is never recorded, because nobody was asked.
+
+A covered call then **defers**. Returning `allow` would be a different act — the `allow`/vouching distinction the interpreter section below makes — since it speaks for the whole command and short-circuits permission rules the operator set themselves. What they approved was one prompt, and defer is the verdict that withdraws exactly that objection and no more.
+
+The worktree grant is the one exemption that does end in `allow`, and it is not the same act. It says a path is *in this workspace*, exactly as the session scratchpad and the read prefixes do, so a command with nothing else outside allows for the ordinary reason. The grant is minted by branch-guard, which asks on the `git worktree add` that created the checkout — the only moment that identifies the tree as this session's rather than a peer's, since an approval at first use cannot tell the two apart and so could never justify granting writes.
+
 ### Why defer on uncertainty
 
 Unparseable commands, commands not in `SPEC`, empty input — all return no decision. Control hands back to Claude Code's normal permission rules, i.e. the same behavior as if the hook weren't installed. This is the only fail mode that doesn't surprise the user:
