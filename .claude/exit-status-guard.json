@@ -1,0 +1,7 @@
+{
+  "_comment": "Project registry for exit-status-guard, read from .claude/ under the project root. It EXTENDS the plugin's shipped lists rather than replacing them; \"replace\": true would take full control. `backlog` and `backlog-next` render the queue and print it -- their exit status carries no verdict, so a pipe swallows nothing and the shipped `^make(\\s|$)` gate denies them for losing a status they never had. `backlog-lint` is deliberately absent: it shares the `backlog` prefix and its status IS the answer, which is why this belongs in a per-project file at all. No rule over target names can tell the two apart; only this Makefile knows which target asserts something.",
+
+  "exempt": [
+    "^make(\\s+-C\\s+\\S+)?\\s+(backlog|backlog-next)(\\s|$)"
+  ]
+}
