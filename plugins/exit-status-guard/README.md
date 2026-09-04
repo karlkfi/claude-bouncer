@@ -68,11 +68,12 @@ build-output directory like `tmp/` is commonly gitignored, and so absent from a
 fresh checkout. Where there is no scratchpad to name, the suggestion carries its
 own `mkdir -p tmp &&` instead.
 
-`set -o pipefail` earlier in the same command suppresses this, and so does
-reading `$pipestatus` (lowercase, 1-indexed), which is zsh's spelling. Reading
-`$PIPESTATUS` (uppercase) is denied on its own, gate or no gate — the array is
-a bash feature, so under a shell without it the read expands to empty and every
-test against it reads as success.
+`set -o pipefail` earlier in the same command suppresses this. Reading
+`$PIPESTATUS` is denied on its own, gate or no gate — the array is a bash
+feature, so under a shell without it the read expands to empty and every test
+against it reads as success. zsh's `$pipestatus` suppresses nothing: the array
+holds the most recent pipeline only, so a read cannot be tied to the pipeline
+it claims to recover, and under bash it expands to empty in its turn.
 
 ### 2. Backgrounded behind something that cannot carry failure
 

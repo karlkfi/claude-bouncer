@@ -801,11 +801,10 @@ def decide(cmd, background, reg, scratch='', depth=0):
             reads_var(body, 'PIPESTATUS', quotes=False) for body in heredocs):
         return with_log_path(PIPESTATUS_REASON, scratch)
 
-    # `pipefail` propagates the failure, and where the shell provides it
-    # `$pipestatus` recovers each stage's status. Neither mitigates a status
-    # the last statement discarded, so the suppression is scoped to the pipe
-    # verdict.
-    if not sets_pipefail(segs) and not reads_var(cleaned, 'pipestatus'):
+    # `pipefail` propagates the failure, so it mitigates a pipeline that
+    # follows it -- but not a status the last statement discarded, which is why
+    # the suppression is scoped to the pipe verdict.
+    if not sets_pipefail(segs):
         gate = piped_gate(segs, reg)
         if gate:
             return with_log_path(
