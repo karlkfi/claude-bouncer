@@ -31,8 +31,8 @@ is guarded, a message an operator reads changes, or a new env var or config surf
 appears. One line, in the voice of a release bullet: what changed for that person, not
 what the diff did. Open with `action required:` if upgrading needs a manual step.
 
-  Unanchored `pkill` patterns now deny. Anchor the pattern to the project root, or set
-  WORKSPACE_GUARD_OVERRIDE for a deliberate cross-workspace kill.
+  Unanchored `pkill` patterns now deny. Anchor the pattern to the project root, or prefix
+  the command with WORKSPACE_GUARD_OVERRIDE=<reason> for a deliberate cross-workspace kill.
 
 Answer `None` when no decision moves and nothing an operator sees changes: tests,
 refactors, internal parsing cleanups that preserve every decision, docs, CI, backlog rows.

@@ -870,14 +870,64 @@ def sibling_checkout_for(rp, session):
     return (co['root'], _branch_label(co['admin']))
 
 
-def guard_override():
-    """Reason string from ``WORKSPACE_GUARD_OVERRIDE``, or None when unset.
+OVERRIDE_VAR = 'WORKSPACE_GUARD_OVERRIDE'
 
-    Downgrades the two cross-workspace denies to ``ask`` — a write into a
-    sibling checkout, and an unanchored process kill — for work that
-    deliberately reaches past this session's own checkout."""
-    v = (os.environ.get('WORKSPACE_GUARD_OVERRIDE') or '').strip()
+
+def env_override():
+    """Reason string from ``WORKSPACE_GUARD_OVERRIDE`` in the hook's own
+    environment, or None when unset.
+
+    Downgrades the cross-workspace denies to ``ask`` — a write into a sibling
+    checkout, a write into a sibling session's scratch, and an unanchored
+    process kill — for work that deliberately reaches past this session's own
+    checkout. This is the operator's route: a settings.json ``env`` block, or a
+    shell export before `claude` started."""
+    v = (os.environ.get(OVERRIDE_VAR) or '').strip()
     return v or None
+
+
+def command_override(cmd):
+    """Reason from a ``WORKSPACE_GUARD_OVERRIDE=<reason>`` prefix on the shell
+    command string, or None when it is absent or empty.
+
+    This is the agent's route, and until Q156 it did not exist: the hook runs as
+    a child of Claude Code rather than of the shell the command runs in, so an
+    inline `NAME=value cmd` prefix never reaches :func:`env_override` — while
+    the prefix is exactly what every deny hands back as the way out. The deny
+    was therefore emitted unchanged on the one route it advertised, and an agent
+    applying the repair spent a round trip to be told the same thing.
+
+    Only the LEADING assignment run of a segment counts, which is what stops the
+    name disarming anything when it is merely mentioned: a real prefix sits in
+    command position, while the name in a commit message, a grep pattern or an
+    `echo` argument is a positional and matches nothing here. An empty value
+    does not count either — the point of the prefix is that the caller says why,
+    and a bare `WORKSPACE_GUARD_OVERRIDE=` would be the switch-it-off form.
+
+    prod-guard, exit-status-guard and branch-guard each keep this rule locally
+    and return three different things (a dict, a bool, a reason string), so the
+    primitive they genuinely share is `ASSIGNMENT_RE`, which is already in
+    ``lib/``. A fourth copy of the *rule* is not a fourth caller of one
+    function; worth re-asking if a fifth appears."""
+    tokens = tokenize_command(cmd or '')
+    if tokens is None:
+        return None                               # unbalanced quotes -> no read
+    prefix = OVERRIDE_VAR + '='
+    at_head = True                                # start of a segment
+    for tok in tokens:
+        if tok in SEPARATORS:
+            at_head = True
+            continue
+        if not at_head:
+            continue
+        if tok in SH_KEYWORDS:
+            continue                              # `if`, `time`, `{`, ...
+        if not ASSIGNMENT_RE.match(tok):
+            at_head = False                       # past the assignment run
+            continue
+        if tok.startswith(prefix) and tok[len(prefix):].strip():
+            return tok[len(prefix):].strip()
+    return None
 
 
 # Per-command parsing spec:
@@ -2511,13 +2561,37 @@ def entry_operand_mask(tokens):
     return mask
 
 
-def build_sibling_hint(siblings, override=None):
+def override_hint(what, prefixable):
+    """The sentence a cross-workspace deny closes with: how to reach the
+    override from HERE.
+
+    `what` names the work the override is for. An inline
+    `WORKSPACE_GUARD_OVERRIDE=<reason> cmd` prefix is the form an agent can
+    apply in the turn it was denied — and it needs a command string to sit on,
+    which an `Edit`, a `Write` or a `NotebookEdit` does not have. Naming it
+    there sent the caller at a route their own tool could not take, so those
+    are pointed at the one that works instead (Q156).
+    """
+    if prefixable:
+        return (" For %s prefix the command with "
+                "WORKSPACE_GUARD_OVERRIDE=<reason> to downgrade this to a "
+                "prompt." % what)
+    return (" For %s re-issue this through the Bash tool prefixed with "
+            "WORKSPACE_GUARD_OVERRIDE=<reason>, which downgrades it to a "
+            "prompt — this tool has no command string to carry the prefix, and "
+            "a variable assigned inside the session never reaches the hook."
+            % what)
+
+
+def build_sibling_hint(siblings, override=None, prefixable=False):
     """One-line guidance for writes into a sibling checkout of the same repo.
 
     `siblings` is a list of `(token, detail)` where `detail` carries the
     offending checkout `root`, its `branch`, and the `corrected` path under the
     session's own checkout (same relative path). When `override` is set the
     write is downgraded to a prompt rather than blocked, so the wording adjusts.
+    `prefixable` says whether this invocation has a command string the override
+    can ride on; see :func:`override_hint`.
     """
     seen, parts = set(), []
     for tok, d in siblings:
@@ -2538,12 +2612,11 @@ def build_sibling_hint(siblings, override=None):
     else:
         lead = ("Sibling-checkout write(s) blocked: writing into a different "
                 "checkout of this repo lands your change on the wrong branch. ")
-        tail = (" For deliberate cross-checkout work set "
-                "WORKSPACE_GUARD_OVERRIDE=<reason> to downgrade this to a prompt.")
+        tail = override_hint("deliberate cross-checkout work", prefixable)
     return lead + body + tail
 
 
-def build_kill_hint(kills, override=None):
+def build_kill_hint(kills, override=None, prefixable=False):
     """One-line guidance for a process kill with no workspace anchor.
 
     `kills` is a list of `(token, detail)` where `detail` carries the kill
@@ -2593,13 +2666,12 @@ def build_kill_hint(kills, override=None):
             fix = ("Fix: run `pgrep -fl <pattern>` and kill the pid(s) you "
                    "meant, or put this workspace's path in the pattern "
                    "(`%s/…`)." % root)
-        tail = (" " + fix + " For a deliberate cross-workspace kill set "
-                "WORKSPACE_GUARD_OVERRIDE=<reason> to downgrade this to a "
-                "prompt.")
+        tail = " " + fix + override_hint(
+            "a deliberate cross-workspace kill", prefixable)
     return lead + body + tail
 
 
-def build_crosssession_hint(crosses, scratch, override=None):
+def build_crosssession_hint(crosses, scratch, override=None, prefixable=False):
     """One-line guidance for writes into a sibling session's scratch dir.
 
     `crosses` is a list of `(token, detail)` where `detail` carries the
@@ -2633,8 +2705,7 @@ def build_crosssession_hint(crosses, scratch, override=None):
                "own scratchpad isn't there to steer at."
                % (scratch.rstrip('/') or 'tmp'))
     return (lead + body + " " + fix
-            + " For a deliberate cross-session write set "
-            "WORKSPACE_GUARD_OVERRIDE=<reason> to downgrade this to a prompt.")
+            + override_hint("a deliberate cross-session write", prefixable))
 
 
 def offender_display(tok, rp):
@@ -2650,7 +2721,7 @@ def offender_display(tok, rp):
     return '%s -> %s' % (tok, rp)
 
 
-def build_reason(offenders, scratch_hint='', override=None):
+def build_reason(offenders, scratch_hint='', override=None, prefixable=False):
     """Build the permissionDecisionReason for a blocked command.
 
     `offenders` is a list of `(token, category[, detail])` items from
@@ -2695,12 +2766,12 @@ def build_reason(offenders, scratch_hint='', override=None):
 
     hints = []
     if siblings:
-        hints.append(build_sibling_hint(siblings, override))
+        hints.append(build_sibling_hint(siblings, override, prefixable))
     if kills:
-        hints.append(build_kill_hint(kills, override))
+        hints.append(build_kill_hint(kills, override, prefixable))
     if crosses:
         hints.append(build_crosssession_hint(crosses, scratch_dir_name(),
-                                             override))
+                                             override, prefixable))
     if buckets['hosttemp']:
         hints.append(
             "Host-wide temp path(s): "
@@ -2857,13 +2928,15 @@ def grant_shapes(offenders, cwd):
 Ctx = collections.namedtuple('Ctx', [
     'proj', 'cwd', 'session_id', 'session_tmp_root', 'session_proj_dir',
     'tmp_roots', 'tmp_allow', 'tmp_action', 'read_prefixes', 'session_wt',
-    'override', 'kill_anchor', 'worktree_grants'],
-    # Absent means no grants, which is the safe reading: a caller that has not
-    # loaded them gets today's boundary rather than a wider one.
-    defaults=(frozenset(),))
+    'override', 'kill_anchor', 'worktree_grants', 'prefixable'],
+    # Absent means no grants and no command string, which is the safe reading
+    # of each: a caller that has not loaded grants gets today's boundary rather
+    # than a wider one, and one that supplied no command gets the deny wording
+    # for a caller that has no command to put a prefix on.
+    defaults=(frozenset(), False))
 
 
-def build_context(data):
+def build_context(data, cmd=None):
     """Resolve the shared per-invocation context from the hook payload.
 
     Fields (all resolved once so the handlers can't drift):
@@ -2878,7 +2951,14 @@ def build_context(data):
       * ``read_prefixes`` — prefixes always allowed for READS (never writes).
       * ``session_wt`` — the session's own checkout, for the sibling-checkout
         deny; a no-op unless the session is itself a linked worktree.
-      * ``override`` — WORKSPACE_GUARD_OVERRIDE reason, or None.
+      * ``override`` — WORKSPACE_GUARD_OVERRIDE reason, or None. Read off
+        ``cmd``'s leading assignment run first and the hook's own environment
+        second, so the inline prefix every deny hands back is the route that
+        works (Q156). ``cmd`` is the shell string for the two shell tools and
+        absent for the native file tools, which have none.
+      * ``prefixable`` — whether this invocation HAS a command string, so a
+        deny can name the inline prefix rather than a route the caller cannot
+        take from an ``Edit`` or a ``Write``.
       * ``kill_anchor`` — compiled regex a ``pkill``/``killall`` pattern must
         match to count as scoped to this workspace (issue 125).
     """
@@ -2895,7 +2975,8 @@ def build_context(data):
         tmp_action=host_temp_action(),
         read_prefixes=allowed_read_prefixes(cwd),
         session_wt=resolve_session_worktree(proj),
-        override=guard_override(),
+        override=command_override(cmd) or env_override(),
+        prefixable=cmd is not None,
         kill_anchor=workspace_anchor_re(proj),
         worktree_grants=granted_worktrees(session_id))
 
@@ -3038,7 +3119,8 @@ def decide(offenders, ctx, bypass):
                               ctx.proj, scratch_dir_name(),
                               session_scratchpad(ctx.session_id,
                                                  ctx.session_proj_dir)),
-                          override=ctx.override)
+                          override=ctx.override,
+                          prefixable=ctx.prefixable)
     return decision, ATTRIBUTION + reason
 
 
@@ -3108,6 +3190,39 @@ def _unstripped_subst_bodies(cmd, subs):
                                                            own_level_only=True)):
         raw.setdefault(strip_heredoc_bodies(body), body)
     return [raw.get(b, b) for b in subs]
+
+
+def tokenize_command(cmd):
+    r"""Shell tokens for a command string, or None when the quoting is unbalanced.
+
+    `\n` is a punctuation char so a newline command boundary surfaces as a
+    token (it is otherwise eaten as whitespace, merging the commands on either
+    side). Removing it from `whitespace` stops shlex re-swallowing it; quoted
+    newlines stay inside their word token regardless. The runs this produces
+    (`;\n`, `|\n`, ...) are split back apart by the caller.
+
+    Heredoc bodies are stripped from the raw string BEFORE shlex (see
+    strip_heredoc_bodies) so body text — which is arbitrary data, possibly with
+    unbalanced quotes — never reaches the tokenizer. Comments are then stripped
+    (see strip_comments) and shlex's own comment handling is disabled — it would
+    swallow the newline after a comment and merge the next line into the
+    commented command's group. Heredoc stripping runs first so an unbalanced
+    quote in a body can't throw off strip_comments' own quote tracking for the
+    rest of the command.
+
+    One function rather than two so :func:`command_override` reads the same
+    tokens the boundary check does: an override the two disagreed about would
+    be granted for a string the guard parsed some other way.
+    """
+    try:
+        cleaned = strip_comments(strip_heredoc_bodies(cmd))
+        lex = shlex.shlex(cleaned, posix=True, punctuation_chars=';()<>|&\n')
+        lex.whitespace_split = True
+        lex.whitespace = lex.whitespace.replace('\n', '')
+        lex.commenters = ''
+        return glue_dollar_paren(split_operator_runs(list(lex)))
+    except ValueError:
+        return None
 
 
 def analyze_command(cmd, ctx, base_cwd, depth=0):
@@ -3183,27 +3298,8 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
     if not cmd.strip():
         return [], False, KillFacts(None, None, [])
 
-    try:
-        # `\n` is a punctuation char so a newline command boundary surfaces as
-        # a token (it is otherwise eaten as whitespace, merging the commands on
-        # either side). Removing it from `whitespace` stops shlex re-swallowing
-        # it; quoted newlines stay inside their word token regardless. The runs
-        # this produces (`;\n`, `|\n`, ...) are split back apart below.
-        # Heredoc bodies are stripped from the raw string BEFORE shlex (see
-        # strip_heredoc_bodies) so body text — which is arbitrary data, possibly
-        # with unbalanced quotes — never reaches the tokenizer. Comments are then
-        # stripped (see strip_comments) and shlex's own comment handling is
-        # disabled — it would swallow the newline after a comment and merge the
-        # next line into the commented command's group. Heredoc stripping runs
-        # first so an unbalanced quote in a body can't throw off strip_comments'
-        # own quote tracking for the rest of the command.
-        cleaned = strip_comments(strip_heredoc_bodies(cmd))
-        lex = shlex.shlex(cleaned, posix=True, punctuation_chars=';()<>|&\n')
-        lex.whitespace_split = True
-        lex.whitespace = lex.whitespace.replace('\n', '')
-        lex.commenters = ''
-        tokens = glue_dollar_paren(split_operator_runs(list(lex)))
-    except ValueError:
+    tokens = tokenize_command(cmd)
+    if tokens is None:
         return [], False, KillFacts(None, None, [])   # unbalanced quotes -> defer
 
     # Each group is a `(cmd_tokens, redir_targets, persists, pipe)` tuple: a
@@ -3818,7 +3914,7 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
 
 def handle_bash(data):
     cmd = (data.get('tool_input') or {}).get('command', '') or ''
-    ctx = build_context(data)
+    ctx = build_context(data, cmd)
     if not cmd.strip():
         return
     outside, guarded = analyze_command(cmd, ctx, ctx.cwd)
@@ -5106,6 +5202,11 @@ def handle_powershell(data):
     cmd = ti['command']
     if not cmd.strip():
         return
+    # `cmd` is deliberately NOT passed: PowerShell has no `NAME=value cmd`
+    # prefix form, so reading one off this string would grant an override on a
+    # token that is a positional there. `prefixable` stays False with it, which
+    # is what points these denies at the Bash form instead of a prefix that has
+    # nowhere to sit.
     ctx = build_context(data)
     outside, guarded = ps_analyze_command(cmd, ctx, ctx.cwd)
     if not outside and not guarded:

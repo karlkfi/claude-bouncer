@@ -1241,8 +1241,10 @@ flowing, avoid triggering it:
   checkout's path.** A write (bash or `Edit`/`Write`) into the primary checkout
   or another worktree of the same repo is **denied**: it would land your change
   on the wrong branch. Use the same relative path under your session root. For
-  deliberate cross-checkout work, set `WORKSPACE_GUARD_OVERRIDE=<reason>` to
-  downgrade the deny to a prompt.
+  deliberate cross-checkout work, prefix the command with
+  `WORKSPACE_GUARD_OVERRIDE=<reason>` to downgrade the deny to a prompt. An
+  `Edit`/`Write` has no command string to carry the prefix, so re-issue the
+  write through the Bash tool with it.
 - **Never kill a process by an unanchored pattern.** `pkill`/`killall` match
   every checkout on the host, so `pkill -f "make check"` or `pkill -f ginkgo`
   kills whatever another session is running — both are **denied**. Run
@@ -1257,8 +1259,8 @@ flowing, avoid triggering it:
   Stop-Process`. On Windows, `taskkill /IM <name>` and `taskkill /FI <filter>`
   are denied from either shell; find the process with
   `tasklist /FI "IMAGENAME eq <name>"` and kill it with `taskkill /PID <pid>`,
-  which is never blocked. For a deliberate cross-workspace kill, set
-  `WORKSPACE_GUARD_OVERRIDE=<reason>`.
+  which is never blocked. For a deliberate cross-workspace kill, prefix the
+  command with `WORKSPACE_GUARD_OVERRIDE=<reason>`.
 - **Routing the same pattern through pids doesn't help.**
   `pgrep -f ginkgo | xargs kill`, `kill $(pgrep -f ginkgo)`, and
   `ps … | grep ginkgo | awk '{print $1}' | xargs kill` are denied on the same
@@ -1422,26 +1424,45 @@ Two denies fire on work that reaches past this session's own checkout: a write
 into a sibling checkout of the same repo (see
 [Worktree-aware sibling-checkout deny](#worktree-aware-sibling-checkout-deny)),
 and a process kill with no workspace anchor (see
-[Unanchored process-kill deny](#unanchored-process-kill-deny)). One env var tunes
-both, read at hook time (no restart needed):
+[Unanchored process-kill deny](#unanchored-process-kill-deny)). One name tunes
+both, and it is read from two places:
 
-| Env var | Default | Effect |
+| Where | Reaches | Effect |
 | --- | --- | --- |
-| `WORKSPACE_GUARD_OVERRIDE` | (empty) | When set to a non-empty reason string, downgrades the sibling-checkout deny, the cross-session scratch-write deny, and the unanchored-kill deny to `ask`, for work that deliberately reaches another checkout or session. The reason is echoed back in the prompt. |
+| `WORKSPACE_GUARD_OVERRIDE=<reason>` as a command prefix | that one Bash call | Downgrades the sibling-checkout deny, the cross-session scratch-write deny, and the unanchored-kill deny to `ask`, for work that deliberately reaches another checkout or session. The reason is echoed back in the prompt. |
+| `WORKSPACE_GUARD_OVERRIDE` in the hook's own environment | every call in the session | The same downgrade, held open for as long as it is set. |
 
 `WORKSPACE_GUARD_OVERRIDE` is the one knob that *loosens* this guard, so it's
 empty by default and opt-in. The denies are the secure default: they self-heal in
 one agent round trip, whereas an approvable prompt invites the reflexive "yes"
 that lands the change on the wrong branch, or kills the wrong process. Scope the
-override to the moment you actually need it (e.g. one command), not the whole
-session.
+override to the moment you actually need it, which is what the prefix form is
+for:
+
+```bash
+WORKSPACE_GUARD_OVERRIDE="porting a fix to the release branch" cp fix.py ../wt-b/
+```
+
+Only a segment's **leading** assignment run counts, so the name is inert
+everywhere it is merely mentioned — quoted in a commit message, echoed into a
+pipe, or passed as a `grep` pattern — and an empty value (`WORKSPACE_GUARD_OVERRIDE=`)
+is not an override at all, because the point of the prefix is that you say why.
+
+`Edit`, `Write`, `MultiEdit`, `NotebookEdit` and the `PowerShell` tool have no
+command string to carry a prefix. Their denies say so and point at the Bash form;
+the environment route below covers them for a whole session.
 
 ### Setting these variables
 
-The hook reads its environment on every invocation, so `export`ing a variable in
-your shell takes effect on the next command. To make one stick, put it in the
-`env` block of a Claude Code `settings.json`; the edit applies to sessions
-started after it.
+The hook runs as a child of Claude Code, not of the shell your commands run in,
+so **`export`ing a variable inside a session does not reach it** — each Bash call
+is its own shell and none of them is the hook's parent.
+`WORKSPACE_GUARD_OVERRIDE` is the exception, and only in its prefix form above,
+which the hook reads off the command string rather than the environment.
+
+Everything else is set from outside a session: `export` it in the shell you
+launch `claude` from, or — to make one stick — put it in the `env` block of a
+Claude Code `settings.json`, which applies to sessions started after the edit.
 
 ```json
 {
