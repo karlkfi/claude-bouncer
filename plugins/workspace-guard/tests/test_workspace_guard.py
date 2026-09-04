@@ -5847,6 +5847,48 @@ class SiblingCheckoutTests(unittest.TestCase):
         self.assertIn("WORKSPACE_GUARD_OVERRIDE", r)
         self.assertIn("deliberate sync", r)
 
+    # --- the two ways out get equal standing (Q155) -------------------------
+
+    def test_bash_deny_names_both_routes_and_says_which_is_which(self):
+        # Leading with the same-relative-path rewrite is right for an accidental
+        # cross-checkout write and wrong for a session that made the second
+        # worktree on purpose — there the corrected path names a file it does
+        # not want. Which case it is turns on intent the hook cannot read, so
+        # both routes are named and neither is promoted.
+        r = self._reason(self._bash("cp root.txt %s"
+                                    % sh(os.path.join(self.main, "root.txt"))))
+        self.assertIn("Which way out is right turns on which tree you meant.", r)
+        self.assertIn("For this session's own, write to the in-session path "
+                      "above.", r)
+        self.assertIn("For a write meant to land in the other checkout, prefix "
+                      "the command with WORKSPACE_GUARD_OVERRIDE", r)
+
+    def test_bash_deny_states_the_corrected_path_without_prescribing_it(self):
+        # Still named — it is the accidental case's whole repair — but as a
+        # fact, so the pair below can present both routes evenly.
+        r = self._reason(self._bash("cp root.txt %s"
+                                    % sh(os.path.join(self.main, "root.txt"))))
+        self.assertIn(os.path.join(self.wt, "root.txt"), r)
+        self.assertNotIn("under this session's checkout instead", r)
+
+    def test_edit_deny_pairs_the_routes_with_the_tool_it_has(self):
+        # Same pairing, second route swapped for the one an Edit can take.
+        r = self._reason(self._edit("Edit", os.path.join(self.main, "root.txt")))
+        self.assertIn("For this session's own, write to the in-session path "
+                      "above.", r)
+        self.assertIn("For a write meant to land in the other checkout, "
+                      "re-issue this through the Bash tool", r)
+
+    def test_prompting_variant_does_not_send_the_write_elsewhere(self):
+        # The operator has just said the other tree is the one they meant, so
+        # steering them back into this one contradicts the override they set.
+        r = self._reason(self._bash(
+            "cat /dev/null > %s" % sh(os.path.join(self.main, "root.txt")),
+            env_extra={"WORKSPACE_GUARD_OVERRIDE": "porting"}))
+        self.assertIn("prompting because", r)
+        self.assertIn(os.path.join(self.wt, "root.txt"), r)     # still named
+        self.assertNotIn("instead", r)
+
     # --- Bash: the inline prefix the deny advertises (Q156) -----------------
 
     def test_bash_inline_override_prefix_downgrades_deny_to_ask(self):
