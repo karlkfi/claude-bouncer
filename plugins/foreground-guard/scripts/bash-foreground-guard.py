@@ -644,17 +644,56 @@ def analyze_class_a(raw, cfg, depth=0):
 # Class B analysis
 # ---------------------------------------------------------------------------
 
-def shell_noexec(argv):
-    """True when the interpreter options in `argv` carry `-n` (noexec): the
-    shell parses the script and executes nothing, so the segment can never be
-    slow however it is registered. Only the option words ahead of the script
-    or the `-c` body are read, so `bash gate.sh -n` — where `-n` belongs to
-    the script — is still a real run. `-o noexec` is not read here; that form
-    already loses its segment to the option peel below, for the wrong reason."""
-    for tok in argv[1:]:
-        if tok == '--' or tok == '-' or not tok.startswith('-'):
-            return False
-        if not tok.startswith('--') and 'n' in tok[1:]:
+# Interpreter options that consume the following word, which is what tells an
+# option's argument from the script. Measured against GNU bash 5.3.15: the
+# argument is a separate token and mandatory, and a letter takes it wherever it
+# sits in the cluster, so `bash -ox errexit gate.sh` runs `gate.sh` (Q149).
+# There is no `--rcfile=path` form; bash rejects it as an invalid option.
+SHELL_OPT_ARG_LETTERS = frozenset('coO')
+SHELL_OPT_ARG_WORDS = frozenset({'--rcfile', '--init-file'})
+
+
+def split_shell_options(argv):
+    """Split an interpreter argv into the shell's own options and what follows.
+
+    Returns `(opts, rest)`: `opts` pairs each option word with the separate
+    argument it consumes, or None where it consumes none, and `rest` is the
+    argv from the script word on. Reading stops at `--`, at `-`, and at the
+    first non-option, so a `-n` past the script name belongs to the script.
+    `+x` is an option too — bash accepts the `+` forms at invocation."""
+    opts = []
+    i = 1
+    while i < len(argv):
+        tok = argv[i]
+        if tok == '-' or tok == '--':
+            i += 1
+            break
+        if len(tok) < 2 or tok[0] not in '-+':
+            break
+        if tok.startswith('--'):
+            takes_arg = tok in SHELL_OPT_ARG_WORDS
+        else:
+            takes_arg = bool(SHELL_OPT_ARG_LETTERS & set(tok[1:]))
+        if takes_arg and i + 1 < len(argv):
+            opts.append((tok, argv[i + 1]))
+            i += 2
+        else:
+            opts.append((tok, None))
+            i += 1
+    return opts, argv[i:]
+
+
+def shell_noexec(opts):
+    """True when the interpreter's own options carry noexec: the shell parses
+    the script and executes nothing, so the segment can never be slow however
+    it is registered. `opts` holds only the words ahead of the script or the
+    `-c` body, so `bash gate.sh -n` — where `-n` belongs to the script — is
+    still a real run. `-o noexec` counts (Q138); `+o noexec` and `+n` turn
+    noexec back off, so those are real runs."""
+    for opt, arg in opts:
+        if opt[0] != '-' or opt.startswith('--'):
+            continue
+        if 'n' in opt[1:] or ('o' in opt[1:] and arg == 'noexec'):
             return True
     return False
 
@@ -679,12 +718,14 @@ def simple_commands(raw, depth=0):
         if not argv:
             continue
         if os.path.basename(argv[0]) in SHELL_NAMES:
-            if shell_noexec(argv):
+            opts, rest = split_shell_options(argv)
+            if shell_noexec(opts):
                 continue  # parse-only: nothing under it runs
             body = None
-            for i, tok in enumerate(argv[1:-1], start=1):
-                if tok == '-c':
-                    body = argv[i + 1]
+            for opt, arg in opts:
+                if arg is not None and opt.startswith('-') \
+                        and not opt.startswith('--') and 'c' in opt[1:]:
+                    body = arg
                     break
             if body is not None:
                 sub = simple_commands(body, depth + 1)
@@ -692,9 +733,7 @@ def simple_commands(raw, depth=0):
                     return None
                 out += sub
                 continue
-            argv = argv[1:]  # `bash scripts/gate.sh`: the script is the command
-            while argv and argv[0].startswith('-'):
-                argv = argv[1:]
+            argv = rest  # `bash scripts/gate.sh`: the script is the command
             if not argv:
                 continue
         elif os.path.basename(argv[0]) == 'eval':

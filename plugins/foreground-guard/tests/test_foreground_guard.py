@@ -647,6 +647,9 @@ class SlowCommandPositionTests(unittest.TestCase):
         self.assert_runs("bash -c 'scripts/gate.sh --all'")
         self.assert_runs("/repo/scripts/gate.sh")
         self.assert_runs("timeout 600 scripts/gate.sh")
+        self.assert_runs("bash -- scripts/gate.sh")
+        self.assert_runs("bash - scripts/gate.sh")
+        self.assert_runs("bash -xc 'scripts/gate.sh --all'")
 
     def test_parse_only_run_defers(self):
         # `-n` is noexec: the shell parses the script and runs nothing, so it
@@ -667,6 +670,43 @@ class SlowCommandPositionTests(unittest.TestCase):
         # these execute and must stay denied.
         self.assert_runs("bash scripts/gate.sh -n")
         self.assert_runs("bash -c 'scripts/gate.sh -n'")
+
+    def test_interpreter_option_with_argument_still_runs(self):
+        # The option takes a separate word, so the script sits one token
+        # further right than a bare peel looks (Q149).
+        self.assert_runs("bash -o errexit scripts/gate.sh")
+        self.assert_runs("bash -o pipefail scripts/gate.sh")
+        self.assert_runs("bash -O extglob scripts/gate.sh")
+        self.assert_runs("bash +o histexpand scripts/gate.sh")
+        self.assert_runs("bash +O extglob scripts/gate.sh")
+        self.assert_runs("bash --rcfile /dev/null scripts/gate.sh")
+        self.assert_runs("bash --init-file /dev/null scripts/gate.sh")
+        self.assert_runs("sh -o errexit scripts/gate.sh")
+        # The letter takes its argument wherever it sits in the cluster.
+        self.assert_runs("bash -xo errexit scripts/gate.sh")
+        self.assert_runs("bash -ox errexit scripts/gate.sh")
+        # `-n` here is --rcfile's argument, not noexec.
+        self.assert_runs("bash --rcfile -n scripts/gate.sh")
+
+    def test_plus_options_still_run(self):
+        # bash takes the `+` forms at invocation, and `+o noexec` turns
+        # noexec back off, so all three run the gate (Q149).
+        self.assert_runs("bash +x scripts/gate.sh")
+        self.assert_runs("bash +e scripts/gate.sh")
+        self.assert_runs("bash +o noexec scripts/gate.sh")
+
+    def test_noexec_through_an_option_argument_defers(self):
+        # noexec reached through an option argument: the shell parses and
+        # runs nothing, so these defer however the gate is registered (Q138).
+        self.assert_mention("bash -o noexec scripts/gate.sh")
+        self.assert_mention("bash -xo noexec scripts/gate.sh")
+        self.assert_mention("bash -no errexit scripts/gate.sh")
+        self.assert_mention("bash --rcfile /dev/null -n scripts/gate.sh")
+
+    def test_script_eaten_as_an_option_argument_defers(self):
+        # The option consumes the script itself, so bash runs nothing.
+        self.assert_mention("bash -o scripts/gate.sh")
+        self.assert_mention("bash --rcfile scripts/gate.sh")
 
     def test_mentions_do_not_match(self):
         self.assert_mention('grep -n "read -p" scripts/gate.sh')
