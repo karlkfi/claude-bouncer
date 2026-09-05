@@ -946,6 +946,70 @@ class StripShKeywordsTests(unittest.TestCase):
         )
 
 
+class CommandOverrideTests(unittest.TestCase):
+    """`WORKSPACE_GUARD_OVERRIDE=<reason>` read off the command string (Q156).
+
+    The env route was the only one the hook ever read, so every one of these
+    passes trivially against a reader that ignores the string: they assert a
+    reason comes back, which only a command-string read can produce.
+    """
+
+    def test_leading_prefix_returns_the_reason(self):
+        self.assertEqual(
+            guard.command_override(
+                'WORKSPACE_GUARD_OVERRIDE="deliberate sync" cp a b'),
+            "deliberate sync")
+
+    def test_prefix_on_a_later_segment(self):
+        # Each segment gets its own assignment run, as in the other guards.
+        self.assertEqual(
+            guard.command_override(
+                'cd x && WORKSPACE_GUARD_OVERRIDE=porting cp a b'),
+            "porting")
+
+    def test_after_another_assignment_in_the_same_run(self):
+        self.assertEqual(
+            guard.command_override('LC_ALL=C WORKSPACE_GUARD_OVERRIDE=r cp a b'),
+            "r")
+
+    def test_after_a_shell_keyword(self):
+        self.assertEqual(
+            guard.command_override('if WORKSPACE_GUARD_OVERRIDE=r cp a b; then'),
+            "r")
+
+    def test_empty_value_is_not_an_override(self):
+        # The point of the prefix is that the caller says why; a bare
+        # assignment would be the switch-it-off form.
+        self.assertIsNone(guard.command_override('WORKSPACE_GUARD_OVERRIDE= cp a b'))
+        self.assertIsNone(
+            guard.command_override('WORKSPACE_GUARD_OVERRIDE="   " cp a b'))
+
+    def test_positional_is_not_an_override(self):
+        # Past the leading assignment run, so it is an argument. This is the
+        # asymmetry that keeps the name inert everywhere it is merely mentioned.
+        self.assertIsNone(
+            guard.command_override('cp a b WORKSPACE_GUARD_OVERRIDE=r'))
+        self.assertIsNone(
+            guard.command_override('git commit -m "WORKSPACE_GUARD_OVERRIDE=r"'))
+        self.assertIsNone(
+            guard.command_override('echo WORKSPACE_GUARD_OVERRIDE=r | sh'))
+        self.assertIsNone(
+            guard.command_override('grep -r WORKSPACE_GUARD_OVERRIDE=r .'))
+
+    def test_inside_a_heredoc_body_is_not_an_override(self):
+        # Body text is stripped before the tokenizer, so data never reads as
+        # command position.
+        self.assertIsNone(guard.command_override(
+            "cat <<EOF\nWORKSPACE_GUARD_OVERRIDE=r cp a b\nEOF"))
+
+    def test_absent_and_unparseable(self):
+        self.assertIsNone(guard.command_override("cp a b"))
+        self.assertIsNone(guard.command_override(""))
+        self.assertIsNone(guard.command_override(None))
+        self.assertIsNone(                       # unbalanced quotes -> no read
+            guard.command_override("WORKSPACE_GUARD_OVERRIDE=r cp 'a b"))
+
+
 class AllowedDeviceTests(unittest.TestCase):
     """Allowlist of well-known device / FD paths."""
 
@@ -5783,6 +5847,52 @@ class SiblingCheckoutTests(unittest.TestCase):
         self.assertIn("WORKSPACE_GUARD_OVERRIDE", r)
         self.assertIn("deliberate sync", r)
 
+    # --- Bash: the inline prefix the deny advertises (Q156) -----------------
+
+    def test_bash_inline_override_prefix_downgrades_deny_to_ask(self):
+        # The route every deny names. The hook is a child of Claude Code rather
+        # than of the shell, so before Q156 this reached `env_override` as an
+        # unset variable and denied with the reason byte-identical to the bare
+        # command's — the agent applied the repair and was told the same thing.
+        target = os.path.join(self.main, "root.txt")
+        out = self._bash('WORKSPACE_GUARD_OVERRIDE="deliberate sync" '
+                         "cp root.txt %s" % sh(target))
+        self.assertEqual(self._decision(out), "ask")
+        self.assertIn("deliberate sync", self._reason(out))
+
+    def test_bash_inline_override_prefix_on_a_later_segment(self):
+        target = os.path.join(self.main, "root.txt")
+        out = self._bash("cd . && WORKSPACE_GUARD_OVERRIDE=porting "
+                         "cp root.txt %s" % sh(target))
+        self.assertEqual(self._decision(out), "ask")
+        self.assertIn("porting", self._reason(out))
+
+    def test_bash_override_name_as_an_argument_disarms_nothing(self):
+        # Only a segment's LEADING assignment run counts, so the name in a
+        # commit message, an `echo` or a grep pattern is a positional and lifts
+        # nothing. This is the property that makes the prefix safe to read.
+        target = os.path.join(self.main, "root.txt")
+        for cmd in (
+                "cp root.txt %s WORKSPACE_GUARD_OVERRIDE=r" % sh(target),
+                'echo "WORKSPACE_GUARD_OVERRIDE=r" && cp root.txt %s'
+                % sh(target),
+                'git commit -m "WORKSPACE_GUARD_OVERRIDE=r" && cp root.txt %s'
+                % sh(target)):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self._decision(self._bash(cmd)), "deny")
+
+    def test_bash_empty_inline_override_disarms_nothing(self):
+        target = os.path.join(self.main, "root.txt")
+        out = self._bash("WORKSPACE_GUARD_OVERRIDE= cp root.txt %s" % sh(target))
+        self.assertEqual(self._decision(out), "deny")
+
+    def test_bash_deny_names_the_prefix_route(self):
+        out = self._bash("cp root.txt %s"
+                         % sh(os.path.join(self.main, "root.txt")))
+        self.assertEqual(self._decision(out), "deny")
+        self.assertIn("prefix the command with WORKSPACE_GUARD_OVERRIDE",
+                      self._reason(out))
+
     # --- Bash: no-op when the session isn't in a worktree -------------------
 
     def test_bash_main_session_write_into_worktree_is_ask_not_deny(self):
@@ -5818,6 +5928,15 @@ class SiblingCheckoutTests(unittest.TestCase):
                          "tool_input": {"notebook_path":
                                         os.path.join(self.main, "nb.ipynb")}})
         self.assertEqual(self._decision(out), "deny")
+
+    def test_edit_deny_names_a_route_this_tool_can_take(self):
+        # An Edit/Write has no command string, so the prefix has nowhere to sit
+        # and naming it sends the caller at a route their own tool cannot take
+        # (Q156). Point them at the one that works instead.
+        r = self._reason(self._edit("Edit", os.path.join(self.main, "root.txt")))
+        self.assertIn("re-issue this through the Bash tool prefixed with "
+                      "WORKSPACE_GUARD_OVERRIDE", r)
+        self.assertNotIn("prefix the command with", r)
 
     def test_edit_override_downgrades_to_ask(self):
         out = self._edit("Write", os.path.join(self.main, "root.txt"),
@@ -6181,6 +6300,21 @@ class UnanchoredKillEndToEndTests(unittest.TestCase):
         self.assertIn("pgrep -fl", r)
         self.assertIn(self.workspace, r)
         self.assertIn("WORKSPACE_GUARD_OVERRIDE", r)
+
+    def test_inline_override_prefix_downgrades_to_ask(self):
+        # `ctx.override` is resolved once for the whole invocation, so reading
+        # the prefix reaches every cross-workspace deny, not just the sibling
+        # one it was filed against (Q156).
+        r = self._decision(
+            'WORKSPACE_GUARD_OVERRIDE="stuck harness" pkill -f ginkgo', "ask")
+        self.assertIn("stuck harness", r)
+
+    def test_override_name_in_the_pattern_disarms_nothing(self):
+        self._decision('pkill -f WORKSPACE_GUARD_OVERRIDE=r', "deny")
+
+    def test_deny_names_the_prefix_route(self):
+        r = self._decision('pkill -f ginkgo', "deny")
+        self.assertIn("prefix the command with WORKSPACE_GUARD_OVERRIDE", r)
 
     def test_override_downgrades_to_ask(self):
         out = self._out('pkill -f ginkgo',
@@ -9415,6 +9549,18 @@ class PowerShellUnanchoredKillEndToEndTests(PowerShellKillFixture,
         self.assertIn(self.workspace, r)
         self.assertIn("WORKSPACE_GUARD_OVERRIDE", r)
         self.assertNotIn("pgrep", r)      # the bash rewrite, wrong shell
+
+    def test_command_string_never_grants_an_override_here(self):
+        # PowerShell has no `NAME=value cmd` prefix form, so the command string
+        # is deliberately not read for an override: setting the variable the
+        # PowerShell way sets it in the tool's shell, which is not the hook's
+        # parent, so it must still deny. The tail then names a route this caller
+        # can take rather than a prefix that has nowhere to sit (Q156).
+        r = self._decision(
+            "$env:WORKSPACE_GUARD_OVERRIDE='r'; Stop-Process -Name node", "deny")
+        self.assertIn("re-issue this through the Bash tool prefixed with "
+                      "WORKSPACE_GUARD_OVERRIDE", r)
+        self.assertNotIn("prefix the command with", r)
 
     def test_override_downgrades_to_ask(self):
         out = self._out("Stop-Process -Name node",

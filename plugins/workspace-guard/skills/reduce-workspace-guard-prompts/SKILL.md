@@ -111,7 +111,7 @@ Which bullets to walk through, by category:
 
 The last three are denies rather than prompts in the default configuration, so
 they surface a command that was blocked outright — say so when you quote the
-bullet, and name the env var that softens it (`WORKSPACE_GUARD_TMP_ACTION`,
+bullet, and name the knob that softens it (`WORKSPACE_GUARD_TMP_ACTION`,
 `WORKSPACE_GUARD_OVERRIDE`) rather than presenting the fix as the only route.
 
 Quote those bullets rather than summarizing them. They carry exact paths,
