@@ -11,7 +11,7 @@ Subcommands:
   next      the top ready item, as a session kickoff prompt
   lint      check the store (frontmatter, ids, ranks, references)
   claims    check every id this branch adds holds a claim on the remote
-  metrics   replay git history into flow metrics
+  metrics   replay git history into flow metrics, per item or per label
   migrate   convert a legacy `docs/STATUS.md` Queue/Deferred table into items
   rank      compute an order key for an insertion
 
@@ -39,6 +39,14 @@ ID_RE = re.compile(r"^Q\d+$")
 # stays true forever. Matching both made the store noisier with every item it
 # cleared, which is backwards for a store that is supposed to drain.
 ITEM_LINK_RE = re.compile(r"\[[^\]]*\]\((?:\./)?(Q\d+)\.md(?:#[^)]*)?\)")
+# The wiki form, which the store format does not carry. It is not a third kind
+# of thing between a link and a mention: nothing the skill recommends renders
+# it, so it reaches a reader as literal brackets while reading to its author as
+# a reference — and the reference checks above, keyed on the href, never see
+# it. Reporting the syntax is what keeps that from being silent; widening the
+# link pattern to match it instead would leave the rendered page broken and
+# call the store clean.
+WIKI_LINK_RE = re.compile(r"\[\[(Q\d+)\]\]")
 # What a blocked row waits on is what it opens with — `Blocked by [Q3](Q3.md)`,
 # or the same sentence in prose where the blocker is not an item. Anchored on
 # purpose: an id quoted anywhere in the note is an example, and a check an
@@ -49,6 +57,24 @@ BLOCKER_RE = re.compile(r"[\s*]*Blocked[\s*]+(?:by|on)[\s*]+\S")
 # so a quoted id or link is neither a reference nor a blocker. The site build
 # honours the same escape.
 CODE_SPAN_RE = re.compile(r"`[^`]*`")
+# The three routes a row carrying an open question names to its answer. One
+# pattern rather than a literal in each rule that reads it: `question-route`
+# and `orphan-route` below are inverses over the same marker set, so a route
+# added to one and not the other leaves a state neither rule can see.
+#
+# The colon is load-bearing rather than cosmetic. Without it `Measure` is a
+# prefix of `Measured`, and `**Measured 2026-…**` opens paragraphs all over a
+# store that records its own provenance — question-route passed two live rows
+# on that alone before the anchor went in, both of them naming no route at all.
+ROUTE_RE = re.compile(r"\*\*(Settles|Measure|Ask):")
+# How an answered row says its route was taken and is spent. The marker stays,
+# because it records where the answer came from, and it has to stop reading as
+# live or every answered row is flagged for the rest of its life. Spanning it
+# is already taken and means something else — a route the row retired as wrong
+# — so the mark goes inside the bold, where it renders as prose and no longer
+# matches ROUTE_RE. Same job as EXHIBIT_PREFIX one check over: the state is
+# declared by the row rather than guessed at from a neighbouring paragraph.
+ANSWERED_MARK = "(answered)"
 
 # A citation into the tree, in `grep -n` output order: the path, the line, and
 # optionally the line's own text. The third field is what makes rot detectable —
@@ -103,8 +129,13 @@ NOTE_CLASSES = (
     "dangling-link",     # a note links an item file the store does not hold
     "blocked-opener",    # a blocked item's note does not open with its blocker
     "deferred-trigger",  # a deferred item names no condition that revives it
+    "question-route",    # an open-question item names no route to an answer
+    "orphan-route",      # a route marker outlived the label that justified it
     "stale-citation",    # a `file.ext:N` pointer that no longer finds its line
+    "wikilink-ref",      # an item referenced as `[[QN]]`, a form nothing renders
     "empty-store",       # no items loaded, the usual cause being a wrong --store
+    "untracked-item",    # a row on disk that no commit would carry
+    "index-unread",      # git could not say what the store's commit would ship
 )
 
 # The bottom of the space: head 'A' takes 26 digits after it. It is reserved
@@ -130,10 +161,10 @@ SMALLEST_INTEGER = "A" + DIGITS[0] * 26
 # lengths 2..27 upward, 'Z'..'A' the same downward, and uppercase sorting below
 # lowercase is what puts the descending magnitudes underneath.
 #
-# The algebra is implemented twice, so a change here is half a change. The
-# shared vectors in `rank-vectors.tsv` are what hold the two sides to one
-# scheme — change them first, and read that file's header for which second
-# implementation this is and where it stands.
+# The vectors in `rank-vectors.tsv` are the one check on this algebra that
+# `queue.py` did not produce — every expected key is derived from the scheme
+# above rather than read off a run. A change here is half a change: settle the
+# scheme in those vectors first, and read that file's header before either.
 
 def integer_length(head):
     if "a" <= head <= "z":
@@ -312,7 +343,7 @@ def rank_series(count):
 
 class Item:
     __slots__ = ("id", "rank", "labels", "status", "size", "target",
-                 "title", "notes", "path")
+                 "title", "notes", "prose", "path")
 
     def __init__(self, **kw):
         for k in self.__slots__:
@@ -322,13 +353,19 @@ class Item:
         # Ties break by numeric id so two sessions that never saw each other
         # cannot produce an order that depends on which side merged first.
         #
-        # A tie is the intended outcome rather than drift, which is why nothing
-        # reports one. `rank_between` returns a key in an open interval, so two
-        # sessions minting the same key passed the same neighbours: both asked
-        # for "somewhere between these two" and neither specified an order
-        # against the other, having never seen it. Any third item holds a
-        # distinct key and sorts strictly outside both, so tied items stay
-        # adjacent however the tie falls, and every placement still holds.
+        # A tie is the intended outcome rather than drift, which is why no
+        # check over the store reports one. `rank_between` returns a key in an
+        # open interval, so two sessions minting the same key passed the same
+        # neighbours: both asked for "somewhere between these two" and neither
+        # specified an order against the other, having never seen it. Any third
+        # item holds a distinct key and sorts strictly outside both, so tied
+        # items stay adjacent however the tie falls, and every placement still
+        # holds.
+        #
+        # `rank` warns when it mints a held key, which is not that check moved
+        # into the mint. It covers the other case: one caller minting against a
+        # store it can already see, where the collision is knowable before the
+        # row exists and the caller is still free to ask for something else.
         return (self.rank or "", int(self.id[1:]) if ID_RE.match(self.id or "") else 0)
 
 
@@ -373,19 +410,37 @@ def read_item(path):
     data, body, problems = _parse_frontmatter(text, path.name)
     if data is None:
         return None, problems
-    title, notes = "", ""
+    # `prose` is `notes` with the code taken out, and it has to be built here
+    # rather than by a pass over `notes` afterwards. A backtick span opens and
+    # closes on one line; `notes` is every line joined into one string, so by
+    # the time a check sees it the line boundaries are gone and a single
+    # unbalanced backtick pairs across the whole row. The text after it is then
+    # stripped in the wrong places and the genuinely spanned text is left
+    # exposed — silently, and as something that reads as a finding: a marker a
+    # row deliberately quoted comes back as a live one, naming a real row.
+    # Fenced blocks go the same way, and are tracked rather than matched
+    # because the delimiters still have to reach `notes`, which is what
+    # write_item rebuilds a body from.
+    title, notes, prose = "", "", ""
+    fenced = False
     for line in body.split("\n"):
         if line.startswith("# ") and not title:
             title = line[2:].strip()
         elif title and line.strip():
             notes += (" " if notes else "") + line.strip()
+            if line.lstrip().startswith("```"):
+                fenced = not fenced
+            elif not fenced:
+                bare = CODE_SPAN_RE.sub("", line).strip()
+                if bare:
+                    prose += (" " if prose else "") + bare
     labels = data.get("labels") or []
     if isinstance(labels, str):
         labels = [labels]
     item = Item(id=data.get("id"), rank=data.get("rank"), labels=labels,
                 status=data.get("status"), size=data.get("size"),
                 target=data.get("target") or None, title=title,
-                notes=notes.strip(), path=path)
+                notes=notes.strip(), prose=prose.strip(), path=path)
     return item, problems
 
 
@@ -536,6 +591,10 @@ def cmd_lint(args):
             print(f"queue: note: {msg}", file=sys.stderr)
 
     seen_id = {}
+    # Every citation the marker exempted. The exemption is a waiver, and one
+    # nothing counts is one a session can reach for to silence real drift,
+    # since the legitimate use and the abuse both report nothing.
+    exhibits = []
     ids = {i.id for i in items}
     for i in items:
         where = i.path.name
@@ -562,7 +621,7 @@ def cmd_lint(args):
             problems.append(
                 f"{where}: title is {len(i.title)} characters (max {TITLE_MAX}); "
                 f"move the detail into the body, which has no cap")
-        prose = CODE_SPAN_RE.sub("", i.notes or "")
+        prose = i.prose or ""
         # A dangling link in the opener is a different defect from one further
         # down: the blocker shipped and the frontmatter still says the row
         # waits. Re-pointing the href, which is what the generic message asks
@@ -571,6 +630,12 @@ def cmd_lint(args):
         waits_on = (set(ITEM_LINK_RE.findall(opener))
                     if i.status == "blocked" and BLOCKER_RE.match(prose)
                     else set())
+        for ref in WIKI_LINK_RE.findall(prose):
+            note("wikilink-ref",
+                 f"{where} refers to {ref} as [[{ref}]], which the store "
+                 f"format does not carry and no index build renders. Write it "
+                 f"as [{ref}]({ref}.md) if it is a reference, or as a bare "
+                 f"{ref} if it is a mention of history")
         for ref in ITEM_LINK_RE.findall(prose):
             if ref not in ids and ref != i.id:
                 if ref in waits_on:
@@ -607,11 +672,55 @@ def cmd_lint(args):
         # re-runs, so one with no stated trigger can never come back by a check.
         # A note rather than an error: whether the prose names a real condition
         # is a reader's call, and the table linter does not fail on it either.
+        # Colon-anchored for the reason the question-route rule below gives:
+        # unanchored, `Event` and `Decision` are prefixes of `Eventually` and
+        # `Decisions`, and a bolded one of those would satisfy the check. No
+        # row in this store exploits that today — every deferred row uses the
+        # colon form — so this is closing the idiom, not fixing a live miss.
         if i.status == "deferred" and not re.search(
-                r"\*\*(Demand|Event|Decision)", i.notes or ""):
+                r"\*\*(Demand|Event|Decision):", i.notes or ""):
             note("deferred-trigger",
                  f"{where} is deferred but names no trigger; say what would "
                  f"revive it")
+        # The same shape one label over, and for the same reason: a marked row
+        # that names no route to its answer is free to write and free to leave,
+        # which is how the class stops draining. Measured over this store's
+        # history before the rule existed: 37 items carried the label and one
+        # had it taken off. A note rather than an error, because whether the
+        # named route is a real one is a reader's call.
+        if OPEN_QUESTION in i.labels and not ROUTE_RE.search(i.notes or ""):
+            note("question-route",
+                 f"{where} carries {OPEN_QUESTION} but names no route; say "
+                 f"whether it Settles from the repo, needs a Measure, or is "
+                 f"an Ask for the maintainer")
+        # The inverse, and the quiet half. `question-route` fires on a state a
+        # groom's route hunt turns up anyway; a live marker whose label has gone
+        # reads to that same hunt as the unmarked, unrouted row it is looking
+        # for. That is the direction that empties the pile a groom batches its
+        # questions out of, and an answered row caught by it is re-routed and
+        # dispatched at a question somebody already settled.
+        #
+        # Three states, not two, which is what the rule turns on. A live route
+        # carries the label. A retired one is spanned, saying the row was routed
+        # that way and should not have been. An answered one keeps the marker
+        # unspanned as provenance and marks it ANSWERED_ROUTE — a row that
+        # simply drops the label and leaves the marker live is the defect, and
+        # it is indistinguishable from an answered row until the row says so.
+        #
+        # A note rather than an error, for `blocked-opener`'s reason: the two
+        # repairs are opposite and the files cannot say which. Over `prose`
+        # rather than the raw note, unlike the rule above — there a quoted
+        # marker is a miss on a row `render --label` still lists, while here it
+        # is a false fire on a row about the convention, with nothing to
+        # correct it.
+        if OPEN_QUESTION not in i.labels and ROUTE_RE.search(prose):
+            note("orphan-route",
+                 f"{where} names a live route and carries no {OPEN_QUESTION}. "
+                 f"If the question was answered, write {ANSWERED_MARK} into the "
+                 f"marker — `**Ask {ANSWERED_MARK}:**` — which keeps it as the "
+                 f"record of where the answer came from. If the route is still "
+                 f"open, put the label back. If it was retired rather than "
+                 f"taken, span it")
         # A `file.ext:N` pointer rots silently as the code moves, and which of
         # the four things below went wrong decides what a reader has to do about
         # it, so each says so. All four warn rather than fail: a bare filename is
@@ -622,6 +731,9 @@ def cmd_lint(args):
             # Marked as an exhibit, so every check below would report a defect
             # the row is deliberately showing — and hand over the repair.
             if notes[:m.start()].endswith(EXHIBIT_PREFIX):
+                exhibits.append(
+                    f"{where} holds {EXHIBIT_PREFIX}{m.group(0)} "
+                    f"(marked exhibit, not checked)")
                 continue
             path, line, fragment = m.group(1), int(m.group(2)), m.group(3)
             target = next((base / path for base in (store.parent, store.parent.parent)
@@ -666,11 +778,66 @@ def cmd_lint(args):
         note("empty-store",
              f"no Q*.md under {store}; either the backlog is empty or --store "
              f"is pointed at the wrong directory")
+    # Every check above read the working tree, which is the store as it stands
+    # rather than the store a commit would carry. The two come apart while a
+    # deletion is unstaged, and the disk is the narrower view: a row still in
+    # the index is one this lint never opened and the commit still ships.
+    #
+    # Only `lint` reconciles them. Every other subcommand here manipulates the
+    # store in place — `render`, `next`, `rank` and `migrate` all legitimately
+    # run over a tree with unstaged work in it — and this is the one used as a
+    # gate, which is the only caller for whom the difference decides anything.
+    #
+    # An empty disk does not skip this. That is the sharpest form of the
+    # defect rather than the case with nothing to say: every row deleted and
+    # none of the deletions staged leaves the whole store in the index, graded
+    # by nothing above, and the note that fires instead offers "the backlog is
+    # empty" while git still holds every row.
+    on_disk = {path.name for path in store.glob("Q*.md")}
+    indexed, why = _indexed_names(store)
+    if indexed is None:
+        # Only the disclosure is gated on the disk, because it counts the rows
+        # that were graded against it. With none there is nothing to disclose,
+        # and `empty-store` above has already said what happened.
+        #
+        # Not silence, and not a store-wide alarm either. A read that could not
+        # be taken has to read differently from one that came back clean, or
+        # the gate that inspected nothing is indistinguishable from the gate
+        # that found nothing.
+        if on_disk:
+            note("index-unread",
+                 f"{why}, so {len(on_disk)} row(s) were graded against the "
+                 f"disk alone; a row held only by the index would be unseen")
+    else:
+        for name in sorted(indexed - on_disk):
+            problems.append(
+                f"{name}: tracked but not on disk, so nothing above read it "
+                f"and a plain `git commit` still ships it. Stage the deletion, "
+                f"or restore the file")
+        for name in sorted(on_disk - indexed):
+            note("untracked-item",
+                 f"{name} is on disk and git does not list it, so it is "
+                 f"ignored and no commit carries it; the checks above graded a "
+                 f"row the store will not ship")
+    # On request rather than by default: the count below raises the question
+    # and this answers it, at a length an ordinary run does not want. A `grep`
+    # for the prefix is not the same reading — it finds prose *about* the
+    # marker as readily as a citation carrying it.
+    if args.show_exhibits:
+        for e in exhibits:
+            print(f"queue: {e}", file=sys.stderr)
     for p in problems:
         print(f"queue: {p}", file=sys.stderr)
     if problems:
         return 1
-    print(f"queue: {len(items)} item(s) OK")
+    # Disclosed only where there is something to disclose. An unconditional
+    # count would change the line every store prints, in every repository
+    # holding a copy of this file, and a zero discloses nothing; what has to
+    # stop is a store carrying exemptions reading like one carrying none.
+    # Telling a silent zero from a copy too old to count is what
+    # --show-exhibits is for, since that copy rejects the flag.
+    held = f" ({len(exhibits)} marked exhibit(s) held back)" if exhibits else ""
+    print(f"queue: {len(items)} item(s) OK{held}")
     return 0
 
 
@@ -686,7 +853,15 @@ def cmd_metrics(args):
     store = Path(args.store or store_dir()).resolve()
     root = Path(_git(["rev-parse", "--show-toplevel"], store).strip()).resolve()
     rel = store.relative_to(root)
-    log = _git(["log", "--diff-filter=AD", "--name-status", "--date=short",
+    if args.labels:
+        return _label_flow(root, rel)
+    # --no-renames, or the identity below is not one. `--diff-filter=AD` drops
+    # an `R`, so a `git mv` inside the store closes a row that was never filed
+    # and the printed classes out-sum `filed`. Splitting the rename into the
+    # D+A pair this filter already reads is what makes the guarantee hold.
+    # `_label_flow` replays the same store and has always passed it.
+    log = _git(["log", "--no-renames", "--diff-filter=AD", "--name-status",
+                "--date=short",
                 "--pretty=format:C\t%H\t%ad\t%s", "--", str(rel)], root)
     filed, closed, reason = {}, {}, {}
     date, subject = None, ""
@@ -717,17 +892,33 @@ def cmd_metrics(args):
         return 0
     done = [q for q in closed if reason.get(q) == "complete"]
     pruned = [q for q in closed if reason.get(q) in ("prune", "merge")]
+    # The residual of the two lists above rather than a third verb match, so
+    # the printed classes always sum to `filed` and no reason can go unshown.
+    # Matching on a name is what left the largest class off this summary: the
+    # walk classes anything it cannot read as `removed`, and `defer` besides,
+    # and neither list held either. A residual cannot drift from the lists it
+    # is taken from.
+    accounted = set(done) | set(pruned)
+    other = [q for q in closed if q not in accounted]
     spans = sorted(_days(filed[q], closed[q]) for q in closed if q in filed)
     open_now = [q for q in filed if q not in closed]
     print(f"filed        {len(filed)}")
     print(f"completed    {len(done)}")
     print(f"pruned       {len(pruned)}")
+    # Printed at zero as well, which the conditional it replaces would not do.
+    # A reader cannot tell an absent line from a line reading 0, and telling
+    # those apart is the whole of what this class is for.
+    print(f"removed      {len(other)}  (no verb in the deleting commit subject)")
     print(f"open         {len(open_now)}")
     if spans:
         print(f"cycle time   median {spans[len(spans) // 2]}d  "
               f"mean {sum(spans) // len(spans)}d")
     if closed:
-        print(f"prune ratio  {100 * len(pruned) // len(closed)}%")
+        # Named, because the ratio divides by every closed item while the
+        # classes above are read as the removal count — which is how one
+        # summary came to carry two different denominators.
+        print(f"prune ratio  {100 * len(pruned) // len(closed)}% "
+              f"of {len(closed)} closed")
     return 0
 
 
@@ -736,6 +927,114 @@ def _days(a, b):
     ya, ma, da = (int(x) for x in a.split("-"))
     yb, mb, db = (int(x) for x in b.split("-"))
     return (date(yb, mb, db) - date(ya, ma, da)).days
+
+
+def _blobs(oids, root):
+    """oid -> text, in one `cat-file` rather than a call per version.
+
+    Bytes rather than text=True: the header gives a byte count, so slicing a
+    decoded stream cuts in the wrong place the first time an item holds a
+    character outside ASCII.
+    """
+    if not oids:
+        return {}
+    out = subprocess.run(["git", "cat-file", "--batch"], cwd=root, check=True,
+                         input=("\n".join(sorted(oids)) + "\n").encode(),
+                         capture_output=True).stdout
+    blobs, at = {}, 0
+    while at < len(out):
+        end = out.index(b"\n", at)
+        head = out[at:end].split(b" ")
+        at = end + 1
+        if len(head) != 3:                    # "<oid> missing"
+            continue
+        size = int(head[2])
+        blobs[head[0].decode()] = out[at:at + size].decode("utf-8", "replace")
+        at += size + 1
+    return blobs
+
+
+# `render --label` reports the stock, and a stock cannot show whether a class is
+# draining: two moves change it with no question settled, an item filed already
+# carrying the label and an item that shipped still carrying it. Both are terms
+# here, so a store settling questions as fast as it meets them reads
+# differently from one that has never settled any. Generic over labels, because
+# the vocabulary is the store's rather than this file's.
+#
+# Labels come out of each version's parsed frontmatter, never off the +/- lines
+# of a diff: stripped of its context a one-token bullet in an item's prose body
+# is indistinguishable from a labels entry, and comparing parsed sets also
+# makes a reordered labels list the no-op it is rather than a gain and a loss.
+def _label_flow(root, rel):
+    raw = _git(["log", "--reverse", "--diff-filter=AMD", "--raw", "--no-abbrev",
+                "--no-renames", "--pretty=format:", "--", str(rel)], root)
+    entries = []
+    for line in raw.split("\n"):
+        if not line.startswith(":"):
+            continue
+        meta, _, path = line.partition("\t")
+        item = Path(path).stem
+        if not ID_RE.match(item):
+            continue
+        fields = meta.split()
+        entries.append((fields[4][0], fields[2], fields[3], item))
+
+    # git writes an all-zero oid for the side an add or a delete does not have.
+    text = _blobs({b for _, old, new, _ in entries
+                   for b in (old, new) if set(b) != {"0"}}, root)
+    unreadable = []
+
+    def labels_at(oid):
+        if set(oid) == {"0"}:
+            return set()
+        data, _, _ = _parse_frontmatter(text.get(oid, ""), oid)
+        if data is None:
+            unreadable.append(oid)
+            return set()
+        got = data.get("labels") or []
+        return {got} if isinstance(got, str) else set(got)
+
+    filed, gained, settled, closed, carried = {}, {}, {}, {}, {}
+
+    def bump(counter, labels):
+        for label in labels:
+            counter[label] = counter.get(label, 0) + 1
+
+    for status, old, new, item in entries:
+        before, after = labels_at(old), labels_at(new)
+        if status == "D":
+            bump(closed, before)
+            carried.pop(item, None)
+            continue
+        if status == "A":
+            bump(filed, after)
+        else:
+            bump(gained, after - before)
+            bump(settled, before - after)
+        carried[item] = after
+
+    now = {}
+    for labels in carried.values():
+        bump(now, labels)
+
+    labels = set(filed) | set(gained) | set(settled) | set(closed)
+    if unreadable:
+        # A version whose frontmatter would not parse contributes no labels, so
+        # without this line a store that changed format reads as one nobody has
+        # ever labelled. Both are zeros; only one of them is a finding.
+        print(f"queue: {len(unreadable)} item version(s) had no readable "
+              "frontmatter and were skipped", file=sys.stderr)
+    if not labels:
+        print("no labels in this store's history")
+        return 0
+    width = max(len("label"), max(len(x) for x in labels))
+    print(f"{'label':<{width}}  filed-with  gained  settled  "
+          "closed-carrying  now")
+    for label in sorted(labels, key=lambda x: (-now.get(x, 0), x)):
+        print(f"{label:<{width}}  {filed.get(label, 0):>10}  "
+              f"{gained.get(label, 0):>6}  {settled.get(label, 0):>7}  "
+              f"{closed.get(label, 0):>15}  {now.get(label, 0):>3}")
+    return 0
 
 
 # --- claims ---------------------------------------------------------------
@@ -779,6 +1078,36 @@ def _git_read(args, cwd, timeout=None):
     except (OSError, subprocess.SubprocessError):
         return "", False
     return p.stdout, p.returncode == 0
+
+
+def _indexed_names(store):
+    """(names, None), or (None, why) for a reading that could not be taken.
+
+    `--cached --others --exclude-standard` is the list the gates around this
+    one build: the index is what a plain `git commit` ships, so a checker
+    reading anything narrower can go green over a file the commit carries.
+
+    An unreadable answer and an empty one are both refusals rather than an
+    empty set, and the empty one is the case that matters. A store git knows
+    nothing about — a tree pulled out with `git archive` and never staged is
+    the one that exists — answers with no files at all, and an empty set
+    reconciled against a full disk reports every row as untracked. That reads
+    as a store-wide defect where the truth is that no reading was taken.
+    """
+    out, ok = _git_read(["ls-files", "--cached", "--others",
+                         "--exclude-standard", "-z", "--", "."], store)
+    if not ok:
+        # What made the read fail is not established here — no repository, no
+        # git — so the message names the consequence rather than a cause.
+        return None, f"git could not read {store}"
+    # Top level only, matching the glob every other read of this store uses:
+    # `Path.match` anchors from the right, so an unfiltered `Q*.md` would take
+    # a nested `sub/Q1.md` that `load` never sees.
+    names = {name for name in out.split("\0")
+             if name and "/" not in name and Path(name).match("Q*.md")}
+    if not names:
+        return None, f"git lists no Q*.md under {store}"
+    return names, None
 
 
 def _ids_at(rev, rel, root):
@@ -977,11 +1306,36 @@ def cmd_rank(args):
     items, _ = load(args.store or store_dir())
     ranks = [i.rank for i in items if i.rank]
     if args.head:
-        print(rank_between(None, ranks[0] if ranks else None))
+        key = rank_between(None, ranks[0] if ranks else None)
     elif args.tail:
-        print(rank_between(ranks[-1] if ranks else None, None))
+        key = rank_between(ranks[-1] if ranks else None, None)
     else:
-        print(rank_between(args.after, args.before))
+        key = rank_between(args.after, args.before)
+    print(key)
+    # The mint is algebra over its bounds and reads nothing: `--head` and
+    # `--tail` take their bound from the store above, and `--after`/`--before`
+    # take theirs from the caller, so a bound naming a gap the store has since
+    # filled yields a key some row already holds. The store is loaded either
+    # way, so the check costs a comparison.
+    #
+    # Every path, not the one-bounded one the report was written from. Two
+    # bounds look like they pin the gap and do not: `--after a6f --before a6i`
+    # mints `a6g` whatever sits between them. `--head` and `--tail` are safe by
+    # construction rather than by check, and including them is what stops the
+    # next bound added here arriving unchecked.
+    #
+    # A warning, and the key still goes to stdout. A shared rank is legal — see
+    # `Item.sort_key` for why the store resolves rather than rejects it — so
+    # this is not a defect being caught. It is the one thing the caller cannot
+    # see, told to the one party who can still choose differently, which is why
+    # it is here and not in `lint`, where a tie is deliberately unreported.
+    held = [i.path.name for i in items if i.rank == key]
+    if held:
+        print(f"queue: rank: {key} is already held by {', '.join(held)}. That "
+              f"is legal — the store breaks the tie by id and both rows stay "
+              f"adjacent — but if you meant to land clear of it, re-run with "
+              f"bounds either side of the slot you want",
+              file=sys.stderr)
     return 0
 
 
@@ -1021,6 +1375,11 @@ def main(argv=None):
                          "line itself. --strict promotes a note's severity and "
                          "never this window, so a gate wanting an exact check "
                          "asks for both.")
+    li.add_argument("--show-exhibits", action="store_true",
+                    help="list the citations held back by the "
+                         f"`{EXHIBIT_PREFIX}` prefix, with the row carrying "
+                         "each. The success line counts them; this names "
+                         "them.")
     li.set_defaults(fn=cmd_lint)
 
     c = sub.add_parser(
@@ -1042,7 +1401,15 @@ def main(argv=None):
     c.set_defaults(fn=cmd_claims)
 
     m = sub.add_parser("metrics", help="flow metrics from git history")
-    m.add_argument("--events", action="store_true")
+    mode = m.add_mutually_exclusive_group()
+    mode.add_argument("--events", action="store_true",
+                      help="one row per item: filed, closed, days, verb")
+    mode.add_argument("--labels", action="store_true",
+                      help="per-label transitions rather than the stock — how "
+                           "many items were filed already carrying each label, "
+                           "gained it later, had it taken off, and shipped "
+                           "still carrying it. `now` is replayed to HEAD and "
+                           "equals `render --label LABEL` over a clean tree.")
     m.set_defaults(fn=cmd_metrics)
 
     g = sub.add_parser("migrate", help="convert a legacy STATUS.md table")
