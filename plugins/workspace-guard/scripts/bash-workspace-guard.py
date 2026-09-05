@@ -2573,10 +2573,10 @@ def override_hint(what, prefixable):
     are pointed at the one that works instead (Q156).
     """
     if prefixable:
-        return (" For %s prefix the command with "
+        return (" For %s, prefix the command with "
                 "WORKSPACE_GUARD_OVERRIDE=<reason> to downgrade this to a "
                 "prompt." % what)
-    return (" For %s re-issue this through the Bash tool prefixed with "
+    return (" For %s, re-issue this through the Bash tool prefixed with "
             "WORKSPACE_GUARD_OVERRIDE=<reason>, which downgrades it to a "
             "prompt — this tool has no command string to carry the prefix, and "
             "a variable assigned inside the session never reaches the hook."
@@ -2592,6 +2592,16 @@ def build_sibling_hint(siblings, override=None, prefixable=False):
     write is downgraded to a prompt rather than blocked, so the wording adjusts.
     `prefixable` says whether this invocation has a command string the override
     can ride on; see :func:`override_hint`.
+
+    The corrected path is stated rather than prescribed, and the two ways out
+    are named as a pair. Leading with the rewrite is right for an accidental
+    write and wrong for a session that made the second worktree on purpose —
+    there the corrected path names a file it does not want, so the promoted
+    route is the one it must ignore (Q155). Which case this is turns on intent
+    the hook cannot see, and Q144 settled that it should not try: it asks the
+    caller instead of guessing. The prompting variant drops the tail, and its
+    body improves by the same change — telling an operator who has just set the
+    override to write somewhere else contradicts the override.
     """
     seen, parts = set(), []
     for tok, d in siblings:
@@ -2600,8 +2610,8 @@ def build_sibling_hint(siblings, override=None, prefixable=False):
             continue
         seen.add(key)
         parts.append(
-            "`%s` is inside another checkout of this repo (%s, on branch %s) — "
-            "write to `%s` under this session's checkout instead"
+            "`%s` is inside another checkout of this repo (%s, on branch %s), "
+            "whose same relative path here is `%s`"
             % (tok, d.get('root'), d.get('branch') or '(unknown)',
                d.get('corrected')))
     body = "; ".join(parts) + "."
@@ -2612,7 +2622,10 @@ def build_sibling_hint(siblings, override=None, prefixable=False):
     else:
         lead = ("Sibling-checkout write(s) blocked: writing into a different "
                 "checkout of this repo lands your change on the wrong branch. ")
-        tail = override_hint("deliberate cross-checkout work", prefixable)
+        tail = (" Which way out is right turns on which tree you meant. For "
+                "this session's own, write to the in-session path above."
+                + override_hint("a write meant to land in the other checkout",
+                                prefixable))
     return lead + body + tail
 
 

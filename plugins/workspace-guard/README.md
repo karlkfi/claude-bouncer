@@ -406,7 +406,14 @@ check and **denies writes into it** — upgraded from the generic outside-worksp
 `ask`, because a deny self-heals in one agent round trip instead of relying on a
 human to notice and retype the path. The message names the offending checkout,
 its checked-out branch, and the corrected path under your session's checkout
-(same relative path). This applies to:
+(same relative path).
+
+It then names **both** ways out, and says which case each is for: write to the
+corrected path if this session's tree is the one you meant, or set
+`WORKSPACE_GUARD_OVERRIDE=<reason>` if the other one is. Which case it is turns
+on intent the hook cannot read, and a session that made the second worktree on
+purpose is the one the corrected path is wrong for — so the message asks rather
+than guessing. This applies to:
 
 - **Bash writes and redirect targets** — `cp`/`mv`/`tee`/`rm`/`dd` operands and
   `> file` targets that resolve inside a sibling checkout.
