@@ -633,6 +633,26 @@ class TestRegistry(unittest.TestCase):
             self.assertTrue(pg.decide('make check | tail', False, reg),
                             'a project file must not drop the defaults')
 
+    def test_a_project_exempt_separates_targets_sharing_a_prefix(self):
+        """`make backlog` renders the queue and `make backlog-lint` checks it.
+
+        Only the project's Makefile knows which of the two asserts something,
+        so widening the shipped `exempt` alternation cannot tell them apart --
+        the first assertion is what fails if anyone tries.
+        """
+        exempt = [r'^make(\s+-C\s+\S+)?\s+(backlog|backlog-next)(\s|$)']
+        self.assertTrue(
+            pg.decide('make backlog | head', False, shipped_registry()),
+            'the shipped registry must not guess a project target')
+        with tempfile.TemporaryDirectory() as root:
+            os.makedirs(os.path.join(root, '.claude'))
+            with open(os.path.join(root, '.claude', 'exit-status-guard.json'), 'w') as fh:
+                json.dump({'exempt': exempt}, fh)
+            reg = pg.load_registry(root)
+            self.assertFalse(pg.decide('make backlog | head', False, reg))
+            self.assertTrue(pg.decide('make backlog-lint | tail -5', False, reg),
+                            'a longer target sharing the prefix is still a gate')
+
     def test_project_file_can_replace_the_defaults(self):
         with tempfile.TemporaryDirectory() as root:
             os.makedirs(os.path.join(root, '.claude'))
@@ -722,6 +742,19 @@ class TestPrecedence(unittest.TestCase):
                         ('echo $PIPESTATUS', False)):
             with self.subTest(cmd):
                 self.assertIn('EXIT_STATUS_GUARD_OVERRIDE=<reason>',
+                              pg.decide(cmd, bg, reg))
+
+    def test_every_reason_names_the_project_registry(self):
+        """The override and the issue tracker are both per-call exits. A
+        session denied on a report its project runs routinely has no other way
+        to learn the durable fix exists."""
+        reg = shipped_registry()
+        for cmd, bg in (('make check | tail', False),
+                        ('make check > c.log 2>&1; echo hi', True),
+                        ('make check; git push', False),
+                        ('echo $PIPESTATUS', False)):
+            with self.subTest(cmd):
+                self.assertIn('.claude/exit-status-guard.json',
                               pg.decide(cmd, bg, reg))
 
     def test_no_reason_names_the_shell_the_tool_runs(self):

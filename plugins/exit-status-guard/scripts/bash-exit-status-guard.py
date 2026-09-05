@@ -733,9 +733,12 @@ REASON_PREFIX = 'exit-status-guard: '
 # The tail every reason ends with. Every rule here is about a status nobody
 # will read, so the sentence before it is the same one throughout.
 OVERRIDE_TAIL = (
-    " If this call is not the mistake the rule describes, that is a defect in "
-    "the rule: report it at https://github.com/karlkfi/claude-bouncer/issues "
-    "rather than overriding it every time.")
+    " Where this is a command the project runs routinely and its status "
+    "carries no verdict, exempt it durably instead: add a pattern to `exempt` "
+    "in .claude/exit-status-guard.json under the project root. If this call is "
+    "not the mistake the rule describes, that is a defect in the rule: report "
+    "it at https://github.com/karlkfi/claude-bouncer/issues rather than "
+    "overriding it every time.")
 
 OVERRIDE_HINT = (
     " If the status genuinely does not matter here, re-run prefixed with "
