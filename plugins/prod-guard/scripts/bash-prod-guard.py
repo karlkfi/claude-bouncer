@@ -2390,15 +2390,16 @@ def is_help_invocation(tool, argv):
     return args[0] == 'help'
 
 
-def evaluate_command_string(raw, ctx, depth=0, exported=None):
+def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None):
     """Findings for a full command string: tokenize, split into simple
     commands, evaluate each. Recurses (bounded) into `sh -c '...'` and
-    `eval ...` bodies so a quoted nested command can't ride past the guard;
-    the recursion passes the invoking segment's exported env so `$VAR` in the
-    body resolves as a child process would see it. Returns
-    (findings, override_seen, session_reason) — session_reason is the value of
-    the first inline PROD_GUARD_SESSION_OVERRIDE assignment, or None when the
-    prefix is absent."""
+    `eval ...` bodies so a quoted nested command can't ride past the guard.
+    `sh -c` starts a child, so its body is evaluated against the invoking
+    segment's exported env; `eval` starts none, so its body gets the same
+    shell's vars, exported or not (Q151). Returns (findings, override_seen,
+    session_reason) — session_reason is the value of the first inline
+    PROD_GUARD_SESSION_OVERRIDE assignment, or None when the prefix is
+    absent."""
     findings = []
     override = False
     session_reason = None
@@ -2408,8 +2409,8 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None):
     if tokens is None:
         return findings, override, session_reason  # unparseable: fail-open
     # Two scopes, both seeded from what this shell inherited (os.environ at the
-    # top level, the invoking segment's exported env for a nested `sh -c`/`eval`
-    # body):
+    # top level, the invoking segment's exported env for a nested `sh -c` body
+    # and its same-shell env for an `eval` one):
     #   shell_env  — variables visible to same-shell `$VAR` expansion. A bare
     #     `P=x` segment (a shell var, not exported) accumulates here so a later
     #     segment on the same line resolves it.
@@ -2425,7 +2426,7 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None):
     #     quoting off the token to tell the two apart.
     if exported is None:
         exported = dict(os.environ)
-    shell_env = dict(exported)
+    shell_env = dict(exported if shell is None else shell)
     exported = dict(exported)
     for group in split_simple_commands(tokens):
         seg_env, argv_raw = extract_env_prefix(group)
@@ -2435,7 +2436,7 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None):
         inline = resolve_assignments(seg_env.items(), shell_env)
         seg_inline = {k: inline[k] for k in seg_env}
         same_shell = {**shell_env, **seg_inline}   # for this command's args
-        child_env = {**exported, **seg_inline}     # for its `sh -c`/`eval` body
+        child_env = {**exported, **seg_inline}     # for its `sh -c` body
         if 'PROD_GUARD_OVERRIDE' in seg_inline:
             override = True
         if 'PROD_GUARD_SESSION_OVERRIDE' in seg_inline and session_reason is None:
@@ -2482,8 +2483,11 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None):
                 session_reason = session_reason if session_reason is not None else sub_s
             continue
         if tool == 'eval':
+            # No child, so the body expands in this shell under either quoting:
+            # single quotes stop only the PARENT, and `eval` expands the same
+            # text itself. `child_env` rides on for a real child inside (Q151).
             sub_f, sub_o, sub_s = evaluate_command_string(
-                ' '.join(argv_raw[1:]), ctx, depth + 1, child_env)
+                ' '.join(argv_raw[1:]), ctx, depth + 1, child_env, same_shell)
             findings += sub_f
             override = override or sub_o
             session_reason = session_reason if session_reason is not None else sub_s

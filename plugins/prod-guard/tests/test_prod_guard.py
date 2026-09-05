@@ -601,6 +601,50 @@ class VariableExpansionDecisionTests(unittest.TestCase):
             "CTX=gke_acme_prod-us; bash -c 'kubectl --context '\"$CTX\"' delete ns x'")
         self.assertEqual(decision, "ask")
 
+    # --- Q151: an `eval` body runs in the CURRENT shell --------------------
+    # `eval` starts no child, so quoting decides nothing: bash expands the body
+    # against this shell's vars either way. Verified against bash 5.3.15 with
+    # `C=RESOLVED; eval 'echo [$C]'` and its double-quoted twin, both `[RESOLVED]`.
+
+    def test_double_quoted_eval_body_resolves_bare_shell_var(self):
+        decision, reason = run_hook(
+            'CTX=gke_acme_prod-us; eval "kubectl --context $CTX delete pod x"')
+        self.assertEqual(decision, "deny")
+        self.assertIn("gke_acme_prod-us", reason)
+
+    def test_single_quoted_eval_body_resolves_bare_shell_var(self):
+        # The row's case: single quotes stop the PARENT expanding the argument,
+        # and `eval` expands the same text itself against the same environment.
+        decision, reason = run_hook(
+            "CTX=gke_acme_prod-us; eval 'kubectl --context $CTX delete pod x'")
+        self.assertEqual(decision, "deny")
+        self.assertIn("gke_acme_prod-us", reason)
+
+    def test_eval_body_nonprod_defers(self):
+        # The same expansion resolving the other way, so the fix is not just
+        # denying more often.
+        decision, _ = run_hook(
+            "CTX=kind-ci; eval 'kubectl --context $CTX delete ns x'")
+        self.assertIsNone(decision)
+
+    def test_child_started_inside_eval_body_still_inherits_exported_only(self):
+        # `eval` sees the bare var, but a `bash -c` it starts is a real child.
+        # A single-quoted grandchild body survives eval's re-parse, so `$CTX`
+        # reaches the child literally: bash prints `[]` here, not `[RESOLVED]`.
+        decision, reason = run_hook(
+            "CTX=gke_acme_prod-us; eval 'bash -c "
+            "'\"'\"'kubectl --context $CTX delete ns x'\"'\"''")
+        self.assertEqual(decision, "ask")
+        self.assertIn("$CTX", reason)
+
+    def test_double_quoted_grandchild_body_resolves_through_eval(self):
+        # The other side: eval's re-parse expands the double-quoted body in
+        # this shell, so the resolved value reaches the child.
+        decision, reason = run_hook(
+            'CTX=gke_acme_prod-us; eval \'bash -c "kubectl --context $CTX delete ns x"\'')
+        self.assertEqual(decision, "deny")
+        self.assertIn("gke_acme_prod-us", reason)
+
 
 class KubectlDecisionTests(unittest.TestCase):
     def test_prod_mutating_denied(self):
