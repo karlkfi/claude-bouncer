@@ -264,6 +264,19 @@ SHELL_NAMES = frozenset({'bash', 'sh', 'zsh', 'dash', 'ksh'})
 # purposes. `xargs` is handled separately (it takes its own flags).
 PLAIN_WRAPPERS = frozenset({'command', 'nohup', 'time', 'builtin', 'exec'})
 
+# Wrapper flags that take a SEPARATE value. Dropped one token at a time, the
+# value is left behind and reads as the tool, so the segment defers (Q152).
+WRAPPER_VALUE_FLAGS = {
+    # sudo's `-h` and `-U` are held out: Q158 and Q157.
+    'sudo': frozenset({'-C', '--close-from', '-D', '--chdir', '-g', '--group',
+                       '-p', '--prompt', '-R', '--chroot',
+                       '-T', '--command-timeout', '-u', '--user'}),
+    'env': frozenset({'-u', '--unset', '-C', '--chdir', '-P'}),  # -P is BSD's
+    'timeout': frozenset({'-k', '--kill-after', '-s', '--signal'}),
+    'exec': frozenset({'-a'}),
+    'time': frozenset({'-o', '--output', '-f', '--format'}),  # -o both, rest GNU
+}
+
 
 def heredoc_openers(line):
     """Heredoc delimiters opened on one line, in the order the bodies follow:
@@ -546,19 +559,16 @@ def strip_wrappers(argv, env):
     assignments found behind `env`/`sudo` merge into the segment env."""
     while argv:
         head = os.path.basename(argv[0])
+        value_flags = WRAPPER_VALUE_FLAGS.get(head, frozenset())
         if head == 'sudo':
             argv = argv[1:]
             while argv and argv[0].startswith('-'):
-                # value-taking sudo flags: skip flag + value
-                if argv[0] in ('-u', '--user', '-g', '--group', '-p', '--prompt'):
-                    argv = argv[2:]
-                else:
-                    argv = argv[1:]
+                argv = argv[2:] if argv[0] in value_flags else argv[1:]
         elif head == 'env':
             argv = argv[1:]
             while argv:
                 if argv[0].startswith('-'):
-                    argv = argv[2:] if argv[0] in ('-u', '--unset', '-C', '--chdir') else argv[1:]
+                    argv = argv[2:] if argv[0] in value_flags else argv[1:]
                 elif ASSIGNMENT_RE.match(argv[0]):
                     name, _, value = argv[0].partition('=')
                     env[name] = value
@@ -568,7 +578,7 @@ def strip_wrappers(argv, env):
         elif head == 'timeout':
             argv = argv[1:]
             while argv and argv[0].startswith('-'):
-                argv = argv[2:] if argv[0] in ('-k', '--kill-after', '-s', '--signal') else argv[1:]
+                argv = argv[2:] if argv[0] in value_flags else argv[1:]
             if argv:
                 argv = argv[1:]  # the DURATION operand
         elif head == 'xargs':
@@ -592,7 +602,7 @@ def strip_wrappers(argv, env):
                 break
             argv = argv[1:]
             while argv and argv[0].startswith('-'):
-                argv = argv[1:]
+                argv = argv[2:] if argv[0] in value_flags else argv[1:]
         else:
             break
     return argv

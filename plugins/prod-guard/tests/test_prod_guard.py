@@ -298,6 +298,39 @@ class ParsingTests(unittest.TestCase):
             ["aws", "s3", "ls"])
         self.assertEqual(env, {"AWS_PROFILE": "dev"})
 
+    def test_value_taking_wrapper_flag_skips_its_value(self):
+        # A flag taking a SEPARATE value leaves that value behind when flags
+        # come off one at a time, and the value reads as the tool (Q152).
+        self.assertEqual(
+            guard.strip_wrappers(["exec", "-a", "myname", "kubectl", "delete"], {}),
+            ["kubectl", "delete"])
+        self.assertEqual(
+            guard.strip_wrappers(["/usr/bin/time", "-o", "out.txt", "kubectl", "delete"], {}),
+            ["kubectl", "delete"])
+        self.assertEqual(
+            guard.strip_wrappers(["/usr/bin/time", "-f", "%e", "kubectl", "delete"], {}),
+            ["kubectl", "delete"])
+        self.assertEqual(
+            guard.strip_wrappers(["command", "time", "-o", "out.txt", "kubectl", "delete"], {}),
+            ["kubectl", "delete"])
+        self.assertEqual(
+            guard.strip_wrappers(["sudo", "-T", "30", "kubectl", "delete"], {}),
+            ["kubectl", "delete"])
+        self.assertEqual(
+            guard.strip_wrappers(["sudo", "-C", "3", "-R", "/tmp", "kubectl", "delete"], {}),
+            ["kubectl", "delete"])
+        self.assertEqual(
+            guard.strip_wrappers(["sudo", "--command-timeout", "30", "kubectl", "delete"], {}),
+            ["kubectl", "delete"])
+        # `-P utilpath` is BSD env's; GNU env has no such option.
+        self.assertEqual(
+            guard.strip_wrappers(["env", "-P", "/usr/bin", "kubectl", "delete"], {}),
+            ["kubectl", "delete"])
+        # Flags that take no value still come off one at a time.
+        self.assertEqual(
+            guard.strip_wrappers(["exec", "-c", "-l", "kubectl", "delete"], {}),
+            ["kubectl", "delete"])
+
     def test_command_wrapper_strips_only_an_invocation(self):
         # `command kubectl delete` runs kubectl, so the wrapper comes off.
         self.assertEqual(
@@ -2030,6 +2063,21 @@ class BypassBatteryTests(unittest.TestCase):
         decision, _ = run_hook(
             "command kubectl --context gke_acme_prod-us delete ns x")
         self.assertEqual(decision, "deny")
+
+    def test_wrapper_value_flag_does_not_swallow_the_tool(self):
+        # The value of `exec -a` / `time -o` / `sudo -T` used to become the
+        # tool, so the kubectl behind it was never classified (Q152).
+        for prefix in ("exec -a myname",
+                       "/usr/bin/time -o out.txt",
+                       "/usr/bin/time -f %e",
+                       "command time -o out.txt",
+                       "sudo -T 30",
+                       "sudo -C 3",
+                       "env -P /usr/bin"):
+            with self.subTest(prefix=prefix):
+                decision, _ = run_hook(
+                    "%s kubectl --context gke_acme_prod-us delete ns x" % prefix)
+                self.assertEqual(decision, "deny")
 
     def test_env_wrapper_with_assignment(self):
         decision, _ = run_hook(
