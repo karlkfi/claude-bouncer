@@ -33,6 +33,17 @@ it is installed — the same reason `lib/bouncer_parse.py` is vendored into each
 plugin, and with the same hazard: fix it upstream in `karlkfi/claude-skills`
 first, or the next vendor drop reverts it.
 
+**Only one of the two is guarded here.** `make sync-check` catches a drifted
+`lib/bouncer_parse.py` because both sides are in this tree. This copy's
+upstream is not, and it is absent from a CI checkout, so no target here can
+compare against it. The watch that exists runs from the other side:
+`make vendor-check` in `karlkfi/claude-skills` hashes this repository's copy
+through the GitHub API and names the commit it was taken at. It reports rather
+than fails, deliberately — a stale copy is not a defect in whatever pull
+request is under review there — and it runs in that checkout, never in this one
+and never in this repository's CI. So a refresh lands when somebody runs it and
+reads the report, not when the copy drifts.
+
 | | |
 |---|---|
 | `make backlog` | the ordered queue, deferred items included |
