@@ -104,6 +104,18 @@ CASES = [
      'reads $PIPESTATUS to recover'),
     ('bare $PIPESTATUS, no gate', 'ls -l | wc -l; echo $PIPESTATUS', False, True,
      'reads $PIPESTATUS to recover'),
+    # zsh's lowercase spelling suppresses nothing: the array holds the most
+    # recent pipeline only, so a read cannot be tied to the pipeline it claims
+    # to recover -- before one, or after a different one.
+    ('lowercase $pipestatus does not suppress the pipe verdict',
+     'make check 2>&1 | tail -5; echo "EXIT=${pipestatus[1]}"', False, True,
+     "exit status is the filter's"),
+    ('$pipestatus does not reach a later pipeline',
+     'make check | tail; echo ${pipestatus[1]}; make lint | tail', False, True,
+     "exit status is the filter's"),
+    ('$pipestatus read before any pipeline',
+     'echo ${pipestatus[1]}; make check | tail', False, True,
+     "exit status is the filter's"),
 
     # --- The correct forms ---------------------------------------------------
     ('redirect then echo $?', 'make check > tmp/check.log 2>&1; echo "EXIT=$?"',
@@ -115,8 +127,6 @@ CASES = [
      False, False, ''),
     ('set -euo pipefail counts', 'set -euo pipefail; make check 2>&1 | tail -30',
      False, False, ''),
-    ("zsh's $pipestatus suppresses the pipe verdict",
-     'make check 2>&1 | tail -5; echo "EXIT=${pipestatus[1]}"', False, False, ''),
     ('no pipe at all', 'make check', False, False, ''),
     ('gate on the RIGHT keeps its status',
      'printf "%s" "$msg" | git commit -F -', False, False, ''),
@@ -291,8 +301,8 @@ CASES = [
      False, True, ''),
     ('backgrounded subshell ending in echo',
      '(make check > tmp/c.log 2>&1; echo "EXIT=$?")', True, True, ''),
-    # pipefail and $pipestatus are pipe mitigations; neither re-raises a status
-    # the last statement already discarded.
+    # `pipefail` is a pipe mitigation; it does not re-raise a status the last
+    # statement already discarded.
     ('pipefail does not mitigate this',
      'set -o pipefail; make check > tmp/c.log 2>&1; echo "EXIT=$?"', True, True, ''),
 
