@@ -571,7 +571,7 @@ def analyze_class_a(raw, cfg, depth=0):
     floor = cfg['sleep_floor_seconds']
 
     # Per-segment classification. kind: 'sleep' | 'cmd' | None (empty/opaque).
-    seg_kinds = []       # for the sandwich rule, foreground segments only
+    segs = []            # (kind, argv) for the sandwich rule, foreground only
     loop_sleep = False   # a foreground `sleep` seen anywhere (any duration)
     sleep_findings = []
     for group, term in split_segments(tokens):
@@ -585,12 +585,12 @@ def analyze_class_a(raw, cfg, depth=0):
         head = os.path.basename(argv[0])
         if head == 'sleep':
             secs = sleep_seconds(argv)
-            seg_kinds.append('sleep')
+            segs.append(('sleep', argv))
             loop_sleep = True
             if secs is None or secs >= floor:
                 sleep_findings.append(finding_sleep(cfg, secs))
             continue
-        seg_kinds.append('cmd')
+        segs.append(('cmd', argv))
         if head in SHELL_NAMES:
             # bash -c 'while ...; do sleep 5; done': analyze the body.
             body = None
@@ -627,12 +627,21 @@ def analyze_class_a(raw, cfg, depth=0):
         # counts — the loop multiplies it. Subsumes the per-sleep findings.
         findings.append(finding_loop(cfg))
     else:
-        # Chained repeat-with-sleep: a sleep sandwiched between commands is
-        # a poll regardless of duration (`gh pr checks; sleep 5; gh pr
-        # checks` waits below the bare-sleep floor but is still a poll).
-        sandwich = any(
-            k == 'sleep' and 'cmd' in seg_kinds[:i] and 'cmd' in seg_kinds[i + 1:]
-            for i, k in enumerate(seg_kinds))
+        # Chained repeat-with-sleep: the same command on both sides of a
+        # sleep is a poll regardless of duration (`gh pr checks; sleep 5;
+        # gh pr checks` waits below the bare-sleep floor but is still a
+        # poll). A sleep between two different commands is one wait — a
+        # settle after a kill, grace after a launch — and the floor judges
+        # it the way it judges a leading `sleep 2 && curl`.
+        sandwich = False
+        for i, (kind, _) in enumerate(segs):
+            if kind != 'sleep':
+                continue
+            before = {tuple(a) for k, a in segs[:i] if k == 'cmd'}
+            after = {tuple(a) for k, a in segs[i + 1:] if k == 'cmd'}
+            if before & after:
+                sandwich = True
+                break
         if sandwich:
             findings.append(finding_sandwich(cfg))
         findings += sleep_findings

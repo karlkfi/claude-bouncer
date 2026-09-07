@@ -108,6 +108,7 @@ The table below shows the decision with default config.
 | `journalctl -f`, `docker logs -f c1`, `watch kubectl get pods` | **deny** |
 | `while true; do gh pr checks 1; sleep 5; done` | **deny** (poll loop) |
 | `gh pr checks 1; sleep 5; gh pr checks 1` | **deny** (repeat-with-sleep) |
+| `pkill -f probe.sh; sleep 2; pgrep -fl probe.sh` | defer (different commands, below floor) |
 | `sleep 300` | **deny** (≥ floor, default 10 s) |
 | `sleep 2 && curl localhost:8080/health` | defer (below floor) |
 | `./server > log 2>&1 & sleep 2; curl localhost` | defer (server detached, grace sleep short) |
@@ -212,8 +213,10 @@ claude plugin update foreground-guard@claude-bouncer
 
 - `while`/`until`/`for` loops whose body runs `sleep` (any duration — the
   loop multiplies it).
-- Chained repeat-with-sleep: `cmd; sleep N; cmd; ...` — a sleep sandwiched
-  between commands is a poll regardless of `N`.
+- Chained repeat-with-sleep: `cmd; sleep N; cmd; ...` — the same command
+  on both sides of a sleep is a poll regardless of `N`. A sleep between two
+  *different* commands is one wait (a settle after a kill, grace after a
+  launch) and is judged by the floor below, like a leading `sleep 2 && curl`.
 - Bare `sleep N` as a foreground segment with `N ≥` the floor (default
   10 s). `sleep $VAR` counts as long (unknown durations lean toward
   blocking, and the reason asks for the literal). Below-floor sleeps —

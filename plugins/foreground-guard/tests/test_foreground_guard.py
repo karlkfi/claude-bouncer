@@ -321,6 +321,51 @@ class LoopAndSleepTests(unittest.TestCase):
         self.assertEqual(d, "deny")
         self.assertIn("repeat-with-sleep", r)
 
+    def test_chained_repeat_with_subsecond_sleep_denies(self):
+        d, r = run_hook("gh pr checks 1; sleep 0.5; gh pr checks 1")
+        self.assertEqual(d, "deny")
+        self.assertIn("repeat-with-sleep", r)
+
+    def test_chained_repeat_not_adjacent_to_sleep_denies(self):
+        d, r = run_hook("gh pr checks 1; echo wait; sleep 5; echo again; gh pr checks 1")
+        self.assertEqual(d, "deny")
+        self.assertIn("repeat-with-sleep", r)
+
+    def test_sleep_between_different_commands_defers(self):
+        # A settle wait between two different commands is one wait, not a
+        # poll: the same shape as `sleep 2 && curl`, judged by the floor.
+        d, _ = run_hook("pkill -f probe.sh; sleep 2; pgrep -fl probe.sh")
+        self.assertIsNone(d)
+
+    def test_same_tool_different_args_defers(self):
+        d, _ = run_hook("git rev-parse HEAD; sleep 0; git reflog -8")
+        self.assertIsNone(d)
+
+    def test_sleep_between_different_commands_at_floor_is_bare_sleep(self):
+        d, r = run_hook("gh api -X POST runs/1/cancel; sleep 45; gh run view 1")
+        self.assertEqual(d, "deny")
+        self.assertIn("`sleep` parks", r)
+        self.assertNotIn("repeat-with-sleep", r)
+
+    def test_one_shot_probe_with_grace_sleep_defers(self):
+        # A semantics probe: backgrounded subshells, one 0.1 s grace sleep,
+        # and `wait -n` calls that are the subject under test. Nothing
+        # repeats, so nothing polls.
+        probe = (
+            "bash -c '\n"
+            "set -u\n"
+            "( exit 3 ) & p1=$!\n"
+            "( sleep 0.3; exit 5 ) & p2=$!\n"
+            "sleep 0.1   # p1 already dead before the first wait -n\n"
+            'wait -n -p done; rc=$?; echo "first: pid=$done rc=$rc"\n'
+            'wait -n -p done; rc=$?; echo "second: pid=$done rc=$rc"\n'
+            "( kill -9 $$ ) & p3=$!\n"
+            'wait -n -p done; rc=$?; echo "killed: pid=$done rc=$rc"\n'
+            "'"
+        )
+        d, _ = run_hook(probe)
+        self.assertIsNone(d)
+
     def test_leading_short_sleep_then_command_defers(self):
         d, _ = run_hook("sleep 2 && curl localhost:8080/health")
         self.assertIsNone(d)
