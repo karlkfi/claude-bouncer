@@ -333,6 +333,30 @@ CASES = [
     ('background grep for the pattern',
      'grep -rn "make check" docs/ > tmp/o.log 2>&1; echo "EXIT=$?"',
      True, False, ''),
+    # Measured 2026-09-06 on 2.0.1, backgrounded: denied with "`make check`
+    # runs in the background, but this call's exit status is its LAST
+    # statement's -- an echo exits 0 whatever the gate did". The `|` inside
+    # `$((rc|rc2))` had tokenized as a pipe, so the `exit` re-raising both
+    # statuses read as a pipeline ending in `rc2`.
+    ('exit re-raising two statuses through an arithmetic expansion',
+     'cd /repo; S=/scratch; make check > $S/check1.log 2>&1; rc=$?; '
+     'echo "EXIT=$rc" >> $S/check1.log; '
+     'make queue MERGED=true > $S/queue1.log 2>&1; rc2=$?; '
+     'echo "EXIT=$rc2" >> $S/queue1.log; exit $((rc|rc2))', True, False, ''),
+    # The trigger was the unquoted `$((`, not the `|`: `$((rc+rc2))` denied too.
+    ('exit summing two statuses through an arithmetic expansion',
+     'make check > tmp/c.log 2>&1; rc=$?; make lint > tmp/l.log 2>&1; rc2=$?; '
+     'exit $((rc+rc2))', True, False, ''),
+    # The mask reaches only the `$((` spelling, and only the shlex input.
+    ('a pipe outside the arithmetic is still a pipe',
+     'make check | tail -5; exit $((rc|rc2))', False, True,
+     "exit status is the filter's"),
+    ('a spaced $( (…) ) is a substitution around a subshell, not arithmetic',
+     'out=$( (make check | tail -1) )', False, True,
+     "exit status is the filter's"),
+    ('PIPESTATUS read inside arithmetic is still a read',
+     'make check | tail; exit $((${PIPESTATUS[0]}|0))', False, True,
+     'reads $PIPESTATUS to recover'),
 
     # --- A gate sequenced before a state change with `;` ---------------------
     ('check then push', 'make check; git push', False, True,
@@ -355,6 +379,24 @@ CASES = [
     # whatever the first returned, so the boundary itself has to keep denying.
     ('a bare newline before a mutator is still a sequence',
      'make check\ngit push', False, True, 'is sequenced before'),
+    # Measured 2026-09-06 on 2.0.1: denied with "`git commit -q -F -` is
+    # sequenced before `git commit -q -m docs(queue): complete Q131` with
+    # `;`" -- and the command holds no `;`. The separator is the newline
+    # after the heredoc line, which really does run the second commit whatever
+    # the first returned, so the deny stands and the reason names the newline.
+    ('heredoc commit, a newline, then a second commit',
+     'git reset -q -- docs/queue/Q131.md && echo "=== staged" && '
+     "git diff --cached --stat && git commit -q -F - <<'MSG'\n"
+     'fix(bash,hook): one\nMSG\n'
+     'echo "commit1: $(git log --oneline -1)" && git add -u docs/queue/Q131.md '
+     '&& git diff --cached --stat && git commit -q -m "docs(queue): complete '
+     'Q131" && echo done', False, True, 'with a newline'),
+    # The rewrite that reason hands over: the `&&` on the line carrying `<<`,
+    # ahead of the body. Bash reads the body after the whole line.
+    ('heredoc commit joined with && on the << line',
+     "git commit -q -F - <<'MSG' && git add -u docs/queue/Q131.md && "
+     'git commit -q -m "docs(queue): complete Q131"\nfix(bash,hook): one\nMSG',
+     False, False, ''),
     ('&& then a trailing mutator is still gated',
      'make check && git add . && git commit -m x', False, False, ''),
     ('two gates, no state change', 'make lint; make test', False, False, ''),
@@ -845,6 +887,49 @@ class TestSequencedRemedy(unittest.TestCase):
                       self.reason)
 
 
+class TestSequencedSeparator(unittest.TestCase):
+    """The reason names the separator it found.
+
+    A newline sequences as `;` does, and a denial naming `;` for one reads as
+    a parser fault to the session it reaches: its command holds none, so the
+    rewrite the reason carries is not tried. The heredoc is the shape that
+    leaves a newline between a gate and a mutator, and it is also where the
+    `&&` has nowhere obvious to go, so that reason says where.
+    """
+
+    HEREDOC = "git commit -F - <<'MSG'\nsubject\nMSG\ngit push"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = shipped_registry()
+
+    def test_semicolon_is_named(self):
+        reason = pg.decide('make check; git push', False, self.reg, '/scratch')
+        self.assertIn('` with `;`, which runs', reason)
+        self.assertNotIn('newline', reason)
+
+    def test_newline_is_named(self):
+        reason = pg.decide('make check\ngit push', False, self.reg, '/scratch')
+        self.assertIn('` with a newline, which', reason)
+        self.assertNotIn('with `;`', reason)
+
+    def test_the_heredoc_reason_places_the_and(self):
+        reason = pg.decide(self.HEREDOC, False, self.reg, '/scratch')
+        self.assertIn('` with a newline', reason)
+        self.assertIn("`cmd <<'EOF' && next`", reason)
+        self.assertLess(reason.index('Join them with `&&`'),
+                        reason.index('rc=$?'),
+                        'the common case has to be read first')
+        self.assertTrue(reason.endswith(pg.OVERRIDE_TAIL),
+                        'the override stays last')
+
+    def test_the_placed_and_is_the_correct_form(self):
+        """The rewrite has to run: bash reads the body after the whole line."""
+        self.assertEqual('', pg.decide(
+            "git commit -F - <<'MSG' && git push\nsubject\nMSG",
+            False, self.reg, '/scratch'))
+
+
 class TestSuggestedLogPath(unittest.TestCase):
     """The rewrite a denied session copies has to be a command that runs.
 
@@ -868,7 +953,7 @@ class TestSuggestedLogPath(unittest.TestCase):
     def test_every_template_carries_both_placeholders(self):
         """A template that loses one names no path, or names one uncreated."""
         for name in ('PIPESTATUS_REASON', 'PIPED_REASON', 'LOST_STATUS_REASON',
-                     'SEQUENCED_REASON'):
+                     'SEQUENCED_REASON', 'SEQUENCED_NEWLINE_REASON'):
             with self.subTest(name):
                 template = getattr(pg, name)
                 self.assertIn(pg.LOG_PLACEHOLDER, template)
@@ -1117,6 +1202,25 @@ class TestSegmentation(unittest.TestCase):
     def test_a_bare_newline_is_still_a_boundary(self):
         segs = self.segs('make check\ngit push')
         self.assertEqual('\n', pg.next_op(segs[0].post_ops))
+
+    def test_arithmetic_expansion_is_one_word(self):
+        """`$((rc|rc2))` holds no pipe: its parens are punctuation to shlex,
+        and unmasked the `|` between them split the segment."""
+        segs = self.segs('exit $((rc|rc2))')
+        self.assertEqual(1, len(segs))
+        self.assertEqual(['exit', pg.ARITHMETIC_WORD], segs[0].tokens)
+
+    def test_arithmetic_is_masked_only_on_the_way_into_shlex(self):
+        _, cleaned, _ = pg.tokenize('exit $((rc|rc2))')
+        self.assertIn('$((rc|rc2))', cleaned)
+
+    def test_a_spaced_substitution_is_not_arithmetic(self):
+        segs = self.segs('out=$( (make check | tail -1) )')
+        self.assertIn('|', [pg.next_op(s.post_ops) for s in segs])
+
+    def test_arithmetic_in_single_quotes_is_left_to_shlex(self):
+        segs = self.segs("echo '$((a|b))' && git push")
+        self.assertEqual(['echo', '$((a|b))'], segs[0].tokens)
 
     def test_a_continuation_in_single_quotes_stays_literal(self):
         segs = self.segs("echo 'a\\\nb' && git push")

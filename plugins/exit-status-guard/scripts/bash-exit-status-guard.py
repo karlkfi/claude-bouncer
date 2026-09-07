@@ -10,8 +10,9 @@ a status goes missing, all of which turn a failure into a green:
   2. Backgrounded with something else running last. A `;`-list yields its last
      statement's status, so a backgrounded `cmd > log 2>&1; echo "EXIT=$?"`
      notifies `completed (exit code 0)` for a failed command.
-  3. Sequenced before a state-changing command with `;`. The status is read
-     correctly and then ignored: `make check; git push` pushes either way.
+  3. Sequenced before a state-changing command with `;` or a newline. The
+     status is read correctly and then ignored: `make check; git push` pushes
+     either way.
 
 Every verdict is a `deny`, never an `ask`. A deny's reason is shown to the
 model, so the fix lands where the command gets rewritten; an ask goes to the
@@ -77,12 +78,64 @@ def next_op(ops):
     return ''
 
 
+# What stands in for a `$((…))` arithmetic expansion before shlex reads the
+# command. Its parens are punctuation to shlex, so `exit $((rc|rc2))` tokenizes
+# as `$(` `(` `(` `rc` `|` `rc2` `)` `)` and the `|` reads as a pipe ending in
+# `rc2`, which carries no status. The expansion holds no command, so one word
+# stands in for the whole of it.
+ARITHMETIC_WORD = '$ARITHMETIC'
+
+
+def mask_arithmetic(text):
+    """Replace each `$((…))` bash would expand with ``ARITHMETIC_WORD``.
+
+    Quote state is tracked the way `reads_var` tracks it: in single quotes the
+    text is literal, and shlex keeps it inside its word without help. Only the
+    `$((` spelling is masked -- `$( (…) )` is a substitution around a subshell,
+    and a gate piped inside one is still a lost status.
+    """
+    out = []
+    i, n = 0, len(text)
+    in_single = in_double = False
+    while i < n:
+        c = text[i]
+        if in_single:
+            if c == "'":
+                in_single = False
+            out.append(c)
+            i += 1
+            continue
+        if c == '\\':
+            out.append(text[i:i+2])
+            i += 2
+            continue
+        if c == "'" and not in_double:
+            in_single = True
+            out.append(c)
+            i += 1
+            continue
+        if c == '"':
+            in_double = not in_double
+            out.append(c)
+            i += 1
+            continue
+        if text.startswith('$((', i):
+            out.append(ARITHMETIC_WORD)
+            i = _skip_balanced_parens(text, i + 1)
+            continue
+        out.append(c)
+        i += 1
+    return ''.join(out)
+
+
 def tokenize(cmd):
     """(tokens, cleaned, heredoc_bodies); tokens is None when unparseable.
 
     ``cleaned`` is the command with comments and heredoc bodies removed -- the
     string the raw-text scans should read, so a `$PIPESTATUS` or a `$(…)` quoted
     inside a heredoc body is not mistaken for one the shell would evaluate.
+    Arithmetic is masked only on the way into shlex: `cleaned` keeps it, so a
+    `$PIPESTATUS` read inside one is still seen.
     """
     expanded = []
     # Heredoc bodies go first so an unbalanced quote inside one cannot throw off
@@ -92,7 +145,8 @@ def tokenize(cmd):
         # `\n` is made a punctuation char so a newline command boundary surfaces
         # as a token; it is otherwise eaten as whitespace, merging the commands
         # on either side. Quoted newlines stay inside their word token.
-        lex = shlex.shlex(cleaned, posix=True, punctuation_chars=';()<>|&\n')
+        lex = shlex.shlex(mask_arithmetic(cleaned), posix=True,
+                          punctuation_chars=';()<>|&\n')
         lex.whitespace_split = True
         lex.whitespace = lex.whitespace.replace('\n', '')
         lex.commenters = ''
@@ -655,13 +709,16 @@ def tested_form(segs, gate_at, mutator_at):
 
 
 def sequenced_mutation(segs, reg):
-    """(gate, mutator) when a gate is sequenced before a state-changing command
-    with `;` rather than `&&`, or ('', '').
+    """(gate, mutator, separator) when a gate is sequenced before a
+    state-changing command with `;` or a newline rather than `&&`, or
+    ('', '', '').
 
     `make check; git push` reads the gate's status correctly and then ignores
     it: the push runs whatever the check did. Only top-level segments count --
     inside a subshell the sequence is that subshell's own business -- and only a
-    `;`/newline separator, since `&&` is the form that already gates.
+    `;`/newline separator, since `&&` is the form that already gates. The
+    separator comes back because the reason names it, and says where the `&&`
+    goes when a heredoc is what left the newline.
 
     A restore in the capture-and-recheck form is skipped rather than returned,
     so a publish later in the same command is still caught: in
@@ -673,7 +730,7 @@ def sequenced_mutation(segs, reg):
     hangs off a test of the capture (`[ "$rc" -eq 0 ] && git push`) is skipped
     the same way.
     """
-    gate, gate_at = '', -1
+    gate, gate_at, sep = '', -1, ''
     for i, seg in enumerate(segs):
         if seg.depth != 0:
             continue
@@ -681,11 +738,12 @@ def sequenced_mutation(segs, reg):
         if gate_at >= 0 and i > gate_at and reg.is_mutator(words):
             if not (restore_form(segs, reg, words, gate_at, i)
                     or tested_form(segs, gate_at, i)):
-                return gate, ' '.join(words)
+                return gate, ' '.join(words), sep
             continue
-        if next_op(seg.post_ops) in (';', '\n') and reg.is_gate(words):
-            gate, gate_at = ' '.join(words), i
-    return '', ''
+        op = next_op(seg.post_ops)
+        if op in (';', '\n') and reg.is_gate(words):
+            gate, gate_at, sep = ' '.join(words), i, op
+    return '', '', ''
 
 
 # --- Reasons ----------------------------------------------------------------
@@ -801,15 +859,27 @@ LOST_STATUS_REASON = (
     + OVERRIDE_HINT)
 
 SEQUENCED_REASON_HEAD = "` is sequenced before `"
-SEQUENCED_REASON = (
-    "` with `;`, which runs the second whatever the first returned -- the "
-    "status is read correctly and then ignored, so a failed check still "
-    "publishes. Join them with `&&` so the state change is conditional on the "
-    "check passing. Where the second command has to run even when the first "
-    "fails -- a restore after a gate whose failure is the assertion -- capture "
-    "the status and check it afterwards: "
+_SEQUENCED_RUNS = (
+    " runs the second whatever the first returned -- the status is read "
+    "correctly and then ignored, so a failed check still publishes. Join them "
+    "with `&&` so the state change is conditional on the check passing.")
+_SEQUENCED_RESTORE = (
+    " Where the second command has to run even when the first fails -- a "
+    "restore after a gate whose failure is the assertion -- capture the "
+    "status and check it afterwards: "
     '<MKDIR>cmd > <LOG> 2>&1; rc=$?; restore; [ "$rc" -ne 0 ] || exit 1.'
     + OVERRIDE_HINT)
+SEQUENCED_REASON = "` with `;`, which" + _SEQUENCED_RUNS + _SEQUENCED_RESTORE
+# The newline form names its separator, and says where the `&&` goes: the
+# shape that leaves a newline between a gate and a mutator is a heredoc, whose
+# body pushes the next command onto a fresh line. Bash reads the body after
+# the whole line, so the operator belongs beside the `<<`, ahead of it.
+SEQUENCED_NEWLINE_REASON = (
+    "` with a newline, which separates as `;` does and" + _SEQUENCED_RUNS
+    + " After a heredoc, the `&&` goes on the line carrying `<<`, ahead of the "
+    "body: `cmd <<'EOF' && next`, then the body and its terminator below."
+    + _SEQUENCED_RESTORE)
+SEQUENCED_REASONS = {';': SEQUENCED_REASON, '\n': SEQUENCED_NEWLINE_REASON}
 
 
 def decide(cmd, background, reg, scratch='', depth=0):
@@ -852,10 +922,11 @@ def decide(cmd, background, reg, scratch='', depth=0):
         return with_log_path(
             '`' + truncate(gate) + '`' + LOST_STATUS_REASON, scratch)
 
-    gate, mutator = sequenced_mutation(segs, reg)
+    gate, mutator, sep = sequenced_mutation(segs, reg)
     if gate:
         return with_log_path('`' + truncate(gate) + SEQUENCED_REASON_HEAD
-                             + truncate(mutator) + SEQUENCED_REASON, scratch)
+                             + truncate(mutator) + SEQUENCED_REASONS[sep],
+                             scratch)
 
     # A gate inside a backtick substitution never reaches the segment loop as a
     # command (backticks are ordinary word characters to shlex), so the bodies

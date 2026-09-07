@@ -106,6 +106,13 @@ git add .; git commit -m wip    # denied — a failed add commits nothing new
 Here the status is read correctly and then ignored. `&&` is the fix, and is
 never denied.
 
+A newline between the two sequences the same way, and the deny names it rather
+than a `;` the command does not hold. The shape that leaves one is a heredoc,
+`git commit -F - <<'MSG' … MSG` with the next command on the line after the
+terminator. Put the `&&` on the line carrying `<<`, ahead of the body: bash
+reads the body after the whole line, so `git commit -F - <<'MSG' && git push`
+followed by the body and its terminator is the gated form.
+
 `&&` is not the fix when the second command has to run whatever the first did.
 A mutation control mutates a file, runs a gate whose failure *is* the
 assertion, and restores; `&&` skips the restore on the expected failure and
