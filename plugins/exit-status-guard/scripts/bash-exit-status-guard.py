@@ -623,6 +623,37 @@ def restore_form(segs, reg, words, gate_at, mutator_at):
     return bool(var) and status_rechecked(segs, mutator_at, var)
 
 
+# The commands that test a value and answer with their status. `(( rc == 0 ))`
+# reads the name bare and tokenizes as a subshell, so it is not one of them.
+STATUS_TESTS = frozenset({'[', '[[', 'test'})
+
+
+def tested_form(segs, gate_at, mutator_at):
+    """Whether this mutator hangs off a test of the gate's captured status.
+
+    `cmd > <LOG> 2>&1; rc=$?; …; [ "$rc" -eq 0 ] && publish` is the restore
+    form with the order reversed: the status is captured, tested, and the
+    mutation is joined to the test with `&&`. Walks back from the mutator over
+    the unbroken `&&` chain that reaches it -- bash associates left to right,
+    so every command in that chain ran only because the ones before it passed
+    -- looking for a `[`, `[[`, or `test` that reads the capture. Any other
+    operator on the way back ends the search: `[ "$rc" -eq 0 ]; git push`
+    reads the status and ignores it, and `[ "$rc" -eq 0 ] && ok || git push`
+    publishes on the failure.
+    """
+    var = status_captured(segs, gate_at, mutator_at)
+    if not var:
+        return False
+    j = mutator_at - 1
+    while j >= 0 and next_op(segs[j].post_ops) == '&&':
+        tokens = segs[j].tokens
+        if tokens and tokens[0] in STATUS_TESTS and reads_var(
+                ' '.join(tokens), var, quotes=False):
+            return True
+        j -= 1
+    return False
+
+
 def sequenced_mutation(segs, reg):
     """(gate, mutator) when a gate is sequenced before a state-changing command
     with `;` rather than `&&`, or ('', '').
@@ -638,7 +669,9 @@ def sequenced_mutation(segs, reg):
     reset is the recommended rewrite and the push is the defect. The skip is a
     `continue` rather than a fall-through, because most restores are gates too
     -- letting one become the gate would restart the capture search after it,
-    and a two-step teardown would then deny on its second step.
+    and a two-step teardown would then deny on its second step. A mutator that
+    hangs off a test of the capture (`[ "$rc" -eq 0 ] && git push`) is skipped
+    the same way.
     """
     gate, gate_at = '', -1
     for i, seg in enumerate(segs):
@@ -646,7 +679,8 @@ def sequenced_mutation(segs, reg):
             continue
         words = head_words(seg)
         if gate_at >= 0 and i > gate_at and reg.is_mutator(words):
-            if not restore_form(segs, reg, words, gate_at, i):
+            if not (restore_form(segs, reg, words, gate_at, i)
+                    or tested_form(segs, gate_at, i)):
                 return gate, ' '.join(words)
             continue
         if next_op(seg.post_ops) in (';', '\n') and reg.is_gate(words):

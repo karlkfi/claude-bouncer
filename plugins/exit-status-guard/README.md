@@ -124,6 +124,19 @@ comes back. A publish is never a restore, so
 `make check > c.log 2>&1; rc=$?; git push; [ "$rc" -ne 0 ] || exit 1` still
 denies — capturing a status does not make a push conditional on it.
 
+The same capture with the test before the publish is conditional, and is not
+denied:
+
+```bash
+make check > <scratchpad>/c.log 2>&1; rc=$?; tail -3 <scratchpad>/c.log; [ "$rc" -eq 0 ] && git push
+```
+
+A `[`, `[[`, or `test` reading the captured status has to reach the publish
+through an unbroken `&&` chain. `[ "$rc" -eq 0 ]; git push` reads the status
+and ignores it, `[ "$rc" -eq 0 ] && echo ok || git push` publishes on the
+failure, and `if [ "$rc" -eq 0 ]; then git push; fi` is not recognised; all
+three still deny.
+
 ## What it does not deny
 
 The registry is deliberately not "every command". A guard that denies every

@@ -423,6 +423,47 @@ CASES = [
     ('kubectl rollout undo is a restore, not a free pass',
      'make check; kubectl rollout undo deploy/foo', False, True, ''),
 
+    # --- A mutation hanging off a test of the captured status ---------------
+    # The restore form with the order reversed: capture, test, and join the
+    # publish to the test with `&&`. The status is consulted, not ignored.
+    ('a publish gated on a test of the capture',
+     'make check > tmp/c.log 2>&1; rc=$?; [ "$rc" -eq 0 ] && git push',
+     False, False, ''),
+    ('the [[ spelling of the test',
+     'make check > tmp/c.log 2>&1; rc=$?; [[ $rc -eq 0 ]] && git push',
+     False, False, ''),
+    ('the test builtin',
+     'make check > tmp/c.log 2>&1; rc=$?; test "$rc" -eq 0 && git push',
+     False, False, ''),
+    # Every command in an unbroken `&&` chain ran only because the test passed.
+    ('a publish further along the tested chain',
+     'make check > tmp/c.log 2>&1; rc=$?; [ "$rc" -eq 0 ] && echo ok && git push',
+     False, False, ''),
+    ('a push status gating a workflow dispatch, with the log read between',
+     'git push -u origin HEAD > tmp/push.log 2>&1; rc=$?; echo "push EXIT=$rc"; '
+     'tail -3 tmp/push.log; [ "$rc" -eq 0 ] && gh workflow run e2e.yml --ref b '
+     '&& gh run list --workflow e2e.yml --limit 3', False, False, ''),
+    # The other direction: a test is what makes the chain conditional, and the
+    # chain has to reach the mutator unbroken.
+    ('a read of the capture is not a test of it',
+     'make check > tmp/c.log 2>&1; rc=$?; echo "$rc" && git push',
+     False, True, 'is sequenced before'),
+    ('a test of some other variable',
+     'make check > tmp/c.log 2>&1; rc=$?; [ "$other" -eq 0 ] && git push',
+     False, True, ''),
+    ('a test the publish is sequenced after rather than joined to',
+     'make check > tmp/c.log 2>&1; rc=$?; [ "$rc" -eq 0 ]; git push',
+     False, True, ''),
+    ('a publish on the || side of the test',
+     'make check > tmp/c.log 2>&1; rc=$?; [ "$rc" -eq 0 ] && echo ok || git push',
+     False, True, ''),
+    ('a second publish outside the tested chain',
+     'make check > tmp/c.log 2>&1; rc=$?; [ "$rc" -eq 0 ] && git push; gh release create v1',
+     False, True, 'gh release create'),
+    ('a test with no capture to read',
+     'make check > tmp/c.log 2>&1; [ "$rc" -eq 0 ] && git push',
+     False, True, ''),
+
     # --- Read forms of a subcommand that also writes -------------------------
     # `git tag` and `kubectl rollout` each have a read form and a write form
     # under one subcommand, so a head match alone casts the read as the publish
