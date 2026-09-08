@@ -4578,6 +4578,53 @@ class SubstBodyCwdTests(unittest.TestCase):
         self.assertIsNotNone(out, "expected a decision, got defer")
         self.assertEqual("deny", out["hookSpecificOutput"]["permissionDecision"])
 
+    # --- review holds: two ways this fix was looser than what it replaced ---
+
+    def _asks_about(self, cmd, needle):
+        out = run_hook(cmd, self.workspace, project_dir=self.workspace)
+        self.assertIsNotNone(out, f"expected a decision, got defer for: {cmd!r}")
+        reason = out["hookSpecificOutput"].get("permissionDecisionReason")
+        self.assertEqual("ask", out["hookSpecificOutput"]["permissionDecision"],
+                         f"for {cmd!r} (reason: {reason!r})")
+        self.assertIn("Outside-workspace", reason, f"for {cmd!r}")
+        self.assertIn(needle, reason, f"for {cmd!r}")
+
+    def test_a_stray_sentinel_byte_does_not_disable_substitution_scanning(self):
+        # The marker is a byte the command could itself contain, so marking
+        # bails when it does. Bailing to "no bodies" switched substitution
+        # scanning off outright and left an out-of-root read silent — looser
+        # than the code this replaced, which analysed every body at the entry
+        # cwd. The operand is written absolute so the verdict does not depend
+        # on the cwd the bail gives up on.
+        self._asks_about('echo "\x1e"; echo "$(cat /etc/q169-sentinel-target)"',
+                         "q169-sentinel-target")
+
+    def test_a_stray_sentinel_byte_does_not_hide_an_out_of_root_write(self):
+        # A write, for the same reason the backtick-write fixture exists above.
+        self._asks_about('echo "\x1e"; echo `tee /etc/q169-sentinel-target`',
+                         "q169-sentinel-target")
+
+    def test_a_cd_target_assigned_after_the_cd_does_not_resolve(self):
+        # `stable_vars` is the map the group loop settled on at the END of the
+        # string. Consumed whole it resolves a `cd $d` from an assignment
+        # written after it — and resolving a cd target makes the cwd KNOWN,
+        # which removes prompts, so the substitution spelling went silent where
+        # the plain one denies. The walk consumes it positionally instead.
+        for cmd in ('cd $d; echo "$(cat ../in.txt)"; d=sub',
+                    "cd $d && echo `cat ../in.txt`; d=sub"):
+            out = run_hook(cmd, self.workspace, project_dir=self.workspace)
+            self.assertIsNotNone(out,
+                                 f"expected a decision, got defer for: {cmd!r}")
+            self.assertEqual("deny",
+                             out["hookSpecificOutput"]["permissionDecision"],
+                             f"for {cmd!r}")
+
+    def test_a_cd_target_assigned_before_the_cd_still_resolves(self):
+        # The other direction of the same map: reading it positionally must not
+        # cost the case it was added for, at this level or inside a body.
+        self._is_clean('d=sub; cd $d; echo "$(cat ../in.txt)"')
+        self._is_clean('d=sub; echo "$(cd $d && cat ../in.txt)"')
+
 
 class SubstBodyVarPropagationTests(unittest.TestCase):
     """Q66: a substitution body inherits the string's literal variables.

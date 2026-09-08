@@ -3260,7 +3260,14 @@ def mark_substitutions(text):
     ``cd "$(git rev-parse --show-toplevel)"`` recognisable.
     """
     if SUBST_MARK in text:
-        return text, [], []
+        # The string already carries the sentinel, so a marker inserted here
+        # could not be told from the caller's own byte. Mark nothing, and say so
+        # with a ``texts`` of None: every body is still analysed, at the entry
+        # cwd, which is what the recursion did before Q169. Returning no bodies
+        # would switch substitution scanning off outright -- an out-of-root read
+        # or write silent from one stray byte, which is looser than main rather
+        # than equal to it.
+        return text, command_substitutions(text), None
     spans = []
     bodies = command_substitutions(text, spans=spans)
     out, texts, last = [], [], 0
@@ -3273,7 +3280,8 @@ def mark_substitutions(text):
     return ''.join(out), bodies, texts
 
 
-def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None):
+def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
+                        inherited=None):
     """Every command a substitution in ``cmd`` runs, with the cwd bash runs it in.
 
     Returns ``(body, cwd, cwd_unknown)`` triples. A body whose position the scan
@@ -3292,6 +3300,16 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None):
     the walk below substitutes from it before reading a `cd` target — without
     it, `d=sub; cd $d; echo "$(cat x)"` loses the cwd the same string resolves
     fine for `cat x`, and the two spellings disagree the wrong way round.
+
+    It is consumed **positionally**, not whole. That map is the state at the
+    *end* of the string, and the argument that licenses over-approximating it
+    ("checking a superset can only find more paths") is an argument about
+    operands. A `cd` target runs the other way — resolving one makes the
+    cwd known, which *removes* prompts. Consumed whole it resolves a `cd $d`
+    from an assignment written after it, and `cd $d; echo "$(cat ../x)"; d=sub`
+    goes silent where the same read spelled plainly denies. ``inherited`` names
+    come from an enclosing string, so they were assigned before this one ran
+    and are usable from the start.
     """
     heredocs = []
     own = strip_heredoc_bodies(cmd, own_level_only=True, bodies=heredocs)
@@ -3300,9 +3318,12 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None):
     sub_cwd = [fallback] * len(bodies)
     hd_cwd = [fallback] * len(heredocs)
 
-    tokens = tokenize_command(marked, heredocs=False)
+    # ``texts`` None means nothing was marked, so there are no positions to
+    # read and every body keeps the fallback cwd.
+    tokens = None if texts is None else tokenize_command(marked, heredocs=False)
     if tokens is not None:
         cwd, unknown, hd_i = base_cwd, base_cwd_unknown, 0
+        usable = set(inherited or ())
         for g, g_redir, _persists, _pipe, nhd in split_groups(tokens):
             # Read the positions before applying this group's own `cd`: a
             # substitution is expanded to build the command line the `cd` then
@@ -3320,11 +3341,20 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None):
             restored = [MARK_RE.sub(
                 lambda m: texts[int(m.group(1))]
                 if int(m.group(1)) < len(texts) else m.group(0), t) for t in g]
-            if stable_vars:
-                restored = [substitute_vars(t, stable_vars) for t in restored]
+            if stable_vars and usable:
+                live = {k: v for k, v in stable_vars.items() if k in usable}
+                if live:
+                    restored = [substitute_vars(t, live) for t in restored]
             kind, arg = classify_cd(strip_env_prefix(strip_sh_keywords(restored)))
             if kind is not None:
                 cwd, unknown = apply_cd(kind, arg, cwd, unknown)
+            # Recorded after this group's own `cd`, so a `cd $d` cannot read an
+            # assignment standing beside it. Still filtered through
+            # `stable_vars`, so a name reassigned or poisoned anywhere in the
+            # string is absent from that map and never substitutes.
+            for tok in g:
+                if ASSIGNMENT_RE.match(tok):
+                    usable.add(tok.split('=', 1)[0])
 
     out = [(b,) + sub_cwd[i] for i, b in enumerate(bodies)]
     for i, (body, quoted) in enumerate(heredocs):
@@ -3989,7 +4019,8 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
     # allows (Q66).
     if subst_depth < MAX_SUBST_DEPTH:
         for body, body_cwd, body_cwd_unknown in substitution_bodies(
-                cmd, base_cwd, base_cwd_unknown, stable_vars):
+                cmd, base_cwd, base_cwd_unknown, stable_vars,
+                inherited=seed_vars):
             sub_off, _, sub_kf = _analyze_command(body, ctx, body_cwd,
                                                   subst_depth + 1, in_subst=True,
                                                   seed_vars=stable_vars,
