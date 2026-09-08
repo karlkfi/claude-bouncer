@@ -793,13 +793,15 @@ def is_assignment(token):
     carries a quote and assigns, so only where the quoting starts separates it
     from `'SP=/x'`.
 
-    A plain `str` carries no such record, so it is read as written plain. That
-    is the pre-Q170 behaviour, and it is what a hand-built token list gets. The
-    fallback is fail-open in this direction: it arms an override on a word bash
-    would not have assigned. Provenance survives slicing and reordering and dies
-    at anything that builds a new string -- prod-guard's `expand_argv` is one
-    such boundary, and every command-position caller there runs above it. Q175
-    holds the census of the rest.
+    A plain `str` carries no such record, so it is read as written plain -- the
+    pre-Q170 behaviour, and fail-open in this direction: it arms an override on
+    a word bash would not have assigned. Provenance survives slicing and
+    reordering and dies at anything that builds a new string, which happens on
+    live paths and not only in hand-built token lists: `substitute_vars`
+    returns a new `str` for a token carrying `$`, `glue_dollar_paren`
+    concatenates, and prod-guard's `expand_argv` rebuilds every token. Every
+    command-position caller in that file runs above its boundary; Q175 holds
+    the census of the rest.
     """
     m = ASSIGNMENT_RE.match(token)
     if not m:
