@@ -611,6 +611,23 @@ class PollConfigTests(unittest.TestCase):
                 d, _ = run_hook(cmd)
                 self.assertEqual(d, "deny")
 
+    def test_a_quoted_env_operand_still_arms(self):
+        # The other half of Q170, and the one a blanket swap breaks: `env` is a
+        # program, so its operands reach it AFTER quote removal and
+        # `env 'NAME=v' cmd` really does set NAME.
+        #
+        # Asserted at the reader, not end to end, because the verdict is not
+        # the discriminator here: converting the `env` branch leaves the
+        # override word as argv[0], which is an unrecognised command with no
+        # finding, so the hook defers either way. What moves is the pair below.
+        for raw in ("env 'FOREGROUND_GUARD_OVERRIDE=why' gh run watch 123",
+                    'env "FOREGROUND_GUARD_OVERRIDE=why" gh run watch 123'):
+            with self.subTest(raw=raw):
+                state = {}
+                argv = guard.strip_head(list(guard.tokenize(raw)), state)
+                self.assertEqual(state.get("override"), "why")
+                self.assertEqual(argv[0], "gh")
+
     def test_an_unquoted_override_statement_still_arms(self):
         # The control for the rows above: same shape, written plain.
         d, _ = run_hook("FOREGROUND_GUARD_OVERRIDE=demo; gh run watch 123")

@@ -8313,6 +8313,14 @@ class VarPropagationEndToEndTests(unittest.TestCase):
                     out["hookSpecificOutput"]["permissionDecision"]
                 self.assertNotEqual("allow", got, cmd)
 
+    def test_a_quoted_export_operand_still_binds(self):
+        # `export` is a builtin and parses its own operands after quote
+        # removal, so `export 'f=x'` assigns where a bare `'f=x'` does not.
+        # The contrast is the row below it in this suite: the same word
+        # without `export` is a command bash fails to find (Q170).
+        self._decision("export 'f=in.txt'; cat $f", "allow")
+        self._decision('export "f=in.txt"; cat $f', "allow")
+
     def test_quoted_value_still_binds_the_name(self):
         # The other direction: `f="in.txt"` IS an assignment, so the precision
         # Q170 buys must not cost the ordinary quoted-value form.
