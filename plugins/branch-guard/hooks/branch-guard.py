@@ -109,7 +109,7 @@ import sys, os, json, re, subprocess, fnmatch
 # copy under this plugin's `lib/` is vendored; see scripts/sync-lib.py.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 from bouncer_parse import (                                   # noqa: E402
-    ASSIGNMENT_RE, PUNCT_CHARS, is_assignment, lex, split_assignment,
+    PUNCT_CHARS, is_assignment, lex, split_assignment,
 )
 from bouncer_grants import record_grants                      # noqa: E402
 
