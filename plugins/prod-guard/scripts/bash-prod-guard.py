@@ -70,7 +70,6 @@ import hashlib
 import json
 import os
 import re
-import shlex
 import subprocess
 import sys
 
@@ -78,7 +77,8 @@ import sys
 # plugin's `lib/` is vendored from the repository root; see scripts/sync-lib.py.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 from bouncer_parse import (                                    # noqa: E402
-    ASSIGNMENT_RE, PUNCT_CHARS, split_assignment, strip_heredoc_bodies,
+    ASSIGNMENT_RE, PUNCT_CHARS, QuoteTrackingLexer, is_assignment,
+    split_assignment, strip_heredoc_bodies,
 )
 from bouncer_grants import grants_path, load_grants, record_grants  # noqa: E402
 import time
@@ -409,53 +409,8 @@ def tokenize(raw):
         return None
 
 
-class QuotedStr(str):
-    """A token, carrying the quote characters it was built from.
-
-    posix-mode shlex strips quotes, so `'kubectl --context $C'` and
-    `"kubectl --context $C"` come back as the same string -- and for a shell's
-    `-c` body those two mean opposite things about who expands `$C`. Subclassing
-    `str` keeps every existing token consumer working unchanged; only the caller
-    that needs the quoting reads `.quotes`."""
-    quotes = frozenset()
-
-
-class _QuoteTrackingLexer(shlex.shlex):
-    """shlex that records which quote characters each token was built from.
-
-    `read_token` assigns the quote character to `self.state` on entering a
-    quoted run and leaves it on exit, so recording every assignment across one
-    call names that token's quoting. A token built from no quoted run at all
-    gets the empty set."""
-
-    def __init__(self, *args, **kwargs):
-        self._seen_quotes = set()
-        super().__init__(*args, **kwargs)
-
-    def _get_state(self):
-        return self._state
-
-    def _set_state(self, value):
-        # `state` also takes 'a', 'c', ' ' and None (end of file); only a quote
-        # character says anything about how the token was written.
-        if value and value in getattr(self, 'quotes', ''):
-            self._seen_quotes.add(value)
-        self._state = value
-
-    state = property(_get_state, _set_state)
-
-    def read_token(self):
-        self._seen_quotes = set()
-        token = super().read_token()
-        if token is None or token is self.eof:
-            return token
-        out = QuotedStr(token)
-        out.quotes = frozenset(self._seen_quotes)
-        return out
-
-
 def _lex_semicolons(raw):
-    lex = _QuoteTrackingLexer(raw, posix=True, punctuation_chars=';()<>|&\n')
+    lex = QuoteTrackingLexer(raw, posix=True, punctuation_chars=';()<>|&\n')
     lex.whitespace_split = True
     return list(lex)
 
@@ -495,7 +450,7 @@ def extract_env_prefix(argv, base_env=None):
     `prod-ro`, not `-ro`."""
     env = {}
     i = 0
-    while i < len(argv) and ASSIGNMENT_RE.match(argv[i]):
+    while i < len(argv) and is_assignment(argv[i]):
         name, append, value = split_assignment(argv[i])
         if append:
             # `NAME+=v` appends to whatever this segment inherits, so it
@@ -588,7 +543,9 @@ def strip_wrappers(argv, env):
                 if argv[0].startswith('-'):
                     argv = argv[2:] if argv[0] in value_flags else argv[1:]
                 elif ASSIGNMENT_RE.match(argv[0]):
-                    # env is not the shell: it splits on the first `=` and takes
+                    # `env` is a program, so its operands reach it after quote
+                    # removal: `env 'A=1' cmd` really does set A (Q170). It is
+                    # also not the shell -- it splits on the first `=` and takes
                     # the rest as a name verbatim, so `env NAME+=v` exports
                     # `NAME+` and leaves `NAME` alone (Q174).
                     name, _, value = split_assignment(
@@ -2475,6 +2432,8 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None):
         if tool in ASSIGN_BUILTINS:
             # `export NAME=val …`: operands persist and are exported. argv is
             # already expanded, so the values are resolved.
+            # A builtin parses its own operands after quote removal, so
+            # `export 'A=1'` assigns where a bare `'A=1'` would not (Q170).
             for tok in argv[1:]:
                 if not tok.startswith('-') and ASSIGNMENT_RE.match(tok):
                     name, append, value = split_assignment(tok)

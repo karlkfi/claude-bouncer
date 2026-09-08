@@ -4,7 +4,7 @@ outside the workspace; allow when it only touches workspace files or pipes.
 
 Reads the hook JSON on stdin, emits a PreToolUse decision on stdout.
 """
-import sys, os, json, re, shlex, shutil, fnmatch, collections, tempfile
+import sys, os, json, re, shutil, fnmatch, collections, tempfile
 
 # The parsing primitives every claude-bouncer guard shares -- lexing, comment
 # and heredoc stripping, substitution scanning, command-head normalising. The
@@ -13,7 +13,8 @@ import sys, os, json, re, shlex, shutil, fnmatch, collections, tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 from bouncer_parse import (                                    # noqa: E402
     ASSIGNMENT_RE, COMMENT_PRECEDERS, DUP, MAX_SUBST_DEPTH, PUNCT_CHARS,
-    REDIR, SEPARATORS, SH_KEYWORDS, SUBST_OPEN, _OPERATORS, split_assignment,
+    QuoteTrackingLexer, REDIR, SEPARATORS, SH_KEYWORDS, SUBST_OPEN,
+    _OPERATORS, is_assignment, split_assignment,
     _consume_heredoc_body, _scan_backticks, _scan_dollar_paren,
     _skip_balanced_parens, command_substitutions, glue_dollar_paren,
     split_operator_runs, strip_comments, strip_env_prefix,
@@ -906,9 +907,10 @@ def command_override(cmd):
 
     prod-guard, exit-status-guard and branch-guard each keep this rule locally
     and return three different things (a dict, a bool, a reason string), so the
-    primitive they genuinely share is `ASSIGNMENT_RE`, which is already in
-    ``lib/``. A fourth copy of the *rule* is not a fourth caller of one
-    function; worth re-asking if a fifth appears."""
+    primitives they genuinely share are the ones in ``lib/``: `ASSIGNMENT_RE`,
+    and `is_assignment`, which adds bash's quote rule on top of it. A fourth
+    copy of the *rule* is not a fourth caller of one function; worth re-asking
+    if a fifth appears."""
     tokens = tokenize_command(cmd or '')
     if tokens is None:
         return None                               # unbalanced quotes -> no read
@@ -921,7 +923,7 @@ def command_override(cmd):
             continue
         if tok in SH_KEYWORDS:
             continue                              # `if`, `time`, `{`, ...
-        if not ASSIGNMENT_RE.match(tok):
+        if not is_assignment(tok):
             at_head = False                       # past the assignment run
             continue
         # `NAME+=reason` assigns in command position exactly as `NAME=reason`
@@ -1401,12 +1403,15 @@ def apply_assignment_group(g, varmap, persists):
         for t in toks[1:]:
             if t.startswith('-'):
                 continue
+            # `export` is a builtin and parses its own operands after quote
+            # removal, so `export 'A=1'` assigns where a bare `'A=1'` -- a
+            # command bash looks for and fails to find -- does not (Q170).
             if ASSIGNMENT_RE.match(t):
                 pairs.append(t)
             elif not IDENT_RE.fullmatch(t):
                 return None
     else:
-        if not toks or not all(ASSIGNMENT_RE.match(t) for t in toks):
+        if not toks or not all(is_assignment(t) for t in toks):
             return None
         pairs = toks
     names = []
@@ -2266,7 +2271,7 @@ def inline_tmpdir(tokens):
     keyword-stripped group (assignments still at the front)."""
     value = None
     for tok in tokens:
-        if not ASSIGNMENT_RE.match(tok):
+        if not is_assignment(tok):
             break                                  # first real word ends the prefix
         name, append, val = split_assignment(tok)
         if name == 'TMPDIR':
@@ -3210,7 +3215,8 @@ def tokenize_command(cmd, heredocs=True):
     """
     try:
         cleaned = strip_comments(strip_heredoc_bodies(cmd) if heredocs else cmd)
-        lex = shlex.shlex(cleaned, posix=True, punctuation_chars=';()<>|&\n')
+        lex = QuoteTrackingLexer(cleaned, posix=True,
+                                 punctuation_chars=';()<>|&\n')
         lex.whitespace_split = True
         lex.whitespace = lex.whitespace.replace('\n', '')
         lex.commenters = ''

@@ -24,6 +24,13 @@ Layers, in the order a command passes through them:
               -> lex                                     (shlex, POSIX quoting)
   tokens      -> split_operator_runs, glue_dollar_paren  (operator repair)
               -> strip_env_prefix, strip_sh_keywords     (find the real argv[0])
+              -> is_assignment                           (bash's own quote rule)
+
+`lex` returns `QuotedStr` tokens, which carry how the word was written before
+posix shlex stripped its quotes. Bash decides what a word IS before quote
+removal, so that record is the only thing that can tell a `NAME=v` assignment
+from a `'NAME=v'` the shell looks for as a program (Q170) -- and posix shlex
+hands back the same string either way.
 
 Fail-safe direction: a parse that cannot be completed returns less, never more.
 `lex` raises ValueError on unbalanced quotes so callers defer rather than guess,
@@ -708,6 +715,88 @@ def command_substitutions(text, quotes=True, spans=None):
 
 # ------------------------------------------------------------------- lexing
 
+class QuotedStr(str):
+    """A token, carrying how it was written before posix shlex stripped quotes.
+
+    posix-mode shlex strips quotes, so `'kubectl --context $C'` and
+    `"kubectl --context $C"` come back as the same string -- and for a shell's
+    `-c` body those two mean opposite things about who expands `$C`. Subclassing
+    `str` keeps every existing token consumer working unchanged; only the caller
+    that needs the quoting reads an attribute.
+
+    `quotes` is the set of quote characters the token was built from.
+    `quoted_from` is the offset into the STRIPPED token at which quoting or
+    escaping first appeared, or None when the word was written plain -- which
+    is what :func:`is_assignment` needs and `quotes` cannot answer, quoting on
+    the value side of an assignment being ordinary (`SP="/x"` assigns).
+    """
+    quotes = frozenset()
+    quoted_from = None
+
+
+class QuoteTrackingLexer(shlex.shlex):
+    """shlex that records, per token, the quoting it was built from.
+
+    `read_token` assigns the quote (or escape) character to `self.state` on
+    entering a quoted run and leaves it on exit, so recording every assignment
+    across one call names that token's quoting. `self.token` holds the stripped
+    text accumulated so far at that moment, which makes its length the offset
+    the quoting began at.
+    """
+
+    def __init__(self, *args, **kwargs):
+        self._seen_quotes = set()
+        self._quoted_from = None
+        super().__init__(*args, **kwargs)
+
+    def _get_state(self):
+        return self._state
+
+    def _set_state(self, value):
+        # `state` also takes 'a', 'c', ' ' and None (end of file); only a quote
+        # or escape character says anything about how the token was written.
+        if value and value in getattr(self, 'quotes', ''):
+            self._seen_quotes.add(value)
+        if value and value in (getattr(self, 'quotes', '')
+                               + getattr(self, 'escape', '')):
+            if self._quoted_from is None:
+                self._quoted_from = len(getattr(self, 'token', ''))
+        self._state = value
+
+    state = property(_get_state, _set_state)
+
+    def read_token(self):
+        self._seen_quotes = set()
+        self._quoted_from = None
+        token = super().read_token()
+        if token is None or token is self.eof:
+            return token
+        out = QuotedStr(token)
+        out.quotes = frozenset(self._seen_quotes)
+        out.quoted_from = self._quoted_from
+        return out
+
+
+def is_assignment(token):
+    """Whether bash would set a variable from `token` in command position.
+
+    `ASSIGNMENT_RE` alone answers this for a raw word and not for a shlex
+    token, because bash decides what a word IS before it removes the quotes:
+    `'SP=/x'` looks for a program named `SP=/x`, fails, and leaves `SP` alone
+    (Q170). Quoting anywhere in the name or on the `=` disarms the assignment;
+    quoting after it does not, so `SP="/x"` and `SP='/x'` still assign -- which
+    is how every break-glass reason with a space in it is written.
+
+    A plain `str` carries no such record, so it is read as written plain. That
+    is the pre-Q170 behaviour, and it is what a hand-built token list gets.
+    """
+    m = ASSIGNMENT_RE.match(token)
+    if not m:
+        return False
+    quoted_from = getattr(token, 'quoted_from', None)
+    return quoted_from is None or quoted_from >= m.end()
+
+
 def lex(text):
     """shlex-tokenize `text` with bash's quoting and operator grouping.
 
@@ -719,7 +808,7 @@ def lex(text):
     comment at a mid-word `#`, which bash does not. `strip_comments` has already
     applied bash's actual rule.
     """
-    lx = shlex.shlex(text, posix=True, punctuation_chars=';()<>|&\n')
+    lx = QuoteTrackingLexer(text, posix=True, punctuation_chars=';()<>|&\n')
     lx.whitespace_split = True
     lx.whitespace = lx.whitespace.replace('\n', '')
     lx.commenters = ''
@@ -824,7 +913,7 @@ def strip_env_prefix(tokens):
     token.
     """
     i = 0
-    while i < len(tokens) and ASSIGNMENT_RE.match(tokens[i]):
+    while i < len(tokens) and is_assignment(tokens[i]):
         i += 1
     return tokens[i:]
 

@@ -217,6 +217,19 @@ CASES = [
      False, False, ''),
     ('override quoted, gate really piped',
      'echo "EXIT_STATUS_GUARD_OVERRIDE=x" | make check | tail -5', False, True, ''),
+    # Q170: bash strips a word's quotes AFTER deciding what the word is, so
+    # `'NAME=v'` is a program it looks for and fails to find -- it arms
+    # nothing. Written as its own statement, so the gate stays the head of the
+    # segment after it and the deny is what the arming would have lifted; the
+    # inline `'NAME=v' make check | tail` form makes `make` an argument
+    # instead, and bash runs no gate there for a status to be lost from. The
+    # quoted-VALUE rows above are the other direction and must keep passing.
+    ('a single-quoted override statement arms nothing',
+     "'EXIT_STATUS_GUARD_OVERRIDE=why'; make check | tail -5", False, True, ''),
+    ('a double-quoted override statement arms nothing',
+     '"EXIT_STATUS_GUARD_OVERRIDE=why"; make check | tail -5', False, True, ''),
+    ('a quoted `=` in an override statement arms nothing',
+     'EXIT_STATUS_GUARD_OVERRIDE"="why; make check | tail -5', False, True, ''),
     ('a different variable is not the override',
      'EXIT_STATUS_GUARD=x make check | tail -30', False, True, ''),
     ('the 1.x prefix still lifts a deny',

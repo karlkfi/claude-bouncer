@@ -406,6 +406,71 @@ class SplitAssignmentTests(unittest.TestCase):
         self.assertEqual(('A', True, ''), bp.split_assignment('A+='))
 
 
+class AssignmentTests(unittest.TestCase):
+    """Bash decides what a word IS before it removes the quotes (Q170, Q139).
+
+    The table is bash's own answer, taken on 5.3.15 with
+    ``bash -c "<word>; printf '[%s]' \"$SP\""``: a set variable prints its
+    value, an unset one prints ``[]`` after a ``command not found``. Quoting
+    anywhere up to and including the ``=`` disarms the assignment; quoting
+    after it is ordinary, which is how a break-glass reason with a space in it
+    is written.
+
+    `RUNS_A_COMMAND` is Q139's nine spellings, grouped by the mechanism that
+    disarms each -- because that row measured the class and warned it is a
+    floor, not a census. A fix written as *quoting the name* passes the first
+    six and still arms on ``SP\\=/x``, where the escape falls on the ``=``
+    itself and so belongs to neither name nor value. The empty pairs are here
+    for the same reason: they put no characters in the token, so only an offset
+    can see them.
+    """
+
+    ASSIGNS = ('SP=/x', 'SP="/x"', "SP='/x'", 'SP=/x"y"', 'SP=$(echo /x)',
+               'SP=one"two"')
+    RUNS_A_COMMAND = ("'SP=/x'", '"SP=/x"',            # the whole word quoted
+                      "S'P'=/x", 'S"P"=/x',            # part of the name
+                      "S''P=/x", 'SP""=/x',            # an empty pair
+                      'SP"="/x',                       # the `=` itself
+                      r'\SP=/x', r'S\P=/x', r'SP\=/x')  # escaped, not quoted
+
+    def test_a_plain_prefix_assigns(self):
+        for word in self.ASSIGNS:
+            with self.subTest(word=word):
+                self.assertTrue(bp.is_assignment(bp.lex(word)[0]))
+
+    def test_a_quoted_name_or_equals_runs_a_command(self):
+        for word in self.RUNS_A_COMMAND:
+            with self.subTest(word=word):
+                self.assertFalse(bp.is_assignment(bp.lex(word)[0]))
+
+    def test_a_word_that_is_no_assignment_at_all_is_never_one(self):
+        for word in ('cat', "'cat'", '1A=x', '-A=x'):
+            with self.subTest(word=word):
+                self.assertFalse(bp.is_assignment(bp.lex(word)[0]))
+
+    def test_a_plain_str_reads_as_written_plain(self):
+        """A hand-built token carries no record, so it keeps the old reading."""
+        self.assertTrue(bp.is_assignment('SP=/x'))
+
+    def test_a_quoted_prefix_is_not_peeled_as_env(self):
+        toks = bp.lex("'LC_ALL=C' cat /x")
+        self.assertEqual(['LC_ALL=C', 'cat', '/x'], bp.strip_env_prefix(toks))
+
+    def test_a_plain_prefix_is_still_peeled_as_env(self):
+        toks = bp.lex('LC_ALL=C cat /x')
+        self.assertEqual(['cat', '/x'], bp.strip_env_prefix(toks))
+
+    def test_the_offset_is_into_the_stripped_token(self):
+        self.assertEqual(2, bp.lex('SP"="/x')[0].quoted_from)
+        self.assertIsNone(bp.lex('SP=/x')[0].quoted_from)
+
+    def test_the_quote_characters_are_still_recorded(self):
+        """prod-guard reads `.quotes` to tell a `-c` body's expander apart."""
+        self.assertEqual(frozenset("'"), bp.lex("'a b'")[0].quotes)
+        self.assertEqual(frozenset('"'), bp.lex('"a b"')[0].quotes)
+        self.assertEqual(frozenset(), bp.lex('ab')[0].quotes)
+
+
 class VendoringTests(unittest.TestCase):
     """The copies under each plugin are what actually ship."""
 

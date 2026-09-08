@@ -101,7 +101,7 @@ Scope note: branch-guard reasons about git/branch *semantics*. The filesystem
 boundary (commands touching paths outside the workspace) is workspace-guard's
 job; the two don't overlap.
 """
-import sys, os, json, re, shlex, subprocess, fnmatch
+import sys, os, json, re, subprocess, fnmatch
 
 # The parsing primitives every claude-bouncer guard shares. This guard keeps its
 # own SEPARATORS/REDIR: it folds the duplicating operators into REDIR and
@@ -109,7 +109,7 @@ import sys, os, json, re, shlex, subprocess, fnmatch
 # copy under this plugin's `lib/` is vendored; see scripts/sync-lib.py.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 from bouncer_parse import (                                   # noqa: E402
-    ASSIGNMENT_RE, PUNCT_CHARS, lex, split_assignment,
+    ASSIGNMENT_RE, PUNCT_CHARS, is_assignment, lex, split_assignment,
 )
 from bouncer_grants import record_grants                      # noqa: E402
 
@@ -924,7 +924,7 @@ def parse_invocation(tokens):
     `FOO=bar git -C path -c k=v commit -m x` ->
     {'prog': 'git', 'sub': 'commit', 'args': ['-m','x'], 'globals': ['-C','path','-c','k=v']}."""
     i = 0
-    while i < len(tokens) and ASSIGNMENT_RE.match(tokens[i]):
+    while i < len(tokens) and is_assignment(tokens[i]):
         i += 1
     if i >= len(tokens):
         return None
@@ -959,7 +959,7 @@ def is_safe_read_filter(tokens):
     a write option (`sort -o`) disqualifies. Fails safe: any token it can't
     prove is stdin-only makes the segment defer rather than allow."""
     i = 0
-    while i < len(tokens) and ASSIGNMENT_RE.match(tokens[i]):
+    while i < len(tokens) and is_assignment(tokens[i]):
         i += 1
     if i >= len(tokens):
         return False
@@ -1000,7 +1000,7 @@ def is_benign_segment(tokens):
     inspection is needed: with redirect and substitution closed, no argument to
     these programs writes a file or runs code."""
     i = 0
-    while i < len(tokens) and ASSIGNMENT_RE.match(tokens[i]):
+    while i < len(tokens) and is_assignment(tokens[i]):
         i += 1
     if i >= len(tokens):
         return False
@@ -1859,7 +1859,7 @@ def override_reason(segments):
     here."""
     for seg, _ in segments:
         for tok in seg:
-            if not ASSIGNMENT_RE.match(tok):
+            if not is_assignment(tok):
                 break
             # `NAME+=reason` is an assignment in command position too (Q174).
             name, _append, value = split_assignment(tok)

@@ -917,11 +917,42 @@ class OverrideTests(unittest.TestCase):
         self.assertEqual(decision, "deny")
         self.assertNotIn("override acknowledged", reason)
 
+    def test_a_quoted_override_prefix_arms_nothing(self):
+        # Q170: bash strips a word's quotes AFTER deciding what the word is, so
+        # `'NAME=v'` is a program it looks for and fails to find. Written as
+        # its own statement, so the kubectl after it keeps its command head --
+        # inline, the quoted word takes that head and no covered tool is left.
+        for prefix in ("'PROD_GUARD_OVERRIDE=drill'; ",
+                       '"PROD_GUARD_OVERRIDE=drill"; ',
+                       'PROD_GUARD_OVERRIDE"="drill; '):
+            with self.subTest(prefix=prefix):
+                decision, reason = run_hook(
+                    prefix + "kubectl --context gke_acme_prod-us delete ns x")
+                self.assertEqual(decision, "deny")
+                self.assertNotIn("override acknowledged", reason)
+
+    def test_an_unquoted_override_statement_still_arms(self):
+        # The control for the rows above: same shape, written plain.
+        decision, reason = run_hook(
+            "PROD_GUARD_OVERRIDE=drill; "
+            "kubectl --context gke_acme_prod-us delete ns x")
+        self.assertEqual(decision, "ask")
+        self.assertIn("override acknowledged", reason)
+
     def test_append_spelled_override_downgrades_deny_to_ask(self):
         # bash assigns for `NAME+=v` in command position, so the prefix arms
         # exactly as `NAME=v` does (Q174).
         decision, reason = run_hook(
             "PROD_GUARD_OVERRIDE+=incident-42 "
+            "kubectl --context gke_acme_prod-us delete ns x")
+        self.assertEqual(decision, "ask")
+        self.assertIn("override acknowledged", reason)
+
+    def test_a_quoted_reason_still_arms(self):
+        # Quoting AFTER the `=` is ordinary, and it is how a reason with a
+        # space in it is written -- Q170 must not cost the documented form.
+        decision, reason = run_hook(
+            "PROD_GUARD_OVERRIDE='incident 42' "
             "kubectl --context gke_acme_prod-us delete ns x")
         self.assertEqual(decision, "ask")
         self.assertIn("override acknowledged", reason)

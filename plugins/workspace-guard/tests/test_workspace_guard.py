@@ -1011,6 +1011,28 @@ class CommandOverrideTests(unittest.TestCase):
         self.assertIsNone(
             guard.command_override('grep -r WORKSPACE_GUARD_OVERRIDE=r .'))
 
+    def test_a_quoted_prefix_does_not_arm(self):
+        # `'NAME=v' cmd` is not an assignment: bash strips the quotes after it
+        # has decided what the word is, looks for a program called `NAME=v`,
+        # and fails. Arming off it disarms the guard on a word bash would not
+        # have run (Q170).
+        self.assertIsNone(guard.command_override(
+            "'WORKSPACE_GUARD_OVERRIDE=r' cp a b"))
+        self.assertIsNone(guard.command_override(
+            '"WORKSPACE_GUARD_OVERRIDE=r" cp a b'))
+        self.assertIsNone(guard.command_override(
+            'WORKSPACE_GUARD"_OVERRIDE=r" cp a b'))
+
+    def test_a_quoted_value_still_arms(self):
+        # Quoting AFTER the `=` is ordinary, and it is how every reason with a
+        # space in it is written — so Q170 must not cost the documented form.
+        self.assertEqual(
+            guard.command_override('WORKSPACE_GUARD_OVERRIDE="two words" cp a b'),
+            "two words")
+        self.assertEqual(
+            guard.command_override("WORKSPACE_GUARD_OVERRIDE='two words' cp a b"),
+            "two words")
+
     def test_inside_a_heredoc_body_is_not_an_override(self):
         # Body text is stripped before the tokenizer, so data never reads as
         # command position.
@@ -8277,6 +8299,25 @@ class VarPropagationEndToEndTests(unittest.TestCase):
     def test_literal_var_host_temp_deny(self):
         # The issue's motivating example: `SP=/tmp/...; tail -5 $SP/x.csv`.
         self._decision("SP=/tmp/q58-fake-dir; tail -5 $SP/q265.csv", "deny")
+
+    def test_quoted_assignment_does_not_bind_the_name(self):
+        # Q170: bash runs a program called `f=in.txt` and leaves `f` unset, so
+        # `$f` is unresolved and the read is not vouched for. The old reading
+        # bound the name and emitted `allow` — for a value bash never assigned.
+        for cmd in ("'f=in.txt'; cat $f",
+                    '"f=in.txt"; cat $f',
+                    "f'='in.txt; cat $f"):
+            with self.subTest(cmd=cmd):
+                out = run_hook(cmd, self.workspace)
+                got = None if out is None else \
+                    out["hookSpecificOutput"]["permissionDecision"]
+                self.assertNotEqual("allow", got, cmd)
+
+    def test_quoted_value_still_binds_the_name(self):
+        # The other direction: `f="in.txt"` IS an assignment, so the precision
+        # Q170 buys must not cost the ordinary quoted-value form.
+        self._decision('f="in.txt"; cat $f', "allow")
+        self._decision("f='in.txt'; cat $f", "allow")
 
     def test_chained_assignment_allow(self):
         # `b=$a/…` sees the already-known literal `a` (bash does the same).

@@ -598,6 +598,24 @@ class PollConfigTests(unittest.TestCase):
                             permission_mode=mode)
             self.assertIsNone(d, "expected defer in %s mode" % mode)
 
+    def test_a_quoted_override_prefix_arms_nothing(self):
+        # Q170: bash strips a word's quotes AFTER deciding what the word is, so
+        # `'NAME=v'` is a program it looks for and fails to find. Written as
+        # its own statement, so the finding in the statement after it is what
+        # the arming would have lifted -- inline, the quoted word takes the
+        # command head and there is no `gh run watch` left to find.
+        for cmd in ("'FOREGROUND_GUARD_OVERRIDE=demo'; gh run watch 123",
+                    '"FOREGROUND_GUARD_OVERRIDE=demo"; gh run watch 123',
+                    'FOREGROUND_GUARD_OVERRIDE"="demo; gh run watch 123'):
+            with self.subTest(cmd=cmd):
+                d, _ = run_hook(cmd)
+                self.assertEqual(d, "deny")
+
+    def test_an_unquoted_override_statement_still_arms(self):
+        # The control for the rows above: same shape, written plain.
+        d, _ = run_hook("FOREGROUND_GUARD_OVERRIDE=demo; gh run watch 123")
+        self.assertIsNone(d)
+
     def test_override_does_not_reach_an_exempt_command(self):
         # The prefix is not a blanket pass: a command with no finding was
         # already deferring, and one that keeps a finding still needs it.
