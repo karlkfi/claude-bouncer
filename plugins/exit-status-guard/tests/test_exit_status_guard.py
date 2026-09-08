@@ -232,6 +232,28 @@ CASES = [
      'EXIT_STATUS_GUARD_OVERRIDE"="why; make check | tail -5', False, True, ''),
     ('a different variable is not the override',
      'EXIT_STATUS_GUARD=x make check | tail -30', False, True, ''),
+    # `env` is the other direction again, and the one `peel_wrappers` has to
+    # get right twice in one loop: its first pass is command position, and the
+    # pass after `env` comes off is OPERAND position, where bash has already
+    # removed the quotes. So `env 'A=1' make check | tail` really does run the
+    # gate and really does lose its status. Driven on bash 5.3.15:
+    # `env 'A=1' bash -c 'echo $A'` prints 1.
+    ('a quoted env operand still reaches the gate',
+     "env 'A=1' make check | tail -5", False, True,
+     "exit status is the filter's"),
+    ('a double-quoted env operand still reaches the gate',
+     'env "A=1" make check | tail -5', False, True,
+     "exit status is the filter's"),
+    ('several quoted env operands still reach the gate',
+     "env 'A=1' 'B=2' go test ./... | tail -5", False, True,
+     "exit status is the filter's"),
+    # The control for those three: `nohup` does NOT consume an assignment
+    # operand -- it execs a program called `A=1` and exits 127 -- so no gate
+    # runs and the guard must stay quiet. Same for `command`.
+    ('a quoted operand after nohup runs no gate',
+     "nohup 'A=1' make check | tail -5", False, False, ''),
+    ('a quoted operand after command runs no gate',
+     "command 'A=1' make check | tail -5", False, False, ''),
     ('the 1.x prefix still lifts a deny',
      'PIPE_GUARD_OVERRIDE=want-the-output-only make check | tail -30',
      False, False, ''),

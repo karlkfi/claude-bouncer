@@ -59,6 +59,17 @@ from bouncer_parse import (                                    # noqa: E402
 WRAPPERS = frozenset({'sudo', 'nohup', 'command', 'exec', 'bash', 'sh', 'zsh',
                       'env', 'stdbuf', 'setsid'})
 
+# Wrappers that take `NAME=v` OPERANDS and assign from them. They receive their
+# arguments after the shell has removed the quotes, so `env 'A=1' make` really
+# does assign where a bare `'A=1' make` runs a program of that name (Q170) --
+# which is why these two peel with `ASSIGNMENT_RE` while command position uses
+# `is_assignment`. Measured on bash 5.3.15: `env 'A=1' bash -c 'echo $A'` prints
+# 1, while `nohup`, `command`, `exec`, `stdbuf` and `setsid` all exit non-zero
+# trying to execute a program called `A=1`. `sudo` is here unverified -- it
+# needs a password to drive -- and keeping it errs toward catching the gate,
+# which is also the behaviour that predates this rule.
+ASSIGN_WRAPPERS = frozenset({'env', 'sudo'})
+
 # A segment: the tokens of one simple command, the operator run that follows it,
 # and its paren-nesting depth. `post_ops` is a tuple rather than a single token
 # because a group can close between a command and the operator that decides its
@@ -231,7 +242,12 @@ def peel_wrappers(tokens):
     while True:
         tokens = strip_env_prefix(strip_sh_keywords(tokens))
         if tokens and os.path.basename(tokens[0]) in WRAPPERS:
+            wrapper = os.path.basename(tokens[0])
             tokens = tokens[1:]
+            if wrapper in ASSIGN_WRAPPERS:
+                # Operand position, not command position: see ASSIGN_WRAPPERS.
+                while tokens and ASSIGNMENT_RE.match(tokens[0]):
+                    tokens = tokens[1:]
             continue
         return tokens
 
