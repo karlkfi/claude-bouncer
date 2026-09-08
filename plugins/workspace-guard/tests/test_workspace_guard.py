@@ -4437,6 +4437,195 @@ class RawSubstScanHeredocTests(unittest.TestCase):
             "cat <<EOF\ndon't\nEOF\necho \"$(cat <<X\nb\nX\ncat in.txt)\"")
 
 
+class SubstBodyCwdTests(unittest.TestCase):
+    """Q169: a substitution body resolved against the string's ENTRY cwd.
+
+    The group loop tracks the cwd across a `cd` chain, so a relative operand is
+    checked against the directory bash would open it in. The substitution
+    recursion ran once over the whole string afterwards and started from the
+    entry cwd, so a body written after a `cd` was judged against a directory the
+    command had already left -- wrong in both directions. After a `cd` out of
+    the root, a backtick or heredoc-body read landed back inside it and drew no
+    prompt at all, where the `$( )` spelling of the same command asked; after a
+    `cd` into a subdirectory, `$(cat ../x)` named a path one level above the
+    root that the command never touches.
+
+    `/etc` stands in for the outside directory throughout: it is outside any
+    workspace and is not host temp, so the verdict is the `ask` a boundary
+    crossing earns rather than the constructive `deny` a `/tmp` path gets.
+    """
+
+    # The operand under test is RELATIVE — resolved against the directory the
+    # `cd` moved to — so the reason names only the resolved path, and that
+    # rendering is platform-specific: Git Bash maps `/etc` through its mount
+    # table, so Windows reads `C:\Program Files\Git\etc\…` where POSIX reads
+    # `/etc/…`. Asserting the basename plus the boundary category is what this
+    # class is actually about and holds on both. (The Q113 class beside this one
+    # can assert a full POSIX path only because its operand is written absolute,
+    # so the literal survives into the reason unresolved.)
+    TARGET = "q169-fake-target"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = os.path.realpath(self._tmp.name)
+        os.mkdir(os.path.join(self.workspace, "sub"))
+        with open(os.path.join(self.workspace, "in.txt"), "w") as f:
+            f.write("x\n")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _asks_about_target(self, cmd):
+        out = run_hook(cmd, self.workspace, project_dir=self.workspace)
+        self.assertIsNotNone(out, f"expected a decision, got defer for: {cmd!r}")
+        reason = out["hookSpecificOutput"].get("permissionDecisionReason")
+        self.assertEqual("ask", out["hookSpecificOutput"]["permissionDecision"],
+                         f"for {cmd!r} (reason: {reason!r})")
+        self.assertIn("Outside-workspace", reason, f"for {cmd!r}")
+        self.assertIn(self.TARGET, reason, f"for {cmd!r}")
+
+    def _is_clean(self, cmd):
+        """No offender: the hook either defers or vouches for the string."""
+        out = run_hook(cmd, self.workspace, project_dir=self.workspace)
+        if out is None:
+            return
+        decision = out["hookSpecificOutput"]["permissionDecision"]
+        self.assertEqual("allow", decision,
+                         f"for {cmd!r} (reason: "
+                         f"{out['hookSpecificOutput'].get('permissionDecisionReason')!r})")
+
+    def _names_no_path_above_the_root(self, cmd):
+        out = run_hook(cmd, self.workspace, project_dir=self.workspace)
+        if out is None:
+            return                                # deferring names nothing
+        reason = out["hookSpecificOutput"].get("permissionDecisionReason") or ""
+        above = os.path.dirname(self.workspace)
+        self.assertNotIn(os.path.join(above, "in.txt"), reason)
+
+    # --- the missed offenders: an out-of-root read or write, and no prompt ---
+
+    def test_a_backtick_read_after_a_cd_out_is_checked(self):
+        self._asks_about_target("cd /etc && echo `cat q169-fake-target`")
+
+    def test_a_backtick_write_after_a_cd_out_is_checked(self):
+        # A write, not just a read: the same silence covered `tee`.
+        self._asks_about_target("cd /etc && echo `tee q169-fake-target`")
+
+    def test_a_heredoc_body_substitution_after_a_cd_out_is_checked(self):
+        self._asks_about_target(
+            "cd /etc && cat <<EOF\n$(cat q169-fake-target)\nEOF")
+
+    def test_a_heredoc_body_backtick_after_a_cd_out_is_checked(self):
+        # The heredoc body is stripped before the group loop sees it, so the
+        # accidental coverage that saved the bare `$( )` never applied here --
+        # both spellings were missed.
+        self._asks_about_target(
+            "cd /etc && cat <<EOF\n`cat q169-fake-target`\nEOF")
+
+    def test_a_nested_backtick_after_a_cd_out_is_checked(self):
+        self._asks_about_target(
+            "cd /etc && echo $(echo `cat q169-fake-target`)")
+
+    def test_a_quoted_substitution_after_a_cd_out_is_checked(self):
+        # Quoted, the whole substitution arrives as one token, so the group
+        # loop never splits its operands out either.
+        self._asks_about_target('cd /etc && echo "$(cat q169-fake-target)"')
+
+    def test_the_bare_form_that_already_worked_still_works(self):
+        # Covered by accident before the fix -- `(` stays in the token stream,
+        # so the group loop saw this body's operands with the tracked cwd. It
+        # is the regression guard on retiring that accident.
+        self._asks_about_target("cd /etc && echo $(cat q169-fake-target)")
+
+    # --- the false positives: a prompt naming a path never touched -----------
+
+    def test_a_substitution_after_a_cd_in_names_no_path_above_the_root(self):
+        self._names_no_path_above_the_root('cd sub && echo "$(cat ../in.txt)"')
+
+    def test_a_backtick_after_a_cd_in_names_no_path_above_the_root(self):
+        self._names_no_path_above_the_root("cd sub && echo `cat ../in.txt`")
+
+    def test_the_same_read_outside_a_substitution_is_silent(self):
+        # The control: bash opens the same file either way, so the two spellings
+        # have to agree. This one was always right.
+        self._is_clean("cd sub && cat ../in.txt")
+
+    # --- what must not change ------------------------------------------------
+
+    def test_a_literal_heredoc_body_is_still_not_scanned(self):
+        # A `<<'EOF'` delimiter makes the body literal, so the `$(…)` in it
+        # never runs and must not produce an offender (Q35). Carrying a cwd
+        # must not turn a body bash treats as data into a command.
+        self._is_clean("cd /etc && cat <<'EOF'\n$(cat q169-fake-target)\nEOF")
+
+    def test_an_in_workspace_read_in_a_substitution_earns_no_prompt(self):
+        self._is_clean('echo "$(cat in.txt)"')
+
+    def test_a_literal_variable_cd_target_still_tracks(self):
+        # The cwd read runs on its own token stream, so it needs the same
+        # literal-variable map the group loop settled on. Without it a `cd $d`
+        # reads as untrackable and the substitution form denies a read the
+        # plain form beside it allows.
+        self._is_clean('d=sub; cd $d; echo "$(cat ../in.txt)"')
+        self._is_clean("d=sub; cd $d; cat ../in.txt")
+
+    def test_a_substitution_after_an_untrackable_cd_blocks(self):
+        # `cd -` loses the cwd, so a relative operand cannot be resolved. The
+        # same operand written outside a substitution already denies; carrying
+        # the unknown into the body is what makes the two spellings agree.
+        out = run_hook("cd - && echo `cat in.txt`", self.workspace,
+                       project_dir=self.workspace)
+        self.assertIsNotNone(out, "expected a decision, got defer")
+        self.assertEqual("deny", out["hookSpecificOutput"]["permissionDecision"])
+
+    # --- review holds: two ways this fix was looser than what it replaced ---
+
+    def _asks_about(self, cmd, needle):
+        out = run_hook(cmd, self.workspace, project_dir=self.workspace)
+        self.assertIsNotNone(out, f"expected a decision, got defer for: {cmd!r}")
+        reason = out["hookSpecificOutput"].get("permissionDecisionReason")
+        self.assertEqual("ask", out["hookSpecificOutput"]["permissionDecision"],
+                         f"for {cmd!r} (reason: {reason!r})")
+        self.assertIn("Outside-workspace", reason, f"for {cmd!r}")
+        self.assertIn(needle, reason, f"for {cmd!r}")
+
+    def test_a_stray_sentinel_byte_does_not_disable_substitution_scanning(self):
+        # The marker is a byte the command could itself contain, so marking
+        # bails when it does. Bailing to "no bodies" switched substitution
+        # scanning off outright and left an out-of-root read silent — looser
+        # than the code this replaced, which analysed every body at the entry
+        # cwd. The operand is written absolute so the verdict does not depend
+        # on the cwd the bail gives up on.
+        self._asks_about('echo "\x1e"; echo "$(cat /etc/q169-sentinel-target)"',
+                         "q169-sentinel-target")
+
+    def test_a_stray_sentinel_byte_does_not_hide_an_out_of_root_write(self):
+        # A write, for the same reason the backtick-write fixture exists above.
+        self._asks_about('echo "\x1e"; echo `tee /etc/q169-sentinel-target`',
+                         "q169-sentinel-target")
+
+    def test_a_cd_target_assigned_after_the_cd_does_not_resolve(self):
+        # `stable_vars` is the map the group loop settled on at the END of the
+        # string. Consumed whole it resolves a `cd $d` from an assignment
+        # written after it — and resolving a cd target makes the cwd KNOWN,
+        # which removes prompts, so the substitution spelling went silent where
+        # the plain one denies. The walk consumes it positionally instead.
+        for cmd in ('cd $d; echo "$(cat ../in.txt)"; d=sub',
+                    "cd $d && echo `cat ../in.txt`; d=sub"):
+            out = run_hook(cmd, self.workspace, project_dir=self.workspace)
+            self.assertIsNotNone(out,
+                                 f"expected a decision, got defer for: {cmd!r}")
+            self.assertEqual("deny",
+                             out["hookSpecificOutput"]["permissionDecision"],
+                             f"for {cmd!r}")
+
+    def test_a_cd_target_assigned_before_the_cd_still_resolves(self):
+        # The other direction of the same map: reading it positionally must not
+        # cost the case it was added for, at this level or inside a body.
+        self._is_clean('d=sub; cd $d; echo "$(cat ../in.txt)"')
+        self._is_clean('d=sub; echo "$(cd $d && cat ../in.txt)"')
+
+
 class SubstBodyVarPropagationTests(unittest.TestCase):
     """Q66: a substitution body inherits the string's literal variables.
 

@@ -3168,44 +3168,7 @@ def resolve_native_path(raw, cwd):
 KillFacts = collections.namedtuple('KillFacts', ['signal', 'launder', 'patterns'])
 
 
-def _unstripped_subst_bodies(cmd, subs):
-    """Swap each substitution body in ``subs`` for its text in the raw ``cmd``.
-
-    ``subs`` comes from the heredoc-stripped string, which is the only scan that
-    reads Q35 and Q50 right: a `` <<'EOF' `` body is literal, so a `$(…)` in one
-    must not be found, and an apostrophe in an expanded body must not hide a
-    real `$(…)` after it. Stripping leaves the `<<WORD` operator behind, though,
-    and a body carrying a disarmed one is mis-read when the recursion strips it
-    a second time — the operator re-arms, its terminator line is long gone, and
-    everything after the newline is swallowed as an unterminated body, so
-    ``echo "$(cat <<EOF … EOF … cat /outside)"`` lost the read entirely (Q113).
-
-    The raw text still has its terminator, so the recursion strips it correctly.
-    A raw body is matched to a stripped one by stripping it back down, which is
-    what keeps the two scans' disagreements out: a body only the RAW scan finds
-    (the `` <<'EOF' `` literal) has no stripped counterpart to replace, and one
-    only the stripped scan finds has no raw match and is left as it is, since a
-    false positive on heredoc data would be worse.
-
-    The raw scan runs over an own-level strip rather than over ``cmd`` itself.
-    Scanning the raw string flat, an apostrophe in an EARLIER top-level heredoc
-    body opened a quoted run that swallowed the rest of it (the Q50 mechanism),
-    so the scan returned nothing, no body had a counterpart to swap in, and the
-    Q113 defect survived with the hook returning `allow` for a substitution
-    whose outside read it never saw (Q119). Dropping the top-level bodies first
-    removes that text while leaving each substitution's own heredocs — the
-    terminators the recursion needs — in place.
-    """
-    if '<<' not in cmd:
-        return subs
-    raw = {}
-    for body in command_substitutions(strip_heredoc_bodies(cmd,
-                                                           own_level_only=True)):
-        raw.setdefault(strip_heredoc_bodies(body), body)
-    return [raw.get(b, b) for b in subs]
-
-
-def tokenize_command(cmd):
+def tokenize_command(cmd, heredocs=True):
     r"""Shell tokens for a command string, or None when the quoting is unbalanced.
 
     `\n` is a punctuation char so a newline command boundary surfaces as a
@@ -3226,9 +3189,15 @@ def tokenize_command(cmd):
     One function rather than two so :func:`command_override` reads the same
     tokens the boundary check does: an override the two disagreed about would
     be granted for a string the guard parsed some other way.
+
+    Pass ``heredocs=False`` for a string whose bodies have already been taken
+    out. Stripping twice is not idempotent — the first pass leaves the `<<WORD`
+    operator behind disarmed, and a second one re-arms it and swallows whatever
+    follows — so a caller that stripped its own bodies to get at what they
+    contained must say so (Q169).
     """
     try:
-        cleaned = strip_comments(strip_heredoc_bodies(cmd))
+        cleaned = strip_comments(strip_heredoc_bodies(cmd) if heredocs else cmd)
         lex = shlex.shlex(cleaned, posix=True, punctuation_chars=';()<>|&\n')
         lex.whitespace_split = True
         lex.whitespace = lex.whitespace.replace('\n', '')
@@ -3236,6 +3205,237 @@ def tokenize_command(cmd):
         return glue_dollar_paren(split_operator_runs(list(lex)))
     except ValueError:
         return None
+
+
+# --- Where a substitution body sat (Q169) -----------------------------------
+# A relative path inside a command substitution resolves against the directory
+# in force at the point the substitution SITS, which a `cd` earlier in the same
+# string has already moved. Neither half of the parse can say where that is:
+# the group loop tracks the cwd over post-shlex tokens, which carry no
+# position, and `command_substitutions` scans the RAW string, which is what
+# reads quoting correctly.
+#
+# Marking joins them. Each substitution is replaced, in the raw string, by a
+# word standing in for it, so the token stream itself carries the position and
+# the group loop's own `cd` tracking answers for it — no offset arithmetic to
+# survive two strip passes, and no keying on body text, which collapses two
+# identical bodies written at different points into one. The PowerShell
+# frontend has masked its subexpressions this way since Q64
+# (`ps_subexpressions`), with an anonymous `$`; numbering the mask is the whole
+# of what carrying a position adds.
+#
+# `\x1e` is the sentinel because it cannot appear in a command Claude Code
+# sends. A string that holds one anyway is left unmarked, which is the pre-Q169
+# behaviour rather than a wrong answer.
+SUBST_MARK = '\x1e'
+MARK_RE = re.compile(SUBST_MARK + r'(\d+)' + SUBST_MARK)
+
+
+def apply_cd(kind, arg, cwd, unknown):
+    """The cwd a `cd`-family group leaves behind, as ``(cwd, unknown)``.
+
+    A whitelisted pure substitution computes the same value bash will, from the
+    tracked cwd: `$(pwd)` is the identity, `$(git rev-parse --show-toplevel)`
+    the nearest `.git` ancestor. Unresolvable — no `.git` boundary,
+    git-discovery env vars set — leaves the cd untracked, as does every other
+    shape `classify_cd` could not read.
+    """
+    if kind == 'arg':
+        return os.path.realpath(
+            arg if os.path.isabs(arg) else os.path.join(cwd, arg)), False
+    if kind == 'subst' and not unknown:
+        nxt = cwd if arg == 'pwd' else git_toplevel(cwd)
+        return (cwd, True) if nxt is None else (nxt, False)
+    return cwd, True
+
+
+def mark_substitutions(text):
+    """Replace every outermost command substitution in ``text`` with a marker.
+
+    Returns ``(marked, bodies, texts)``: the marked string, each substitution's
+    inner command, and the original source slice it was cut from. The marker is
+    a bare word, so shlex keeps it whole and it lands in the group the
+    substitution was written in; ``texts`` puts the original back before
+    :func:`classify_cd` reads the group, which is what keeps a whitelisted
+    ``cd "$(git rev-parse --show-toplevel)"`` recognisable.
+    """
+    if SUBST_MARK in text:
+        # The string already carries the sentinel, so a marker inserted here
+        # could not be told from the caller's own byte. Mark nothing, and say so
+        # with a ``texts`` of None: every body is still analysed, at the entry
+        # cwd, which is what the recursion did before Q169. Returning no bodies
+        # would switch substitution scanning off outright -- an out-of-root read
+        # or write silent from one stray byte, which is looser than main rather
+        # than equal to it.
+        return text, command_substitutions(text), None
+    spans = []
+    bodies = command_substitutions(text, spans=spans)
+    out, texts, last = [], [], 0
+    for i, (start, end) in enumerate(spans):
+        out.append(text[last:start])
+        out.append('%s%d%s' % (SUBST_MARK, i, SUBST_MARK))
+        texts.append(text[start:end])
+        last = end
+    out.append(text[last:])
+    return ''.join(out), bodies, texts
+
+
+def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
+                        inherited=None):
+    """Every command a substitution in ``cmd`` runs, with the cwd bash runs it in.
+
+    Returns ``(body, cwd, cwd_unknown)`` triples. A body whose position the scan
+    could not place keeps ``base_cwd``, which is what the recursion used before
+    Q169 — a marker lost inside a comment, or a string already carrying the
+    sentinel, is answered no worse than it was.
+
+    Heredoc bodies are read at their own level only. A `` <<'EOF' `` body is
+    literal to bash, so a `$(…)` written in one never runs (Q35); an expanded
+    one does, with the cwd of the command its `<<` was armed on. A substitution
+    that carries heredocs of its own keeps them, so its terminator is intact
+    when the recursion strips that body in its own right (Q119) — which is also
+    why the bodies come back raw, with no reconciliation against a second scan.
+
+    ``stable_vars`` is the literal-variable map the group loop settled on, and
+    the walk below substitutes from it before reading a `cd` target — without
+    it, `d=sub; cd $d; echo "$(cat x)"` loses the cwd the same string resolves
+    fine for `cat x`, and the two spellings disagree the wrong way round.
+
+    It is consumed **positionally**, not whole. That map is the state at the
+    *end* of the string, and the argument that licenses over-approximating it
+    ("checking a superset can only find more paths") is an argument about
+    operands. A `cd` target runs the other way — resolving one makes the
+    cwd known, which *removes* prompts. Consumed whole it resolves a `cd $d`
+    from an assignment written after it, and `cd $d; echo "$(cat ../x)"; d=sub`
+    goes silent where the same read spelled plainly denies. ``inherited`` names
+    come from an enclosing string, so they were assigned before this one ran
+    and are usable from the start.
+    """
+    heredocs = []
+    own = strip_heredoc_bodies(cmd, own_level_only=True, bodies=heredocs)
+    marked, bodies, texts = mark_substitutions(own)
+    fallback = (base_cwd, base_cwd_unknown)
+    sub_cwd = [fallback] * len(bodies)
+    hd_cwd = [fallback] * len(heredocs)
+
+    # ``texts`` None means nothing was marked, so there are no positions to
+    # read and every body keeps the fallback cwd.
+    tokens = None if texts is None else tokenize_command(marked, heredocs=False)
+    if tokens is not None:
+        cwd, unknown, hd_i = base_cwd, base_cwd_unknown, 0
+        usable = set(inherited or ())
+        for g, g_redir, _persists, _pipe, nhd in split_groups(tokens):
+            # Read the positions before applying this group's own `cd`: a
+            # substitution is expanded to build the command line the `cd` then
+            # runs on, so `cd $(dirname x)` resolves `x` where the string
+            # started, not where it lands.
+            for tok in g + g_redir:
+                for m in MARK_RE.finditer(tok):
+                    idx = int(m.group(1))
+                    if idx < len(sub_cwd):
+                        sub_cwd[idx] = (cwd, unknown)
+            for _ in range(nhd):
+                if hd_i < len(hd_cwd):
+                    hd_cwd[hd_i] = (cwd, unknown)
+                hd_i += 1
+            restored = [MARK_RE.sub(
+                lambda m: texts[int(m.group(1))]
+                if int(m.group(1)) < len(texts) else m.group(0), t) for t in g]
+            if stable_vars and usable:
+                live = {k: v for k, v in stable_vars.items() if k in usable}
+                if live:
+                    restored = [substitute_vars(t, live) for t in restored]
+            kind, arg = classify_cd(strip_env_prefix(strip_sh_keywords(restored)))
+            if kind is not None:
+                cwd, unknown = apply_cd(kind, arg, cwd, unknown)
+            # Recorded after this group's own `cd`, so a `cd $d` cannot read an
+            # assignment standing beside it. Still filtered through
+            # `stable_vars`, so a name reassigned or poisoned anywhere in the
+            # string is absent from that map and never substitutes.
+            for tok in g:
+                if ASSIGNMENT_RE.match(tok):
+                    usable.add(tok.split('=', 1)[0])
+
+    out = [(b,) + sub_cwd[i] for i, b in enumerate(bodies)]
+    for i, (body, quoted) in enumerate(heredocs):
+        if quoted:
+            continue
+        # No quoting applies inside a heredoc body, so an apostrophe in a
+        # `don't` is text rather than the start of a run that would swallow a
+        # later `$(…)` (Q50).
+        out.extend((b,) + hd_cwd[i]
+                   for b in command_substitutions(body, quotes=False))
+    return out
+
+
+def split_groups(tokens):
+    """Split a token list into `(cmd_tokens, redir_targets, persists, pipe,
+    heredocs)` groups.
+
+    A redirect target is collected into the group it textually appears in, so
+    it later resolves against THAT group's cwd rather than the chain's original
+    cwd — this is what lets `cd /tmp && cat /dev/null > evil` flag `/tmp/evil`
+    (Q16). `persists` is True only when a variable assignment in the group
+    survives into later commands of the same string: at paren depth 0 (not a
+    subshell — `(f=x); cat $f` doesn't set f), not a pipeline segment (each side
+    of `|` runs in a subshell), and not backgrounded (`f=x & …` assigns in the
+    background copy only). `pipe` numbers the pipeline the group belongs to,
+    which is what tells a `grep` filtering `ps` output apart from a `grep`
+    reading ordinary files. `heredocs` counts the `<<WORD` operators armed in
+    the group, whose bodies bash expands with this group's cwd in force (Q169);
+    the delimiter itself is not a path, so it is counted rather than kept.
+    """
+    groups, cur, cur_redir, i = [], [], [], 0
+    paren, prev_sep, pipe, nhd = 0, '', 0, 0
+    while i < len(tokens):
+        t = tokens[i]
+        if t in SEPARATORS:
+            if cur or cur_redir:
+                persists = (paren == 0 and prev_sep != '|'
+                            and t in (';', '\n', '&&', '||'))
+                groups.append((cur, cur_redir, persists, pipe, nhd))
+                cur, cur_redir, nhd = [], [], 0
+            if t == '(':
+                paren += 1
+            elif t == ')':
+                paren = max(0, paren - 1)
+            if t != '|':
+                pipe += 1
+            prev_sep = t
+            i += 1; continue
+        if t in REDIR or t in DUP:
+            # An fd number written immediately before a redirect/dup operator
+            # (`2>file`, `2>&1`) tokenizes as a bare digit token glued to the
+            # operator. shlex drops the adjacency, so it lands as the previous
+            # `cur` token; pop it so it doesn't leak as a positional file arg.
+            # (A literal file *named* `2` right before a redirect is
+            # indistinguishable post-tokenization — see Limitations.)
+            if cur and cur[-1].isdigit():
+                cur.pop()
+            if t in DUP:
+                # `2>&1`, `2>&-`, `<&3`: the target is a bare fd number or `-`
+                # (a duplication/close target, not a path) — skip it. But
+                # `>&file` (target isn't a bare fd) redirects to a file, so
+                # treat that target like any other redirect target.
+                if i + 1 < len(tokens):
+                    nxt = tokens[i+1]
+                    if not nxt.isdigit() and nxt != '-':
+                        cur_redir.append(nxt)
+                    i += 2; continue
+                i += 1; continue
+            if i + 1 < len(tokens):
+                # `<<TAG` heredoc delimiter and `<<<STR` here-string content
+                # are not file paths — skip without recording a redirect target.
+                if t in ('<<', '<<<'):
+                    if t == '<<':
+                        nhd += 1
+                    i += 2; continue
+                cur_redir.append(tokens[i+1]); i += 2; continue
+            i += 1; continue
+        cur.append(t); i += 1
+    if cur or cur_redir:
+        groups.append((cur, cur_redir, paren == 0 and prev_sep != '|', pipe, nhd))
+    return groups
 
 
 def analyze_command(cmd, ctx, base_cwd, depth=0):
@@ -3272,7 +3472,7 @@ def analyze_command(cmd, ctx, base_cwd, depth=0):
 
 
 def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None,
-                     seed_loops=None):
+                     seed_loops=None, base_cwd_unknown=False):
     """Analyze one command string; returns ``(offenders, guarded, KillFacts)``.
 
     Command-substitution bodies (``"$(…)"`` and backtick ``` `…` ```, plus the
@@ -3303,6 +3503,12 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
     ``for f in docs/*.md; do echo "$(wc -l < "$f")"; done`` blocks on an ``$f``
     the enclosing string had already resolved — while the same command without
     the ``$( )`` allows. See ``stable_loops`` for what qualifies.
+
+    ``base_cwd_unknown`` says ``base_cwd`` is a guess rather than the directory
+    the string will run in, which happens when an untrackable `cd` precedes the
+    substitution this body came from. Every relative operand then resolves as
+    ``untracked`` — the same answer the enclosing string already gives one
+    written outside a substitution (Q169).
     """
     proj, cwd = ctx.proj, base_cwd
     # Alias for readability at the two use sites far below; the group loop's own
@@ -3315,65 +3521,7 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
     if tokens is None:
         return [], False, KillFacts(None, None, [])   # unbalanced quotes -> defer
 
-    # Each group is a `(cmd_tokens, redir_targets, persists, pipe)` tuple: a
-    # redirect target is collected into the group it textually appears in, so
-    # it later resolves against THAT group's cwd rather than the chain's
-    # original cwd — this is what lets `cd /tmp && cat /dev/null > evil` flag
-    # `/tmp/evil` (Q16). `persists` is True only when a variable assignment in
-    # the group survives into later commands of the same string: at paren
-    # depth 0 (not a subshell — `(f=x); cat $f` doesn't set f), not a pipeline
-    # segment (each side of `|` runs in a subshell), and not backgrounded
-    # (`f=x & …` assigns in the background copy only). `pipe` numbers the
-    # pipeline the group belongs to, which is what tells a `grep` filtering `ps`
-    # output apart from a `grep` reading ordinary files.
-    groups, cur, cur_redir, i = [], [], [], 0
-    paren, prev_sep, pipe = 0, '', 0
-    while i < len(tokens):
-        t = tokens[i]
-        if t in SEPARATORS:
-            if cur or cur_redir:
-                persists = (paren == 0 and prev_sep != '|'
-                            and t in (';', '\n', '&&', '||'))
-                groups.append((cur, cur_redir, persists, pipe))
-                cur, cur_redir = [], []
-            if t == '(':
-                paren += 1
-            elif t == ')':
-                paren = max(0, paren - 1)
-            if t != '|':
-                pipe += 1
-            prev_sep = t
-            i += 1; continue
-        if t in REDIR or t in DUP:
-            # An fd number written immediately before a redirect/dup operator
-            # (`2>file`, `2>&1`) tokenizes as a bare digit token glued to the
-            # operator. shlex drops the adjacency, so it lands as the previous
-            # `cur` token; pop it so it doesn't leak as a positional file arg.
-            # (A literal file *named* `2` right before a redirect is
-            # indistinguishable post-tokenization — see Limitations.)
-            if cur and cur[-1].isdigit():
-                cur.pop()
-            if t in DUP:
-                # `2>&1`, `2>&-`, `<&3`: the target is a bare fd number or `-`
-                # (a duplication/close target, not a path) — skip it. But
-                # `>&file` (target isn't a bare fd) redirects to a file, so
-                # treat that target like any other redirect target.
-                if i + 1 < len(tokens):
-                    nxt = tokens[i+1]
-                    if not nxt.isdigit() and nxt != '-':
-                        cur_redir.append(nxt)
-                    i += 2; continue
-                i += 1; continue
-            if i + 1 < len(tokens):
-                # `<<TAG` heredoc delimiter and `<<<STR` here-string content
-                # are not file paths — skip without recording a redirect target.
-                if t in ('<<', '<<<'):
-                    i += 2; continue
-                cur_redir.append(tokens[i+1]); i += 2; continue
-            i += 1; continue
-        cur.append(t); i += 1
-    if cur or cur_redir:
-        groups.append((cur, cur_redir, paren == 0 and prev_sep != '|', pipe))
+    groups = split_groups(tokens)
 
     def is_outside(rp):
         return path_is_outside(rp, proj)
@@ -3520,7 +3668,7 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
     # chain shifts the runtime cwd for later guarded groups; `popd` or an
     # unresolvable `cd` arg (`cd -`, `$HOME`, etc.) loses tracking.
     outside, guarded = [], False
-    group_cwd, group_cwd_unknown = cwd, False
+    group_cwd, group_cwd_unknown = cwd, base_cwd_unknown
     # Literal variable propagation (issue 58): values of `NAME=literal`
     # assignments seen so far in this command string. A heredoc used to disable
     # the whole feature, because body lines tokenized as commands and one shaped
@@ -3592,7 +3740,7 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
     # `(body, cwd)` for every shell `-c` body this string runs locally, recursed
     # into after the loop so each resolves against the cwd of its own group.
     shell_bodies = []
-    for g, g_redir, persists, pipe in groups:
+    for g, g_redir, persists, pipe, _nhd in groups:
         track_stable()
         # Substitute known literals for path checking. The pre-substitution
         # tokens are kept for assignment parsing below — bash decides what is
@@ -3717,23 +3865,8 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
                 p, ctx.kill_anchor, group_cwd, group_cwd_unknown)))
         kind, arg = classify_cd(g)
         if kind is not None:
-            if kind == 'arg':
-                new_cwd = arg if os.path.isabs(arg) else os.path.join(group_cwd, arg)
-                group_cwd = os.path.realpath(new_cwd)
-                group_cwd_unknown = False
-            elif kind == 'subst' and not group_cwd_unknown:
-                # Whitelisted pure substitution: compute the same value bash
-                # will, from the tracked cwd. `$(pwd)` is the identity;
-                # `$(git rev-parse --show-toplevel)` is the nearest `.git`
-                # ancestor. Unresolvable (no `.git` boundary, git-discovery
-                # env vars set) -> cd stays untracked.
-                new_cwd = group_cwd if arg == 'pwd' else git_toplevel(group_cwd)
-                if new_cwd is not None:
-                    group_cwd = new_cwd
-                else:
-                    group_cwd_unknown = True
-            else:
-                group_cwd_unknown = True
+            group_cwd, group_cwd_unknown = apply_cd(
+                kind, arg, group_cwd, group_cwd_unknown)
             continue
         lnop = ln_operands(g)
         if lnop is not None:
@@ -3869,36 +4002,30 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
     # (harmless double-analysis, deduped by the reason builder). A guarded
     # command hidden in a quoted/backtick substitution isn't tokenized as its
     # own command by shlex (the metacharacters are inside quotes), so its file
-    # ops would otherwise be invisible. Each body resolves against the same
-    # `base_cwd`; only its OFFENDERS bubble up — its `guarded` is dropped, so a
-    # clean substitution never produces an `allow`. (Q33)
+    # ops would otherwise be invisible. Only its OFFENDERS bubble up — its
+    # `guarded` is dropped, so a clean substitution never produces an `allow`.
+    # (Q33)
+    #
+    # Each body resolves against the cwd in force where it was WRITTEN, which
+    # `substitution_bodies` reads off the string. Resolving them all against
+    # `base_cwd` was wrong in both directions: after a `cd` out of the root a
+    # backtick or heredoc-body read of `x` landed back inside it and vanished,
+    # and after a `cd` into a subdirectory `$(cat ../x)` named a path one level
+    # above the root that the command never touches (Q169).
     #
     # Each body also starts from the string's stable literal variables, since a
     # substitution inherits them: without that, `f=docs/x; echo "$(grep p "$f")"`
     # prompts on an unresolvable `$f` where the same command without the `$( )`
     # allows (Q66).
-    #
-    # Heredoc bodies come out of the command line first: a `cat <<'EOF'` body is
-    # literal data to bash, so a `$(…)` written there never runs, while a
-    # `<<EOF` body is expanded and does need scanning (Q35). The expanded ones
-    # are scanned as their own units, with `quotes=False` — inside a heredoc
-    # body bash applies no quoting, so an apostrophe there is text, not the
-    # start of a quoted run that would swallow a later `$(…)`. (Q50)
-    #
-    # Each body then goes back to its raw text before the recursion sees it, so
-    # the `<<WORD` the strip left behind does not re-arm and swallow the rest of
-    # the body (Q113). See `_unstripped_subst_bodies`.
     if subst_depth < MAX_SUBST_DEPTH:
-        heredocs = []
-        subs = command_substitutions(strip_heredoc_bodies(cmd, expanded=heredocs))
-        subs = _unstripped_subst_bodies(cmd, subs)
-        for hd in heredocs:
-            subs.extend(command_substitutions(hd, quotes=False))
-        for body in subs:
-            sub_off, _, sub_kf = _analyze_command(body, ctx, base_cwd,
+        for body, body_cwd, body_cwd_unknown in substitution_bodies(
+                cmd, base_cwd, base_cwd_unknown, stable_vars,
+                inherited=seed_vars):
+            sub_off, _, sub_kf = _analyze_command(body, ctx, body_cwd,
                                                   subst_depth + 1, in_subst=True,
                                                   seed_vars=stable_vars,
-                                                  seed_loops=stable_loops)
+                                                  seed_loops=stable_loops,
+                                                  base_cwd_unknown=body_cwd_unknown)
             outside.extend(sub_off)
             signal = signal or sub_kf.signal
             launder = launder or sub_kf.launder

@@ -236,7 +236,7 @@ def _scan_heredoc_delim(text, i):
     return ''.join(chars), strip_tabs, quoted, i
 
 def strip_heredoc_bodies(cmd, expanded=None, unterminated=None,
-                         own_level_only=False):
+                         own_level_only=False, bodies=None):
     """Remove heredoc body text from the raw command string, before shlex.
 
     Bash slurps everything between the newline after a `<<WORD` / `<<-WORD`
@@ -298,6 +298,13 @@ def strip_heredoc_bodies(cmd, expanded=None, unterminated=None,
     as it does by default — so re-scan the bodies, never the result. The default
     strips every level, because the callers that hand it to shlex need all of it
     gone.
+
+    Pass a list as ``bodies`` to collect ``(body, quoted)`` for EVERY heredoc
+    consumed, in order, whatever its delimiter's quoting. ``expanded`` reports a
+    subset — the unquoted ones — so it cannot be counted against the `<<WORD`
+    operators the tokenizer still sees: one quoted heredoc earlier in the string
+    shifts every later body by one. A caller pairing a body with the command it
+    was written on needs the full sequence to index into (Q169).
     """
     out = []
     i, n = 0, len(cmd)
@@ -383,6 +390,8 @@ def strip_heredoc_bodies(cmd, expanded=None, unterminated=None,
             while pending and i < n:
                 delim, strip_tabs, quoted = pending.pop(0)
                 end, closed = _consume_heredoc_body_ex(cmd, i, delim, strip_tabs)
+                if bodies is not None:
+                    bodies.append((cmd[i:end], quoted))
                 if expanded is not None and not quoted:
                     expanded.append(cmd[i:end])
                 if unterminated is not None and not closed:
@@ -612,7 +621,7 @@ def _scan_backticks(text, start):
         i += 1
     return (None, start)
 
-def command_substitutions(text, quotes=True):
+def command_substitutions(text, quotes=True, spans=None):
     """Extract the command-substitution bodies bash would evaluate in ``text``.
 
     Returns the inner command string of each ``$(…)`` and backtick ``` `…` ```
@@ -635,6 +644,16 @@ def command_substitutions(text, quotes=True):
     switch the scanner off for the rest of the body (Q50). Backslash still
     escapes the next character, matching the body's own rule that a backslash
     quotes a following `$`, backtick, backslash, or newline.
+
+    Pass a list as ``spans`` to also collect, in order, the ``(start, end)``
+    half-open span each returned body's WHOLE substitution occupies in ``text``
+    -- the `$` or opening backtick through the closing `)` or backtick. A caller
+    that must know which directory was in force where a body sat needs a
+    position: the body text alone cannot say, and two identical bodies written
+    at different points in the string are indistinguishable without one (Q169).
+    The span covers the substitution rather than the body so the caller can
+    replace the whole construct, which is what keeps the body out of a tokenizer
+    that would otherwise read its text as the enclosing command's own.
     """
     bodies = []
     i, n = 0, len(text)
@@ -665,6 +684,8 @@ def command_substitutions(text, quotes=True):
             if body is None:
                 break                              # unterminated -> stop
             bodies.append(body)
+            if spans is not None:
+                spans.append((i, end))
             i = end
             continue
         if c == '`':
@@ -672,6 +693,8 @@ def command_substitutions(text, quotes=True):
             if body is None:
                 break                              # unterminated -> stop
             bodies.append(body)
+            if spans is not None:
+                spans.append((i, end))
             i = end
             continue
         i += 1

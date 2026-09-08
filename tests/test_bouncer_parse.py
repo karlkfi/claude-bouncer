@@ -137,6 +137,77 @@ class CommandSubstitutionTests(unittest.TestCase):
         self.assertEqual([], bp.command_substitutions('echo $((1+2))'))
 
 
+class SubstitutionSpanTests(unittest.TestCase):
+    """`spans` says where each body's substitution sat, which its text cannot.
+
+    A caller resolving a body's relative paths needs the directory in force at
+    that point in the string, and two identical bodies written on either side of
+    a `cd` are indistinguishable by text alone (Q169).
+    """
+    def test_a_span_covers_the_whole_substitution(self):
+        text = 'cd sub && echo $(cat ../x)'
+        spans = []
+        self.assertEqual(['cat ../x'],
+                         bp.command_substitutions(text, spans=spans))
+        start, end = spans[0]
+        self.assertEqual('$(cat ../x)', text[start:end])
+
+    def test_a_backtick_span_covers_its_own_delimiters(self):
+        text = 'echo `cat x`'
+        spans = []
+        bp.command_substitutions(text, spans=spans)
+        start, end = spans[0]
+        self.assertEqual('`cat x`', text[start:end])
+
+    def test_two_identical_bodies_get_distinct_spans(self):
+        # The whole reason a position beats keying on body text.
+        text = 'cat $(id) && cd sub && cat $(id)'
+        spans = []
+        self.assertEqual(['id', 'id'],
+                         bp.command_substitutions(text, spans=spans))
+        self.assertEqual(2, len(set(spans)))
+        for start, end in spans:
+            self.assertEqual('$(id)', text[start:end])
+
+    def test_a_skipped_substitution_contributes_no_span(self):
+        # Single-quoted and arithmetic are not substitutions, so the spans stay
+        # aligned with the bodies rather than counting what was passed over.
+        text = "echo '$(a)' $((1+2)) $(b)"
+        spans = []
+        self.assertEqual(['b'], bp.command_substitutions(text, spans=spans))
+        start, end = spans[0]
+        self.assertEqual('$(b)', text[start:end])
+
+
+class HeredocBodySequenceTests(unittest.TestCase):
+    """`bodies` reports every heredoc; `expanded` reports a subset (Q169).
+
+    A caller pairing a body with the `<<WORD` the tokenizer still sees has to
+    count them the way the tokenizer does, and one quoted delimiter earlier in
+    the string shifts every later body by one.
+    """
+    CMD = "cat <<'A' && cat <<B\nliteral\nA\nlive\nB\n"
+
+    def test_every_body_is_reported_with_its_quoting(self):
+        bodies = []
+        bp.strip_heredoc_bodies(self.CMD, bodies=bodies)
+        self.assertEqual([("literal\nA\n", True), ("live\nB\n", False)], bodies)
+
+    def test_expanded_alone_would_shift_the_index(self):
+        bodies, expanded = [], []
+        bp.strip_heredoc_bodies(self.CMD, bodies=bodies, expanded=expanded)
+        self.assertEqual(["live\nB\n"], expanded)
+        self.assertEqual(1, [b for b, _ in bodies].index(expanded[0]))
+
+    def test_own_level_only_reports_only_the_top_levels(self):
+        # A substitution's own heredoc stays inside the body the recursion gets,
+        # so it must not be counted against a `<<` the outer stream never shows.
+        cmd = 'cat <<A && echo "$(cat <<X\nb\nX\n)"\ntop\nA\n'
+        bodies = []
+        bp.strip_heredoc_bodies(cmd, own_level_only=True, bodies=bodies)
+        self.assertEqual([("top\nA\n", False)], bodies)
+
+
 class CasePatternScanTests(unittest.TestCase):
     """A `case` pattern's `)` needs no opener, so it must not end a `$(…)` (Q81).
 
