@@ -787,6 +787,12 @@ def is_assignment(token):
     quoting after it does not, so `SP="/x"` and `SP='/x'` still assign -- which
     is how every break-glass reason with a space in it is written.
 
+    `quoted_from` and `m.end()` are both offsets into the same stripped token,
+    which is what makes comparing them well-founded. A per-word "was this
+    quoted" flag cannot stand in, `QuotedStr.quotes` included: `SP='/x'`
+    carries a quote and assigns, so only where the quoting starts separates it
+    from `'SP=/x'`.
+
     A plain `str` carries no such record, so it is read as written plain. That
     is the pre-Q170 behaviour, and it is what a hand-built token list gets.
     """
