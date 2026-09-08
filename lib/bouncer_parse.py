@@ -794,7 +794,12 @@ def is_assignment(token):
     from `'SP=/x'`.
 
     A plain `str` carries no such record, so it is read as written plain. That
-    is the pre-Q170 behaviour, and it is what a hand-built token list gets.
+    is the pre-Q170 behaviour, and it is what a hand-built token list gets. The
+    fallback is fail-open in this direction: it arms an override on a word bash
+    would not have assigned. Provenance survives slicing and reordering and dies
+    at anything that builds a new string -- prod-guard's `expand_argv` is one
+    such boundary, and every command-position caller there runs above it. Q175
+    holds the census of the rest.
     """
     m = ASSIGNMENT_RE.match(token)
     if not m:
