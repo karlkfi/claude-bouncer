@@ -359,6 +359,17 @@ def strip_head(argv, state):
             argv = argv[1:]
             while argv and argv[0].startswith('-'):
                 argv = argv[2:] if argv[0] in SUDO_VALUE_FLAGS else argv[1:]
+            while argv and ASSIGNMENT_RE.match(argv[0]):
+                # Sudo's operands, like `env`'s below. The shell removes the
+                # quotes before sudo is executed, so `sudo A=1 cmd` and
+                # `sudo 'A=1' cmd` hand it byte-identical argv -- measured,
+                # both `[A=1] [cmd]`. Sudo cannot tell them apart, so whatever
+                # its env policy does it does for both, and a guard answering
+                # them differently is wrong whichever answer is right (Q170).
+                name, _, _val = argv[0].partition('=')
+                if name == 'FOREGROUND_GUARD_OVERRIDE':
+                    state['override'] = _val
+                argv = argv[1:]
         elif head == 'env':
             argv = argv[1:]
             while argv:

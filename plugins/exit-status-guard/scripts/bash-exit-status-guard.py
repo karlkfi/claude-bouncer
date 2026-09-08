@@ -65,9 +65,13 @@ WRAPPERS = frozenset({'sudo', 'nohup', 'command', 'exec', 'bash', 'sh', 'zsh',
 # which is why these two peel with `ASSIGNMENT_RE` while command position uses
 # `is_assignment`. Measured on bash 5.3.15: `env 'A=1' bash -c 'echo $A'` prints
 # 1, while `nohup`, `command`, `exec`, `stdbuf` and `setsid` all exit non-zero
-# trying to execute a program called `A=1`. `sudo` is here unverified -- it
-# needs a password to drive -- and keeping it errs toward catching the gate,
-# which is also the behaviour that predates this rule.
+# trying to execute a program called `A=1`. `sudo` is here on a warrant
+# stronger than its own env policy, which needs a password to drive: the shell
+# removes the quotes before sudo is executed, so `sudo A=1 cmd` and
+# `sudo 'A=1' cmd` hand it byte-identical argv -- measured, `[A=1] [cmd]` for
+# both. Sudo cannot tell the spellings apart, so whatever its policy does it
+# does for both, and a guard answering them differently is wrong whichever
+# answer is right.
 ASSIGN_WRAPPERS = frozenset({'env', 'sudo'})
 
 # A segment: the tokens of one simple command, the operator run that follows it,

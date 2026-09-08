@@ -628,6 +628,31 @@ class PollConfigTests(unittest.TestCase):
                 self.assertEqual(state.get("override"), "why")
                 self.assertEqual(argv[0], "gh")
 
+    def test_a_quoted_sudo_operand_still_arms(self):
+        # `sudo` takes assignment operands the same way `env` does, and
+        # the shell removes the quotes before either is executed:
+        # `sudo A=1 cmd` and `sudo 'A=1' cmd` hand sudo byte-identical
+        # argv, measured as `[A=1] [cmd]` for both. So sudo cannot tell
+        # the spellings apart, and a guard answering them differently is
+        # wrong whichever answer is right (Q170).
+        for raw in ("sudo 'FOREGROUND_GUARD_OVERRIDE=why' gh run watch 123",
+                    'sudo "FOREGROUND_GUARD_OVERRIDE=why" gh run watch 123',
+                    "sudo -u me 'FOREGROUND_GUARD_OVERRIDE=why' gh run watch 123"):
+            with self.subTest(raw=raw):
+                state = {}
+                argv = guard.strip_head(list(guard.tokenize(raw)), state)
+                self.assertEqual(state.get("override"), "why")
+                self.assertEqual(argv[0], "gh")
+
+    def test_a_quoted_sudo_operand_does_not_hide_the_command(self):
+        # End to end, and the direction that makes this a defect rather
+        # than a nicety: the blocking command underneath is still found.
+        for raw in ("sudo 'A=1' gh run watch 123",
+                    'sudo "A=1" gh run watch 123'):
+            with self.subTest(raw=raw):
+                d, _ = run_hook(raw)
+                self.assertEqual("deny", d)
+
     def test_an_unquoted_override_statement_still_arms(self):
         # The control for the rows above: same shape, written plain.
         d, _ = run_hook("FOREGROUND_GUARD_OVERRIDE=demo; gh run watch 123")
