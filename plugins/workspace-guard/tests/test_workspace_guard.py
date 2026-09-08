@@ -4578,6 +4578,44 @@ class SubstBodyCwdTests(unittest.TestCase):
         self.assertIn("untracked cd",
                       out["hookSpecificOutput"]["permissionDecisionReason"])
 
+    def test_a_quoted_prefix_does_not_apply_the_cd_beside_it(self):
+        # The other assignment reader in the same loop, one call above the
+        # one exercised by the test before this. `restored` is rebuilt by
+        # `MARK_RE.sub` -- and `re.sub` returns a plain `str` even when
+        # nothing matches -- so the peel that finds the `cd` had no record of
+        # how the words were written. `'d=sub' cd sub` is a program bash
+        # fails to find, so no `cd` runs and `../in.txt` reads ABOVE the root;
+        # peeled as an assignment, the guard applies the `cd`, resolves the
+        # read back inside the root and says nothing. Fail-open.
+        #
+        # Asserted on the operand rather than the rendered path: what lies
+        # above a temporary root is host temp on this platform and something
+        # else elsewhere, which is the variance this class's `/etc` targets
+        # exist to dodge. That the guard reports at all is the whole point.
+        for raw in ("'d=sub' cd sub; echo \"$(cat ../in.txt)\"",
+                    '"d=sub" cd sub; echo "$(cat ../in.txt)"'):
+            with self.subTest(raw=raw):
+                out = run_hook(raw, self.workspace, project_dir=self.workspace)
+                self.assertIsNotNone(out, f"went silent for {raw!r}")
+                reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+                self.assertIn("../in.txt", reason)
+
+    def test_an_unquoted_prefix_still_applies_the_cd_beside_it(self):
+        # The control, and the direction that must not regress: written
+        # plainly, bash does set `d` and does run `cd sub`, so `../in.txt` is
+        # the root's own file and there is nothing to report.
+        self._is_clean("d=sub cd sub; echo \"$(cat ../in.txt)\"")
+
+    def test_a_substitution_in_the_cd_target_still_resolves(self):
+        # The peel is now counted on the pre-rebuild tokens and applied to
+        # the rebuilt ones by index, so a group whose `cd` target IS a
+        # substitution must still line up.
+        out = run_hook("d=x cd $(echo sub); echo \"$(cat ../in.txt)\"",
+                       self.workspace, project_dir=self.workspace)
+        self.assertIsNotNone(out)
+        self.assertIn("../in.txt",
+                      out["hookSpecificOutput"]["permissionDecisionReason"])
+
     def test_an_unquoted_assignment_still_makes_a_name_usable(self):
         # The control, and the direction that must not regress: written
         # plainly, `d` IS usable, the `cd` resolves, `../in.txt` lands back in

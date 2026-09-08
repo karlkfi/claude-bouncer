@@ -3363,7 +3363,17 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
                 live = {k: v for k, v in stable_vars.items() if k in usable}
                 if live:
                     restored = [substitute_vars(t, live) for t in restored]
-            kind, arg = classify_cd(strip_env_prefix(strip_sh_keywords(restored)))
+            # Decide the peel on `g`, then apply it to `restored` by index.
+            # `MARK_RE.sub` and `substitute_vars` both hand back a plain `str`
+            # -- `re.sub` does so even when nothing matches -- so `restored`
+            # carries no record of how its words were written, and
+            # `is_assignment` would degrade to the pre-Q170 reading and peel a
+            # quoted `'d=sub'`. That gives `classify_cd` a `cd` bash never
+            # runs, and applying it resolves a read back inside the root:
+            # fail-open. Both helpers drop a leading run only, and `restored`
+            # is built element-wise from `g`, so the count indexes it exactly.
+            head = len(g) - len(strip_env_prefix(strip_sh_keywords(g)))
+            kind, arg = classify_cd(restored[head:])
             if kind is not None:
                 cwd, unknown = apply_cd(kind, arg, cwd, unknown)
             # Recorded after this group's own `cd`, so a `cd $d` cannot read an
