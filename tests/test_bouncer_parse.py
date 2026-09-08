@@ -378,6 +378,12 @@ class CommandHeadTests(unittest.TestCase):
         self.assertEqual(['S+P=/x', 'cmd'],
                          bp.strip_env_prefix(['S+P=/x', 'cmd']))
 
+    def test_a_quoted_keyword_is_not_peeled(self):
+        self.assertEqual(['if', 'cmd'], bp.strip_sh_keywords(bp.lex("'if' cmd")))
+
+    def test_a_plain_keyword_is_still_peeled(self):
+        self.assertEqual(['cmd'], bp.strip_sh_keywords(bp.lex('if cmd')))
+
 
 class SplitAssignmentTests(unittest.TestCase):
     """The `+` belongs to the operator, so a name recovered from the token has
@@ -469,6 +475,55 @@ class AssignmentTests(unittest.TestCase):
         self.assertEqual(frozenset("'"), bp.lex("'a b'")[0].quotes)
         self.assertEqual(frozenset('"'), bp.lex('"a b"')[0].quotes)
         self.assertEqual(frozenset(), bp.lex('ab')[0].quotes)
+
+
+class ReservedWordTests(unittest.TestCase):
+    """The keyword half of Q170: quoting decides this too, and more bluntly.
+
+    An assignment has an ``=`` for the quoting to sit after, so `is_assignment`
+    compares offsets. A reserved word has no such split -- quoting ANY part of
+    it makes bash look for a program of that name -- so the test is simply
+    whether the word carries a quote at all.
+
+    Measured on bash 5.3.15 with ``cd /tmp; <word> cd /etc; pwd``. The plain
+    keyword changes directory (``time``, ``!``) or opens a compound command;
+    every quoted spelling prints ``<word>: command not found`` and leaves the
+    shell in ``/tmp``, because the ``cd`` is an argument to a program that does
+    not exist. ``\\if`` is the case a ``.quotes`` check would miss: it carries
+    no quote character and is still not the keyword.
+    """
+
+    RUNS_A_COMMAND = ("'if'", '"if"', 'i"f"', r'\if',   # if
+                      "'then'", "'do'", "'time'",       # more of SH_KEYWORDS
+                      "'!'", "'{'")                     # the punctuation ones
+
+    def test_a_plain_keyword_is_reserved(self):
+        for word in ('if', 'then', 'do', 'time', '!', '{', '[['):
+            with self.subTest(word=word):
+                self.assertTrue(bp.is_reserved_word(bp.lex(word)[0]))
+
+    def test_a_quoted_keyword_runs_a_command(self):
+        for word in self.RUNS_A_COMMAND:
+            with self.subTest(word=word):
+                self.assertFalse(bp.is_reserved_word(bp.lex(word)[0]))
+
+    def test_a_word_that_is_no_keyword_at_all_is_never_one(self):
+        for word in ('cat', 'iff', 'IF'):
+            with self.subTest(word=word):
+                self.assertFalse(bp.is_reserved_word(bp.lex(word)[0]))
+
+    def test_a_plain_str_reads_as_written_plain(self):
+        """A hand-built token carries no record, so it keeps the old reading."""
+        self.assertTrue(bp.is_reserved_word('if'))
+
+    def test_quoting_after_the_first_character_still_disarms(self):
+        """Where the assignment rule and this one part company.
+
+        `SP="/x"` assigns because the quote falls past the `=`; there is no
+        `=` here, so the same shape (`i"f"`) is just a command name.
+        """
+        self.assertTrue(bp.is_assignment(bp.lex('SP="/x"')[0]))
+        self.assertFalse(bp.is_reserved_word(bp.lex('i"f"')[0]))
 
 
 class VendoringTests(unittest.TestCase):

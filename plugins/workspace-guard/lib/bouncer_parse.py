@@ -28,13 +28,13 @@ Layers, in the order a command passes through them:
               -> lex                                     (shlex, POSIX quoting)
   tokens      -> split_operator_runs, glue_dollar_paren  (operator repair)
               -> strip_env_prefix, strip_sh_keywords     (find the real argv[0])
-              -> is_assignment                           (bash's own quote rule)
+              -> is_assignment, is_reserved_word         (bash's quote rule)
 
 `lex` returns `QuotedStr` tokens, which carry how the word was written before
 posix shlex stripped its quotes. Bash decides what a word IS before quote
 removal, so that record is the only thing that can tell a `NAME=v` assignment
-from a `'NAME=v'` the shell looks for as a program (Q170) -- and posix shlex
-hands back the same string either way.
+from a `'NAME=v'` the shell looks for as a program (Q170), or an `if` from
+an `'if'` -- and posix shlex hands back the same string either way.
 
 Fail-safe direction: a parse that cannot be completed returns less, never more.
 `lex` raises ValueError on unbalanced quotes so callers defer rather than guess,
@@ -814,6 +814,27 @@ def is_assignment(token):
     return quoted_from is None or quoted_from >= m.end()
 
 
+def is_reserved_word(token):
+    """Whether bash would recognise `token` as one of `SH_KEYWORDS`.
+
+    Quoting ANYWHERE in the word disarms it, which is stricter than the
+    assignment rule above: a reserved word has no `=` for the quoting to sit
+    after, so `'if'`, `"if"`, `\\if` and `i"f"` all look for a program named
+    `if` and none of them start a conditional. Measured on bash 5.3: after
+    `cd /tmp`, `'if' cd /etc` prints `if: command not found` and leaves the
+    shell in `/tmp`, while `time cd /etc` -- the real reserved word -- does
+    change directory.
+
+    So `quoted_from`, not `QuotedStr.quotes`: `\\if` carries no quote
+    character and is still not the keyword. A plain `str` carries no record
+    and is read as written plain, the same fail-open direction
+    `is_assignment` documents -- here it drops a word bash would have run,
+    which for a caller looking past a prefix means finding a command that is
+    not there.
+    """
+    return token in SH_KEYWORDS and getattr(token, 'quoted_from', None) is None
+
+
 def lex(text):
     """shlex-tokenize `text` with bash's quoting and operator grouping.
 
@@ -947,8 +968,13 @@ def strip_sh_keywords(tokens):
     Stripped BEFORE strip_env_prefix because bash's order in a simple command is
     reserved-word(s), then inline env assignments, then the command name
     (`until LC_ALL=C grep …`).
+
+    A quoted word is not stripped: see `is_reserved_word`. Left quote-blind
+    this peels a word bash executes, so the caller finds whatever follows and
+    treats it as the command -- a `cd` that never runs, or an override
+    assignment bash never made.
     """
     i = 0
-    while i < len(tokens) and tokens[i] in SH_KEYWORDS:
+    while i < len(tokens) and is_reserved_word(tokens[i]):
         i += 1
     return tokens[i:]

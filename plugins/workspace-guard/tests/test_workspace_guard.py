@@ -1023,6 +1023,29 @@ class CommandOverrideTests(unittest.TestCase):
         self.assertIsNone(guard.command_override(
             'WORKSPACE_GUARD"_OVERRIDE=r" cp a b'))
 
+    def test_a_quoted_keyword_does_not_arm(self):
+        # The same defect one axis over. `'if' NAME=v cmd` runs a program
+        # called `if` with three arguments -- bash never reaches the
+        # assignment, so nothing is set and the guard must not be disarmed.
+        # Quoting ANY part of a reserved word disarms it, and an escape
+        # counts: `\\if` carries no quote character and is still not the
+        # keyword.
+        for cmd in ("'if' WORKSPACE_GUARD_OVERRIDE=r cp a b",
+                    '"if" WORKSPACE_GUARD_OVERRIDE=r cp a b',
+                    'i"f" WORKSPACE_GUARD_OVERRIDE=r cp a b',
+                    r'\if WORKSPACE_GUARD_OVERRIDE=r cp a b',
+                    "'time' WORKSPACE_GUARD_OVERRIDE=r cp a b"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(guard.command_override(cmd))
+
+    def test_a_plain_keyword_still_arms(self):
+        # The control for the pair above: written plainly these ARE reserved
+        # words, so bash reaches the assignment and the override stands.
+        self.assertEqual("r", guard.command_override(
+            'time WORKSPACE_GUARD_OVERRIDE=r cp a b'))
+        self.assertEqual("r", guard.command_override(
+            'until WORKSPACE_GUARD_OVERRIDE=r cp a b; do :; done'))
+
     def test_a_quoted_value_still_arms(self):
         # Quoting AFTER the `=` is ordinary, and it is how every reason with a
         # space in it is written — so Q170 must not cost the documented form.
@@ -4579,6 +4602,34 @@ class SubstBodyCwdTests(unittest.TestCase):
         self.assertEqual("deny", out["hookSpecificOutput"]["permissionDecision"])
         self.assertIn("untracked cd",
                       out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_a_quoted_keyword_does_not_apply_the_cd_behind_it(self):
+        # The keyword half of the same defect: `strip_sh_keywords` matched the
+        # quote-stripped word, so a quoted reserved word was peeled and the
+        # `cd` behind it applied. Bash runs `'if' cd sub` as a program called
+        # `if` with two arguments -- no `cd` happens -- so `../in.txt` reads
+        # ABOVE the root, and peeling made the guard resolve it back inside
+        # and stay silent. Fail-open, and `'time'` is the sharpest spelling:
+        # unquoted it is the one reserved word here whose `cd` really does
+        # persist.
+        for raw in ("'if' cd sub; cat ../in.txt",
+                    '"if" cd sub; cat ../in.txt',
+                    "'time' cd sub; cat ../in.txt"):
+            with self.subTest(raw=raw):
+                out = run_hook(raw, self.workspace, project_dir=self.workspace)
+                self.assertIsNotNone(out, f"went silent for {raw!r}")
+                h = out["hookSpecificOutput"]
+                self.assertNotEqual("allow", h["permissionDecision"],
+                                    f"vouched for a read above the root: {raw!r}")
+                self.assertIn("../in.txt", h["permissionDecisionReason"])
+
+    def test_a_plain_keyword_still_applies_the_cd_behind_it(self):
+        # The control. Written plainly these are reserved words, bash runs the
+        # `cd`, and the read is the root's own file. `time cd sub` is measured
+        # rather than assumed: bash 5.3.15 leaves the shell in `sub` after it,
+        # because `time` does not fork.
+        self._is_clean("time cd sub; cat ../in.txt")
+        self._is_clean("if cd sub; then cat ../in.txt; fi")
 
     def test_a_quoted_prefix_carrying_a_dollar_does_not_apply_the_cd(self):
         # The group loop's own peel, and the sharpest of these: it ends in an

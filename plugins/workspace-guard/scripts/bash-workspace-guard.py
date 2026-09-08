@@ -13,8 +13,8 @@ import sys, os, json, re, shutil, fnmatch, collections, tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 from bouncer_parse import (                                    # noqa: E402
     ASSIGNMENT_RE, COMMENT_PRECEDERS, DUP, MAX_SUBST_DEPTH, PUNCT_CHARS,
-    QuoteTrackingLexer, REDIR, SEPARATORS, SH_KEYWORDS, SUBST_OPEN,
-    _OPERATORS, is_assignment, split_assignment,
+    QuoteTrackingLexer, REDIR, SEPARATORS, SUBST_OPEN,
+    _OPERATORS, is_assignment, is_reserved_word, split_assignment,
     _consume_heredoc_body, _scan_backticks, _scan_dollar_paren,
     _skip_balanced_parens, command_substitutions, glue_dollar_paren,
     split_operator_runs, strip_comments, strip_env_prefix,
@@ -921,8 +921,12 @@ def command_override(cmd):
             continue
         if not at_head:
             continue
-        if tok in SH_KEYWORDS:
+        if is_reserved_word(tok):
             continue                              # `if`, `time`, `{`, ...
+        # A QUOTED keyword is a command name, so bash never reaches an
+        # assignment behind it: `'if' WORKSPACE_GUARD_OVERRIDE=x cmd` runs a
+        # program called `if` and sets nothing. Skipping it here would arm the
+        # override off a word the shell would not have honoured (Q170).
         if not is_assignment(tok):
             at_head = False                       # past the assignment run
             continue

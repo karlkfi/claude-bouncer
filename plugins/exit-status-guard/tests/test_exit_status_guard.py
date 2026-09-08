@@ -230,6 +230,35 @@ CASES = [
      '"EXIT_STATUS_GUARD_OVERRIDE=why"; make check | tail -5', False, True, ''),
     ('a quoted `=` in an override statement arms nothing',
      'EXIT_STATUS_GUARD_OVERRIDE"="why; make check | tail -5', False, True, ''),
+    # Q170's keyword half. `strip_sh_keywords` matched the quote-stripped
+    # word, so a quoted reserved word came off and the assignment behind it
+    # was read as the override. Bash runs `'if' NAME=v :` as a program called
+    # `if` and sets nothing, so the gate in the next segment really does lose
+    # its status -- and the guard was disarmed by a word the shell never
+    # honoured. `'time'` is the sharpest: unquoted it IS the keyword.
+    ('a single-quoted keyword arms nothing',
+     "'if' EXIT_STATUS_GUARD_OVERRIDE=why :; make check | tail -5", False, True, ''),
+    ('a double-quoted keyword arms nothing',
+     '"if" EXIT_STATUS_GUARD_OVERRIDE=why :; make check | tail -5', False, True, ''),
+    ('a quoted `time` arms nothing',
+     "'time' EXIT_STATUS_GUARD_OVERRIDE=why :; make check | tail -5", False, True, ''),
+    # The controls: written plainly these are reserved words, bash reaches the
+    # assignment, and the override stands.
+    ('a plain keyword still arms',
+     'if EXIT_STATUS_GUARD_OVERRIDE=why :; then :; fi; make check | tail -5',
+     False, False, ''),
+    ('a plain `time` still arms',
+     'time EXIT_STATUS_GUARD_OVERRIDE=why :; make check | tail -5', False, False, ''),
+    # The same peel, read the other way round: with the keyword quoted, `make`
+    # is an ARGUMENT to a program bash cannot find, so no gate runs and there
+    # is no status to lose. Denying it was a false positive on a command that
+    # never executes.
+    ('a quoted keyword makes the gate an argument',
+     "'if' make check | tail -5", False, False, ''),
+    ('a plain keyword leaves the gate a gate',
+     'if make check | tail -5; then :; fi', False, True, ''),
+    ('a plain `time` leaves the gate a gate',
+     'time make check | tail -5', False, True, ''),
     ('a different variable is not the override',
      'EXIT_STATUS_GUARD=x make check | tail -30', False, True, ''),
     # `env` is the other direction again, and the one `peel_wrappers` has to
