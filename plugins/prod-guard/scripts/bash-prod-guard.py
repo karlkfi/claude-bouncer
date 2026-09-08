@@ -77,7 +77,9 @@ import sys
 # The parsing primitives every claude-bouncer guard shares. The copy under this
 # plugin's `lib/` is vendored from the repository root; see scripts/sync-lib.py.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
-from bouncer_parse import ASSIGNMENT_RE, PUNCT_CHARS, strip_heredoc_bodies  # noqa: E402
+from bouncer_parse import (                                    # noqa: E402
+    ASSIGNMENT_RE, PUNCT_CHARS, split_assignment, strip_heredoc_bodies,
+)
 from bouncer_grants import grants_path, load_grants, record_grants  # noqa: E402
 import time
 
@@ -481,15 +483,31 @@ def split_simple_commands(tokens):
     return groups
 
 
-def extract_env_prefix(argv):
+def extract_env_prefix(argv, base_env=None):
     """Peel leading NAME=VALUE assignments off a simple command. Returns
     (env_dict, remaining_argv). The assignments matter twice over: they can
     pin a target (AWS_PROFILE=dev, TF_WORKSPACE=prod) and they can carry the
-    PROD_GUARD_OVERRIDE escape hatch."""
+    PROD_GUARD_OVERRIDE escape hatch.
+
+    `base_env` is the env this segment inherits, used to resolve a `NAME+=v`
+    append. Passing it is what keeps an append from narrowing a target to its
+    suffix: `AWS_PROFILE+=-ro` against an ambient `prod` has to read
+    `prod-ro`, not `-ro`."""
     env = {}
     i = 0
     while i < len(argv) and ASSIGNMENT_RE.match(argv[i]):
-        name, _, value = argv[i].partition('=')
+        name, append, value = split_assignment(argv[i])
+        if append:
+            # `NAME+=v` appends to whatever this segment inherits, so it
+            # resolves against `base_env` -- an earlier assignment in the same
+            # run first, then the shell env the caller passes. An unset name
+            # gives just `v`, which is how `PROD_GUARD_OVERRIDE+=why` arms
+            # (Q174); a set one keeps the prefix, so a target cannot be
+            # narrowed to the suffix alone.
+            prior = env.get(name)
+            if prior is None:
+                prior = (base_env or {}).get(name, '')
+            value = prior + value
         env[name] = value
         i += 1
     return env, argv[i:]
@@ -570,7 +588,11 @@ def strip_wrappers(argv, env):
                 if argv[0].startswith('-'):
                     argv = argv[2:] if argv[0] in value_flags else argv[1:]
                 elif ASSIGNMENT_RE.match(argv[0]):
-                    name, _, value = argv[0].partition('=')
+                    # env is not the shell: it splits on the first `=` and takes
+                    # the rest as a name verbatim, so `env NAME+=v` exports
+                    # `NAME+` and leaves `NAME` alone (Q174).
+                    name, _, value = split_assignment(
+                        argv[0], append_is_operator=False)
                     env[name] = value
                     argv = argv[1:]
                 else:
@@ -2429,7 +2451,7 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None):
     shell_env = dict(exported if shell is None else shell)
     exported = dict(exported)
     for group in split_simple_commands(tokens):
-        seg_env, argv_raw = extract_env_prefix(group)
+        seg_env, argv_raw = extract_env_prefix(group, shell_env)
         # This segment's inline `A=x cmd` assignments, resolved left-to-right
         # against the current shell env. They export to this command's own
         # children but do not persist to the chain.
@@ -2455,7 +2477,11 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None):
             # already expanded, so the values are resolved.
             for tok in argv[1:]:
                 if not tok.startswith('-') and ASSIGNMENT_RE.match(tok):
-                    name, _, value = tok.partition('=')
+                    name, append, value = split_assignment(tok)
+                    # `export NAME+=v` appends to the inherited value; unset
+                    # gives just `v` (Q174).
+                    if append:
+                        value = shell_env.get(name, '') + value
                     shell_env[name] = value
                     exported[name] = value
             continue

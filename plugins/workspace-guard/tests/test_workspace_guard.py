@@ -972,6 +972,21 @@ class CommandOverrideTests(unittest.TestCase):
             guard.command_override('LC_ALL=C WORKSPACE_GUARD_OVERRIDE=r cp a b'),
             "r")
 
+    def test_an_append_spelled_prefix_arms(self):
+        # bash assigns for `NAME+=v` exactly as for `NAME=v` in command
+        # position, so the guard has to read it as the caller wrote it (Q174).
+        self.assertEqual(
+            guard.command_override('WORKSPACE_GUARD_OVERRIDE+=porting cp a b'),
+            "porting")
+
+    def test_an_empty_append_value_does_not_arm(self):
+        self.assertIsNone(guard.command_override('WORKSPACE_GUARD_OVERRIDE+= cp a b'))
+
+    def test_a_plus_inside_the_name_does_not_arm(self):
+        # `WORKSPACE_GUARD+_OVERRIDE=r` is `command not found` to bash.
+        self.assertIsNone(
+            guard.command_override('WORKSPACE_GUARD+_OVERRIDE=r cp a b'))
+
     def test_after_a_shell_keyword(self):
         self.assertEqual(
             guard.command_override('if WORKSPACE_GUARD_OVERRIDE=r cp a b; then'),
@@ -2808,6 +2823,15 @@ class HookEndToEndTests(unittest.TestCase):
     def test_inline_tmpdir_none_when_absent(self):
         self.assertIsNone(guard.inline_tmpdir(["LC_ALL=C", "mktemp"]))
         self.assertIsNone(guard.inline_tmpdir(["mktemp", "TMPDIR=./x"]))
+
+    def test_inline_tmpdir_rejects_an_append(self):
+        # `TMPDIR+=./scratch` appends to the ambient value, which is not
+        # knowable here -- fall back to the host-temp default (Q174).
+        self.assertIsNone(guard.inline_tmpdir(["TMPDIR+=./scratch", "mktemp"]))
+
+    def test_inline_tmpdir_append_clears_an_earlier_literal(self):
+        self.assertIsNone(
+            guard.inline_tmpdir(["TMPDIR=/a", "TMPDIR+=./scratch", "mktemp"]))
 
     def test_inline_tmpdir_rejects_unexpanded_value(self):
         # A `$`/backtick value would be expanded by bash; not a trusted literal.
@@ -7577,6 +7601,21 @@ class ApplyAssignmentGroupTests(unittest.TestCase):
     def test_impure_value_poisons(self):
         m = {"f": "in.txt"}
         guard.apply_assignment_group(["f=$(cmd)"], m, True)
+        self.assertEqual(m, {})
+
+    def test_append_poisons_rather_than_replacing(self):
+        # `f+=x` resolves to the old value plus `x`. Treating it as a plain set
+        # would resolve `$f` to `x` and classify the wrong path, so the name is
+        # dropped -- the same answer this already gives an unprovable value
+        # (Q174).
+        m = {"f": "in.txt"}
+        self.assertEqual(
+            guard.apply_assignment_group(["f+=x"], m, True), ["f"])
+        self.assertEqual(m, {})
+
+    def test_export_append_poisons_too(self):
+        m = {"f": "in.txt"}
+        guard.apply_assignment_group(["export", "f+=x"], m, True)
         self.assertEqual(m, {})
 
     def test_non_persisting_group_poisons(self):

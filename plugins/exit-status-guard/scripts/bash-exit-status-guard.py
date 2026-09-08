@@ -40,6 +40,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 from bouncer_parse import (                                    # noqa: E402
     ASSIGNMENT_RE, CHAIN_OPS, COMMENT_PRECEDERS, DUP, END_OPS, MAX_SUBST_DEPTH,
     PIPE_OPS, PUNCT_CHARS, REDIR, SEPARATORS, SH_KEYWORDS, _OPERATORS,
+    split_assignment,
     _consume_heredoc_body, _scan_backticks, _scan_dollar_paren,
     _skip_balanced_parens, command_substitutions, glue_dollar_paren,
     split_operator_runs, strip_comments, strip_env_prefix,
@@ -500,14 +501,14 @@ def has_override(segs):
     name quoted in a commit message or echoed into a pipe is an argument and
     disables nothing.
     """
-    prefixes = tuple(name + '=' for name in OVERRIDE_VARS)
     for seg in segs:
         for tok in strip_sh_keywords(seg.tokens):
             if not ASSIGNMENT_RE.match(tok):
                 break                             # past the assignment run
-            for prefix in prefixes:
-                if tok.startswith(prefix) and tok[len(prefix):].strip():
-                    return True
+            # `NAME+=reason` is an assignment in command position too (Q174).
+            name, _append, value = split_assignment(tok)
+            if name in OVERRIDE_VARS and value.strip():
+                return True
     return False
 
 
