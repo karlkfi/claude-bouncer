@@ -804,8 +804,8 @@ def is_assignment(token):
     live paths and not only in hand-built token lists: `substitute_vars`
     returns a new `str` for a token carrying `$`, `glue_dollar_paren`
     concatenates, and prod-guard's `expand_argv` rebuilds every token. Every
-    command-position caller in that file runs above its boundary; Q175 holds
-    the census of the rest.
+    command-position caller in that file runs above its boundary. The other
+    guards have not been swept.
     """
     m = ASSIGNMENT_RE.match(token)
     if not m:
