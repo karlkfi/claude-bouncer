@@ -4531,6 +4531,8 @@ class SubstBodyCwdTests(unittest.TestCase):
         os.mkdir(os.path.join(self.workspace, "sub"))
         with open(os.path.join(self.workspace, "in.txt"), "w") as f:
             f.write("x\n")
+        with open(os.path.join(self.workspace, "sub", "deep.txt"), "w") as f:
+            f.write("y\n")
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -4577,6 +4579,37 @@ class SubstBodyCwdTests(unittest.TestCase):
         self.assertEqual("deny", out["hookSpecificOutput"]["permissionDecision"])
         self.assertIn("untracked cd",
                       out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_a_quoted_prefix_carrying_a_dollar_does_not_apply_the_cd(self):
+        # The group loop's own peel, and the sharpest of these: it ends in an
+        # `allow`, which speaks for the whole command string.
+        #
+        # `sub_g` is rebuilt by `substitute_vars`, which returns a new `str`
+        # for any token carrying `$`. So the record of how the word was
+        # written survives `'d=x'` and dies on `'d=$H'`, and the peel that
+        # finds the command word took the pre-Q170 answer for the second --
+        # dropping the quoted word, finding `cd sub`, and applying it. Bash
+        # runs no `cd` there, so `../in.txt` reads ABOVE the root, and the
+        # guard vouched for it.
+        #
+        # The `$` is the only difference between these and the control below.
+        for raw in ("H=sub; 'd=$H' cd sub; cat ../in.txt",
+                    'H=sub; "d=$H" cd sub; cat ../in.txt'):
+            with self.subTest(raw=raw):
+                out = run_hook(raw, self.workspace, project_dir=self.workspace)
+                self.assertIsNotNone(out, f"vouched silently for {raw!r}")
+                self.assertNotEqual(
+                    "allow", out["hookSpecificOutput"]["permissionDecision"],
+                    f"vouched for a read above the root: {raw!r}")
+
+    def test_an_unquoted_prefix_carrying_a_dollar_still_applies_the_cd(self):
+        # The control that must not regress: written plainly, bash does set
+        # `d` and does run the `cd`, so the same read is the root's own file
+        # and the string is vouched for. A `for`/`if` group is included
+        # because the peel is now counted with the keywords rather than after
+        # them.
+        self._is_clean("H=sub; d=$H cd sub; cat deep.txt")
+        self._is_clean("H=sub; if d=$H cd sub; then cat deep.txt; fi")
 
     def test_a_quoted_prefix_does_not_apply_the_cd_beside_it(self):
         # The other assignment reader in the same loop, one call above the

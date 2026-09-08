@@ -3832,7 +3832,16 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
                 had = set(loopmap)
                 poison_vars(sub_g, loopmap)       # same rules invalidate loops
                 blacklist_loops(had - set(loopmap))
-        g = strip_env_prefix(kw_g)
+        # Count the peel on the raw group, apply it to the substituted one by
+        # index. `sub_g` is rebuilt element-wise by `substitute_vars`, which
+        # returns a new `str` for any token carrying `$`, so a peel decided on
+        # `kw_g` reads a token stripped of the record of how it was written and
+        # falls back to the pre-Q170 answer -- peeling a quoted `'d=$H'` and
+        # letting the `cd` behind it apply. Deciding on `g`, which still
+        # carries the record, is also closer to bash: it settles what a word IS
+        # before expansion, keywords included.
+        head = len(g) - len(strip_env_prefix(strip_sh_keywords(g)))
+        g = sub_g[head:]
         if not g: continue                        # keyword/env-only or redirect-only group
         # Signalling and pid-source classification runs before every `continue`
         # below, so no command shape can skip past it.
