@@ -108,7 +108,9 @@ import sys, os, json, re, shlex, subprocess, fnmatch
 # derives FD_PREFIX_REDIR from it, a shape the shared split does not carry. The
 # copy under this plugin's `lib/` is vendored; see scripts/sync-lib.py.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
-from bouncer_parse import ASSIGNMENT_RE, PUNCT_CHARS, lex     # noqa: E402
+from bouncer_parse import (                                   # noqa: E402
+    ASSIGNMENT_RE, PUNCT_CHARS, lex, split_assignment,
+)
 from bouncer_grants import record_grants                      # noqa: E402
 
 # Branch names protected no matter what the environment says. Configuration only
@@ -1855,13 +1857,14 @@ def override_reason(segments):
     prefix sits in command position, while the name inside a commit message,
     a grep pattern, or an `echo` argument is a positional and matches nothing
     here."""
-    prefix = OVERRIDE_VAR + '='
     for seg, _ in segments:
         for tok in seg:
             if not ASSIGNMENT_RE.match(tok):
                 break
-            if tok.startswith(prefix) and tok[len(prefix):].strip():
-                return tok[len(prefix):].strip()
+            # `NAME+=reason` is an assignment in command position too (Q174).
+            name, _append, value = split_assignment(tok)
+            if name == OVERRIDE_VAR and value.strip():
+                return value.strip()
     return None
 
 

@@ -43,7 +43,11 @@ import shlex
 
 # ---------------------------------------------------------------- constants
 
-ASSIGNMENT_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
+# `NAME=v` and `NAME+=v` are both assignments in command position -- `+=`
+# appends rather than replaces, and bash decides it is an assignment either
+# way. The `+` is part of the operator, never of the name, so anything
+# recovering a name from the token goes through `split_assignment` (Q174).
+ASSIGNMENT_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*\+?=')
 
 # Shell keywords that can precede the real command word in a compound statement.
 SH_KEYWORDS = frozenset({
@@ -788,6 +792,31 @@ def glue_dollar_paren(tokens):
 
 
 # -------------------------------------------------- command-head normalising
+
+def split_assignment(token, append_is_operator=True):
+    """Split an assignment token into ``(name, append, value)``.
+
+    `NAME=v` gives ``('NAME', False, 'v')`` and `NAME+=v` gives
+    ``('NAME', True, 'v')`` -- the `+` belongs to the operator, so a caller that
+    reached for `partition('=')` would otherwise track a variable called
+    ``NAME+`` and miss every read of ``NAME`` (Q174).
+
+    `append_is_operator=False` is the `env(1)` case. env is an external program
+    with no append semantics: it splits on the first `=` and uses the rest as a
+    name verbatim, so `env 'NAME+=v' cmd` really does export a variable called
+    ``NAME+`` and leaves ``NAME`` alone. Measured on coreutils 9.x and bash
+    5.3.15. The shell builtins that look identical -- `export`, `declare`,
+    `local`, `readonly`, `typeset` -- do append, and take the default.
+
+    Callers decide what an append means for them. A tracked value that cannot
+    be resolved without the old one is the common answer, and dropping the name
+    is the fail-safe form of it.
+    """
+    name, _, value = token.partition('=')
+    if append_is_operator and name.endswith('+'):
+        return name[:-1], True, value
+    return name, False, value
+
 
 def strip_env_prefix(tokens):
     """Drop leading POSIX `NAME=VALUE` command-prefix assignments.

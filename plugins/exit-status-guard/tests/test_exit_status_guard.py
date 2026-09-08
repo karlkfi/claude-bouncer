@@ -222,6 +222,27 @@ CASES = [
     ('the 1.x prefix still lifts a deny',
      'PIPE_GUARD_OVERRIDE=want-the-output-only make check | tail -30',
      False, False, ''),
+    # `NAME+=v` is an assignment in command position, so it arms like `NAME=v`
+    # (Q174). bash 5.3.15: `SG_OVR+=x printenv SG_OVR` prints `x`.
+    ('an append-spelled override lifts a deny',
+     'EXIT_STATUS_GUARD_OVERRIDE+=want-the-output-only make check | tail -30',
+     False, False, ''),
+    # The inline row above cannot fail on its own: a guard that misreads the
+    # prefix leaves it as the command head, which hides the gate and so denies
+    # nothing either way. As its own statement the gate is still in plain view,
+    # so only a guard that reads the append spelling keeps this from denying.
+    ('an append-spelled override as its own statement',
+     'EXIT_STATUS_GUARD_OVERRIDE+=scoped-to-this-call; make check | tail -5',
+     False, False, ''),
+    ('an empty append override still denies',
+     'EXIT_STATUS_GUARD_OVERRIDE+= make check | tail -30', False, True, ''),
+    # A `+` anywhere but directly before the `=` is part of no operator, so the
+    # word is a command name and the assignment run has ended. As its own
+    # statement, so the gate stays in plain view: inline, the unparsed word
+    # takes the command head and hides `make check`, and the resulting silence
+    # would say nothing about whether the override armed.
+    ('a plus inside the name does not arm the override',
+     'EXIT_STATUS+_GUARD_OVERRIDE=x; make check | tail -30', False, True, ''),
     ('empty 1.x prefix still denies',
      'PIPE_GUARD_OVERRIDE= make check | tail -30', False, True, ''),
     ('the 1.x prefix named in a commit message',

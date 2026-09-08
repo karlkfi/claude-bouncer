@@ -917,6 +917,55 @@ class OverrideTests(unittest.TestCase):
         self.assertEqual(decision, "deny")
         self.assertNotIn("override acknowledged", reason)
 
+    def test_append_spelled_override_downgrades_deny_to_ask(self):
+        # bash assigns for `NAME+=v` in command position, so the prefix arms
+        # exactly as `NAME=v` does (Q174).
+        decision, reason = run_hook(
+            "PROD_GUARD_OVERRIDE+=incident-42 "
+            "kubectl --context gke_acme_prod-us delete ns x")
+        self.assertEqual(decision, "ask")
+        self.assertIn("override acknowledged", reason)
+
+    def test_extract_env_prefix_reads_an_append(self):
+        # The command-prefix reader recovers the bare name: bash assigns
+        # `PROD_GUARD_OVERRIDE`, not `PROD_GUARD_OVERRIDE+` (Q174).
+        env, argv = guard.extract_env_prefix(
+            ['PROD_GUARD_OVERRIDE+=why', 'kubectl', 'get', 'po'])
+        self.assertEqual(env, {'PROD_GUARD_OVERRIDE': 'why'})
+        self.assertEqual(argv, ['kubectl', 'get', 'po'])
+
+    def test_append_keeps_the_inherited_prefix(self):
+        # The direction that would otherwise loosen a verdict: an append onto a
+        # set value must not narrow the target to the suffix alone (Q174).
+        env, _ = guard.extract_env_prefix(
+            ['AWS_PROFILE+=-readonly', 'aws', 's3', 'ls'],
+            {'AWS_PROFILE': 'prod'})
+        self.assertEqual(env, {'AWS_PROFILE': 'prod-readonly'})
+
+    def test_append_chains_within_one_run(self):
+        env, _ = guard.extract_env_prefix(
+            ['AWS_PROFILE=prod', 'AWS_PROFILE+=-ro', 'aws', 's3', 'ls'], {})
+        self.assertEqual(env, {'AWS_PROFILE': 'prod-ro'})
+
+    def test_env_wrapper_keeps_the_plus_in_the_name(self):
+        # env(1) is not the shell -- it splits on the first `=` and takes the
+        # rest as a name verbatim, so `env KUBECONFIG+=/x` exports `KUBECONFIG+`
+        # and leaves `KUBECONFIG` alone. The operand is still consumed, so the
+        # kubectl underneath is what gets classified (Q174).
+        env = {}
+        argv = guard.strip_wrappers(
+            ['env', 'KUBECONFIG+=/x', 'kubectl', 'get', 'po'], env)
+        self.assertEqual(env, {'KUBECONFIG+': '/x'})
+        self.assertEqual(argv, ['kubectl', 'get', 'po'])
+
+    def test_env_wrapper_plain_assignment_sets_the_name(self):
+        # The control: only the append spelling gets the `+`.
+        env = {}
+        argv = guard.strip_wrappers(
+            ['env', 'KUBECONFIG=/x', 'kubectl', 'get', 'po'], env)
+        self.assertEqual(env, {'KUBECONFIG': '/x'})
+        self.assertEqual(argv, ['kubectl', 'get', 'po'])
+
     def test_override_does_not_touch_plain_ask(self):
         decision, reason = run_hook(
             "PROD_GUARD_OVERRIDE=x kubectl --context bluefin apply -f m.yaml")

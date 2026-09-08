@@ -558,6 +558,38 @@ class PollConfigTests(unittest.TestCase):
         d, _ = run_hook("FOREGROUND_GUARD_OVERRIDE= gh run watch 123")
         self.assertIsNone(d)
 
+    def test_append_spelled_override_defers(self):
+        # bash assigns for `NAME+=v` in command position, so the prefix arms
+        # exactly as `NAME=v` does (Q174).
+        #
+        # Asserted on `strip_head` rather than the decision: a guard that fails
+        # to read the prefix leaves it as the command head, so `gh` is never
+        # found and the hook defers anyway -- the decision is None either way,
+        # and only the parsed state tells the two apart.
+        state = {}
+        argv = guard.strip_head(
+            ['FOREGROUND_GUARD_OVERRIDE+=demo-run', 'gh', 'run', 'watch'], state)
+        self.assertEqual(state.get('override'), 'demo-run')
+        self.assertEqual(argv, ['gh', 'run', 'watch'])
+
+    def test_env_append_does_not_arm_but_is_still_consumed(self):
+        # env(1) exports `FOREGROUND_GUARD_OVERRIDE+`, so the break-glass does
+        # not arm -- while the operand is still consumed, leaving the `gh`
+        # underneath to be classified (Q174).
+        state = {}
+        argv = guard.strip_head(
+            ['env', 'FOREGROUND_GUARD_OVERRIDE+=demo', 'gh', 'run', 'watch'],
+            state)
+        self.assertIsNone(state.get('override'))
+        self.assertEqual(argv, ['gh', 'run', 'watch'])
+
+    def test_env_plain_assignment_still_arms(self):
+        state = {}
+        guard.strip_head(
+            ['env', 'FOREGROUND_GUARD_OVERRIDE=demo', 'gh', 'run', 'watch'],
+            state)
+        self.assertEqual(state.get('override'), 'demo')
+
     def test_override_defers_in_every_permission_mode(self):
         # Unlike the old downgrade-to-a-prompt, deferring needs no one to be
         # there, so the escape hatch works where no prompt can be answered.
