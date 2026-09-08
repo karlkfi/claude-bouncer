@@ -366,6 +366,45 @@ class CommandHeadTests(unittest.TestCase):
     def test_shell_keywords_are_peeled(self):
         self.assertEqual(['cmd'], bp.strip_sh_keywords(['if', 'cmd']))
 
+    def test_an_append_prefix_is_peeled(self):
+        # `NAME+=v` assigns in command position exactly as `NAME=v` does; bash
+        # 5.3.15 runs `cmd` for both (Q174).
+        self.assertEqual(['cmd'], bp.strip_env_prefix(['A+=1', 'cmd']))
+        self.assertEqual(['cmd'], bp.strip_env_prefix(['A=1', 'B+=2', 'cmd']))
+
+    def test_a_plus_inside_the_name_is_not_an_assignment(self):
+        # `S+P=/x` is `command not found` -- the `+` is only an operator
+        # directly before the `=`.
+        self.assertEqual(['S+P=/x', 'cmd'],
+                         bp.strip_env_prefix(['S+P=/x', 'cmd']))
+
+
+class SplitAssignmentTests(unittest.TestCase):
+    """The `+` belongs to the operator, so a name recovered from the token has
+    to have it removed -- except after `env`, which is not the shell (Q174)."""
+
+    def test_a_plain_assignment_does_not_append(self):
+        self.assertEqual(('A', False, '1'), bp.split_assignment('A=1'))
+
+    def test_an_append_is_reported_with_the_bare_name(self):
+        self.assertEqual(('A', True, '1'), bp.split_assignment('A+=1'))
+
+    def test_env_takes_the_plus_as_part_of_the_name(self):
+        # `env 'A+=1' cmd` exports `A+` and leaves `A` alone. Measured:
+        # `env 'SP+=/x' printenv 'SP+'` prints `/x`.
+        self.assertEqual(('A+', False, '1'),
+                         bp.split_assignment('A+=1', append_is_operator=False))
+
+    def test_env_and_shell_agree_on_a_plain_assignment(self):
+        self.assertEqual(bp.split_assignment('A=1'),
+                         bp.split_assignment('A=1', append_is_operator=False))
+
+    def test_an_equals_in_the_value_is_kept(self):
+        self.assertEqual(('A', True, 'b=c'), bp.split_assignment('A+=b=c'))
+
+    def test_an_empty_append_value(self):
+        self.assertEqual(('A', True, ''), bp.split_assignment('A+='))
+
 
 class VendoringTests(unittest.TestCase):
     """The copies under each plugin are what actually ship."""

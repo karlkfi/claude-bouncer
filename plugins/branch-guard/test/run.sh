@@ -1670,6 +1670,19 @@ check_text "interactive ask does not name the prefix" lacks \
   'BRANCH_GUARD_OVERRIDE' \
   "$(reason_for "$(bash_payload 'git restore file.txt')" "$WORK")"
 
+#     `NAME+=v` assigns in command position exactly as `NAME=v` does -- bash
+#     5.3.15 runs the command for both -- so the append spelling arms too, and a
+#     `+` anywhere else in the name is a command word that arms nothing (Q174).
+APPEND_OVR="BRANCH_GUARD_OVERRIDE+='reverting a superseded local change'"
+check "append-spelled override -> allow" allow \
+  "$(decision_for "$(bash_payload "$APPEND_OVR git restore file.txt")" "$WORK")"
+#     A `+` anywhere but directly before the `=` is part of no operator, so the
+#     word is a command name -- bash reports `command not found` and never runs
+#     the git. Put it in its own segment so the guarded command really does run,
+#     which is what makes this a negative control rather than a no-op.
+check "a plus inside the name does not arm the override -> ask" ask \
+  "$(decision_for "$(bash_payload "BRANCH_GUARD+_OVERRIDE=x; git restore file.txt")" "$WORK")"
+
 #     26b. The reason is mandatory. A bare `BRANCH_GUARD_OVERRIDE=` would be the
 #     switch-it-off spelling, which is the thing this is not.
 check "empty override reason -> ask" ask \

@@ -972,6 +972,21 @@ class CommandOverrideTests(unittest.TestCase):
             guard.command_override('LC_ALL=C WORKSPACE_GUARD_OVERRIDE=r cp a b'),
             "r")
 
+    def test_an_append_spelled_prefix_arms(self):
+        # bash assigns for `NAME+=v` exactly as for `NAME=v` in command
+        # position, so the guard has to read it as the caller wrote it (Q174).
+        self.assertEqual(
+            guard.command_override('WORKSPACE_GUARD_OVERRIDE+=porting cp a b'),
+            "porting")
+
+    def test_an_empty_append_value_does_not_arm(self):
+        self.assertIsNone(guard.command_override('WORKSPACE_GUARD_OVERRIDE+= cp a b'))
+
+    def test_a_plus_inside_the_name_does_not_arm(self):
+        # `WORKSPACE_GUARD+_OVERRIDE=r` is `command not found` to bash.
+        self.assertIsNone(
+            guard.command_override('WORKSPACE_GUARD+_OVERRIDE=r cp a b'))
+
     def test_after_a_shell_keyword(self):
         self.assertEqual(
             guard.command_override('if WORKSPACE_GUARD_OVERRIDE=r cp a b; then'),
@@ -2786,6 +2801,20 @@ class HookEndToEndTests(unittest.TestCase):
             guard.classify_mktemp(["mktemp", "--", "/tmp/x.XXX"]),
             ["/tmp/x.XXX"])
 
+    # --- an append prefix poisons the name it assigns (Q174) ----------------
+
+    def test_append_prefix_before_an_arg_assigner_still_denies(self):
+        # `f+=…` in command position is an assignment, so `f` must come off the
+        # varmap. Left on it at its stale in-workspace value, `$f/passwd`
+        # resolves to `docs/passwd` and the read is ALLOWED -- an escape from
+        # the workspace, not merely a missed prompt. `export` is an
+        # ARG_ASSIGNER_CMD, whose branch returns before the fall-through net.
+        self._decision("f=docs; f+=/../../../etc export Y; cat $f/passwd", "deny")
+
+    def test_plain_prefix_before_an_arg_assigner_still_denies(self):
+        # The control: the `=` spelling behaved correctly before Q174.
+        self._decision("f=docs; f=/etc export Y; cat $f/passwd", "deny")
+
     # --- inline TMPDIR= override (Q34) --------------------------------------
     # A literal `TMPDIR=<dir>` command prefix relocates mktemp's default
     # location; `inline_tmpdir` captures it and `classify_mktemp` feeds it to
@@ -2808,6 +2837,15 @@ class HookEndToEndTests(unittest.TestCase):
     def test_inline_tmpdir_none_when_absent(self):
         self.assertIsNone(guard.inline_tmpdir(["LC_ALL=C", "mktemp"]))
         self.assertIsNone(guard.inline_tmpdir(["mktemp", "TMPDIR=./x"]))
+
+    def test_inline_tmpdir_rejects_an_append(self):
+        # `TMPDIR+=./scratch` appends to the ambient value, which is not
+        # knowable here -- fall back to the host-temp default (Q174).
+        self.assertIsNone(guard.inline_tmpdir(["TMPDIR+=./scratch", "mktemp"]))
+
+    def test_inline_tmpdir_append_clears_an_earlier_literal(self):
+        self.assertIsNone(
+            guard.inline_tmpdir(["TMPDIR=/a", "TMPDIR+=./scratch", "mktemp"]))
 
     def test_inline_tmpdir_rejects_unexpanded_value(self):
         # A `$`/backtick value would be expanded by bash; not a trusted literal.
@@ -7768,6 +7806,21 @@ class ApplyAssignmentGroupTests(unittest.TestCase):
         guard.apply_assignment_group(["f=$(cmd)"], m, True)
         self.assertEqual(m, {})
 
+    def test_append_poisons_rather_than_replacing(self):
+        # `f+=x` resolves to the old value plus `x`. Treating it as a plain set
+        # would resolve `$f` to `x` and classify the wrong path, so the name is
+        # dropped -- the same answer this already gives an unprovable value
+        # (Q174).
+        m = {"f": "in.txt"}
+        self.assertEqual(
+            guard.apply_assignment_group(["f+=x"], m, True), ["f"])
+        self.assertEqual(m, {})
+
+    def test_export_append_poisons_too(self):
+        m = {"f": "in.txt"}
+        guard.apply_assignment_group(["export", "f+=x"], m, True)
+        self.assertEqual(m, {})
+
     def test_non_persisting_group_poisons(self):
         # Subshell / pipeline-segment / backgrounded assignment: pop, not set.
         m = {"f": "old.txt"}
@@ -7814,6 +7867,22 @@ class PoisonVarsTests(unittest.TestCase):
         m = {"f": "x"}
         guard.poison_vars(["read", "$n"], m)
         self.assertEqual(m, {})
+
+    def test_append_prefix_poisons_the_bare_name(self):
+        # `strip_env_prefix` peels `f+=v`, so the name recovered from it has to
+        # be `f`. Splitting on `=` poisons `f+` and leaves `f` on the map at its
+        # stale value, which a later `cat $f/x` then resolves and allows -- the
+        # ARG_ASSIGNER_CMDS branch returns before the fall-through net that
+        # would otherwise have caught it (Q174).
+        m = {"f": "docs", "g": "y"}
+        guard.poison_vars(["f+=/../etc", "export", "Y"], m)
+        self.assertEqual(m, {"g": "y"})
+
+    def test_plain_prefix_poisons_the_name(self):
+        # The control: the `=` spelling was already handled.
+        m = {"f": "docs", "g": "y"}
+        guard.poison_vars(["f=/etc", "export", "Y"], m)
+        self.assertEqual(m, {"g": "y"})
 
     def test_read_clobbers_reply(self):
         m = {"REPLY": "x", "g": "y"}

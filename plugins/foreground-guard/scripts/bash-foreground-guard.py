@@ -96,7 +96,7 @@ import sys
 # this plugin's `lib/` is vendored from the root; see scripts/sync-lib.py.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 from bouncer_parse import (                                    # noqa: E402
-    ASSIGNMENT_RE, COMMENT_PRECEDERS, _consume_heredoc_body,
+    ASSIGNMENT_RE, COMMENT_PRECEDERS, split_assignment, _consume_heredoc_body,
     _skip_balanced_parens, strip_heredoc_bodies,
 )
 
@@ -351,7 +351,7 @@ def strip_head(argv, state):
         elif head in OTHER_KEYWORDS:
             argv = argv[1:]
         elif ASSIGNMENT_RE.match(argv[0]):
-            name, _, _val = argv[0].partition('=')
+            name, _append, _val = split_assignment(argv[0])
             if name == 'FOREGROUND_GUARD_OVERRIDE':
                 state['override'] = _val
             argv = argv[1:]
@@ -366,7 +366,11 @@ def strip_head(argv, state):
                     argv = argv[2:] if argv[0] in ('-u', '--unset', '-C',
                                                    '--chdir') else argv[1:]
                 elif ASSIGNMENT_RE.match(argv[0]):
-                    name, _, _val = argv[0].partition('=')
+                    # env exports `NAME+` for a `NAME+=v` operand, so the
+                    # append spelling names a different variable and does not
+                    # arm the break-glass (Q174).
+                    name, _append, _val = split_assignment(
+                        argv[0], append_is_operator=False)
                     if name == 'FOREGROUND_GUARD_OVERRIDE':
                         state['override'] = _val
                     argv = argv[1:]
