@@ -3371,7 +3371,12 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
             # `stable_vars`, so a name reassigned or poisoned anywhere in the
             # string is absent from that map and never substitutes.
             for tok in g:
-                if ASSIGNMENT_RE.match(tok):
+                # Command position, so a quoted `'d=sub'` names a program bash
+                # fails to find and assigns nothing (Q170). Reading it as an
+                # assignment would make `d` usable before the real one later in
+                # the string, which is the out-of-order resolve `usable` exists
+                # to stop -- and resolving a cwd removes prompts.
+                if is_assignment(tok):
                     usable.add(tok.split('=', 1)[0])
 
     out = [(b,) + sub_cwd[i] for i, b in enumerate(bodies)]

@@ -4564,6 +4564,27 @@ class SubstBodyCwdTests(unittest.TestCase):
 
     # --- the missed offenders: an out-of-root read or write, and no prompt ---
 
+    def test_a_quoted_assignment_does_not_make_a_name_usable(self):
+        # Q170 inside Q169's positional rule. `usable` exists so a `cd $d`
+        # cannot resolve from an assignment written after it. A quoted
+        # `'d=sub'` is a program bash fails to find, so it must not put `d`
+        # in that set -- otherwise the real `d=sub` at the end of the string
+        # reaches the `cd`, and the read lands in `sub/` instead of the root.
+        # Fail-open, because resolving a cwd is what removes the prompt.
+        out = run_hook("'d=sub'; cd $d; echo \"$(cat ../in.txt)\"; d=sub",
+                       self.workspace, project_dir=self.workspace)
+        self.assertIsNotNone(out, "expected a decision, got defer")
+        self.assertEqual("deny", out["hookSpecificOutput"]["permissionDecision"])
+        self.assertIn("untracked cd",
+                      out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_an_unquoted_assignment_still_makes_a_name_usable(self):
+        # The control, and the direction that must not regress: written
+        # plainly, `d` IS usable, the `cd` resolves, `../in.txt` lands back in
+        # the root, and there is nothing to report. If this starts denying,
+        # the fix has over-reached and Q34's false deny is back.
+        self._is_clean("d=sub; cd $d; echo \"$(cat ../in.txt)\"")
+
     def test_a_backtick_read_after_a_cd_out_is_checked(self):
         self._asks_about_target("cd /etc && echo `cat q169-fake-target`")
 
