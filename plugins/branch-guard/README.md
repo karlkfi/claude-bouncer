@@ -463,7 +463,7 @@ variable:
 
 | Policy | Behavior |
 | --- | --- |
-| `strict` *(default)* | **allow** a push of the worktree's own current branch, including a force push of it, and a *leased rewrite* of one other unprotected branch from it (see below). **ask** before any other push — a *different* branch (`git push origin other`), foreign refspecs (`git push origin HEAD:other`), wildcards, `--all`/`--mirror`, a tag (`git push origin v1.3.0`, `refs/tags/v1.3.0`, `--tags`), or a protected target. |
+| `strict` *(default)* | **allow** a push of the worktree's own current branch, including a force push of it, and a *leased rewrite* of one other unprotected branch (see below). **ask** before any other push — a *different* branch (`git push origin other`), foreign refspecs (`git push origin HEAD:other`), wildcards, `--all`/`--mirror`, a tag (`git push origin v1.3.0`, `refs/tags/v1.3.0`, `--tags`), or a protected target. |
 | `protected` | **ask** before a push whose target is `main`/`master` (including `git push origin main`, `HEAD:main`, deleting `main`, and `--all`/`--mirror`). Any other push defers. Never auto-approves. |
 | `off` | Pushes are not guarded at all. |
 
@@ -501,12 +501,21 @@ need no check of their own. Under `strict`:
 git push --force-with-lease=claude/topic origin HEAD:claude/topic
 ```
 
-is auto-approved when the lease **names the destination**, the source is the
-worktree branch, and the destination isn't protected. Everything else still asks:
-a bare `--force-with-lease` (it names no ref), a lease naming some other branch,
-a deletion (`--delete`, or an empty source as in `origin :other`), a foreign
-source branch, and `--no-force-with-lease` cancelling an earlier lease. Under
-`protected` nothing changes — that policy never auto-approves a push.
+is auto-approved when the lease **names the destination**, the destination isn't
+protected, and the source is either the worktree branch or the destination
+itself:
+
+```bash
+git push --force-with-lease=claude/topic origin claude/topic
+```
+
+That second form names the target three times, so it states its intent at least
+as clearly as the first. Everything else still asks: a bare `--force-with-lease`
+(it names no ref), a lease naming some other branch, a deletion (`--delete`, or
+an empty source as in `origin :other`), a source that is neither the worktree
+branch nor the destination, and `--no-force-with-lease` cancelling an earlier
+lease. Under `protected` nothing changes — that policy never auto-approves a
+push.
 
 What a lease proves is that the remote hasn't moved, not that the branch is
 yours alone. Sharedness stays branch-guard's own question, answered by the
@@ -848,8 +857,9 @@ protected branch (main/master) or destructive git commands. To keep work flowing
   rule still prompts on main/master.
 - **Push the worktree's own branch.** `git push` / `git push -u origin HEAD`
   auto-approves; pushing a different branch or a refspec like `HEAD:main` prompts.
-  To rewrite another unprotected branch from this one, name it in a lease —
-  `git push --force-with-lease=other origin HEAD:other`.
+  To rewrite another unprotected branch, name it in a lease —
+  `git push --force-with-lease=other origin HEAD:other`, or
+  `git push --force-with-lease=other origin other` to send that branch itself.
 - **Prefer fast-forward pulls on a protected branch.** On a feature branch a
   bare `git pull` is auto-approved. On `main` it prompts, because it lands a
   merge or rewrites history — `git pull --ff-only` is auto-approved there, since
