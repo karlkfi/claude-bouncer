@@ -132,5 +132,102 @@ class GateTests(unittest.TestCase):
         self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
 
 
+class ClaimsTests(unittest.TestCase):
+    """`make backlog-claims`, against a real repository and a real remote.
+
+    The remote is a bare repo in a temp dir, so these run offline: `claims`
+    reads it with `git ls-remote`, which does not care that it is a path.
+    """
+
+    def git(self, *args, **kw):
+        p = subprocess.run(
+            ['git', '-c', 'user.email=t@example.com', '-c', 'user.name=T',
+             '-c', 'commit.gpgsign=false'] + list(args),
+            cwd=self.work, capture_output=True, text=True,
+            input=kw.get('input'))
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        return p.stdout
+
+    def claims(self, *extra):
+        return subprocess.run(
+            [sys.executable, QUEUE, '--store', self.store, 'claims'] + list(extra),
+            capture_output=True, text=True)
+
+    def write(self, ident):
+        with open(os.path.join(self.store, ident + '.md'), 'w',
+                  encoding='utf-8') as fh:
+            fh.write(GateTests.CLEAN.replace('id: Q1', 'id: ' + ident)
+                     % ('ready', 'An ordinary note.'))
+
+    def claim(self, ident):
+        """What alloc-queue-id.sh does: a blob pushed at refs/queue-ids/QN."""
+        blob = self.git('hash-object', '-w', '--stdin',
+                        input='claim ' + ident).strip()
+        self.git('push', self.remote, blob + ':refs/queue-ids/' + ident)
+
+    def setUp(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self.remote = os.path.join(tmp, 'remote.git')
+        self.work = os.path.join(tmp, 'work')
+        subprocess.run(['git', 'init', '--bare', '-b', 'main', self.remote],
+                       capture_output=True, check=True)
+        subprocess.run(['git', 'init', '-b', 'main', self.work],
+                       capture_output=True, check=True)
+        self.store = os.path.join(self.work, 'docs', 'queue')
+        os.makedirs(self.store)
+        # Q1 lands on main, so it sits at the merge base of every later branch.
+        self.write('Q1')
+        self.git('add', '-A')
+        self.git('commit', '-m', 'file Q1')
+        self.git('remote', 'add', 'origin', self.remote)
+        self.git('push', '-u', 'origin', 'main')
+        self.git('checkout', '-b', 'work')
+
+    def test_a_branch_that_adds_nothing_passes(self):
+        p = self.claims()
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+
+    def test_an_added_id_holding_no_claim_fails(self):
+        self.write('Q2')
+        p = self.claims()
+        self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn('Q2', p.stderr)
+
+    def test_an_added_id_holding_a_claim_passes(self):
+        self.write('Q2')
+        self.claim('Q2')
+        p = self.claims()
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+
+    def test_an_id_already_on_main_is_never_asked_for_a_claim(self):
+        """The property that makes this need no backfill.
+
+        Q1 is on main and holds no claim, which is the state 16 rows of the
+        real store are in. It sits at the merge base, so it is not an id this
+        branch adds -- and the case above proves the check is not simply
+        passing everything.
+        """
+        self.write('Q2')
+        self.claim('Q2')
+        p = self.claims()
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertNotIn('Q1', p.stderr)
+
+    def test_an_unreadable_remote_skips_but_fails_under_strict(self):
+        """CI passes --strict, so a remote that cannot be read is a failure
+        there and a skip in an offline clone. Both directions, because a skip
+        that quietly became the CI behaviour would be the gate not running."""
+        self.write('Q2')
+        gone = ['--remote', os.path.join(self.work, 'no-such-remote.git')]
+        self.assertEqual(self.claims(*gone).returncode, 0)
+        self.assertNotEqual(self.claims('--strict', *gone).returncode, 0)
+
+    def test_allow_excuses_an_id_claimed_on_another_remote(self):
+        self.write('Q2')
+        p = self.claims('--allow', 'Q2')
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+
+
 if __name__ == '__main__':
     unittest.main()

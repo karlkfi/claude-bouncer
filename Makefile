@@ -2,9 +2,15 @@
 PYTHON ?= python3
 PLUGINS := workspace-guard branch-guard prod-guard exit-status-guard foreground-guard
 
+# An unreadable remote skips rather than fails, so an offline clone still runs
+# the gate; CI always has a network, so there a skip is the failure. Actions
+# sets CI itself, which is why nothing has to pass this by hand.
+CLAIMS_FLAGS := $(if $(CI),--strict)
+
 .PHONY: check sync sync-check version-check path-filter-check action-pin-check \
         install-ref-check lib-test plugin-tests \
-        validate images help backlog backlog-next backlog-lint
+        validate images help backlog backlog-next backlog-lint backlog-claims \
+        backlog-claim
 
 help:
 	@echo "make check             run everything CI runs"
@@ -21,9 +27,11 @@ help:
 	@echo "make backlog           the queue in priority order (ARGS='--label prod-guard')"
 	@echo "make backlog-next      the top ready item, as a session prompt"
 	@echo "make backlog-lint      check docs/queue"
+	@echo "make backlog-claim     claim a Q-ID (ARGS='The row title')"
+	@echo "make backlog-claims    fail if an id this branch adds holds no claim"
 
 check: sync-check version-check path-filter-check action-pin-check \
-       install-ref-check backlog-lint lib-test plugin-tests
+       install-ref-check backlog-lint backlog-claims lib-test plugin-tests
 
 sync:
 	$(PYTHON) scripts/sync-lib.py
@@ -91,3 +99,23 @@ backlog-next:
 backlog-lint:
 	$(PYTHON) scripts/queue.py lint \
 	  --strict blocked-opener --strict deferred-trigger --strict empty-store
+
+# Reserving an ID binds only the sessions that ask, so a hand-picked number
+# survives until the rebase it collides with -- which Q146 paid three times
+# over. Keyed on ids added against the merge base rather than origin/main's
+# tip, so the rows predating the allocator are never asked for a claim and
+# this needs no backfill. An id claimed elsewhere takes `--allow QNNN`.
+#
+# Separate from backlog-lint because `lint` is a pure function of a directory,
+# which is what keeps it usable in an edit loop. This one reads the remote.
+backlog-claims:
+	$(PYTHON) scripts/queue.py claims $(CLAIMS_FLAGS)
+
+# ARGS is quoted here and nowhere else in this file: a title is free text where
+# the others take flags, and unquoted the shell splits it, so the script reads
+# one title per WORD and claims an id for each. A nine-word title took Q182
+# through Q192 that way. A claim cannot be released.
+backlog-claim:
+	@[ -n "$(ARGS)" ] || { \
+	  echo "usage: make backlog-claim ARGS='The row title'" >&2; exit 2; }
+	@bash scripts/alloc-queue-id.sh "$(ARGS)"

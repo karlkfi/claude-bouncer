@@ -121,6 +121,32 @@ jobs:
       - run: python3 scripts/install-ref-check.py
       - run: python3 -m unittest discover tests
 
+  # ----------------------------------------------------------- backlog claims
+  # Its own job rather than a step in shared-parser, for two reasons that both
+  # come from what it reads. It needs `fetch-depth: 0`, and the matrix above
+  # would pay for that five times; and it makes a network round trip to the
+  # remote, which the matrix would also make five times, for five chances to
+  # flake on one answer.
+  #
+  # `--strict` arrives through the Makefile's $(CI), which Actions sets. That
+  # is what makes an unreadable remote a failure here while it stays a skip in
+  # an offline clone -- otherwise the one place the check is guaranteed to run
+  # would also be a place it can silently not run.
+  backlog-claims:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The check measures which ids this branch adds against its merge
+          # base with origin/main. The default shallow checkout fetches
+          # neither the base branch nor enough history to find a merge base,
+          # and under --strict that is a failure rather than a skip.
+          fetch-depth: 0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - run: make backlog-claims
+
   # --------------------------------------------------------- workspace-guard
   workspace-guard:
     needs: [changes]
