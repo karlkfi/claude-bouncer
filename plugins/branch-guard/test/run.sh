@@ -1876,6 +1876,26 @@ make_overlap_repo() {
   git -C "$OVL" commit -q -am "branch work"
 }
 
+# make_overlap_worktrees
+#   The same repo with two worktrees of it, and the primary checkout parked on
+#   `main` so neither branch is held there: $OVL_WT_DIRTY holds claude/x, whose
+#   edit meets the base's own movement, and $OVL_WT_CLEAN holds claude/y, whose
+#   edit is in a file the base never touched. One repository is the point --
+#   both worktrees report the same `--git-common-dir` and differ only in
+#   `--show-toplevel`, so two separate repos would not express the defect.
+make_overlap_worktrees() {
+  make_overlap_repo claude/x file.txt 10 file.txt 10
+  git -C "$OVL" switch -q main
+  git -C "$OVL" switch -q -c claude/y
+  numbered "$OVL/other.txt" 10 "branch edit"
+  git -C "$OVL" commit -q -am "clean branch work"
+  git -C "$OVL" switch -q main
+  OVL_WT_DIRTY="$OVL/wt-overlapping"
+  OVL_WT_CLEAN="$OVL/wt-clean"
+  git -C "$OVL" worktree add -q "$OVL_WT_DIRTY" claude/x
+  git -C "$OVL" worktree add -q "$OVL_WT_CLEAN" claude/y
+}
+
 ENABLED_OFF='BRANCH_GUARD_PUSH_OVERLAP_ENABLED=false'
 OVL_OVR="BRANCH_GUARD_OVERRIDE='the overlap is mine to merge'"
 
@@ -2044,13 +2064,17 @@ check "[overlap] ignore glob rather than exact name -> allow" allow \
 check "[overlap] an ignore glob matching nothing changes nothing -> deny" deny \
   "$(decision_for "$(push 'git push')" "$OVL" 'BRANCH_GUARD_OVERLAP_IGNORE=nope.*')"
 
-# 27l. The probes read the SESSION cwd, so a `git -C` pointing elsewhere would
-#      measure the wrong repository — the same reason the `git branch` probes
-#      are gated on it. The overlap is skipped and the push keeps the verdict it
-#      already had.
+# 27l. A redirect the hook cannot resolve to a working directory stands the
+#      probe down rather than measuring a tree the command is not acting on.
+#      `--git-dir` names a repository without naming a tree to probe from, and a
+#      `-C` the shell has to compute names one only the shell knows. The push
+#      keeps the verdict it already had. 27o is the other half: a redirect that
+#      DOES resolve gets probed, in the tree it names.
 make_overlap_repo claude/x file.txt 10 file.txt 10
-check "[overlap] git -C another repo skips the probe -> allow" allow \
-  "$(decision_for "$(bash_payload "git -C '$(nat "$WORK")' push")" "$OVL")"
+check "[overlap] an unresolvable --git-dir skips the probe -> allow" allow \
+  "$(decision_for "$(bash_payload "git --git-dir='$(nat "$OVL")/.git' push")" "$OVL")"
+check "[overlap] a non-literal -C skips the probe -> allow" allow \
+  "$(decision_for "$(bash_payload 'git -C "$SOMEWHERE" push')" "$OVL")"
 
 # 27m. A removed line that itself begins with `--` comes out of a unified diff as
 #      `--- …`, which is content rather than a file header. Reading one as a
@@ -2135,6 +2159,68 @@ git -C "$OVL" switch -q main
 check "[overlap] the break-glass does not lift a protected push -> ask" ask \
   "$(decision_for "$(push "$OVL_OVR git push origin main")" "$OVL")"
 git -C "$OVL" switch -q claude/x
+
+# 27o. Which TREE the probe measures. A session's own cwd is that tree only
+#      while nothing moved it: a literal `cd` moves it for every segment after
+#      it, a literal `git -C` for one invocation. Reading the payload cwd once
+#      answered about the tree the command had already left.
+#
+#      Two worktrees of ONE repository is the shape this needs, and the shape
+#      `make_overlap_repo` cannot build. They share a `--git-common-dir` and
+#      differ only in `--show-toplevel`, so a fixture built from two separate
+#      repositories would pass with the defect still in place.
+make_overlap_worktrees
+
+#      Aimed by a `cd`, in both directions -- and both are needed, because a
+#      fix that merely switched the probe OFF on seeing any `cd` would satisfy
+#      the second half alone. Nothing in the clean worktree's own branch
+#      overlaps, so this deny can only come from the `cd` having been followed.
+check "[overlap] cd into the overlapping worktree -> deny" deny \
+  "$(decision_for "$(bash_payload "cd '$(nat "$OVL_WT_DIRTY")' && git push")" \
+     "$OVL_WT_CLEAN")"
+#      The converse is the false deny the row was filed for: the session sits in
+#      the overlapping worktree and pushes a branch that does not overlap. The
+#      `cd` segment is still `nongit`, so the auto-approve is withheld and the
+#      command defers rather than allowing -- Q146 owns that half.
+check "[overlap] cd out of the overlapping worktree -> none" none \
+  "$(decision_for "$(bash_payload "cd '$(nat "$OVL_WT_CLEAN")' && git push")" \
+     "$OVL_WT_DIRTY")"
+#      A `cd` that goes nowhere still measures the tree it is in. That is what
+#      separates "followed the cd" from "gave up on seeing one".
+check "[overlap] cd . in the overlapping worktree -> deny" deny \
+  "$(decision_for "$(bash_payload 'cd . && git push')" "$OVL_WT_DIRTY")"
+#      A target only the shell can compute stands the probe down instead of
+#      guessing at it, so the deny goes -- for a different reason than the
+#      case above, which is why both are here.
+check "[overlap] cd \$VAR stands the probe down -> none" none \
+  "$(decision_for "$(bash_payload 'cd "$ELSEWHERE" && git push')" \
+     "$OVL_WT_DIRTY")"
+check "[overlap] cd - stands the probe down -> none" none \
+  "$(decision_for "$(bash_payload 'cd - && git push')" "$OVL_WT_DIRTY")"
+
+#      Aimed by `git -C`. This direction is the false ALLOW, which is the worse
+#      of the two: a wrong deny is visible to the session and a wrong allow is
+#      not. It did not even defer, because a `git -C` segment is a git segment.
+check "[overlap] git -C the overlapping worktree -> deny" deny \
+  "$(decision_for "$(bash_payload "git -C '$(nat "$OVL_WT_DIRTY")' push")" \
+     "$OVL_WT_CLEAN")"
+#      The control that stops that reading as "any -C denies": the same spelling
+#      aimed at the clean worktree allows, and the reason names the branch it
+#      measured rather than the session's.
+check "[overlap] git -C the clean worktree -> allow" allow \
+  "$(decision_for "$(bash_payload "git -C '$(nat "$OVL_WT_CLEAN")' push")" \
+     "$OVL_WT_DIRTY")"
+check_text "[overlap] the allow names the branch it measured" has "claude/y" \
+  "$(reason_for "$(bash_payload "git -C '$(nat "$OVL_WT_CLEAN")' push")" \
+     "$OVL_WT_DIRTY")"
+
+#      The break-glass does not reach the new deny. `is_overridable` refuses a
+#      repo redirect whichever tree it names, because the override is scoped to
+#      loss in the checkout the session owns -- a different question from where
+#      the probe ran, and one aiming the probe does not answer.
+check "[overlap] the break-glass does not lift a -C overlap deny -> deny" deny \
+  "$(decision_for "$(bash_payload "$OVL_OVR git -C '$(nat "$OVL_WT_DIRTY")' push")" \
+     "$OVL_WT_CLEAN")"
 
 # --- Worktree grant recording (Q144) -----------------------------------------
 # The PreToolUse ask above and workspace-guard's exemption are two halves of one
