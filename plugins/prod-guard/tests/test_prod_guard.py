@@ -411,6 +411,21 @@ class ParsingTests(unittest.TestCase):
             with self.subTest(flags=flags):
                 self.assertFalse(guard.is_sudo_run_nothing(flags + ["kubectl"]))
 
+    def test_attached_flag_value_is_not_scanned_for_modes(self):
+        # A short flag's value can be attached to it, and a username or a
+        # prompt is free to contain a mode letter. Testing the whole token
+        # read `sudo -uKarl` as `--remove-timestamp`, which defers a command
+        # sudo really runs -- fail-open, so both directions are pinned.
+        for flags in (["-uKarl"], ["-pplease"], ["-pEnter"], ["-gwheel"],
+                      ["-Ttimeout"], ["-pl"], ["-Tl"]):
+            with self.subTest(flags=flags):
+                self.assertFalse(guard.is_sudo_run_nothing(flags + ["kubectl"]))
+        # The walk stops at the value and not before it, so a mode letter
+        # bundled ahead of a value-taking flag still counts.
+        for flags in (["-lp"], ["-lu"], ["-vp"]):
+            with self.subTest(flags=flags):
+                self.assertTrue(guard.is_sudo_run_nothing(flags + ["kubectl"]))
+
     def test_sudo_wrapper_strips_only_an_invocation(self):
         # A real invocation still has sudo peeled off.
         self.assertEqual(
@@ -2657,6 +2672,7 @@ class SpecialCaseTests(unittest.TestCase):
                     "sudo --remove-timestamp kubectl delete ns foo",
                     "sudo -kl kubectl delete ns foo",
                     "sudo -U bob -l kubectl delete ns foo",
+                    "sudo -lp kubectl delete ns foo",
                     "sudo --other-user=bob -l kubectl delete ns foo"):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(run_hook(cmd, home=home)[0])
@@ -2673,6 +2689,22 @@ class SpecialCaseTests(unittest.TestCase):
                     "sudo -- kubectl delete ns foo",
                     "sudo -p prompt kubectl delete ns foo",
                     "sudo -p -l kubectl delete ns foo"):
+            with self.subTest(cmd=cmd):
+                decision, reason = run_hook(cmd, home=home)
+                self.assertEqual(decision, "deny")
+                self.assertIn("kubectl delete", reason)
+
+    def test_sudo_attached_flag_value_still_denies(self):
+        # An attached value holding `l`, `v`, `e`, `K` or `U` was read as a
+        # run-nothing mode, so the command behind it went unguarded. `-uKarl`
+        # is ordinary usage rather than a crafted bypass, which is what makes
+        # this the direction worth a test of its own.
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        for cmd in ("sudo -uKarl kubectl delete ns foo",
+                    "sudo -pplease kubectl delete ns foo",
+                    "sudo -pEnter kubectl delete ns foo",
+                    "sudo -gwheel kubectl delete ns foo",
+                    "sudo -pl kubectl delete ns foo"):
             with self.subTest(cmd=cmd):
                 decision, reason = run_hook(cmd, home=home)
                 self.assertEqual(decision, "deny")

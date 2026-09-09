@@ -580,10 +580,12 @@ SUDO_RUN_NOTHING_LONG = frozenset({
 def is_sudo_run_nothing(operands):
     """Whether sudo's flags put it in a mode that runs no command (Q157).
 
-    The sudo-side twin of `is_command_lookup`. Flags bundle, `--` ends them,
-    and a value-taking flag's value is stepped over so a prompt or user that
-    happens to look like a mode is not read as one -- matched to the walk in
-    `strip_wrappers`, which tests the whole token too."""
+    The sudo-side twin of `is_command_lookup`. Flags bundle and `--` ends
+    them, so a short token is walked one character at a time rather than
+    tested whole: a value-taking flag ends the walk, because what follows it
+    in the token is that flag's value and a username or prompt is free to
+    contain a mode letter. `sudo -uKarl` is the case -- reading the `K` as
+    `--remove-timestamp` would defer a command sudo really runs."""
     value_flags = WRAPPER_VALUE_FLAGS['sudo']
     i = 0
     while i < len(operands):
@@ -596,9 +598,16 @@ def is_sudo_run_nothing(operands):
                 return True
             i += 2 if name == tok and tok in value_flags else 1
         else:
-            if SUDO_RUN_NOTHING.intersection(tok[1:]):
-                return True
-            i += 2 if tok in value_flags else 1
+            i += 1
+            for pos, char in enumerate(tok[1:], start=2):
+                if char in SUDO_RUN_NOTHING:
+                    return True
+                if '-' + char in value_flags:
+                    # The value is the rest of the token, or the next operand
+                    # when this flag ends it. Either way it is not flags.
+                    if pos == len(tok):
+                        i += 1
+                    break
     return False
 
 
