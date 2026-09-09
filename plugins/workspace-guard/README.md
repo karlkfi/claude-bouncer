@@ -67,6 +67,11 @@ The hook produces one of four outcomes:
   opener there is nothing to tell you which of your installed hooks stopped the
   command. `allow` reasons stay bare: they reach neither a prompt nor the agent.
 - **defer** — the hook stays silent; your normal permission settings apply.
+  That is protection only where those settings prompt. In `auto`, `acceptEdits`
+  and `bypassPermissions` they pre-approve, so a defer runs — which is why a
+  silence the hook chose *because it could not read the command* escalates in
+  those three instead (see
+  [Suppression escalation](#suppression-escalation-in-pre-approving-modes)).
 
 Guarded commands: `grep` (and `egrep`, `fgrep`), `rg`, `sed`, `awk` (and
 `gawk`, `mawk`), `jq`, `yq`, `cat`, `head`, `tail`, `sort`, `wc`, `diff`,
@@ -1461,6 +1466,42 @@ is not an override at all, because the point of the prefix is that you say why.
 `Edit`, `Write`, `MultiEdit`, `NotebookEdit` and the `PowerShell` tool have no
 command string to carry a prefix. Their denies say so and point at the Bash form;
 the environment route below covers them for a whole session.
+
+### Suppression escalation in pre-approving modes
+
+The hook has two ways of saying nothing, and only one of them means it found
+nothing to catch. The other is that it read a construct it admits it cannot
+parse — an `sh -c` body under a container or remote wrapper, a kill it could not
+scope to this workspace, interpreter code — and **withheld** the `allow` it
+would otherwise have given the string. Withholding hands the question to your
+own permission rules, which is protection in `manual`, `dontAsk` and `plan`,
+where those rules prompt. In `auto`, `acceptEdits` and `bypassPermissions` they
+pre-approve, so the command simply runs (see
+[`docs/permission-modes.md`](docs/permission-modes.md)).
+
+In those three modes the hook now puts the decision back, and the verdict splits
+on whether anyone is at the prompt: `ask` in `auto` and `acceptEdits`, where a
+person can answer, and `deny` under `bypassPermissions`, where an `ask` would
+block and strand the agent while a `deny` blocks and hands back the rewrite. The
+other three modes are untouched — a defer already stops the command there, so
+escalating would buy a prompt and no protection.
+
+| Env var | Default | Effect |
+| --- | --- | --- |
+| `WORKSPACE_GUARD_ESCALATE` | `scoped` | `scoped` escalates a `sh -c` body and an unscoped kill. `all` adds interpreter code. `off` restores the silence every mode had before. Any other value falls back to `scoped`. |
+
+**Interpreter code is left deferring by default, and the cost is why.** Replaying
+89,133 commands from 1,962 local session transcripts through the hook's own
+analyzer (2026-09-09): 4,243 carry a withheld `allow`, and 4,160 of those —
+98.0% — are the interpreter suppression, against 64 for `sh -c` and 19 for a
+kill. Escalating all three in an attended mode raises a prompt on 4.67% of every
+command run; escalating the two this guard already judges raises one on 0.09%.
+An interpreter's own file access is a [documented non-goal](#limitations) and a
+bare `python3 -c` runs unprompted in every mode, so escalating it would fire
+only where such code shares a string with a guarded command — co-occurrence
+rather than the hazard. `WORKSPACE_GUARD_ESCALATE=all` is there for an operator
+who wants it anyway; unlike the other knobs in this section it *tightens* the
+guard, so the trade it asks you to accept is friction rather than exposure.
 
 ### Setting these variables
 
