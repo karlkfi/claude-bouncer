@@ -331,6 +331,21 @@ class ParsingTests(unittest.TestCase):
             guard.strip_wrappers(["exec", "-c", "-l", "kubectl", "delete"], {}),
             ["kubectl", "delete"])
 
+    def test_stdbuf_and_unbuffer_strip_like_other_wrappers(self):
+        # Both prefix a command the way `nohup` does (Q161). stdbuf's mode
+        # flags take a value attached or separate; the long forms are GNU's.
+        for argv in (["stdbuf", "-oL", "kubectl", "delete"],
+                     ["stdbuf", "-o", "L", "kubectl", "delete"],
+                     ["stdbuf", "--output=L", "kubectl", "delete"],
+                     ["stdbuf", "--output", "L", "kubectl", "delete"],
+                     ["stdbuf", "-i", "0", "-o", "L", "-e", "0",
+                      "kubectl", "delete"],
+                     ["unbuffer", "kubectl", "delete"],
+                     ["unbuffer", "-p", "kubectl", "delete"]):
+            with self.subTest(argv=argv):
+                self.assertEqual(guard.strip_wrappers(argv, {}),
+                                 ["kubectl", "delete"])
+
     def test_command_wrapper_strips_only_an_invocation(self):
         # `command kubectl delete` runs kubectl, so the wrapper comes off.
         self.assertEqual(
@@ -2513,6 +2528,35 @@ class SpecialCaseTests(unittest.TestCase):
         # Named in Q142 as the fixtures to match: both already defer.
         home = make_home(kubeconfig=KUBECONFIG_PROD)
         for cmd in ("which kubectl", "type kubectl"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(run_hook(cmd, home=home)[0])
+
+    # --- Q161: stdbuf/unbuffer prefix a command like any other wrapper ---
+
+    def test_stdbuf_and_unbuffer_do_not_hide_the_tool(self):
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        for cmd in ("stdbuf -oL kubectl delete ns foo",
+                    "stdbuf -o L kubectl delete ns foo",
+                    "stdbuf --output=L kubectl delete ns foo",
+                    "stdbuf --output L kubectl delete ns foo",
+                    "unbuffer kubectl delete ns foo",
+                    "unbuffer -p kubectl delete ns foo",
+                    "nohup stdbuf -oL kubectl delete ns foo",
+                    "stdbuf -oL bash -c 'kubectl delete ns foo'"):
+            with self.subTest(cmd=cmd):
+                decision, reason = run_hook(cmd, home=home)
+                self.assertEqual(decision, "deny")
+                self.assertIn("kubectl delete", reason)
+
+    def test_read_only_verb_behind_either_wrapper_still_defers(self):
+        # Regression coverage, not a control: no mis-strip of these wrappers
+        # can turn a read-only verb into a deny, because shifting the tokens
+        # takes the tool name with it. Token alignment is pinned by the
+        # reason assertion above.
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        for cmd in ("stdbuf -oL kubectl get pods",
+                    "stdbuf -o L kubectl get pods",
+                    "unbuffer kubectl get pods"):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(run_hook(cmd, home=home)[0])
 
