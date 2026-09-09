@@ -70,6 +70,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 
@@ -530,6 +531,36 @@ def is_command_lookup(operands):
     return False
 
 
+def env_split_string(argv):
+    """(words, rest) for an `env` split-string flag at argv[0], else None.
+
+    `env -S STRING` splits STRING into words and runs them, so the command is
+    inside the string. It is not a shell: operators come out as literal words,
+    and operands after STRING are appended to the command rather than becoming
+    positional parameters. That is why the caller splices instead of recursing
+    into evaluate_command_string, which would do both differently (Q159).
+
+    Reads `-S STRING`, `-SSTRING`, `--split-string=STRING` and
+    `--split-string STRING`. A value that will not tokenize is env's error to
+    report, not ours to guess at, so it returns None and the flag is left
+    alone."""
+    tok = argv[0]
+    if tok in ('-S', '--split-string'):
+        if len(argv) < 2:
+            return None
+        value, rest = argv[1], argv[2:]
+    elif tok.startswith('--split-string='):
+        value, rest = tok[len('--split-string='):], argv[1:]
+    elif tok.startswith('-S') and len(tok) > 2:
+        value, rest = tok[2:], argv[1:]
+    else:
+        return None
+    try:
+        return shlex.split(value), rest
+    except ValueError:
+        return None
+
+
 def strip_wrappers(argv, env):
     """Remove leading launcher commands (sudo, env, timeout, xargs, ...) so
     the covered tool underneath is classified, not the wrapper. `env`
@@ -543,8 +574,17 @@ def strip_wrappers(argv, env):
                 argv = argv[2:] if argv[0] in value_flags else argv[1:]
         elif head == 'env':
             argv = argv[1:]
+            assigned = False
             while argv:
-                if argv[0].startswith('-'):
+                # Options stop at the first NAME=val operand: `env A=1 -S ...`
+                # runs a program called `-S` and fails, so there is nothing
+                # behind it to classify.
+                if argv[0].startswith('-') and not assigned:
+                    split = env_split_string(argv)
+                    if split is not None:
+                        words, rest = split
+                        argv = words + rest
+                        continue
                     argv = argv[2:] if argv[0] in value_flags else argv[1:]
                 elif ASSIGNMENT_RE.match(argv[0]):
                     # `env` is a program, so its operands reach it after quote
@@ -555,6 +595,7 @@ def strip_wrappers(argv, env):
                     name, _, value = split_assignment(
                         argv[0], append_is_operator=False)
                     env[name] = value
+                    assigned = True
                     argv = argv[1:]
                 else:
                     break
