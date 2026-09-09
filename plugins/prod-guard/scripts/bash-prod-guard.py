@@ -561,6 +561,47 @@ def env_split_string(argv):
         return None
 
 
+# sudo modes that run no command, so the operands behind them are not one to
+# classify. `-l` lists privileges -- a command given to it is checked, never
+# run -- `-v` refreshes the timestamp, `-e` edits its operands as files, `-K`
+# may not be given a command at all, and `-U` is documented as valid only
+# alongside `-l`, so it is list mode either way. Flags bundle: `sudo -kl` is
+# list mode.
+#
+# `-k` is deliberately absent. Lowercase RUNS the command when given one,
+# which is the opposite answer to `-K` and differs from it only in case.
+# `-h` is left alone: it spells both `--help` and `--host` (Q158).
+# `--help` and `--version` are the class every wrapper shares (Q181).
+SUDO_RUN_NOTHING = frozenset('lveKU')
+SUDO_RUN_NOTHING_LONG = frozenset({
+    '--list', '--validate', '--edit', '--remove-timestamp', '--other-user'})
+
+
+def is_sudo_run_nothing(operands):
+    """Whether sudo's flags put it in a mode that runs no command (Q157).
+
+    The sudo-side twin of `is_command_lookup`. Flags bundle, `--` ends them,
+    and a value-taking flag's value is stepped over so a prompt or user that
+    happens to look like a mode is not read as one -- matched to the walk in
+    `strip_wrappers`, which tests the whole token too."""
+    value_flags = WRAPPER_VALUE_FLAGS['sudo']
+    i = 0
+    while i < len(operands):
+        tok = operands[i]
+        if not tok.startswith('-') or tok in ('-', '--'):
+            return False
+        if tok.startswith('--'):
+            name = tok.split('=', 1)[0]
+            if name in SUDO_RUN_NOTHING_LONG:
+                return True
+            i += 2 if name == tok and tok in value_flags else 1
+        else:
+            if SUDO_RUN_NOTHING.intersection(tok[1:]):
+                return True
+            i += 2 if tok in value_flags else 1
+    return False
+
+
 def strip_wrappers(argv, env):
     """Remove leading launcher commands (sudo, env, timeout, xargs, ...) so
     the covered tool underneath is classified, not the wrapper. `env`
@@ -569,6 +610,11 @@ def strip_wrappers(argv, env):
         head = os.path.basename(argv[0])
         value_flags = WRAPPER_VALUE_FLAGS.get(head, frozenset())
         if head == 'sudo':
+            # A run-nothing mode makes the operands behind it something other
+            # than a command, so leaving `sudo` in place defers the segment --
+            # the same move `command -v` makes below (Q142, Q157).
+            if is_sudo_run_nothing(argv[1:]):
+                break
             argv = argv[1:]
             while argv and argv[0].startswith('-'):
                 argv = argv[2:] if argv[0] in value_flags else argv[1:]

@@ -394,6 +394,36 @@ class ParsingTests(unittest.TestCase):
             guard.strip_wrappers(["command", "-v", "kubectl", "kubeconform"], {}),
             ["command", "-v", "kubectl", "kubeconform"])
 
+    def test_is_sudo_run_nothing(self):
+        # The five modes that run no command (Q157).
+        for flags in (["-l"], ["-v"], ["-e"], ["-K"], ["-U", "bob", "-l"],
+                      ["--list"], ["--validate"], ["--edit"],
+                      ["--remove-timestamp"], ["--other-user=bob", "-l"],
+                      ["-kl"], ["-lk"]):
+            with self.subTest(flags=flags):
+                self.assertTrue(guard.is_sudo_run_nothing(flags + ["kubectl"]))
+        # `-k` runs the command when given one -- the opposite answer to `-K`,
+        # differing only in case. `-h` is left to Q158, `-V` to Q181.
+        for flags in (["-k"], ["-u", "root"], ["-i"], ["-s"], ["-b"],
+                      ["-h"], ["-V"], ["--"], ["-p", "prompt"],
+                      # A value that looks like a mode is a value, not a mode.
+                      ["-p", "-l"], ["-u", "-e"]):
+            with self.subTest(flags=flags):
+                self.assertFalse(guard.is_sudo_run_nothing(flags + ["kubectl"]))
+
+    def test_sudo_wrapper_strips_only_an_invocation(self):
+        # A real invocation still has sudo peeled off.
+        self.assertEqual(
+            guard.strip_wrappers(["sudo", "-k", "kubectl", "delete"], {}),
+            ["kubectl", "delete"])
+        self.assertEqual(
+            guard.strip_wrappers(["sudo", "--", "kubectl", "delete"], {}),
+            ["kubectl", "delete"])
+        # A run-nothing mode leaves sudo in place, so the segment is uncovered.
+        self.assertEqual(
+            guard.strip_wrappers(["sudo", "-l", "kubectl", "delete"], {}),
+            ["sudo", "-l", "kubectl", "delete"])
+
     def test_is_command_lookup(self):
         self.assertTrue(guard.is_command_lookup(["-v", "kubectl"]))
         self.assertTrue(guard.is_command_lookup(["-V", "kubectl"]))
@@ -2610,6 +2640,54 @@ class SpecialCaseTests(unittest.TestCase):
                     "env -S"):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(run_hook(cmd, home=home)[0])
+
+    # --- Q157: sudo's run-nothing modes classify no command ---------------
+
+    def test_sudo_run_nothing_modes_do_not_deny(self):
+        # sudo runs nothing in these modes, so a production name among the
+        # operands is not a command that was going to reach the cluster.
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        for cmd in ("sudo -l kubectl delete ns foo",
+                    "sudo -v kubectl delete ns foo",
+                    "sudo -e kubectl delete ns foo",
+                    "sudo -K kubectl delete ns foo",
+                    "sudo --list kubectl delete ns foo",
+                    "sudo --validate kubectl delete ns foo",
+                    "sudo --edit kubectl delete ns foo",
+                    "sudo --remove-timestamp kubectl delete ns foo",
+                    "sudo -kl kubectl delete ns foo",
+                    "sudo -U bob -l kubectl delete ns foo",
+                    "sudo --other-user=bob -l kubectl delete ns foo"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(run_hook(cmd, home=home)[0])
+
+    def test_sudo_still_denies_what_it_actually_runs(self):
+        # The direction that must not move. `-k` differs from `-K` only in
+        # case and runs the command; `-p`'s value is a value even when it is
+        # spelled like a mode.
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        for cmd in ("sudo kubectl delete ns foo",
+                    "sudo -k kubectl delete ns foo",
+                    "sudo -u root kubectl delete ns foo",
+                    "sudo -i kubectl delete ns foo",
+                    "sudo -- kubectl delete ns foo",
+                    "sudo -p prompt kubectl delete ns foo",
+                    "sudo -p -l kubectl delete ns foo"):
+            with self.subTest(cmd=cmd):
+                decision, reason = run_hook(cmd, home=home)
+                self.assertEqual(decision, "deny")
+                self.assertIn("kubectl delete", reason)
+
+    def test_sudo_h_and_version_are_left_to_their_own_rows(self):
+        # Pinned so this change is not read as having settled either. `-h` is
+        # both --help and --host (Q158); --help/--version are the class every
+        # wrapper shares (Q181). Both still deny, unchanged by Q157.
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        for cmd in ("sudo -h kubectl delete ns foo",
+                    "sudo -V kubectl delete ns foo",
+                    "sudo --version kubectl delete ns foo"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(run_hook(cmd, home=home)[0], "deny")
 
     # --- Q161: stdbuf/unbuffer prefix a command like any other wrapper ---
 
