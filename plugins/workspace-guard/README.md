@@ -1370,7 +1370,7 @@ variables tune this — all read at hook time, so no restart is needed:
 
 | Env var | Default | Effect |
 | --- | --- | --- |
-| `WORKSPACE_GUARD_TMP_ACTION` | `deny` | `deny` blocks host-temp paths; `ask` softens to a confirmation prompt. Any other value falls back to `deny`. |
+| `WORKSPACE_GUARD_TMP_ACTION` | `deny` | `deny` blocks host-temp paths; `ask` softens to a confirmation prompt. Any other value falls back to `deny`. Unset, it follows [the posture](#supervising-posture). |
 | `WORKSPACE_GUARD_SCRATCH_DIR` | `tmp/` | The repo-local scratch dir named in the deny message. |
 | `WORKSPACE_GUARD_TMP_ROOTS` | (empty) | Extra host-temp roots, separated by the platform list separator (`:` on POSIX, `;` on Windows) or a comma. **Additive** — it extends the built-in `/tmp`, `/var/tmp`, `$TMPDIR`, and the platform temp dir (`%TMP%` on Windows); it can't shrink them. |
 | `WORKSPACE_GUARD_TMP_ALLOW` | (empty) | Allowlist of exact-prefix or glob paths (same separators) that **escape** the deny — for the rare tool that genuinely needs `/tmp`. |
@@ -1381,6 +1381,53 @@ rather than denied. Scope each entry tightly (an exact path or a narrow glob lik
 `/tmp/myapp-*`), since anything it matches bypasses the boundary. The deny itself
 is the secure default — softening to `ask` (`WORKSPACE_GUARD_TMP_ACTION=ask`) is
 the gentler way to keep a human in the loop.
+
+### Supervising posture
+
+Four classes are **denied** rather than prompted: a host-temp path, a write into
+a sibling checkout, a write into another session's scratch dir, and an unanchored
+`pkill`/`Stop-Process`. Each denies because the fix is mechanical and the reason
+carries it, so the agent rewrites the command instead of spending your attention
+on it.
+
+That argument is worth checking rather than taking on trust, and `supervise`
+is how: it turns those denies into prompts so you can watch them land.
+
+`WORKSPACE_GUARD_POSTURE` is `enforce` by default; `supervise` moves all four
+categories to `ask`, and any other value falls back to `enforce`. Each category
+also has a variable of its own, defaulting to whatever the posture says:
+
+| Env var | Category |
+| --- | --- |
+| `WORKSPACE_GUARD_TMP_ACTION` | Host-temp paths. |
+| `WORKSPACE_GUARD_SIBLING_ACTION` | Writes into a sibling checkout. |
+| `WORKSPACE_GUARD_CROSSSESSION_ACTION` | Writes into another session's scratch dir. |
+| `WORKSPACE_GUARD_KILL_ACTION` | Unanchored `pkill`, `killall`, `Stop-Process`, `taskkill`. |
+
+The category's own variable wins, so you can supervise everything except the
+kill:
+
+```sh
+WORKSPACE_GUARD_POSTURE=supervise WORKSPACE_GUARD_KILL_ACTION=deny
+```
+
+Each takes `deny` or `ask`, and anything else reads as `deny` — a typo fails
+toward the boundary rather than away from it. A supervised prompt keeps the
+deny's fix text and adds a line naming the knob that softened it.
+
+This is not `WORKSPACE_GUARD_OVERRIDE`. The override is per-command and stands
+the guard aside; the posture leaves every decision in place and changes only the
+verdict it emits. Three limits:
+
+- **It cannot turn a block into a run.** No permission mode auto-approves an
+  `ask` ([permission modes](docs/permission-modes.md)), so the posture picks
+  which blocking verdict you get and who can lift it, never whether the boundary
+  holds.
+- **`bypassPermissions` is unaffected.** Nobody is there to answer a prompt, so
+  the deny stands whatever the posture says.
+- **It does not reach the `$VAR`/`$(...)` deny.** That one blocks because the
+  operator at the prompt sees the same unexpanded token the hook did, and so has
+  nothing the hook lacked to judge it with.
 
 ### Allowed read prefixes
 

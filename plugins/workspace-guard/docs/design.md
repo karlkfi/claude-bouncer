@@ -89,6 +89,8 @@ Detection lives in the same script the Bash hook uses (dispatched on `tool_name`
 
 The deny (rather than `ask`) is the secure default here specifically because the failure mode is an approvable-by-reflex prompt whose only correct answer was "reject and retype the path"; a deny self-heals in one agent round trip. `WORKSPACE_GUARD_OVERRIDE=<reason>` is the documented, reasoned escape hatch for deliberate cross-checkout work.
 
+That reasoning is an assertion an operator has to take on trust — the reflex it predicts is not visible from outside. Q84 made it checkable without weakening it: `WORKSPACE_GUARD_POSTURE=supervise` turns the deny classes into prompts so the operator can watch them land, with a per-category knob above it for holding one class back. The default does not move, and the posture cannot turn a block into a run, since no permission mode auto-approves an `ask`. See "Supervising posture" in the README, and [`permission-modes.md`](permission-modes.md) for the mode measurement behind that last claim.
+
 ### Why a write into another session's scratch denies while a read is allowed
 
 The scratch tree Claude Code hands each session sits under one project slug, so a dispatcher and its workers share a parent. Reads across that parent are allowed — tailing a worker's task output is the case they were opened for — and the write half stays blocked, because a session writing into a sibling's scratch clobbers work nobody asked it to touch.
