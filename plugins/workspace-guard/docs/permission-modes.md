@@ -51,9 +51,27 @@ nothing about. That baseline decides which lever does any work.
 The consequence worth internalizing: **`defer` is a protective decision only in
 `manual`, `dontAsk`, and `plan`.** Every "the hook declines to vouch, so it
 defers" mechanism — the signalling-command suppression, the shell `-c`
-suppression, the interpreter suppression — is inert in `auto`, `acceptEdits`,
-and `bypassPermissions`. Those mechanisms restore the operator's own permission
-rules, which is worth exactly what those rules are worth in that mode.
+suppression, the interpreter suppression — restores the operator's own
+permission rules, which is worth exactly what those rules are worth in that
+mode. In `auto`, `acceptEdits`, and `bypassPermissions` they are worth nothing:
+the fallback is the pre-approval the suppression was trying to withhold.
+
+Q74 closed that for the two suppressions naming a construct this guard already
+judges. A `sh -c` body it could not reach, and a kill it could not scope, now
+**escalate** in those three modes rather than deferring — `ask` in `auto` and
+`acceptEdits`, where a prompt reaches somebody, and `deny` under
+`bypassPermissions`, where it would not. The interpreter suppression stays
+inert by default and is the one this paragraph still describes unchanged:
+escalating it costs 4.67% of all commands against 0.09% for the other two
+(measured 2026-09-09 over 89,133 corpus commands), and an interpreter's own
+file access is a documented non-goal. `WORKSPACE_GUARD_ESCALATE` moves that
+line in either direction; see the README's Configuration section.
+
+**Do not read the escalation as a reason to treat the three modes alike.** They
+share one property — a defer runs — and differ on the one that picks the
+verdict: `auto` and `acceptEdits` have a person at the prompt and
+`bypassPermissions` does not. Collapsing them denies in a mode where somebody
+was there to say yes, which removes the human rather than protecting them.
 
 This also qualifies a claim in [`design.md`](design.md): defer is described as
 net-neutral, leaving the operator "no worse off than without the hook." True —
@@ -109,6 +127,16 @@ names when the hook's mode handling was written. Re-run the matrix when:
   an invalid value prints the current list);
 - a new decision type appears in the hook API;
 - any change makes a decision conditional on `permission_mode`.
+
+Q74 fired the third trigger and answered the first, which is the half that
+decides whether the mode names in the code are still the whole set. At CLI
+**2.1.261** the list is `acceptEdits, auto, bypassPermissions, manual, dontAsk,
+plan` — the same six the matrix above was measured on at 2.1.220, so
+`DEFER_RUNS_MODES` names every mode that exists and no seventh is silently
+unguarded. The cells themselves were **not** re-run: the escalation emits `ask`
+and `deny`, two rows the matrix already carries, so it depends on the matrix
+without changing it. A CLI that altered what those two rows do would move this
+guard's behaviour everywhere, not only here.
 
 Do not infer a mode's behavior from its name. `dontAsk` blocks a deferred
 command rather than waving it through, which is the opposite of what the name

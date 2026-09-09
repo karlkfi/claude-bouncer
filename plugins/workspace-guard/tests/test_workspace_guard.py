@@ -7376,6 +7376,257 @@ class ShellCSuppressesAllowTests(unittest.TestCase):
         self._decision("grep -c foo in.txt", "allow")
 
 
+class SuppressionEscalationTests(unittest.TestCase):
+    """A withheld `allow` escalates in the modes where defer RUNS (Q74).
+
+    `docs/permission-modes.md` measures the baseline: a defer is blocked in
+    `manual`, `dontAsk` and `plan`, and RUNS in `auto`, `acceptEdits` and
+    `bypassPermissions`. So a suppression — the hook declining to vouch for a
+    string it admits it cannot read — hands the decision to permission rules
+    that say yes in exactly those three, and protects nothing there.
+
+    Two axes, and the tests below pin both because collapsing either is the way
+    this goes wrong. WHICH MODES escalate is the defer-runs set. WHAT VERDICT
+    they get splits inside it: `bypassPermissions` has nobody at a prompt, so an
+    `ask` would block and strand the agent where a `deny` blocks and hands back
+    the rewrite, while `auto` and `acceptEdits` do reach a person and get the
+    `ask` their own rules would have raised.
+
+    Targets are synthetic (repo rule); nothing here is ever executed.
+    """
+
+    # The modes a defer runs in, and what each escalates to.
+    ESCALATING = (("auto", "ask"), ("acceptEdits", "ask"),
+                  ("bypassPermissions", "deny"))
+    # The modes where a defer already blocks, so escalating buys nothing.
+    DEFERRING = ("manual", "dontAsk", "plan", "default", None)
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = os.path.realpath(self._tmp.name)
+        with open(os.path.join(self.workspace, "in.txt"), "w") as f:
+            f.write("hello\n")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run(self, cmd, permission_mode=None, scope=None):
+        # A scope of None deletes the key, so an operator's own setting in the
+        # test runner's environment cannot decide the assertion.
+        return run_hook(cmd, self.workspace, project_dir=self.workspace,
+                        permission_mode=permission_mode,
+                        env_extra={"WORKSPACE_GUARD_ESCALATE": scope})
+
+    def _decision(self, cmd, expected, permission_mode=None, scope=None):
+        out = self._run(cmd, permission_mode, scope)
+        if expected == "defer":
+            self.assertIsNone(
+                out, f"expected defer for {cmd!r} in {permission_mode!r}, "
+                     f"got {out!r}")
+            return None
+        self.assertIsNotNone(
+            out, f"expected {expected!r}, got defer for {cmd!r} "
+                 f"in {permission_mode!r}")
+        got = out["hookSpecificOutput"]["permissionDecision"]
+        self.assertEqual(
+            got, expected,
+            f"expected {expected!r} for {cmd!r} in {permission_mode!r}; "
+            f"got {got!r}")
+        return out["hookSpecificOutput"]["permissionDecisionReason"]
+
+    # --- the two escalating signals, on both frontends ----------------------
+
+    SCOPED = (
+        "cat in.txt; docker exec c sh -c 'cat /q74-fake-target'",   # sh -c
+        "cat in.txt; grep foo in.txt | xargs kill",                 # kill
+    )
+
+    def test_scoped_signals_escalate_where_defer_runs(self):
+        for cmd in self.SCOPED:
+            for mode, expected in self.ESCALATING:
+                self._decision(cmd, expected, permission_mode=mode)
+
+    def test_scoped_signals_keep_deferring_where_defer_blocks(self):
+        # The other half of the mode condition. Escalating here would spend a
+        # prompt on a command the fallback already stops.
+        for cmd in self.SCOPED:
+            for mode in self.DEFERRING:
+                self._decision(cmd, "defer", permission_mode=mode)
+
+    def test_bypass_is_not_auto(self):
+        # The distinction the whole rule turns on, asserted on its own so a
+        # future mode-set edit that collapses them fails here by name. An `ask`
+        # under `auto` reaches somebody who can answer it; under
+        # `bypassPermissions` nobody can, so a deny is what teaches the agent.
+        cmd = self.SCOPED[0]
+        self.assertEqual(
+            "ask",
+            self._run(cmd, "auto")["hookSpecificOutput"]["permissionDecision"])
+        self.assertEqual(
+            "deny",
+            self._run(cmd, "bypassPermissions")
+            ["hookSpecificOutput"]["permissionDecision"])
+
+    # --- the interpreter signal is opt-in ------------------------------------
+
+    INTERPRETED = "cat in.txt && python3 - <<'PY'\nimport os\nPY"
+
+    def test_interpreter_defers_in_every_mode_by_default(self):
+        # Measured 2026-09-09 over 89,133 corpus commands: 4,160 (4.67%) carry
+        # this signal against 83 for the other two, and an interpreter's own
+        # file access is a documented non-goal. Escalating it by default would
+        # spend a prompt every ~21 commands to guard a shape that runs
+        # unprompted whenever it is NOT sharing a string with a guarded command.
+        for mode, _ in self.ESCALATING:
+            self._decision(self.INTERPRETED, "defer", permission_mode=mode)
+        for mode in self.DEFERRING:
+            self._decision(self.INTERPRETED, "defer", permission_mode=mode)
+
+    def test_interpreter_escalates_under_all(self):
+        for mode, expected in self.ESCALATING:
+            self._decision(self.INTERPRETED, expected, permission_mode=mode,
+                           scope="all")
+        for mode in self.DEFERRING:
+            self._decision(self.INTERPRETED, "defer", permission_mode=mode,
+                           scope="all")
+
+    # --- the knob ------------------------------------------------------------
+
+    def test_off_restores_the_pre_q74_silence(self):
+        for cmd in self.SCOPED + (self.INTERPRETED,):
+            for mode, _ in self.ESCALATING:
+                self._decision(cmd, "defer", permission_mode=mode, scope="off")
+
+    def test_an_unrecognised_scope_falls_back_to_the_default(self):
+        # Secure-by-default: a typo must not switch the escalation off, and
+        # must not switch the interpreter half on either.
+        for bad in ("", "  ", "yes", "al l", "scoped-ish"):
+            self._decision(self.SCOPED[0], "ask", permission_mode="auto",
+                           scope=bad)
+            self._decision(self.INTERPRETED, "defer", permission_mode="auto",
+                           scope=bad)
+
+    def test_scope_is_case_and_space_insensitive(self):
+        for good in (" ALL", "All\t", "OFF "):
+            want = "defer" if good.strip().lower() == "off" else "ask"
+            self._decision(self.INTERPRETED, want, permission_mode="auto",
+                           scope=good)
+
+    # --- nothing else moves --------------------------------------------------
+
+    def test_a_clean_guarded_command_still_allows_in_every_mode(self):
+        # The escalation reads a suppression, not a mode: a string with nothing
+        # withheld keeps its `allow` wherever it runs.
+        for mode, _ in self.ESCALATING:
+            self._decision("cat in.txt", "allow", permission_mode=mode)
+            self._decision("cat in.txt", "allow", permission_mode=mode,
+                           scope="all")
+
+    def test_a_string_with_no_guarded_command_still_defers(self):
+        # Nothing was withheld here — the hook never had a verdict to suppress,
+        # and guarding an interpreter is a documented non-goal. This is the
+        # bucket the escalation must NOT reach, in either scope.
+        for cmd in ("python3 -c 'import os'", "sh -c 'cat in.txt'",
+                    "echo hi"):
+            for mode, _ in self.ESCALATING:
+                self._decision(cmd, "defer", permission_mode=mode)
+                self._decision(cmd, "defer", permission_mode=mode, scope="all")
+
+    def test_a_real_offender_still_outranks_the_escalation(self):
+        # An offender takes the `decide` path, which the escalation never
+        # reaches: the reason must name the path, not the suppression. `ask`
+        # rather than `deny` because an outside path only denies under
+        # bypassPermissions -- what this pins is which verdict path ran.
+        reason = self._decision("cat /q74-fake-target && python3 -c 'import os'",
+                                "ask", permission_mode="auto")
+        self.assertIn("/q74-fake-target", reason)
+        self.assertNotIn("WORKSPACE_GUARD_ESCALATE", reason)
+
+    # --- what the reason has to carry ----------------------------------------
+
+    def test_the_reason_names_the_plugin_the_mode_and_a_fix(self):
+        reason = self._decision(self.SCOPED[0], "ask", permission_mode="auto")
+        self.assertTrue(reason.startswith("workspace-guard: "), reason)
+        self.assertIn("auto", reason)
+        self.assertIn("Fix:", reason)
+        self.assertIn("WORKSPACE_GUARD_ESCALATE=off", reason)
+
+    def test_the_kill_reason_names_the_kill_rewrite(self):
+        reason = self._decision(self.SCOPED[1], "deny",
+                                permission_mode="bypassPermissions")
+        self.assertIn("pgrep -fl", reason)
+
+    def test_the_interpreter_reason_names_the_repo_resident_rewrite(self):
+        reason = self._decision(self.INTERPRETED, "ask", permission_mode="auto",
+                                scope="all")
+        self.assertIn("inside the project root", reason)
+
+
+class PowerShellSuppressionEscalationTests(unittest.TestCase):
+    """The PowerShell frontend escalates on the same terms (Q74).
+
+    Its suppression was a bool, so it could say THAT something was withheld and
+    not WHAT — and the escalation's default scope turns on which construct it
+    was. Naming it is what lets a `Stop-Process` escalate while interpreter code
+    beside it keeps deferring, as on the bash side.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = os.path.realpath(self._tmp.name)
+        with open(os.path.join(self.workspace, "in.txt"), "w") as f:
+            f.write("hello\n")
+
+    def _ps(self, cmd, permission_mode=None, scope=None):
+        return run_hook(cmd, self.workspace, project_dir=self.workspace,
+                        permission_mode=permission_mode,
+                        tool_name="PowerShell",
+                        env_extra={"WORKSPACE_GUARD_ESCALATE": scope})
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _decision(self, cmd, expected, permission_mode=None, scope=None):
+        out = self._ps(cmd, permission_mode, scope)
+        if expected == "defer":
+            self.assertIsNone(out, f"expected defer for {cmd!r}, got {out!r}")
+            return None
+        self.assertIsNotNone(out, f"expected {expected!r}, got defer: {cmd!r}")
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"],
+                         expected, f"for {cmd!r} in {permission_mode!r}")
+        return out["hookSpecificOutput"]["permissionDecisionReason"]
+
+    # An anchored kill and a literal-pid kill earn no offender, so the
+    # suppression is the only thing between them and the caller's `allow`.
+    KILL = "Get-Content .\\in.txt; Stop-Process -Id 1234"
+    INTERPRETED = "Get-Content .\\in.txt; python3 -c 'import os'"
+
+    def test_a_kill_escalates_where_defer_runs(self):
+        for mode, expected in (("auto", "ask"), ("acceptEdits", "ask"),
+                               ("bypassPermissions", "deny")):
+            self._decision(self.KILL, expected, permission_mode=mode)
+
+    def test_a_kill_keeps_deferring_where_defer_blocks(self):
+        for mode in ("manual", "dontAsk", "plan", None):
+            self._decision(self.KILL, "defer", permission_mode=mode)
+
+    def test_interpreter_code_is_opt_in_here_too(self):
+        self._decision(self.INTERPRETED, "defer", permission_mode="auto")
+        self._decision(self.INTERPRETED, "ask", permission_mode="auto",
+                       scope="all")
+
+    def test_the_kill_reason_names_the_powershell_rewrite(self):
+        # The bash rewrite (`pgrep -fl`) is not runnable here, so a shared
+        # message would send the reader at a command their shell does not have.
+        reason = self._decision(self.KILL, "ask", permission_mode="auto")
+        self.assertIn("Get-Process", reason)
+        self.assertNotIn("pgrep", reason)
+
+    def test_a_clean_cmdlet_still_allows(self):
+        self._decision("Get-Content .\\in.txt", "allow",
+                       permission_mode="bypassPermissions")
+
+
 class InterpreterSuppressesAllowTests(unittest.TestCase):
     """A clean guarded command never speaks for interpreter code (Q72).
 

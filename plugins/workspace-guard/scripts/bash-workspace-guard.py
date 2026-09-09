@@ -3117,6 +3117,94 @@ ATTRIBUTION = 'workspace-guard: '
 UNPARSED_CATS = frozenset({'expand', 'untracked'})
 
 
+# Modes where a defer RUNS the command (`docs/permission-modes.md`). A
+# suppression — the hook withholding `allow` for a string it admits it cannot
+# read — hands the decision back to the operator's own permission rules, and in
+# these three those rules say yes. So the one class of string the guard has
+# DECLARED it cannot vouch for is the class it stays silent on, exactly where
+# silence runs. Named for the measured property rather than for the mode names:
+# `dontAsk` blocks a deferred command despite its name, and is deliberately not
+# in here. (Q74)
+DEFER_RUNS_MODES = frozenset({'auto', 'acceptEdits', 'bypassPermissions'})
+
+# The one suppression `scoped` — the default — leaves alone. `sh -c` and every
+# kill spelling name shell-level constructs this guard already judges (it
+# recurses into `-c` bodies and anchors kills), so putting a prompt back where
+# the fallback cannot is the suppression finishing its own job.
+#
+# The interpreter suppression is left deferring, and the cost is why. Measured
+# 2026-09-09 by replaying 89,133 corpus commands from 1,962 local transcripts
+# through `_analyze_command`: 4,243 suppress (4.76%), and 4,160 of those —
+# 98.0% — are the interpreter signal, against 64 for `sh -c` and 19 for a kill.
+# Escalating all three in an attended mode spends 4.67% of every command on a
+# prompt; escalating these two spends 0.09%. An interpreter's own file access is
+# a documented non-goal (README, Limitations) and a bare `python3 -c` defers in
+# every mode, so the escalation would fire only where such code shares a string
+# with a guarded command — co-occurrence rather than the hazard. `all` opts in.
+INTERPRETER_SIGNAL = 'interpreter'
+
+
+def escalation_scope():
+    """`scoped` (default), `all`, or `off`, from ``WORKSPACE_GUARD_ESCALATE``.
+
+    `all` adds the interpreter suppression; `off` restores the silence every
+    mode had before Q74. Any unrecognised value falls back to the default."""
+    v = (os.environ.get('WORKSPACE_GUARD_ESCALATE') or 'scoped').strip().lower()
+    return v if v in ('scoped', 'all', 'off') else 'scoped'
+
+
+def escalate_suppression(signal, mode):
+    """Map a withheld `allow` to a ``(decision, reason)`` pair, or None to keep
+    deferring.
+
+    ``signal`` is what suppressed — `'sh -c'`, `'interpreter'`, or the name of a
+    signalling command — and None when nothing did. Only a mode in
+    :data:`DEFER_RUNS_MODES` escalates: everywhere else the defer already
+    blocks, so this would buy a prompt and no protection.
+
+    The verdict splits on who is at the prompt, which is the one distinction
+    this must not collapse. `bypassPermissions` has nobody, so an `ask` blocks
+    and strands the agent while a `deny` blocks and hands back the rewrite —
+    the Q17 reasoning `decide` already applies to an offender. `auto` and
+    `acceptEdits` DO reach a person, and a prompt there is precisely what the
+    operator's own rules would have raised had they not opted out, so those ask.
+    Denying in them would remove the human rather than protect them."""
+    scope = escalation_scope()
+    if signal is None or scope == 'off' or mode not in DEFER_RUNS_MODES:
+        return None
+    if signal == INTERPRETER_SIGNAL and scope != 'all':
+        return None
+    if signal == 'sh -c':
+        what = ("a shell `-c` body it could not reach (a container or remote "
+                "wrapper, or an untracked cwd)")
+        fix = ("Fix: run the body as a plain command so its paths are checked, "
+               "or approve this one.")
+    elif signal == INTERPRETER_SIGNAL:
+        what = "interpreter code it cannot read (an inline body, a heredoc, -m)"
+        fix = ("Fix: move the code into a file inside the project root and run "
+               "that — a repo-resident script vouches — or approve this one.")
+    elif signal == 'taskkill':
+        what = "a `taskkill` whose targets it cannot see"
+        fix = ('Fix: run `tasklist /FI "IMAGENAME eq <name>"` and `taskkill '
+               "/PID <pid>` for the one you meant, or approve this one.")
+    elif signal == 'Stop-Process':
+        what = "a `Stop-Process` whose targets it cannot see"
+        fix = ("Fix: run `Get-Process <name> | Select-Object Id, Path` and "
+               "`Stop-Process -Id <pid>` for the one you meant, or approve "
+               "this one.")
+    else:
+        what = "a `%s` whose targets it cannot see" % signal
+        fix = ("Fix: inspect with `pgrep -fl` and signal the literal pid you "
+               "meant, or approve this one.")
+    return ('deny' if mode == 'bypassPermissions' else 'ask',
+            ATTRIBUTION + "This command mixes a guarded command with %s, so the "
+            "hook will not vouch for the whole string. Withholding `allow` "
+            "normally hands the question to your own permission rules; in `%s` "
+            "those pre-approve it, so the hook puts the decision back. %s Set "
+            "WORKSPACE_GUARD_ESCALATE=off to restore the silence."
+            % (what, mode, fix))
+
+
 def decide(offenders, ctx, bypass):
     """Map a non-empty ``offenders`` list to a ``(decision, reason)`` pair.
 
@@ -3475,7 +3563,7 @@ def split_groups(tokens):
     return groups
 
 
-def analyze_command(cmd, ctx, base_cwd, depth=0):
+def analyze_command(cmd, ctx, base_cwd, depth=0, suppressed=None):
     """Analyze one command string against the workspace boundary.
 
     Returns ``(offenders, guarded)``: the list of ``check_file`` offender tuples
@@ -3491,7 +3579,12 @@ def analyze_command(cmd, ctx, base_cwd, depth=0):
       hides one behind a shell ``-c`` body. A clean guarded command must never
       speak for either — ``allow`` speaks for the WHOLE string and
       short-circuits the user's own permission settings, so ``grep x f | xargs
-      kill`` and ``grep x f && sh -c '…'`` defer instead.
+      kill`` and ``grep x f && sh -c '…'`` defer instead. An out-parameter
+      list passed as ``suppressed`` collects what did the clearing, so a caller
+      can tell that defer from the one meaning "nothing here to catch" — the
+      two are identical at the emit site, and only the first is a verdict the
+      hook withheld. Extended additively: a caller passing nothing is
+      unaffected. (Q74)
     * A launderable kill whose pid-source patterns ALL fail the workspace anchor
       test becomes one ``'kill'`` offender, the same category and message
       ``pkill`` produces. "Any pattern anchors ⇒ no offender" mirrors the
@@ -3499,6 +3592,8 @@ def analyze_command(cmd, ctx, base_cwd, depth=0):
       ``grep -v grep`` stage from denying an otherwise anchored pipeline.
     """
     offenders, guarded, kf = _analyze_command(cmd, ctx, base_cwd, depth)
+    if suppressed is not None and guarded and kf.signal:
+        suppressed.append(kf.signal)
     if kf.launder and kf.patterns and not any(a for _, a in kf.patterns):
         texts = list(dict.fromkeys(t for t, _ in kf.patterns))
         named = [t for t in texts if t != UNREADABLE_PATTERN]
@@ -4103,7 +4198,8 @@ def handle_bash(data):
     ctx = build_context(data, cmd)
     if not cmd.strip():
         return
-    outside, guarded = analyze_command(cmd, ctx, ctx.cwd)
+    suppressed = []
+    outside, guarded = analyze_command(cmd, ctx, ctx.cwd, suppressed=suppressed)
     # Emit only when there's something to say. A real offender (`outside`
     # non-empty) blocks; a guarded command whose targets are all clean emits an
     # explicit `allow`; a string with neither — an unguarded command and no
@@ -4119,6 +4215,15 @@ def handle_bash(data):
     # clean `grep` must never carry an `xargs kill` past the user's own
     # permission settings.
     if not outside and not guarded:
+        # Nothing to catch, or a verdict the hook withheld — the two arrive
+        # here identically and are not the same fact. A withheld `allow` falls
+        # back to the operator's own rules, and in the three modes
+        # `DEFER_RUNS_MODES` names those rules say yes. Escalating is that
+        # suppression finishing its job where the fallback has no teeth. (Q74)
+        esc = escalate_suppression(suppressed[0] if suppressed else None,
+                                   data.get("permission_mode"))
+        if esc is not None:
+            finish(esc[0], esc[1], [], data)
         return
 
     if outside:
@@ -5130,26 +5235,28 @@ def ps_statement_kills(segments, ctx):
     pipeline (see PS_STATEMENT_OPS). A `-Name` kill is exempt from that scan —
     no amount of surrounding text scopes a bare process name to this workspace.
 
-    The signal flag counts a kill that earns no offender — one by literal pid,
-    or one the anchor cleared — because suppressing the caller's blanket `allow`
-    is exactly what those cases need (Q59).
+    The signal counts a kill that earns no offender — one by literal pid, or
+    one the anchor cleared — because suppressing the caller's blanket `allow`
+    is exactly what those cases need (Q59). It is the killing command's name
+    rather than a flag, because `escalate_suppression` decides on which
+    construct suppressed, not merely that one did. (Q74)
 
     A `taskkill` segment is judged here too, but on its OWN tokens: it reads no
     pipeline, so an anchor upstream of it selects nothing it kills. It shares
     this function only so one place answers "did this statement signal" (Q58).
     """
-    kills, signal, offenders = [], False, []
+    kills, signal, offenders = [], None, []
     for seg in segments:
         words = ps_strip_head([t for t in seg if t[0] == 'word'])
         tk = classify_taskkill([w[1] for w in words])
         if tk is not None:
-            signal = True
+            signal = signal or 'taskkill'
             offenders.extend(ps_taskkill_offenders(words, tk, ctx))
             continue
         kl = ps_classify_kill(words)
         if kl is None:
             continue
-        signal = True
+        signal = signal or 'Stop-Process'
         if kl[0] != 'pid':
             kills.append(kl)
     if not kills:
@@ -5221,18 +5328,19 @@ def ps_analyze_segment(tokens, ctx, cwd, cwd_unknown):
                 guarded = True
                 files.extend(ps_bind_args(words[1:], spec))
 
-    signal = False
+    signal = None
     if words:
         # Same suppression the bash side applies, on the same question: `allow`
         # speaks for the WHOLE string, so a clean `Get-Content` must not vouch
-        # for interpreter code sharing it. Withheld, not escalated -- the bash
-        # side lands such a string on `defer`, and raising an `ask` here would
-        # absorb Q74, which is a separate item with a narrower signal (Q73).
+        # for interpreter code sharing it. Named rather than flagged so
+        # `escalate_suppression` can weigh this construct separately from a
+        # kill's: under the default scope the interpreter signal keeps
+        # deferring in every mode, exactly as it did before Q74.
         src = interp_code_source([w[1] for w in words], name=ps_command_name)
         if src is not None:
             kind, tok = src
             if kind == 'inline':
-                signal = True
+                signal = INTERPRETER_SIGNAL
             else:
                 # A script operand is a file the interpreter reads, so it is
                 # checked like any other read, and repo-resident code still
@@ -5245,7 +5353,7 @@ def ps_analyze_segment(tokens, ctx, cwd, cwd_unknown):
                 files.append((tok, exp, quoted, 'read', False))
                 if not ps_operand_inside(tok, exp, quoted, ctx, cwd,
                                          cwd_unknown):
-                    signal = True
+                    signal = INTERPRETER_SIGNAL
 
     offenders = ps_file_offenders(files, ctx, cwd, cwd_unknown)
     return offenders, guarded, signal, cwd, cwd_unknown
@@ -5298,7 +5406,7 @@ def ps_file_offenders(files, ctx, cwd, cwd_unknown):
     return offenders
 
 
-def ps_analyze_command(cmd, ctx, base_cwd, depth=0):
+def ps_analyze_command(cmd, ctx, base_cwd, depth=0, suppressed=None):
     """Analyze a PowerShell command string. Returns `(offenders, guarded)`,
     matching `analyze_command`'s contract so the two frontends share the
     emit logic below.
@@ -5310,25 +5418,31 @@ def ps_analyze_command(cmd, ctx, base_cwd, depth=0):
     the kills the decision layer had no cause to deny, by literal pid or
     anchored. Those defer instead, which is the posture an anchored kill on its
     own already gets. (Q59)
+
+    ``suppressed`` is the same out-parameter :func:`analyze_command` takes, and
+    carries the same reading: what cleared `guarded`, so the emit site can tell
+    a withheld verdict from having nothing to say. (Q74)
     """
     offenders, guarded, signal = _ps_analyze_command(cmd, ctx, base_cwd, depth)
+    if suppressed is not None and guarded and signal:
+        suppressed.append(signal)
     return offenders, guarded and not signal
 
 
 def _ps_analyze_command(cmd, ctx, base_cwd, depth=0):
     """Analyze one PowerShell string; returns `(offenders, guarded, signal)`."""
     if not cmd.strip():
-        return [], False, False
+        return [], False, None
     expandable_text = ps_strip_here_strings(cmd, literal_only=True)
     stripped = ps_strip_here_strings(cmd)
     if expandable_text is None or stripped is None:
-        return [], False, False               # open here-string -> defer
+        return [], False, None                # open here-string -> defer
     bodies = ps_subexpressions(expandable_text)[1]
     toks = ps_tokenize(ps_subexpressions(stripped)[0])
     if toks is None:
-        return [], False, False               # open quote -> defer
+        return [], False, None                # open quote -> defer
 
-    offenders, guarded, signal = [], False, False
+    offenders, guarded, signal = [], False, None
     cwd, cwd_unknown, seg, stmt = base_cwd, False, [], []
     for tok in toks + [('op', ';', False, False)]:
         if tok[0] == 'op':
@@ -5394,8 +5508,14 @@ def handle_powershell(data):
     # is what points these denies at the Bash form instead of a prefix that has
     # nowhere to sit.
     ctx = build_context(data)
-    outside, guarded = ps_analyze_command(cmd, ctx, ctx.cwd)
+    suppressed = []
+    outside, guarded = ps_analyze_command(cmd, ctx, ctx.cwd,
+                                          suppressed=suppressed)
     if not outside and not guarded:
+        esc = escalate_suppression(suppressed[0] if suppressed else None,
+                                   data.get("permission_mode"))
+        if esc is not None:
+            finish(esc[0], esc[1], [], data)
         return
     if outside:
         bypass = data.get("permission_mode") == "bypassPermissions"
