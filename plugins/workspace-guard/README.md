@@ -1393,16 +1393,19 @@ on it.
 That argument is worth checking rather than taking on trust, and `supervise`
 is how: it turns those denies into prompts so you can watch them land.
 
-| Env var | Default | Category |
-| --- | --- | --- |
-| `WORKSPACE_GUARD_POSTURE` | `enforce` | `supervise` moves every category below to `ask`. Any other value falls back to `enforce`. |
-| `WORKSPACE_GUARD_TMP_ACTION` | the posture | Host-temp paths. |
-| `WORKSPACE_GUARD_SIBLING_ACTION` | the posture | Writes into a sibling checkout. |
-| `WORKSPACE_GUARD_CROSSSESSION_ACTION` | the posture | Writes into another session's scratch dir. |
-| `WORKSPACE_GUARD_KILL_ACTION` | the posture | Unanchored `pkill`, `killall`, `Stop-Process`, `taskkill`. |
+`WORKSPACE_GUARD_POSTURE` is `enforce` by default; `supervise` moves all four
+categories to `ask`, and any other value falls back to `enforce`. Each category
+also has a variable of its own, defaulting to whatever the posture says:
 
-A category's own variable wins over the posture, so you can supervise everything
-except the kill:
+| Env var | Category |
+| --- | --- |
+| `WORKSPACE_GUARD_TMP_ACTION` | Host-temp paths. |
+| `WORKSPACE_GUARD_SIBLING_ACTION` | Writes into a sibling checkout. |
+| `WORKSPACE_GUARD_CROSSSESSION_ACTION` | Writes into another session's scratch dir. |
+| `WORKSPACE_GUARD_KILL_ACTION` | Unanchored `pkill`, `killall`, `Stop-Process`, `taskkill`. |
+
+The category's own variable wins, so you can supervise everything except the
+kill:
 
 ```sh
 WORKSPACE_GUARD_POSTURE=supervise WORKSPACE_GUARD_KILL_ACTION=deny
