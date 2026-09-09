@@ -4,7 +4,7 @@ outside the workspace; allow when it only touches workspace files or pipes.
 
 Reads the hook JSON on stdin, emits a PreToolUse decision on stdout.
 """
-import sys, os, json, re, shlex, shutil, fnmatch, collections, tempfile
+import sys, os, json, re, shutil, fnmatch, collections, tempfile
 
 # The parsing primitives every claude-bouncer guard shares -- lexing, comment
 # and heredoc stripping, substitution scanning, command-head normalising. The
@@ -13,7 +13,8 @@ import sys, os, json, re, shlex, shutil, fnmatch, collections, tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 from bouncer_parse import (                                    # noqa: E402
     ASSIGNMENT_RE, COMMENT_PRECEDERS, DUP, MAX_SUBST_DEPTH, PUNCT_CHARS,
-    REDIR, SEPARATORS, SH_KEYWORDS, SUBST_OPEN, _OPERATORS, split_assignment,
+    QuoteTrackingLexer, REDIR, SEPARATORS, SUBST_OPEN,
+    _OPERATORS, is_assignment, is_reserved_word, split_assignment,
     _consume_heredoc_body, _scan_backticks, _scan_dollar_paren,
     _skip_balanced_parens, command_substitutions, glue_dollar_paren,
     split_operator_runs, strip_comments, strip_env_prefix,
@@ -906,9 +907,10 @@ def command_override(cmd):
 
     prod-guard, exit-status-guard and branch-guard each keep this rule locally
     and return three different things (a dict, a bool, a reason string), so the
-    primitive they genuinely share is `ASSIGNMENT_RE`, which is already in
-    ``lib/``. A fourth copy of the *rule* is not a fourth caller of one
-    function; worth re-asking if a fifth appears."""
+    primitives they genuinely share are the ones in ``lib/``: `ASSIGNMENT_RE`,
+    and `is_assignment`, which adds bash's quote rule on top of it. A fourth
+    copy of the *rule* is not a fourth caller of one function; worth re-asking
+    if a fifth appears."""
     tokens = tokenize_command(cmd or '')
     if tokens is None:
         return None                               # unbalanced quotes -> no read
@@ -919,9 +921,13 @@ def command_override(cmd):
             continue
         if not at_head:
             continue
-        if tok in SH_KEYWORDS:
+        if is_reserved_word(tok):
             continue                              # `if`, `time`, `{`, ...
-        if not ASSIGNMENT_RE.match(tok):
+        # A QUOTED keyword is a command name, so bash never reaches an
+        # assignment behind it: `'if' WORKSPACE_GUARD_OVERRIDE=x cmd` runs a
+        # program called `if` and sets nothing. Skipping it here would arm the
+        # override off a word the shell would not have honoured (Q170).
+        if not is_assignment(tok):
             at_head = False                       # past the assignment run
             continue
         # `NAME+=reason` assigns in command position exactly as `NAME=reason`
@@ -1401,12 +1407,15 @@ def apply_assignment_group(g, varmap, persists):
         for t in toks[1:]:
             if t.startswith('-'):
                 continue
+            # `export` is a builtin and parses its own operands after quote
+            # removal, so `export 'A=1'` assigns where a bare `'A=1'` -- a
+            # command bash looks for and fails to find -- does not (Q170).
             if ASSIGNMENT_RE.match(t):
                 pairs.append(t)
             elif not IDENT_RE.fullmatch(t):
                 return None
     else:
-        if not toks or not all(ASSIGNMENT_RE.match(t) for t in toks):
+        if not toks or not all(is_assignment(t) for t in toks):
             return None
         pairs = toks
     names = []
@@ -2266,7 +2275,7 @@ def inline_tmpdir(tokens):
     keyword-stripped group (assignments still at the front)."""
     value = None
     for tok in tokens:
-        if not ASSIGNMENT_RE.match(tok):
+        if not is_assignment(tok):
             break                                  # first real word ends the prefix
         name, append, val = split_assignment(tok)
         if name == 'TMPDIR':
@@ -3210,7 +3219,8 @@ def tokenize_command(cmd, heredocs=True):
     """
     try:
         cleaned = strip_comments(strip_heredoc_bodies(cmd) if heredocs else cmd)
-        lex = shlex.shlex(cleaned, posix=True, punctuation_chars=';()<>|&\n')
+        lex = QuoteTrackingLexer(cleaned, posix=True,
+                                 punctuation_chars=';()<>|&\n')
         lex.whitespace_split = True
         lex.whitespace = lex.whitespace.replace('\n', '')
         lex.commenters = ''
@@ -3357,7 +3367,17 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
                 live = {k: v for k, v in stable_vars.items() if k in usable}
                 if live:
                     restored = [substitute_vars(t, live) for t in restored]
-            kind, arg = classify_cd(strip_env_prefix(strip_sh_keywords(restored)))
+            # Decide the peel on `g`, then apply it to `restored` by index.
+            # `MARK_RE.sub` and `substitute_vars` both hand back a plain `str`
+            # -- `re.sub` does so even when nothing matches -- so `restored`
+            # carries no record of how its words were written, and
+            # `is_assignment` would degrade to the pre-Q170 reading and peel a
+            # quoted `'d=sub'`. That gives `classify_cd` a `cd` bash never
+            # runs, and applying it resolves a read back inside the root:
+            # fail-open. Both helpers drop a leading run only, and `restored`
+            # is built element-wise from `g`, so the count indexes it exactly.
+            head = len(g) - len(strip_env_prefix(strip_sh_keywords(g)))
+            kind, arg = classify_cd(restored[head:])
             if kind is not None:
                 cwd, unknown = apply_cd(kind, arg, cwd, unknown)
             # Recorded after this group's own `cd`, so a `cd $d` cannot read an
@@ -3365,7 +3385,12 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
             # `stable_vars`, so a name reassigned or poisoned anywhere in the
             # string is absent from that map and never substitutes.
             for tok in g:
-                if ASSIGNMENT_RE.match(tok):
+                # Command position, so a quoted `'d=sub'` names a program bash
+                # fails to find and assigns nothing (Q170). Reading it as an
+                # assignment would make `d` usable before the real one later in
+                # the string, which is the out-of-order resolve `usable` exists
+                # to stop -- and resolving a cwd removes prompts.
+                if is_assignment(tok):
                     usable.add(tok.split('=', 1)[0])
 
     out = [(b,) + sub_cwd[i] for i, b in enumerate(bodies)]
@@ -3811,7 +3836,16 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
                 had = set(loopmap)
                 poison_vars(sub_g, loopmap)       # same rules invalidate loops
                 blacklist_loops(had - set(loopmap))
-        g = strip_env_prefix(kw_g)
+        # Count the peel on the raw group, apply it to the substituted one by
+        # index. `sub_g` is rebuilt element-wise by `substitute_vars`, which
+        # returns a new `str` for any token carrying `$`, so a peel decided on
+        # `kw_g` reads a token stripped of the record of how it was written and
+        # falls back to the pre-Q170 answer -- peeling a quoted `'d=$H'` and
+        # letting the `cd` behind it apply. Deciding on `g`, which still
+        # carries the record, is also closer to bash: it settles what a word IS
+        # before expansion, keywords included.
+        head = len(g) - len(strip_env_prefix(strip_sh_keywords(g)))
+        g = sub_g[head:]
         if not g: continue                        # keyword/env-only or redirect-only group
         # Signalling and pid-source classification runs before every `continue`
         # below, so no command shape can skip past it.

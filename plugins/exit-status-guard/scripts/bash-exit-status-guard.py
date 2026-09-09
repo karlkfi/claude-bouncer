@@ -32,15 +32,15 @@ bash-workspace-guard.py rather than written fresh. Hand-rolling a shell-grammar
 scanner is the documented way this class of tool fails: silently, in both
 directions.
 """
-import sys, os, json, re, shlex, collections
+import sys, os, json, re, collections
 
 # The parsing primitives every claude-bouncer guard shares. The copy under this
 # plugin's `lib/` is vendored from the repository root; see scripts/sync-lib.py.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 from bouncer_parse import (                                    # noqa: E402
     ASSIGNMENT_RE, CHAIN_OPS, COMMENT_PRECEDERS, DUP, END_OPS, MAX_SUBST_DEPTH,
-    PIPE_OPS, PUNCT_CHARS, REDIR, SEPARATORS, SH_KEYWORDS, _OPERATORS,
-    split_assignment,
+    PIPE_OPS, PUNCT_CHARS, QuoteTrackingLexer, REDIR, SEPARATORS,
+    SH_KEYWORDS, _OPERATORS, is_assignment, split_assignment,
     _consume_heredoc_body, _scan_backticks, _scan_dollar_paren,
     _skip_balanced_parens, command_substitutions, glue_dollar_paren,
     split_operator_runs, strip_comments, strip_env_prefix,
@@ -58,6 +58,21 @@ from bouncer_parse import (                                    # noqa: E402
 # Words that precede a real command without changing whose status is at stake.
 WRAPPERS = frozenset({'sudo', 'nohup', 'command', 'exec', 'bash', 'sh', 'zsh',
                       'env', 'stdbuf', 'setsid'})
+
+# Wrappers that take `NAME=v` OPERANDS and assign from them. They receive their
+# arguments after the shell has removed the quotes, so `env 'A=1' make` really
+# does assign where a bare `'A=1' make` runs a program of that name (Q170) --
+# which is why these two peel with `ASSIGNMENT_RE` while command position uses
+# `is_assignment`. Measured on bash 5.3.15: `env 'A=1' bash -c 'echo $A'` prints
+# 1, while `nohup`, `command`, `exec`, `stdbuf` and `setsid` all exit non-zero
+# trying to execute a program called `A=1`. `sudo` is here on a warrant
+# stronger than its own env policy, which needs a password to drive: the shell
+# removes the quotes before sudo is executed, so `sudo A=1 cmd` and
+# `sudo 'A=1' cmd` hand it byte-identical argv -- measured, `[A=1] [cmd]` for
+# both. Sudo cannot tell the spellings apart, so whatever its policy does it
+# does for both, and a guard answering them differently is wrong whichever
+# answer is right.
+ASSIGN_WRAPPERS = frozenset({'env', 'sudo'})
 
 # A segment: the tokens of one simple command, the operator run that follows it,
 # and its paren-nesting depth. `post_ops` is a tuple rather than a single token
@@ -146,8 +161,8 @@ def tokenize(cmd):
         # `\n` is made a punctuation char so a newline command boundary surfaces
         # as a token; it is otherwise eaten as whitespace, merging the commands
         # on either side. Quoted newlines stay inside their word token.
-        lex = shlex.shlex(mask_arithmetic(cleaned), posix=True,
-                          punctuation_chars=';()<>|&\n')
+        lex = QuoteTrackingLexer(mask_arithmetic(cleaned), posix=True,
+                                 punctuation_chars=';()<>|&\n')
         lex.whitespace_split = True
         lex.whitespace = lex.whitespace.replace('\n', '')
         lex.commenters = ''
@@ -231,7 +246,12 @@ def peel_wrappers(tokens):
     while True:
         tokens = strip_env_prefix(strip_sh_keywords(tokens))
         if tokens and os.path.basename(tokens[0]) in WRAPPERS:
+            wrapper = os.path.basename(tokens[0])
             tokens = tokens[1:]
+            if wrapper in ASSIGN_WRAPPERS:
+                # Operand position, not command position: see ASSIGN_WRAPPERS.
+                while tokens and ASSIGNMENT_RE.match(tokens[0]):
+                    tokens = tokens[1:]
             continue
         return tokens
 
@@ -503,7 +523,7 @@ def has_override(segs):
     """
     for seg in segs:
         for tok in strip_sh_keywords(seg.tokens):
-            if not ASSIGNMENT_RE.match(tok):
+            if not is_assignment(tok):
                 break                             # past the assignment run
             # `NAME+=reason` is an assignment in command position too (Q174).
             name, _append, value = split_assignment(tok)

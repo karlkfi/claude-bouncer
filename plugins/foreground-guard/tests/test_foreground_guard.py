@@ -598,6 +598,66 @@ class PollConfigTests(unittest.TestCase):
                             permission_mode=mode)
             self.assertIsNone(d, "expected defer in %s mode" % mode)
 
+    def test_a_quoted_override_prefix_arms_nothing(self):
+        # Q170: bash strips a word's quotes AFTER deciding what the word is, so
+        # `'NAME=v'` is a program it looks for and fails to find. Written as
+        # its own statement, so the finding in the statement after it is what
+        # the arming would have lifted -- inline, the quoted word takes the
+        # command head and there is no `gh run watch` left to find.
+        for cmd in ("'FOREGROUND_GUARD_OVERRIDE=demo'; gh run watch 123",
+                    '"FOREGROUND_GUARD_OVERRIDE=demo"; gh run watch 123',
+                    'FOREGROUND_GUARD_OVERRIDE"="demo; gh run watch 123'):
+            with self.subTest(cmd=cmd):
+                d, _ = run_hook(cmd)
+                self.assertEqual(d, "deny")
+
+    def test_a_quoted_env_operand_still_arms(self):
+        # The other half of Q170, and the one a blanket swap breaks: `env` is a
+        # program, so its operands reach it AFTER quote removal and
+        # `env 'NAME=v' cmd` really does set NAME.
+        #
+        # Asserted at the reader, not end to end, because the verdict is not
+        # the discriminator here: converting the `env` branch leaves the
+        # override word as argv[0], which is an unrecognised command with no
+        # finding, so the hook defers either way. What moves is the pair below.
+        for raw in ("env 'FOREGROUND_GUARD_OVERRIDE=why' gh run watch 123",
+                    'env "FOREGROUND_GUARD_OVERRIDE=why" gh run watch 123'):
+            with self.subTest(raw=raw):
+                state = {}
+                argv = guard.strip_head(list(guard.tokenize(raw)), state)
+                self.assertEqual(state.get("override"), "why")
+                self.assertEqual(argv[0], "gh")
+
+    def test_a_quoted_sudo_operand_still_arms(self):
+        # `sudo` takes assignment operands the same way `env` does, and
+        # the shell removes the quotes before either is executed:
+        # `sudo A=1 cmd` and `sudo 'A=1' cmd` hand sudo byte-identical
+        # argv, measured as `[A=1] [cmd]` for both. So sudo cannot tell
+        # the spellings apart, and a guard answering them differently is
+        # wrong whichever answer is right (Q170).
+        for raw in ("sudo 'FOREGROUND_GUARD_OVERRIDE=why' gh run watch 123",
+                    'sudo "FOREGROUND_GUARD_OVERRIDE=why" gh run watch 123',
+                    "sudo -u me 'FOREGROUND_GUARD_OVERRIDE=why' gh run watch 123"):
+            with self.subTest(raw=raw):
+                state = {}
+                argv = guard.strip_head(list(guard.tokenize(raw)), state)
+                self.assertEqual(state.get("override"), "why")
+                self.assertEqual(argv[0], "gh")
+
+    def test_a_quoted_sudo_operand_does_not_hide_the_command(self):
+        # End to end, and the direction that makes this a defect rather
+        # than a nicety: the blocking command underneath is still found.
+        for raw in ("sudo 'A=1' gh run watch 123",
+                    'sudo "A=1" gh run watch 123'):
+            with self.subTest(raw=raw):
+                d, _ = run_hook(raw)
+                self.assertEqual("deny", d)
+
+    def test_an_unquoted_override_statement_still_arms(self):
+        # The control for the rows above: same shape, written plain.
+        d, _ = run_hook("FOREGROUND_GUARD_OVERRIDE=demo; gh run watch 123")
+        self.assertIsNone(d)
+
     def test_override_does_not_reach_an_exempt_command(self):
         # The prefix is not a blanket pass: a command with no finding was
         # already deferring, and one that keeps a finding still needs it.

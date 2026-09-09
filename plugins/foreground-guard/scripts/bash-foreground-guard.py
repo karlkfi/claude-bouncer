@@ -87,7 +87,6 @@ import fnmatch
 import json
 import os
 import re
-import shlex
 import sys
 
 # The parsing primitives every claude-bouncer guard shares. This guard keeps its
@@ -96,8 +95,9 @@ import sys
 # this plugin's `lib/` is vendored from the root; see scripts/sync-lib.py.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 from bouncer_parse import (                                    # noqa: E402
-    ASSIGNMENT_RE, COMMENT_PRECEDERS, split_assignment, _consume_heredoc_body,
-    _skip_balanced_parens, strip_heredoc_bodies,
+    ASSIGNMENT_RE, COMMENT_PRECEDERS, QuoteTrackingLexer,
+    _consume_heredoc_body, _skip_balanced_parens, is_assignment,
+    split_assignment, strip_heredoc_bodies,
 )
 
 DEFAULT_BASH_TIMEOUT_MS = 120000
@@ -274,7 +274,7 @@ def tokenize(raw):
     commands split into their own segments. Returns None on unbalanced
     quotes (caller defers: fail-open on parse errors)."""
     raw = raw.replace('`', ';').replace('\n', ';')
-    lex = shlex.shlex(raw, posix=True, punctuation_chars=';()<>|&')
+    lex = QuoteTrackingLexer(raw, posix=True, punctuation_chars=';()<>|&')
     lex.whitespace_split = True
     try:
         return list(lex)
@@ -350,7 +350,7 @@ def strip_head(argv, state):
             argv = argv[1:]
         elif head in OTHER_KEYWORDS:
             argv = argv[1:]
-        elif ASSIGNMENT_RE.match(argv[0]):
+        elif is_assignment(argv[0]):
             name, _append, _val = split_assignment(argv[0])
             if name == 'FOREGROUND_GUARD_OVERRIDE':
                 state['override'] = _val
@@ -359,6 +359,17 @@ def strip_head(argv, state):
             argv = argv[1:]
             while argv and argv[0].startswith('-'):
                 argv = argv[2:] if argv[0] in SUDO_VALUE_FLAGS else argv[1:]
+            while argv and ASSIGNMENT_RE.match(argv[0]):
+                # Sudo's operands, like `env`'s below. The shell removes the
+                # quotes before sudo is executed, so `sudo A=1 cmd` and
+                # `sudo 'A=1' cmd` hand it byte-identical argv -- measured,
+                # both `[A=1] [cmd]`. Sudo cannot tell them apart, so whatever
+                # its env policy does it does for both, and a guard answering
+                # them differently is wrong whichever answer is right (Q170).
+                name, _, _val = argv[0].partition('=')
+                if name == 'FOREGROUND_GUARD_OVERRIDE':
+                    state['override'] = _val
+                argv = argv[1:]
         elif head == 'env':
             argv = argv[1:]
             while argv:
@@ -366,9 +377,11 @@ def strip_head(argv, state):
                     argv = argv[2:] if argv[0] in ('-u', '--unset', '-C',
                                                    '--chdir') else argv[1:]
                 elif ASSIGNMENT_RE.match(argv[0]):
-                    # env exports `NAME+` for a `NAME+=v` operand, so the
-                    # append spelling names a different variable and does not
-                    # arm the break-glass (Q174).
+                    # `env` is a program: its operands reach it after quote
+                    # removal, so `env 'A=1' cmd` really does set A (Q170), and
+                    # it exports `NAME+` for a `NAME+=v` operand, so the append
+                    # spelling names a different variable and does not arm the
+                    # break-glass (Q174).
                     name, _append, _val = split_assignment(
                         argv[0], append_is_operator=False)
                     if name == 'FOREGROUND_GUARD_OVERRIDE':

@@ -917,11 +917,70 @@ class OverrideTests(unittest.TestCase):
         self.assertEqual(decision, "deny")
         self.assertNotIn("override acknowledged", reason)
 
+    def test_a_quoted_override_prefix_arms_nothing(self):
+        # Q170: bash strips a word's quotes AFTER deciding what the word is, so
+        # `'NAME=v'` is a program it looks for and fails to find. Written as
+        # its own statement, so the kubectl after it keeps its command head --
+        # inline, the quoted word takes that head and no covered tool is left.
+        for prefix in ("'PROD_GUARD_OVERRIDE=drill'; ",
+                       '"PROD_GUARD_OVERRIDE=drill"; ',
+                       'PROD_GUARD_OVERRIDE"="drill; '):
+            with self.subTest(prefix=prefix):
+                decision, reason = run_hook(
+                    prefix + "kubectl --context gke_acme_prod-us delete ns x")
+                self.assertEqual(decision, "deny")
+                self.assertNotIn("override acknowledged", reason)
+
+    def test_an_unquoted_override_statement_still_arms(self):
+        # The control for the rows above: same shape, written plain.
+        decision, reason = run_hook(
+            "PROD_GUARD_OVERRIDE=drill; "
+            "kubectl --context gke_acme_prod-us delete ns x")
+        self.assertEqual(decision, "ask")
+        self.assertIn("override acknowledged", reason)
+
     def test_append_spelled_override_downgrades_deny_to_ask(self):
         # bash assigns for `NAME+=v` in command position, so the prefix arms
         # exactly as `NAME=v` does (Q174).
         decision, reason = run_hook(
             "PROD_GUARD_OVERRIDE+=incident-42 "
+            "kubectl --context gke_acme_prod-us delete ns x")
+        self.assertEqual(decision, "ask")
+        self.assertIn("override acknowledged", reason)
+
+    def test_a_quoted_env_operand_still_pins_the_target(self):
+        """Q170's other half, and the pair that shows why it is position-sensitive.
+
+        `env` is a program, so its operands reach it AFTER quote removal and
+        `env 'TF_WORKSPACE=dev'` really does pin the workspace. The same word
+        in command position does not: bash looks for a program called
+        `TF_WORKSPACE=dev` and fails, so nothing is set and the word is argv[0].
+
+        At the reader rather than end to end, because the verdict is not the
+        discriminator: converting the `env` branch leaves that word as argv[0],
+        which is no covered tool, so the hook is quiet either way.
+        """
+        def read(raw):
+            groups = guard.split_simple_commands(guard.tokenize(raw))
+            env, argv = guard.extract_env_prefix(list(groups[0]))
+            return env, guard.strip_wrappers(list(argv), env)
+
+        for raw in ("env 'TF_WORKSPACE=dev' terraform apply",
+                    'env "TF_WORKSPACE=dev" terraform apply'):
+            with self.subTest(raw=raw):
+                env, argv = read(raw)
+                self.assertEqual(env.get("TF_WORKSPACE"), "dev")
+                self.assertEqual(argv[0], "terraform")
+
+        env, argv = read("'TF_WORKSPACE=dev' terraform apply")
+        self.assertEqual(env, {})
+        self.assertEqual(argv[0], "TF_WORKSPACE=dev")
+
+    def test_a_quoted_reason_still_arms(self):
+        # Quoting AFTER the `=` is ordinary, and it is how a reason with a
+        # space in it is written -- Q170 must not cost the documented form.
+        decision, reason = run_hook(
+            "PROD_GUARD_OVERRIDE='incident 42' "
             "kubectl --context gke_acme_prod-us delete ns x")
         self.assertEqual(decision, "ask")
         self.assertIn("override acknowledged", reason)

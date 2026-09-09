@@ -378,6 +378,12 @@ class CommandHeadTests(unittest.TestCase):
         self.assertEqual(['S+P=/x', 'cmd'],
                          bp.strip_env_prefix(['S+P=/x', 'cmd']))
 
+    def test_a_quoted_keyword_is_not_peeled(self):
+        self.assertEqual(['if', 'cmd'], bp.strip_sh_keywords(bp.lex("'if' cmd")))
+
+    def test_a_plain_keyword_is_still_peeled(self):
+        self.assertEqual(['cmd'], bp.strip_sh_keywords(bp.lex('if cmd')))
+
 
 class SplitAssignmentTests(unittest.TestCase):
     """The `+` belongs to the operator, so a name recovered from the token has
@@ -404,6 +410,120 @@ class SplitAssignmentTests(unittest.TestCase):
 
     def test_an_empty_append_value(self):
         self.assertEqual(('A', True, ''), bp.split_assignment('A+='))
+
+
+class AssignmentTests(unittest.TestCase):
+    """Bash decides what a word IS before it removes the quotes (Q170, Q139).
+
+    The table is bash's own answer, taken on 5.3.15 with
+    ``bash -c "<word>; printf '[%s]' \"$SP\""``: a set variable prints its
+    value, an unset one prints ``[]`` after a ``command not found``. Quoting
+    anywhere up to and including the ``=`` disarms the assignment; quoting
+    after it is ordinary, which is how a break-glass reason with a space in it
+    is written.
+
+    `RUNS_A_COMMAND` is Q139's nine spellings, grouped by the mechanism that
+    disarms each -- because that row measured the class and warned it is a
+    floor, not a census. A fix written as *quoting the name* passes the first
+    six and still arms on ``SP\\=/x``, where the escape falls on the ``=``
+    itself and so belongs to neither name nor value. The empty pairs are here
+    for the same reason: they put no characters in the token, so only an offset
+    can see them.
+    """
+
+    ASSIGNS = ('SP=/x', 'SP="/x"', "SP='/x'", 'SP=/x"y"', 'SP=$(echo /x)',
+               'SP=one"two"')
+    RUNS_A_COMMAND = ("'SP=/x'", '"SP=/x"',            # the whole word quoted
+                      "S'P'=/x", 'S"P"=/x',            # part of the name
+                      "S''P=/x", 'SP""=/x',            # an empty pair
+                      'SP"="/x',                       # the `=` itself
+                      r'\SP=/x', r'S\P=/x', r'SP\=/x')  # escaped, not quoted
+
+    def test_a_plain_prefix_assigns(self):
+        for word in self.ASSIGNS:
+            with self.subTest(word=word):
+                self.assertTrue(bp.is_assignment(bp.lex(word)[0]))
+
+    def test_a_quoted_name_or_equals_runs_a_command(self):
+        for word in self.RUNS_A_COMMAND:
+            with self.subTest(word=word):
+                self.assertFalse(bp.is_assignment(bp.lex(word)[0]))
+
+    def test_a_word_that_is_no_assignment_at_all_is_never_one(self):
+        for word in ('cat', "'cat'", '1A=x', '-A=x'):
+            with self.subTest(word=word):
+                self.assertFalse(bp.is_assignment(bp.lex(word)[0]))
+
+    def test_a_plain_str_reads_as_written_plain(self):
+        """A hand-built token carries no record, so it keeps the old reading."""
+        self.assertTrue(bp.is_assignment('SP=/x'))
+
+    def test_a_quoted_prefix_is_not_peeled_as_env(self):
+        toks = bp.lex("'LC_ALL=C' cat /x")
+        self.assertEqual(['LC_ALL=C', 'cat', '/x'], bp.strip_env_prefix(toks))
+
+    def test_a_plain_prefix_is_still_peeled_as_env(self):
+        toks = bp.lex('LC_ALL=C cat /x')
+        self.assertEqual(['cat', '/x'], bp.strip_env_prefix(toks))
+
+    def test_the_offset_is_into_the_stripped_token(self):
+        self.assertEqual(2, bp.lex('SP"="/x')[0].quoted_from)
+        self.assertIsNone(bp.lex('SP=/x')[0].quoted_from)
+
+    def test_the_quote_characters_are_still_recorded(self):
+        """prod-guard reads `.quotes` to tell a `-c` body's expander apart."""
+        self.assertEqual(frozenset("'"), bp.lex("'a b'")[0].quotes)
+        self.assertEqual(frozenset('"'), bp.lex('"a b"')[0].quotes)
+        self.assertEqual(frozenset(), bp.lex('ab')[0].quotes)
+
+
+class ReservedWordTests(unittest.TestCase):
+    """The keyword half of Q170: quoting decides this too, and more bluntly.
+
+    An assignment has an ``=`` for the quoting to sit after, so `is_assignment`
+    compares offsets. A reserved word has no such split -- quoting ANY part of
+    it makes bash look for a program of that name -- so the test is simply
+    whether the word carries a quote at all.
+
+    Measured on bash 5.3.15 with ``cd /tmp; <word> cd /etc; pwd``. The plain
+    keyword changes directory (``time``, ``!``) or opens a compound command;
+    every quoted spelling prints ``<word>: command not found`` and leaves the
+    shell in ``/tmp``, because the ``cd`` is an argument to a program that does
+    not exist. ``\\if`` is the case a ``.quotes`` check would miss: it carries
+    no quote character and is still not the keyword.
+    """
+
+    RUNS_A_COMMAND = ("'if'", '"if"', 'i"f"', r'\if',   # if
+                      "'then'", "'do'", "'time'",       # more of SH_KEYWORDS
+                      "'!'", "'{'")                     # the punctuation ones
+
+    def test_a_plain_keyword_is_reserved(self):
+        for word in ('if', 'then', 'do', 'time', '!', '{', '[['):
+            with self.subTest(word=word):
+                self.assertTrue(bp.is_reserved_word(bp.lex(word)[0]))
+
+    def test_a_quoted_keyword_runs_a_command(self):
+        for word in self.RUNS_A_COMMAND:
+            with self.subTest(word=word):
+                self.assertFalse(bp.is_reserved_word(bp.lex(word)[0]))
+
+    def test_a_word_that_is_no_keyword_at_all_is_never_one(self):
+        for word in ('cat', 'iff', 'IF'):
+            with self.subTest(word=word):
+                self.assertFalse(bp.is_reserved_word(bp.lex(word)[0]))
+
+    def test_a_plain_str_reads_as_written_plain(self):
+        """A hand-built token carries no record, so it keeps the old reading."""
+        self.assertTrue(bp.is_reserved_word('if'))
+
+    def test_quoting_after_the_first_character_still_disarms(self):
+        """Where the assignment rule and this one part company.
+
+        `SP="/x"` assigns because the quote falls past the `=`; there is no
+        `=` here, so the same shape (`i"f"`) is just a command name.
+        """
+        self.assertTrue(bp.is_assignment(bp.lex('SP="/x"')[0]))
+        self.assertFalse(bp.is_reserved_word(bp.lex('i"f"')[0]))
 
 
 class VendoringTests(unittest.TestCase):

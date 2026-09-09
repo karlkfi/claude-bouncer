@@ -217,8 +217,72 @@ CASES = [
      False, False, ''),
     ('override quoted, gate really piped',
      'echo "EXIT_STATUS_GUARD_OVERRIDE=x" | make check | tail -5', False, True, ''),
+    # Q170: bash strips a word's quotes AFTER deciding what the word is, so
+    # `'NAME=v'` is a program it looks for and fails to find -- it arms
+    # nothing. Written as its own statement, so the gate stays the head of the
+    # segment after it and the deny is what the arming would have lifted; the
+    # inline `'NAME=v' make check | tail` form makes `make` an argument
+    # instead, and bash runs no gate there for a status to be lost from. The
+    # quoted-VALUE rows above are the other direction and must keep passing.
+    ('a single-quoted override statement arms nothing',
+     "'EXIT_STATUS_GUARD_OVERRIDE=why'; make check | tail -5", False, True, ''),
+    ('a double-quoted override statement arms nothing',
+     '"EXIT_STATUS_GUARD_OVERRIDE=why"; make check | tail -5', False, True, ''),
+    ('a quoted `=` in an override statement arms nothing',
+     'EXIT_STATUS_GUARD_OVERRIDE"="why; make check | tail -5', False, True, ''),
+    # Q170's keyword half. `strip_sh_keywords` matched the quote-stripped
+    # word, so a quoted reserved word came off and the assignment behind it
+    # was read as the override. Bash runs `'if' NAME=v :` as a program called
+    # `if` and sets nothing, so the gate in the next segment really does lose
+    # its status -- and the guard was disarmed by a word the shell never
+    # honoured. `'time'` is the sharpest: unquoted it IS the keyword.
+    ('a single-quoted keyword arms nothing',
+     "'if' EXIT_STATUS_GUARD_OVERRIDE=why :; make check | tail -5", False, True, ''),
+    ('a double-quoted keyword arms nothing',
+     '"if" EXIT_STATUS_GUARD_OVERRIDE=why :; make check | tail -5', False, True, ''),
+    ('a quoted `time` arms nothing',
+     "'time' EXIT_STATUS_GUARD_OVERRIDE=why :; make check | tail -5", False, True, ''),
+    # The controls: written plainly these are reserved words, bash reaches the
+    # assignment, and the override stands.
+    ('a plain keyword still arms',
+     'if EXIT_STATUS_GUARD_OVERRIDE=why :; then :; fi; make check | tail -5',
+     False, False, ''),
+    ('a plain `time` still arms',
+     'time EXIT_STATUS_GUARD_OVERRIDE=why :; make check | tail -5', False, False, ''),
+    # The same peel, read the other way round: with the keyword quoted, `make`
+    # is an ARGUMENT to a program bash cannot find, so no gate runs and there
+    # is no status to lose. Denying it was a false positive on a command that
+    # never executes.
+    ('a quoted keyword makes the gate an argument',
+     "'if' make check | tail -5", False, False, ''),
+    ('a plain keyword leaves the gate a gate',
+     'if make check | tail -5; then :; fi', False, True, ''),
+    ('a plain `time` leaves the gate a gate',
+     'time make check | tail -5', False, True, ''),
     ('a different variable is not the override',
      'EXIT_STATUS_GUARD=x make check | tail -30', False, True, ''),
+    # `env` is the other direction again, and the one `peel_wrappers` has to
+    # get right twice in one loop: its first pass is command position, and the
+    # pass after `env` comes off is OPERAND position, where bash has already
+    # removed the quotes. So `env 'A=1' make check | tail` really does run the
+    # gate and really does lose its status. Driven on bash 5.3.15:
+    # `env 'A=1' bash -c 'echo $A'` prints 1.
+    ('a quoted env operand still reaches the gate',
+     "env 'A=1' make check | tail -5", False, True,
+     "exit status is the filter's"),
+    ('a double-quoted env operand still reaches the gate',
+     'env "A=1" make check | tail -5', False, True,
+     "exit status is the filter's"),
+    ('several quoted env operands still reach the gate',
+     "env 'A=1' 'B=2' go test ./... | tail -5", False, True,
+     "exit status is the filter's"),
+    # The control for those three: `nohup` does NOT consume an assignment
+    # operand -- it execs a program called `A=1` and exits 127 -- so no gate
+    # runs and the guard must stay quiet. Same for `command`.
+    ('a quoted operand after nohup runs no gate',
+     "nohup 'A=1' make check | tail -5", False, False, ''),
+    ('a quoted operand after command runs no gate',
+     "command 'A=1' make check | tail -5", False, False, ''),
     ('the 1.x prefix still lifts a deny',
      'PIPE_GUARD_OVERRIDE=want-the-output-only make check | tail -30',
      False, False, ''),

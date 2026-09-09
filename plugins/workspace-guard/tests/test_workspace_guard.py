@@ -1011,6 +1011,51 @@ class CommandOverrideTests(unittest.TestCase):
         self.assertIsNone(
             guard.command_override('grep -r WORKSPACE_GUARD_OVERRIDE=r .'))
 
+    def test_a_quoted_prefix_does_not_arm(self):
+        # `'NAME=v' cmd` is not an assignment: bash strips the quotes after it
+        # has decided what the word is, looks for a program called `NAME=v`,
+        # and fails. Arming off it disarms the guard on a word bash would not
+        # have run (Q170).
+        self.assertIsNone(guard.command_override(
+            "'WORKSPACE_GUARD_OVERRIDE=r' cp a b"))
+        self.assertIsNone(guard.command_override(
+            '"WORKSPACE_GUARD_OVERRIDE=r" cp a b'))
+        self.assertIsNone(guard.command_override(
+            'WORKSPACE_GUARD"_OVERRIDE=r" cp a b'))
+
+    def test_a_quoted_keyword_does_not_arm(self):
+        # The same defect one axis over. `'if' NAME=v cmd` runs a program
+        # called `if` with three arguments -- bash never reaches the
+        # assignment, so nothing is set and the guard must not be disarmed.
+        # Quoting ANY part of a reserved word disarms it, and an escape
+        # counts: `\\if` carries no quote character and is still not the
+        # keyword.
+        for cmd in ("'if' WORKSPACE_GUARD_OVERRIDE=r cp a b",
+                    '"if" WORKSPACE_GUARD_OVERRIDE=r cp a b',
+                    'i"f" WORKSPACE_GUARD_OVERRIDE=r cp a b',
+                    r'\if WORKSPACE_GUARD_OVERRIDE=r cp a b',
+                    "'time' WORKSPACE_GUARD_OVERRIDE=r cp a b"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(guard.command_override(cmd))
+
+    def test_a_plain_keyword_still_arms(self):
+        # The control for the pair above: written plainly these ARE reserved
+        # words, so bash reaches the assignment and the override stands.
+        self.assertEqual("r", guard.command_override(
+            'time WORKSPACE_GUARD_OVERRIDE=r cp a b'))
+        self.assertEqual("r", guard.command_override(
+            'until WORKSPACE_GUARD_OVERRIDE=r cp a b; do :; done'))
+
+    def test_a_quoted_value_still_arms(self):
+        # Quoting AFTER the `=` is ordinary, and it is how every reason with a
+        # space in it is written — so Q170 must not cost the documented form.
+        self.assertEqual(
+            guard.command_override('WORKSPACE_GUARD_OVERRIDE="two words" cp a b'),
+            "two words")
+        self.assertEqual(
+            guard.command_override("WORKSPACE_GUARD_OVERRIDE='two words' cp a b"),
+            "two words")
+
     def test_inside_a_heredoc_body_is_not_an_override(self):
         # Body text is stripped before the tokenizer, so data never reads as
         # command position.
@@ -4509,6 +4554,8 @@ class SubstBodyCwdTests(unittest.TestCase):
         os.mkdir(os.path.join(self.workspace, "sub"))
         with open(os.path.join(self.workspace, "in.txt"), "w") as f:
             f.write("x\n")
+        with open(os.path.join(self.workspace, "sub", "deep.txt"), "w") as f:
+            f.write("y\n")
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -4541,6 +4588,124 @@ class SubstBodyCwdTests(unittest.TestCase):
         self.assertNotIn(os.path.join(above, "in.txt"), reason)
 
     # --- the missed offenders: an out-of-root read or write, and no prompt ---
+
+    def test_a_quoted_assignment_does_not_make_a_name_usable(self):
+        # Q170 inside Q169's positional rule. `usable` exists so a `cd $d`
+        # cannot resolve from an assignment written after it. A quoted
+        # `'d=sub'` is a program bash fails to find, so it must not put `d`
+        # in that set -- otherwise the real `d=sub` at the end of the string
+        # reaches the `cd`, and the read lands in `sub/` instead of the root.
+        # Fail-open, because resolving a cwd is what removes the prompt.
+        out = run_hook("'d=sub'; cd $d; echo \"$(cat ../in.txt)\"; d=sub",
+                       self.workspace, project_dir=self.workspace)
+        self.assertIsNotNone(out, "expected a decision, got defer")
+        self.assertEqual("deny", out["hookSpecificOutput"]["permissionDecision"])
+        self.assertIn("untracked cd",
+                      out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_a_quoted_keyword_does_not_apply_the_cd_behind_it(self):
+        # The keyword half of the same defect: `strip_sh_keywords` matched the
+        # quote-stripped word, so a quoted reserved word was peeled and the
+        # `cd` behind it applied. Bash runs `'if' cd sub` as a program called
+        # `if` with two arguments -- no `cd` happens -- so `../in.txt` reads
+        # ABOVE the root, and peeling made the guard resolve it back inside
+        # and stay silent. Fail-open, and `'time'` is the sharpest spelling:
+        # unquoted it is the one reserved word here whose `cd` really does
+        # persist.
+        for raw in ("'if' cd sub; cat ../in.txt",
+                    '"if" cd sub; cat ../in.txt',
+                    "'time' cd sub; cat ../in.txt"):
+            with self.subTest(raw=raw):
+                out = run_hook(raw, self.workspace, project_dir=self.workspace)
+                self.assertIsNotNone(out, f"went silent for {raw!r}")
+                h = out["hookSpecificOutput"]
+                self.assertNotEqual("allow", h["permissionDecision"],
+                                    f"vouched for a read above the root: {raw!r}")
+                self.assertIn("../in.txt", h["permissionDecisionReason"])
+
+    def test_a_plain_keyword_still_applies_the_cd_behind_it(self):
+        # The control. Written plainly these are reserved words, bash runs the
+        # `cd`, and the read is the root's own file. `time cd sub` is measured
+        # rather than assumed: bash 5.3.15 leaves the shell in `sub` after it,
+        # because `time` does not fork.
+        self._is_clean("time cd sub; cat ../in.txt")
+        self._is_clean("if cd sub; then cat ../in.txt; fi")
+
+    def test_a_quoted_prefix_carrying_a_dollar_does_not_apply_the_cd(self):
+        # The group loop's own peel, and the sharpest of these: it ends in an
+        # `allow`, which speaks for the whole command string.
+        #
+        # `sub_g` is rebuilt by `substitute_vars`, which returns a new `str`
+        # for any token carrying `$`. So the record of how the word was
+        # written survives `'d=x'` and dies on `'d=$H'`, and the peel that
+        # finds the command word took the pre-Q170 answer for the second --
+        # dropping the quoted word, finding `cd sub`, and applying it. Bash
+        # runs no `cd` there, so `../in.txt` reads ABOVE the root, and the
+        # guard vouched for it.
+        #
+        # The `$` is the only difference between these and the control below.
+        for raw in ("H=sub; 'd=$H' cd sub; cat ../in.txt",
+                    'H=sub; "d=$H" cd sub; cat ../in.txt'):
+            with self.subTest(raw=raw):
+                out = run_hook(raw, self.workspace, project_dir=self.workspace)
+                self.assertIsNotNone(out, f"vouched silently for {raw!r}")
+                self.assertNotEqual(
+                    "allow", out["hookSpecificOutput"]["permissionDecision"],
+                    f"vouched for a read above the root: {raw!r}")
+
+    def test_an_unquoted_prefix_carrying_a_dollar_still_applies_the_cd(self):
+        # The control that must not regress: written plainly, bash does set
+        # `d` and does run the `cd`, so the same read is the root's own file
+        # and the string is vouched for. A `for`/`if` group is included
+        # because the peel is now counted with the keywords rather than after
+        # them.
+        self._is_clean("H=sub; d=$H cd sub; cat deep.txt")
+        self._is_clean("H=sub; if d=$H cd sub; then cat deep.txt; fi")
+
+    def test_a_quoted_prefix_does_not_apply_the_cd_beside_it(self):
+        # The other assignment reader in the same loop, one call above the
+        # one exercised by the test before this. `restored` is rebuilt by
+        # `MARK_RE.sub` -- and `re.sub` returns a plain `str` even when
+        # nothing matches -- so the peel that finds the `cd` had no record of
+        # how the words were written. `'d=sub' cd sub` is a program bash
+        # fails to find, so no `cd` runs and `../in.txt` reads ABOVE the root;
+        # peeled as an assignment, the guard applies the `cd`, resolves the
+        # read back inside the root and says nothing. Fail-open.
+        #
+        # Asserted on the operand rather than the rendered path: what lies
+        # above a temporary root is host temp on this platform and something
+        # else elsewhere, which is the variance this class's `/etc` targets
+        # exist to dodge. That the guard reports at all is the whole point.
+        for raw in ("'d=sub' cd sub; echo \"$(cat ../in.txt)\"",
+                    '"d=sub" cd sub; echo "$(cat ../in.txt)"'):
+            with self.subTest(raw=raw):
+                out = run_hook(raw, self.workspace, project_dir=self.workspace)
+                self.assertIsNotNone(out, f"went silent for {raw!r}")
+                reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+                self.assertIn("../in.txt", reason)
+
+    def test_an_unquoted_prefix_still_applies_the_cd_beside_it(self):
+        # The control, and the direction that must not regress: written
+        # plainly, bash does set `d` and does run `cd sub`, so `../in.txt` is
+        # the root's own file and there is nothing to report.
+        self._is_clean("d=sub cd sub; echo \"$(cat ../in.txt)\"")
+
+    def test_a_substitution_in_the_cd_target_still_resolves(self):
+        # The peel is now counted on the pre-rebuild tokens and applied to
+        # the rebuilt ones by index, so a group whose `cd` target IS a
+        # substitution must still line up.
+        out = run_hook("d=x cd $(echo sub); echo \"$(cat ../in.txt)\"",
+                       self.workspace, project_dir=self.workspace)
+        self.assertIsNotNone(out)
+        self.assertIn("../in.txt",
+                      out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_an_unquoted_assignment_still_makes_a_name_usable(self):
+        # The control, and the direction that must not regress: written
+        # plainly, `d` IS usable, the `cd` resolves, `../in.txt` lands back in
+        # the root, and there is nothing to report. If this starts denying,
+        # the fix has over-reached and Q34's false deny is back.
+        self._is_clean("d=sub; cd $d; echo \"$(cat ../in.txt)\"")
 
     def test_a_backtick_read_after_a_cd_out_is_checked(self):
         self._asks_about_target("cd /etc && echo `cat q169-fake-target`")
@@ -8277,6 +8442,33 @@ class VarPropagationEndToEndTests(unittest.TestCase):
     def test_literal_var_host_temp_deny(self):
         # The issue's motivating example: `SP=/tmp/...; tail -5 $SP/x.csv`.
         self._decision("SP=/tmp/q58-fake-dir; tail -5 $SP/q265.csv", "deny")
+
+    def test_quoted_assignment_does_not_bind_the_name(self):
+        # Q170: bash runs a program called `f=in.txt` and leaves `f` unset, so
+        # `$f` is unresolved and the read is not vouched for. The old reading
+        # bound the name and emitted `allow` — for a value bash never assigned.
+        for cmd in ("'f=in.txt'; cat $f",
+                    '"f=in.txt"; cat $f',
+                    "f'='in.txt; cat $f"):
+            with self.subTest(cmd=cmd):
+                out = run_hook(cmd, self.workspace)
+                got = None if out is None else \
+                    out["hookSpecificOutput"]["permissionDecision"]
+                self.assertNotEqual("allow", got, cmd)
+
+    def test_a_quoted_export_operand_still_binds(self):
+        # `export` is a builtin and parses its own operands after quote
+        # removal, so `export 'f=x'` assigns where a bare `'f=x'` does not.
+        # The contrast is the row below it in this suite: the same word
+        # without `export` is a command bash fails to find (Q170).
+        self._decision("export 'f=in.txt'; cat $f", "allow")
+        self._decision('export "f=in.txt"; cat $f', "allow")
+
+    def test_quoted_value_still_binds_the_name(self):
+        # The other direction: `f="in.txt"` IS an assignment, so the precision
+        # Q170 buys must not cost the ordinary quoted-value form.
+        self._decision('f="in.txt"; cat $f', "allow")
+        self._decision("f='in.txt'; cat $f", "allow")
 
     def test_chained_assignment_allow(self):
         # `b=$a/…` sees the already-known literal `a` (bash does the same).

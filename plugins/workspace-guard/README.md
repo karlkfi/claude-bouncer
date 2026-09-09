@@ -839,7 +839,10 @@ through the same boundary rules and produce the same reasons. Symlink staging
    tail …`, `! grep …`, `time cat …`) and then POSIX `NAME=VALUE` command-prefix
    assignments (`LC_ALL=C cat …` → `cat …`) from each simple command, in that
    order, so neither a keyword nor an inline assignment masks the command-name
-   lookup.
+   lookup. Quoting disarms both, because bash decides what a word is before it
+   removes the quotes: `'if' cat …` and `'LC_ALL=C' cat …` are programs it
+   looks for and fails to find, so neither is stripped and the `cat` behind
+   them is an argument, not the command.
 4. **Resolve** literal in-command variable assignments (one-pass constant
    propagation). A standalone `NAME=value` or `export NAME=value` command
    whose value survives quote removal as a plain literal — non-empty, no `$`,

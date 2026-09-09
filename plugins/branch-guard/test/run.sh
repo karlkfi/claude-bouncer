@@ -1690,6 +1690,28 @@ check "empty override reason -> ask" ask \
 check "whitespace-only override reason -> ask" ask \
   "$(decision_for "$(bash_payload "BRANCH_GUARD_OVERRIDE='   ' git restore file.txt")" "$WORK")"
 
+#     26b'. A quoted prefix is no assignment at all. Bash strips a word's
+#     quotes AFTER deciding what the word is, so `'NAME=v'` is a program it
+#     looks for and fails to find, leaving the variable alone (Q170). The
+#     `echo` in front carries the quoted word out of the restore's own segment,
+#     so the restore keeps its command head and really does run after the `;` --
+#     which is what makes the old `allow` an allow for a destructive command on
+#     a variable bash never set. 26a's `$OVR` is the other direction: it quotes
+#     the REASON, after the `=`, which is ordinary and still arms.
+BGQ='echo x; git restore file.txt'
+check "single-quoted override prefix -> ask" ask \
+  "$(decision_for "$(bash_payload "'BRANCH_GUARD_OVERRIDE=why' $BGQ")" "$WORK")"
+check "double-quoted override prefix -> ask" ask \
+  "$(decision_for "$(bash_payload "\"BRANCH_GUARD_OVERRIDE=why\" $BGQ")" "$WORK")"
+check "quoted = in the override prefix -> ask" ask \
+  "$(decision_for "$(bash_payload "BRANCH_GUARD_OVERRIDE\"=\"why $BGQ")" "$WORK")"
+check "unquoted override prefix in the same shape -> allow" allow \
+  "$(decision_for "$(bash_payload "BRANCH_GUARD_OVERRIDE=why $BGQ")" "$WORK")"
+#     Inline, the quoted word takes the command head and `git` becomes its
+#     argument, so bash runs no git at all and neither does the guard.
+check "quoted prefix inline leaves no git invocation -> none" none \
+  "$(decision_for "$(bash_payload "'BRANCH_GUARD_OVERRIDE=why' git restore file.txt")" "$WORK")"
+
 #     26c. Only a real command-prefix assignment counts. The name appearing as
 #     an argument — in a pathspec, a commit message, an echoed line — is a
 #     positional, and disarms nothing.
