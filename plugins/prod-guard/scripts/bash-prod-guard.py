@@ -264,7 +264,8 @@ SHELL_NAMES = frozenset({'bash', 'sh', 'zsh', 'dash', 'ksh'})
 
 # Wrappers that prefix another command without changing its meaning for our
 # purposes. `xargs` is handled separately (it takes its own flags).
-PLAIN_WRAPPERS = frozenset({'command', 'nohup', 'time', 'builtin', 'exec'})
+PLAIN_WRAPPERS = frozenset({'command', 'nohup', 'time', 'builtin', 'exec',
+                            'stdbuf', 'unbuffer'})
 
 # Wrapper flags that take a SEPARATE value. Dropped one token at a time, the
 # value is left behind and reads as the tool, so the segment defers (Q152).
@@ -277,6 +278,9 @@ WRAPPER_VALUE_FLAGS = {
     'timeout': frozenset({'-k', '--kill-after', '-s', '--signal'}),
     'exec': frozenset({'-a'}),
     'time': frozenset({'-o', '--output', '-f', '--format'}),  # -o both, rest GNU
+    # Long forms are GNU's, as with `time` above; BSD stdbuf rejects them.
+    # `unbuffer` needs no entry -- its only flag, `-p`, carries no value.
+    'stdbuf': frozenset({'-i', '--input', '-o', '--output', '-e', '--error'}),
 }
 
 
