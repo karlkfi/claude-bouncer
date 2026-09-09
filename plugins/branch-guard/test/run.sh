@@ -1842,9 +1842,9 @@ git -C "$WORK" checkout -q claude/x
 check "cd . ahead of an overridden ask -> allow" allow \
   "$(decision_for "$(bash_payload "cd . && $OVR git restore file.txt")" "$WORK")"
 check "cd to the worktree root ahead of an overridden ask -> allow" allow \
-  "$(decision_for "$(bash_payload "cd $WORK && $OVR git restore file.txt")" "$WORK")"
+  "$(decision_for "$(bash_payload "cd '$(nat "$WORK")' && $OVR git restore file.txt")" "$WORK")"
 check "cd to a subdirectory of the worktree -> allow" allow \
-  "$(decision_for "$(bash_payload "cd $WORK/tmp && $OVR git restore file.txt")" "$WORK")"
+  "$(decision_for "$(bash_payload "cd '$(nat "$WORK/tmp")' && $OVR git restore file.txt")" "$WORK")"
 #     The symptom itself, at the verdict where it was found: the denial names
 #     the route again. Without this the fix could pass on the allow alone while
 #     the message a session actually reads stayed silent.
@@ -1862,7 +1862,7 @@ check "pwd ahead of an overridden ask -> allow" allow \
 #     Until the probe is aimed at the tree the command lands in, there is no
 #     correct verdict there to lift.
 check "cd into a sibling worktree ahead of an override -> ask" ask \
-  "$(decision_for "$(bash_payload "cd $WT && $OVR git restore file.txt")" "$WORK")"
+  "$(decision_for "$(bash_payload "cd '$(nat "$WT")' && $OVR git restore file.txt")" "$WORK")"
 #     A target the hook cannot place stays unliftable for the same reason: it
 #     cannot know which tree the command runs in.
 check "cd to a \$VAR target ahead of an override -> ask" ask \
@@ -1889,7 +1889,7 @@ check "cd ahead of an override with a non-git segment -> ask" ask \
 check "cd . ahead of a read-only git segment -> allow" allow \
   "$(decision_for "$(bash_payload 'cd . && git status')" "$WORK")"
 check "cd into a sibling worktree ahead of a read-only segment -> none" none \
-  "$(decision_for "$(bash_payload "cd $WT && git status")" "$WORK")"
+  "$(decision_for "$(bash_payload "cd '$(nat "$WT")' && git status")" "$WORK")"
 
 # 27. Push overlap. A `strict` auto-approve says the push is in bounds; it says
 #     nothing about the branch still being built on what it thinks it is. When
@@ -2255,8 +2255,9 @@ check "[overlap] cd into the overlapping worktree -> deny" deny \
      "$OVL_WT_CLEAN")"
 #      The converse is the false deny the row was filed for: the session sits in
 #      the overlapping worktree and pushes a branch that does not overlap. The
-#      `cd` segment is still `nongit`, so the auto-approve is withheld and the
-#      command defers rather than allowing -- Q146 owns that half.
+#      `cd` segment is still `nongit` -- Q146 admitted a `cd` as benign only
+#      within ONE worktree, and this one crosses -- so the auto-approve is
+#      withheld and the command defers rather than allowing.
 check "[overlap] cd out of the overlapping worktree -> none" none \
   "$(decision_for "$(bash_payload "cd '$(nat "$OVL_WT_CLEAN")' && git push")" \
      "$OVL_WT_DIRTY")"
