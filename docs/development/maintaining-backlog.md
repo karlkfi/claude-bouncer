@@ -8,12 +8,26 @@ would drift.
 
 The load-bearing invariants, for sessions without the skill available:
 
-1. **Take the next number above the highest the store has ever held** — and read
-   that from git, not from the directory, which understates it by every item
-   that has shipped. IDs are stable and never reused or renumbered. This is the
-   part of the process that does not survive two sessions filing at once, which
-   is what Q92 is for; until it lands, a second concurrent filer collides and
-   git reports it as an add/add conflict on one path rather than silently.
+1. **Claim the ID on the remote. Never read a number and add one.**
+
+   ```bash
+   make backlog-claim ARGS='The row title'
+   ```
+
+   Creating `refs/queue-ids/QN` is a compare-and-swap, so two sessions asking
+   at the same instant get different numbers with no lock and nothing to
+   release. IDs are stable and never reused or renumbered. `make
+   backlog-claims` is the other half and runs in `make check` and in CI, so an
+   ID a branch adds that holds no claim fails there rather than at the rebase
+   it collides with.
+
+   **Incrementing the highest number is the fallback, for a remote that
+   refuses a custom ref namespace** — which GitHub does not. It is what this
+   invariant used to prescribe, and it collides: claims are not fetched by the
+   default refspec, so they are invisible to a clone. Measured 2026-09-09, the
+   highest ID ever added on `origin/main` was Q181, and Q182 through Q193 were
+   all claimed already. `git ls-remote origin 'refs/queue-ids/*'` is how you
+   see them.
 2. **Never hand-type a `rank`.** `scripts/queue.py rank --head` / `--tail` /
    `--after` / `--before` computes one.
 3. **Isolate backlog edits in their own commit.** Under a per-item store this
@@ -28,15 +42,21 @@ The load-bearing invariants, for sessions without the skill available:
 
 ## Repo-local tooling
 
-`scripts/queue.py` is vendored from the skill so the checks work whether or not
-it is installed — the same reason `lib/bouncer_parse.py` is vendored into each
-plugin, and with the same hazard: fix it upstream in `karlkfi/claude-skills`
-first, or the next vendor drop reverts it.
+`scripts/queue.py` and `scripts/alloc-queue-id.sh` are vendored from the skill
+so the checks work whether or not it is installed — the same reason
+`lib/bouncer_parse.py` is vendored into each plugin, and with the same hazard:
+fix them upstream in `karlkfi/claude-skills` first, or the next vendor drop
+reverts the change.
 
-**Only one of the two is guarded here.** `make sync-check` catches a drifted
-`lib/bouncer_parse.py` because both sides are in this tree. This copy's
-upstream is not, and it is absent from a CI checkout, so no target here can
-compare against it. The watch that exists runs from the other side:
+The allocator is vendored because the gate creates the need: `backlog-claims`
+tells a failing session to allocate an ID with `alloc-queue-id.sh`, so a clone
+with nothing installed has to be able to run it.
+
+**Drift in the vendored parser is guarded here; drift in these two is not.**
+`make sync-check` catches a drifted `lib/bouncer_parse.py` because both sides
+are in this tree. The skill's copies are not, and are absent from a CI
+checkout, so no target here can compare against them. The watch that exists
+runs from the other side:
 `make vendor-check` in `karlkfi/claude-skills` hashes this repository's copy
 through the GitHub API and names the commit it was taken at. It reports rather
 than fails, deliberately — a stale copy is not a defect in whatever pull
@@ -49,12 +69,24 @@ reads the report, not when the copy drifts.
 | `make backlog` | the ordered queue, deferred items included |
 | `make backlog ARGS='--label prod-guard'` | one plugin's items |
 | `make backlog-next` | the top ready item, as a session prompt |
-| `make backlog-lint` | the gate, also run by `make check` and by CI |
+| `make backlog-claim ARGS='The row title'` | claim an ID — one title, one ID |
+| `make backlog-lint` | the store gate, also run by `make check` |
+| `make backlog-claims` | the claim gate, run by `make check` and by CI |
+
+`ARGS` is quoted for `backlog-claim` and not for the others, because a title is
+free text where the rest take flags. Give it one title per invocation.
 
 `make backlog-lint` promotes three of the linter's advisory classes to errors:
 `blocked-opener`, `deferred-trigger`, and `empty-store`. `dangling-link` stays
 advisory on purpose — a link across a live batch is legitimately in flight, and
 a gate that failed on it would redden the store for the hours after every merge.
+No CI step runs this target; what covers it there is `tests/test_backlog.py`,
+which restates those three flags in a constant of its own. Q183 is that gap.
+
+`make backlog-claims` passes `--strict` when `$CI` is set, so a remote it
+cannot read is a skip in an offline clone and a failure in CI. Its job in
+`tests.yml` checks out with `fetch-depth: 0`: the check needs a merge base with
+`origin/main`, and the default shallow checkout fetches neither.
 
 The pre-commit gate lives at `.githooks/pre-commit`. It is enabled per-clone:
 
