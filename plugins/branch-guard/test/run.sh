@@ -1832,6 +1832,65 @@ check "override does not reach the edit path on main -> ask" ask \
   "$(decision_for "$(edit_payload Edit file_path "$WORK/file.txt")" "$WORK")"
 git -C "$WORK" checkout -q claude/x
 
+#     26j. A leading `cd` used to make the whole command unliftable: a `cd`
+#     segment classified `nongit`, which is outside the set `liftable` accepts,
+#     so the override was never read. The command denied with the same reason it
+#     would have carried unprefixed, minus the closing invitation — the only
+#     tell, and nobody diffs a refusal they have just read. Sessions here lead
+#     with `cd` by habit, because the neighbouring guard asks them to give it a
+#     literal target.
+check "cd . ahead of an overridden ask -> allow" allow \
+  "$(decision_for "$(bash_payload "cd . && $OVR git restore file.txt")" "$WORK")"
+check "cd to the worktree root ahead of an overridden ask -> allow" allow \
+  "$(decision_for "$(bash_payload "cd $WORK && $OVR git restore file.txt")" "$WORK")"
+check "cd to a subdirectory of the worktree -> allow" allow \
+  "$(decision_for "$(bash_payload "cd $WORK/tmp && $OVR git restore file.txt")" "$WORK")"
+#     The symptom itself, at the verdict where it was found: the denial names
+#     the route again. Without this the fix could pass on the allow alone while
+#     the message a session actually reads stayed silent.
+check_text "[dontAsk] liftable deny behind a cd names the prefix" has \
+  'BRANCH_GUARD_OVERRIDE=<reason>' \
+  "$(reason_for "$(bash_mode 'cd . && git restore file.txt' dontAsk)" "$WORK")"
+#     `pwd` is what widens the finding past `cd` — any leading segment outside
+#     BENIGN_COMMANDS did this, and `cd` only made it frequent.
+check "pwd ahead of an overridden ask -> allow" allow \
+  "$(decision_for "$(bash_payload "pwd && $OVR git restore file.txt")" "$WORK")"
+
+#     The exclusion the relaxation keeps, and the cell that makes it mean
+#     something. $WT is a path INSIDE $WORK and a DIFFERENT worktree of it, so a
+#     containment test would allow it and a worktree-identity test does not.
+#     Until the probe is aimed at the tree the command lands in, there is no
+#     correct verdict there to lift.
+check "cd into a sibling worktree ahead of an override -> ask" ask \
+  "$(decision_for "$(bash_payload "cd $WT && $OVR git restore file.txt")" "$WORK")"
+#     A target the hook cannot place stays unliftable for the same reason: it
+#     cannot know which tree the command runs in.
+check "cd to a \$VAR target ahead of an override -> ask" ask \
+  "$(decision_for "$(bash_payload "cd \$HOME && $OVR git restore file.txt")" "$WORK")"
+check "bare cd ahead of an override -> ask" ask \
+  "$(decision_for "$(bash_payload "cd && $OVR git restore file.txt")" "$WORK")"
+check "cd - ahead of an override -> ask" ask \
+  "$(decision_for "$(bash_payload "cd - && $OVR git restore file.txt")" "$WORK")"
+
+#     Both locks still hold through a `cd`, which is the thing a relaxation of
+#     the liftable set could quietly undo. Without these the fix would read as
+#     "a cd now lifts anything".
+check "cd ahead of an override on a push -> ask" ask \
+  "$(decision_for "$(bash_payload "cd . && $OVR git push origin other")" "$WORK")"
+check "cd ahead of an override on gh repo delete -> ask" ask \
+  "$(decision_for "$(bash_payload "cd . && $OVR gh repo delete owner/repo")" "$WORK")"
+check "cd ahead of an override with a non-git segment -> ask" ask \
+  "$(decision_for "$(bash_payload "cd . && rm -rf junk && $OVR git restore file.txt")" "$WORK")"
+
+#     A `cd` is now recognized-safe, so it reaches the ordinary all-segments
+#     auto-approve too, not only the break-glass — state that as a fixture
+#     rather than leaving it as a side effect nobody asserted. The sibling
+#     worktree is the control: it stays `nongit`, so the command still defers.
+check "cd . ahead of a read-only git segment -> allow" allow \
+  "$(decision_for "$(bash_payload 'cd . && git status')" "$WORK")"
+check "cd into a sibling worktree ahead of a read-only segment -> none" none \
+  "$(decision_for "$(bash_payload "cd $WT && git status")" "$WORK")"
+
 # 27. Push overlap. A `strict` auto-approve says the push is in bounds; it says
 #     nothing about the branch still being built on what it thinks it is. When
 #     the base has moved into the same LINES this branch edits, the auto-approve
