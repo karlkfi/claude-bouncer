@@ -78,6 +78,41 @@ net-neutral, leaving the operator "no worse off than without the hook." True —
 but in a pre-approving mode, *without the hook* means the command runs. Defer is
 neutral, not safe, and it is safe only where the fallback has teeth.
 
+## `dontAsk` blocks an `ask` without swallowing its reason
+
+Q84 asked whether a supervising posture had to route around `dontAsk`, on the
+reading that an `ask` there strands the agent behind a prompt nobody can answer.
+Six cells at CLI **2.1.261**, same probe as the matrix (`touch sentinel.txt`),
+nothing answering any prompt:
+
+| Cell | Ran? | What reached the agent |
+|---|---|---|
+| `manual` × defer | no | Claude Code's own message |
+| `dontAsk` × defer | no | Claude Code's own *don't ask mode* message |
+| `auto` × defer | **yes** | — |
+| `dontAsk` × `allow` | **yes** | — |
+| `dontAsk` × `ask` | no | the hook's `permissionDecisionReason`, verbatim |
+| `dontAsk` × `deny` | no | the hook's `permissionDecisionReason`, verbatim |
+
+The first four reproduce the matrix, which is what makes the last two worth
+reading — a harness that cannot show a command running cannot show one blocked.
+In `dontAsk` an unanswered `ask` blocks and feeds its reason back exactly as a
+`deny` does, so there is nothing to route around: the posture ships with no
+`dontAsk` case, and `bypassPermissions` keeps the forced deny it already had.
+
+**The generic message that loses the hook's reason belongs to defer, not to
+`ask`.** That is the distinction to hold onto, because the two are easy to
+attribute to each other from a transcript: both block, and only one of them is
+the hook's own doing.
+
+These were headless `-p` runs, so nothing could answer a prompt in any mode.
+They establish that the reason survives — not whether an interactive `dontAsk`
+session renders a prompt at all.
+
+Q84 also answers the re-measure trigger it fired. It adds no new mode
+condition: `decide()` reads the `bypassPermissions` term it already had, and the
+posture reads underneath it. So the matrix carries this change without moving.
+
 ## Do not assume the operator configured an allowlist
 
 The plugin's rationale in [`design.md`](design.md) starts from an operator who

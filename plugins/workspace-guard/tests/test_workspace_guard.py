@@ -6143,6 +6143,34 @@ class SiblingCheckoutTests(unittest.TestCase):
         out = self._bash(f"rm -f {sh(os.path.join(self.main, 'root.txt'))}")
         self.assertEqual(self._decision(out), "deny")
 
+    # --- Q84: the same writes under a supervising posture -------------------
+
+    def test_bash_redirect_into_primary_asks_under_supervise(self):
+        target = os.path.join(self.main, "root.txt")
+        out = self._bash(f"cat /dev/null > {sh(target)}",
+                         env_extra={"WORKSPACE_GUARD_POSTURE": "supervise"})
+        self.assertEqual(self._decision(out), "ask")
+        r = self._reason(out)
+        # The fix text is what makes the prompt worth answering, so it has to
+        # survive the softening rather than be replaced by it.
+        self.assertIn("Sibling-checkout", r)
+        self.assertIn(os.path.join(self.wt, "root.txt"), r)
+        self.assertIn("normally denies", r)
+
+    def test_bash_rm_in_sibling_holds_when_its_own_knob_says_deny(self):
+        out = self._bash(
+            f"rm -f {sh(os.path.join(self.main, 'root.txt'))}",
+            env_extra={"WORKSPACE_GUARD_POSTURE": "supervise",
+                       "WORKSPACE_GUARD_SIBLING_ACTION": "deny"})
+        self.assertEqual(self._decision(out), "deny")
+
+    def test_bash_sibling_write_denies_with_no_posture_set(self):
+        # The default this posture is opt-in against, pinned beside it.
+        out = self._bash(f"cp root.txt {sh(os.path.join(self.other, 'c.txt'))}",
+                         env_extra={"WORKSPACE_GUARD_POSTURE": None,
+                                    "WORKSPACE_GUARD_SIBLING_ACTION": None})
+        self.assertEqual(self._decision(out), "deny")
+
     # --- Bash: an operand that IS a link is judged by the link ---------------
     # `rm link` unlinks the link and never writes the target, so resolving the
     # operand through to a sibling checkout denied a removal that lands nothing
@@ -11481,6 +11509,269 @@ class SessionGrantTests(unittest.TestCase):
         self.assertEqual("ask", self.run_hook("cat %s" % shlex.quote(inside),
                                               enabled=False))
 
+
+
+class SupervisePostureTests(unittest.TestCase):
+    """Q84: `supervise` turns the deny classes back into prompts.
+
+    The posture exists so an operator can watch the cross-checkout denies land
+    as prompts before deciding to keep them, and it is an opt-in: `enforce` is
+    the default and every unrecognised value falls back to it. What it can and
+    cannot reach is the interesting part, so these cover the four categories it
+    does reach, the one (`unparsed`) it deliberately does not, and the two
+    things that outrank it -- `bypassPermissions` and a stricter sibling
+    category in the same command.
+    """
+
+    ENV_VARS = ('WORKSPACE_GUARD_POSTURE', 'WORKSPACE_GUARD_TMP_ACTION',
+                'WORKSPACE_GUARD_SIBLING_ACTION', 'WORKSPACE_GUARD_KILL_ACTION',
+                'WORKSPACE_GUARD_CROSSSESSION_ACTION')
+
+    SIBLING = ("/repo/main/x", "sibling",
+               {"root": "/repo/main", "branch": "main",
+                "corrected": "/repo/wt/x"})
+    KILL = ("pkill", "kill",
+            {"cmd": "pkill", "pattern": "ginkgo", "root": "/repo/wt"})
+    CROSS = ("/tmp/claude-501/slug/other/scratchpad/x", "crosssession", None)
+    EXPAND = ("$f", "expand", None)
+    OUTSIDE = ("/q84-fake-target", "outside", None)
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = os.path.realpath(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _env(self, **kw):
+        """Every knob explicitly empty, then the case's own values on top. An
+        empty string reads as unset to all of them, so this pins the case
+        against whatever the developer running the suite has exported."""
+        env = {k: '' for k in self.ENV_VARS}
+        env.update(kw)
+        return mock.patch.dict(os.environ, env)
+
+    def _decide(self, offenders, bypass=False, **ctx_kw):
+        fields = dict(
+            proj=self.workspace, cwd=self.workspace, session_id="",
+            session_tmp_root=os.path.join(self.workspace, "no-such-tmp-root"),
+            session_proj_dir=None, tmp_roots=(), tmp_allow=(),
+            tmp_action="deny", read_prefixes=(), session_wt=None,
+            override=None, kill_anchor=None)
+        fields.update(ctx_kw)
+        return guard.decide(offenders, guard.Ctx(**fields), bypass)
+
+    def _supervised(self, offenders, **ctx_kw):
+        """`decide` with every cross category supervised."""
+        actions = {c: "ask" for c in guard.CROSS_ACTION_CATS}
+        actions.update(ctx_kw.pop("actions", {}))
+        return self._decide(offenders, cat_actions=actions, **ctx_kw)
+
+    # --- reading the knobs --------------------------------------------------
+
+    def test_posture_defaults_to_enforce(self):
+        with self._env():
+            self.assertEqual(guard.guard_posture(), "enforce")
+            for cat in guard.SUPERVISABLE_CATS:
+                self.assertEqual(guard.category_action(cat), "deny", cat)
+
+    def test_unknown_posture_falls_back_to_enforce(self):
+        # Not " SUPERVISE " -- that one is recognised, and the test below
+        # pins the trim-and-fold that recognises it.
+        for bogus in ("supervize", "supervise!", "1", "on", "ask"):
+            with self._env(WORKSPACE_GUARD_POSTURE=bogus):
+                self.assertEqual(guard.guard_posture(), "enforce", bogus)
+
+    def test_supervise_is_the_all_categories_spelling(self):
+        with self._env(WORKSPACE_GUARD_POSTURE="supervise"):
+            self.assertEqual(guard.guard_posture(), "supervise")
+            for cat in guard.SUPERVISABLE_CATS:
+                self.assertEqual(guard.category_action(cat), "ask", cat)
+
+    def test_posture_value_is_trimmed_and_case_folded(self):
+        with self._env(WORKSPACE_GUARD_POSTURE="  SuperVise \n"):
+            self.assertEqual(guard.guard_posture(), "supervise")
+
+    def test_category_knob_overrides_the_posture(self):
+        # Supervise everything except the kill: the more specific signal wins,
+        # which is what makes the posture usable one category at a time.
+        with self._env(WORKSPACE_GUARD_POSTURE="supervise",
+                       WORKSPACE_GUARD_KILL_ACTION="deny"):
+            self.assertEqual(guard.category_action("kill"), "deny")
+            self.assertEqual(guard.category_action("sibling"), "ask")
+            self.assertEqual(guard.category_action("hosttemp"), "ask")
+
+    def test_category_knob_softens_without_any_posture(self):
+        with self._env(WORKSPACE_GUARD_SIBLING_ACTION="ask"):
+            self.assertEqual(guard.category_action("sibling"), "ask")
+            self.assertEqual(guard.category_action("kill"), "deny")
+
+    def test_unknown_category_value_falls_back_to_deny(self):
+        # Under `supervise` too: a typo fails toward the boundary, not away
+        # from it, so a misspelled knob cannot silently widen the guard.
+        for env in ({}, {"WORKSPACE_GUARD_POSTURE": "supervise"}):
+            with self._env(WORKSPACE_GUARD_SIBLING_ACTION="asky", **env):
+                self.assertEqual(guard.category_action("sibling"), "deny", env)
+
+    def test_tmp_action_contract_is_unchanged(self):
+        # The knob Q84 generalized shipped before it. Unset, `ask` and a bogus
+        # value all still mean what they meant with no posture in the picture.
+        with self._env():
+            self.assertEqual(guard.host_temp_action(), "deny")
+        with self._env(WORKSPACE_GUARD_TMP_ACTION="ask"):
+            self.assertEqual(guard.host_temp_action(), "ask")
+        with self._env(WORKSPACE_GUARD_TMP_ACTION="bogus"):
+            self.assertEqual(guard.host_temp_action(), "deny")
+
+    def test_every_supervisable_category_has_an_env_name(self):
+        self.assertEqual(set(guard.CATEGORY_ENV), set(guard.SUPERVISABLE_CATS))
+        self.assertEqual(len(set(guard.CATEGORY_ENV.values())),
+                         len(guard.SUPERVISABLE_CATS))
+
+    def test_cross_action_cats_is_supervisable_minus_hosttemp(self):
+        # hosttemp rides in `tmp_action`; the other three ride in `cat_actions`.
+        # One category, one source -- this pins that split.
+        self.assertEqual(set(guard.CROSS_ACTION_CATS),
+                         set(guard.SUPERVISABLE_CATS) - {"hosttemp"})
+
+    # --- what decide() does with them ---------------------------------------
+
+    def test_cross_categories_deny_when_unsupervised(self):
+        for offender in (self.SIBLING, self.KILL, self.CROSS):
+            decision, _ = self._decide([offender])
+            self.assertEqual(decision, "deny", offender[1])
+
+    def test_cross_categories_ask_when_supervised(self):
+        for offender in (self.SIBLING, self.KILL, self.CROSS):
+            decision, _ = self._supervised([offender])
+            self.assertEqual(decision, "ask", offender[1])
+
+    def test_absent_cat_actions_denies(self):
+        # A Ctx built without the field -- an older caller, or a test -- gets
+        # the posture the guard shipped with rather than the loosest one.
+        decision, _ = self._decide([self.SIBLING], cat_actions=None)
+        self.assertEqual(decision, "deny")
+
+    def test_strictest_category_governs_a_mixed_command(self):
+        # One string, two classes, one still enforced: the deny stands. The
+        # inverse -- softening `sibling` and having the kill ride along on it --
+        # is the regression this exists to catch.
+        decision, _ = self._supervised(
+            [self.SIBLING, self.KILL], actions={"kill": "deny"})
+        self.assertEqual(decision, "deny")
+        decision, _ = self._supervised(
+            [self.SIBLING, self.KILL], actions={"sibling": "deny"})
+        self.assertEqual(decision, "deny")
+
+    def test_bypass_permissions_outranks_the_posture(self):
+        # `bypassPermissions` has nobody to answer a prompt, so the posture
+        # reads UNDER that term and never over it.
+        for offender in (self.SIBLING, self.KILL, self.CROSS):
+            decision, _ = self._supervised([offender], bypass=True)
+            self.assertEqual(decision, "deny", offender[1])
+
+    def test_unparsed_is_not_supervisable(self):
+        # `expand`/`untracked` deny because the person at the prompt sees the
+        # same unexpanded token the hook did. Supervising the classes beside it
+        # must not drag it along.
+        decision, _ = self._supervised([self.EXPAND])
+        self.assertEqual(decision, "deny")
+        decision, _ = self._supervised([self.SIBLING, self.EXPAND])
+        self.assertEqual(decision, "deny")
+
+    def test_host_temp_still_reads_its_own_field(self):
+        decision, _ = self._supervised([("/tmp/x", "hosttemp", None)],
+                                       tmp_action="deny")
+        self.assertEqual(decision, "deny")
+        decision, _ = self._decide([("/tmp/x", "hosttemp", None)],
+                                   tmp_action="ask")
+        self.assertEqual(decision, "ask")
+
+    def test_supervise_never_turns_a_block_into_an_allow(self):
+        # The posture's safety claim: it moves a verdict between the two
+        # blocking ones and never off them. Paired against the unsupervised
+        # verdict so the assertion can actually fail.
+        for offender in (self.SIBLING, self.KILL, self.CROSS):
+            enforced, _ = self._decide([offender])
+            supervised, _ = self._supervised([offender])
+            self.assertEqual((enforced, supervised), ("deny", "ask"),
+                             offender[1])
+
+    # --- the softened verdict says so ---------------------------------------
+
+    def test_softened_ask_names_the_knob_that_softened_it(self):
+        _, reason = self._supervised([self.SIBLING])
+        self.assertIn("WORKSPACE_GUARD_POSTURE", reason)
+        self.assertIn("normally denies", reason)
+        # The categorized body and its fix survive ahead of the note.
+        self.assertIn("Sibling-checkout", reason)
+
+    def test_unsoftened_verdicts_do_not_claim_supervision(self):
+        # An `outside` path always asked, an overridden cross write always
+        # asked, and a plain deny never asked. None of the three was softened
+        # by anything, so none may say it was.
+        _, plain_ask = self._decide([self.OUTSIDE])
+        _, overridden = self._decide([self.SIBLING], override="deliberate")
+        _, denied = self._decide([self.SIBLING])
+        for reason in (plain_ask, overridden, denied):
+            self.assertNotIn("normally denies", reason)
+
+    def test_softened_reason_is_attributed_once(self):
+        _, reason = self._supervised([self.KILL])
+        self.assertTrue(reason.startswith(guard.ATTRIBUTION), reason)
+        self.assertEqual(reason.count(guard.ATTRIBUTION), 1)
+
+    # --- end to end: the env var reaches the emitted decision ---------------
+
+    def _hook(self, cmd, **kw):
+        return run_hook(cmd, self.workspace, project_dir=self.workspace, **kw)
+
+    def _e2e(self, cmd, expected, **kw):
+        out = self._hook(cmd, **kw)
+        self.assertIsNotNone(out, f"expected a decision, got defer for {cmd!r}")
+        got = out["hookSpecificOutput"]["permissionDecision"]
+        self.assertEqual(got, expected, f"{cmd!r} under {kw!r}")
+        return out["hookSpecificOutput"]["permissionDecisionReason"]
+
+    def test_e2e_kill_follows_the_posture(self):
+        self._e2e("pkill -f ginkgo", "deny",
+                  env_extra={"WORKSPACE_GUARD_POSTURE": None})
+        reason = self._e2e("pkill -f ginkgo", "ask",
+                           env_extra={"WORKSPACE_GUARD_POSTURE": "supervise"})
+        self.assertIn("normally denies", reason)
+
+    def test_e2e_category_knob_holds_a_category_back(self):
+        self._e2e("pkill -f ginkgo", "deny",
+                  env_extra={"WORKSPACE_GUARD_POSTURE": "supervise",
+                             "WORKSPACE_GUARD_KILL_ACTION": "deny"})
+
+    def test_e2e_category_knob_works_without_the_posture(self):
+        self._e2e("pkill -f ginkgo", "ask",
+                  env_extra={"WORKSPACE_GUARD_POSTURE": None,
+                             "WORKSPACE_GUARD_KILL_ACTION": "ask"})
+
+    def test_e2e_host_temp_follows_the_posture(self):
+        self._e2e("cat /tmp/q84-hosttemp-x", "deny",
+                  env_extra={"WORKSPACE_GUARD_POSTURE": None,
+                             "WORKSPACE_GUARD_TMP_ACTION": None})
+        self._e2e("cat /tmp/q84-hosttemp-x", "ask",
+                  env_extra={"WORKSPACE_GUARD_POSTURE": "supervise",
+                             "WORKSPACE_GUARD_TMP_ACTION": None})
+
+    def test_e2e_bypass_permissions_still_denies(self):
+        self._e2e("pkill -f ginkgo", "deny",
+                  permission_mode="bypassPermissions",
+                  env_extra={"WORKSPACE_GUARD_POSTURE": "supervise"})
+
+    def test_e2e_dont_ask_is_not_special_cased(self):
+        # Measured at CLI 2.1.261: in `dontAsk` an unanswered `ask` blocks AND
+        # delivers permissionDecisionReason to the agent, exactly as `deny`
+        # does -- so there is nothing for the posture to route around here.
+        # See ../docs/permission-modes.md.
+        reason = self._e2e("pkill -f ginkgo", "ask",
+                           permission_mode="dontAsk",
+                           env_extra={"WORKSPACE_GUARD_POSTURE": "supervise"})
+        self.assertIn("normally denies", reason)
 
 if __name__ == "__main__":
     unittest.main()

@@ -622,12 +622,63 @@ def is_host_temp(rp, roots):
     return any(path_at_or_under(rp, r) for r in roots)
 
 
+# The deny classes an operator can watch as prompts, and the environment
+# variable each one reads. `hosttemp` is here under the name it already shipped
+# with (Q84 generalized the knob rather than renaming it); `unparsed` is absent
+# on purpose, for the reason decide() gives at the `unparsed_hit` line.
+SUPERVISABLE_CATS = ('hosttemp', 'sibling', 'kill', 'crosssession')
+# The subset `cat_actions` carries and `decide()`'s cross term consults.
+CROSS_ACTION_CATS = ('sibling', 'kill', 'crosssession')
+CATEGORY_ENV = {
+    'hosttemp': 'WORKSPACE_GUARD_TMP_ACTION',
+    'sibling': 'WORKSPACE_GUARD_SIBLING_ACTION',
+    'kill': 'WORKSPACE_GUARD_KILL_ACTION',
+    'crosssession': 'WORKSPACE_GUARD_CROSSSESSION_ACTION',
+}
+
+
+def guard_posture():
+    """`enforce` (default) or `supervise`, from ``WORKSPACE_GUARD_POSTURE``.
+    Any unrecognised value falls back to the secure default (`enforce`).
+
+    `supervise` is the all-categories spelling of the per-category knobs: it
+    moves their default from `deny` to `ask` so an operator can watch the deny
+    classes land as prompts before deciding whether to keep them. It cannot let
+    a blocked command run -- no permission mode auto-approves an `ask`, which
+    ../docs/permission-modes.md re-confirms at 2.1.261 -- so it changes which
+    blocking verdict is used and who can lift it, never whether the boundary
+    holds."""
+    v = (os.environ.get('WORKSPACE_GUARD_POSTURE') or 'enforce').strip().lower()
+    return v if v in ('enforce', 'supervise') else 'enforce'
+
+
+def category_action(cat):
+    """`deny` or `ask` for one supervisable category.
+
+    Its own ``WORKSPACE_GUARD_<CATEGORY>_ACTION`` wins; unset falls through to
+    the posture. Anything unrecognised falls back to `deny`, so a typo under
+    `supervise` fails toward the boundary rather than away from it -- and so
+    that the pre-Q84 contract of ``WORKSPACE_GUARD_TMP_ACTION`` is unchanged."""
+    raw = (os.environ.get(CATEGORY_ENV[cat]) or '').strip().lower()
+    if not raw:
+        return 'ask' if guard_posture() == 'supervise' else 'deny'
+    return raw if raw in ('deny', 'ask') else 'deny'
+
+
+def category_actions():
+    """The three cross-checkout categories' actions, resolved once per
+    invocation. `hosttemp` is absent because it already rides in ``tmp_action``,
+    the Ctx field it had before this knob was generalized -- one category, one
+    source, so the two cannot be set in disagreement."""
+    return {c: category_action(c) for c in CROSS_ACTION_CATS}
+
+
 def host_temp_action():
     """`deny` (default) or `ask` for host-temp paths, from
-    ``WORKSPACE_GUARD_TMP_ACTION``. Any unrecognised value falls back to the
-    secure default (`deny`)."""
-    v = (os.environ.get('WORKSPACE_GUARD_TMP_ACTION') or 'deny').strip().lower()
-    return v if v in ('deny', 'ask') else 'deny'
+    ``WORKSPACE_GUARD_TMP_ACTION``, falling back to ``WORKSPACE_GUARD_POSTURE``
+    when that is unset. Any unrecognised value falls back to the secure default
+    (`deny`)."""
+    return category_action('hosttemp')
 
 
 def host_temp_allowlist():
@@ -2962,12 +3013,13 @@ def grant_shapes(offenders, cwd):
 Ctx = collections.namedtuple('Ctx', [
     'proj', 'cwd', 'session_id', 'session_tmp_root', 'session_proj_dir',
     'tmp_roots', 'tmp_allow', 'tmp_action', 'read_prefixes', 'session_wt',
-    'override', 'kill_anchor', 'worktree_grants', 'prefixable'],
+    'override', 'kill_anchor', 'worktree_grants', 'prefixable',
+    'cat_actions'],
     # Absent means no grants and no command string, which is the safe reading
     # of each: a caller that has not loaded grants gets today's boundary rather
     # than a wider one, and one that supplied no command gets the deny wording
     # for a caller that has no command to put a prefix on.
-    defaults=(frozenset(), False))
+    defaults=(frozenset(), False, None))
 
 
 def build_context(data, cmd=None):
@@ -2982,6 +3034,9 @@ def build_context(data, cmd=None):
         sibling-session read exemption (#61) and for naming this session's
         ``scratchpad/`` in the host-temp deny (Q56); None when not locatable.
       * ``tmp_roots`` / ``tmp_allow`` / ``tmp_action`` — host-temp config.
+      * ``cat_actions`` — `deny`/`ask` per cross-checkout category (Q84), from
+        each one's own env var over ``WORKSPACE_GUARD_POSTURE``. Absent means
+        every category denies, which is the posture the guard shipped with.
       * ``read_prefixes`` — prefixes always allowed for READS (never writes).
       * ``session_wt`` — the session's own checkout, for the sibling-checkout
         deny; a no-op unless the session is itself a linked worktree.
@@ -3012,7 +3067,8 @@ def build_context(data, cmd=None):
         override=command_override(cmd) or env_override(),
         prefixable=cmd is not None,
         kill_anchor=workspace_anchor_re(proj),
-        worktree_grants=granted_worktrees(session_id))
+        worktree_grants=granted_worktrees(session_id),
+        cat_actions=category_actions())
 
 
 def path_is_outside(rp, proj):
@@ -3212,7 +3268,7 @@ def decide(offenders, ctx, bypass):
     ``bypassPermissions`` (no human to answer an ask), when a host-temp path is
     hit and the configured action is ``deny``, when a sibling-checkout write, a
     cross-session scratch write, or an unanchored process kill is hit without an
-    override, or when ANY
+    override and its own configured action is ``deny`` (Q84), or when ANY
     offender is one the hook merely failed to parse (``UNPARSED_CATS``);
     otherwise ``ask``.
     Both decisions block equally — this is a recoverability/steering choice, not
@@ -3220,8 +3276,13 @@ def decide(offenders, ctx, bypass):
     neither the prompt nor the refusal text names the plugin on its own."""
     cats = {cat for _, cat, _ in offenders}
     host_temp_hit = 'hosttemp' in cats
-    cross_hit = bool(cats & {'sibling', 'kill', 'crosssession'})
-    cross_deny = cross_hit and ctx.override is None
+    cross_cats = cats & set(CROSS_ACTION_CATS)
+    actions = ctx.cat_actions or {}
+    # The strictest category governs. A command hitting a supervised class and
+    # an enforced one still denies, so softening `sibling` cannot quietly
+    # soften the unanchored kill sharing the string with it.
+    cross_deny = (bool(cross_cats) and ctx.override is None
+                  and any(actions.get(c, 'deny') == 'deny' for c in cross_cats))
     # Any offender, not every. This read `cats <= UNPARSED_CATS` when the
     # unparsed deny arrived, on the reasoning that a command also naming a
     # genuinely outside path keeps the `ask` that path is owed. The ask is
@@ -3232,10 +3293,23 @@ def decide(offenders, ctx, bypass):
     #
     # It also made the rule non-monotonic: `cat $f` denied while
     # `cat $f /etc/hosts` asked, so adding an offender SOFTENED the verdict.
+    #
+    # Same reasoning keeps this term out of the supervising posture (Q84).
+    # The other classes deny because the fix is mechanical, and a posture lets
+    # an operator watch that judgement land as a prompt instead. Here there is
+    # no judgement to watch: the operator at the prompt sees the same
+    # unexpanded `$f` the hook did, so a prompt would carry nothing the hook
+    # did not already have.
     unparsed_hit = bool(cats & UNPARSED_CATS)
     deny_now = bypass or (host_temp_hit and ctx.tmp_action == 'deny') \
         or cross_deny or unparsed_hit
     decision = "deny" if deny_now else "ask"
+    # Visible when it acts, or the operator cannot tell a supervised deny from
+    # an `outside` path that always asked -- which is the whole point of the
+    # posture. Only on the classes it actually softened: `hosttemp` reached
+    # this shape first and its wording is left as it shipped.
+    softened = (decision == "ask" and bool(cross_cats)
+                and ctx.override is None)
     reason = build_reason(offenders,
                           build_scratch_hint(
                               ctx.proj, scratch_dir_name(),
@@ -3243,6 +3317,11 @@ def decide(offenders, ctx, bypass):
                                                  ctx.session_proj_dir)),
                           override=ctx.override,
                           prefixable=ctx.prefixable)
+    if softened:
+        reason += (" This normally denies; it is a prompt because "
+                   "WORKSPACE_GUARD_POSTURE or the category's own "
+                   "WORKSPACE_GUARD_*_ACTION is supervising. Unset it to "
+                   "restore the deny.")
     return decision, ATTRIBUTION + reason
 
 
