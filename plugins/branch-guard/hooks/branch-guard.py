@@ -20,10 +20,11 @@ force form has one more way to be in bounds: when every commit the ref move
 would orphan is a merge that `git merge-tree` reproduces from its parents, the
 branch holds nothing original to lose (`orphans_only_reproducible_merges`). This
 only ever relaxes a would-be `ask` into an `allow`, and only on proof from a
-local git query: a foreign repo (`git -C`), an unreachable git, or a branch that
-won't resolve all keep asking. The non-force spellings need no query, because
-git already enforces the same check (`-d` refuses unmerged work; `-m`/`-c`
-refuse an existing destination), so only `-D`/`-M`/`-C`/`-f` are probed.
+local git query: a working tree the hook can't name (a `--git-dir`, a `cd` it
+can't follow), an unreachable git, or a branch that won't resolve all keep
+asking. The non-force spellings need no query, because git already enforces the
+same check (`-d` refuses unmerged work; `-m`/`-c` refuse an existing
+destination), so only `-D`/`-M`/`-C`/`-f` are probed.
 
 A command is auto-approved only when EVERY segment in it is recognized-safe — a
 git/gh invocation classified `allow`, a read-only pager piped after one
@@ -164,9 +165,9 @@ GH_VALUE_OPTS = {'-R', '--repo'}
 GIT_ESCAPE_HATCHES = {'-c', '--config-env'}
 
 # git global options that point the command at a DIFFERENT repository than the
-# session's. The ref probes below run against the session cwd, so their answers
-# would be about the wrong repo — their presence disables probing and the gated
-# `git branch` forms keep their unprobed `ask`.
+# one its cwd is in. `is_overridable` reads this: the break-glass is scoped to
+# loss in the checkout the session owns. Aiming the probes is `git_cwd`'s
+# question — a literal `-C` names a tree they can run in.
 REPO_REDIRECT_OPTS = ('-C', '--git-dir', '--work-tree')
 
 # Refs whose reachability makes a branch tip RECOVERABLE: any remote-tracking
@@ -308,6 +309,12 @@ FILTER_WRITE_OPT_RE = re.compile(r'^(-o|--output(=|$))')
 # redirect/substitution gating is what keeps even these safe (`echo x > f` and
 # `echo $(…)` both still defer).
 BENIGN_COMMANDS = frozenset({'echo', 'printf', 'true', 'false', ':'})
+
+# Characters that make a path token something only a shell can resolve — a
+# parameter or command expansion, or a glob. Quoting is deliberately not
+# consulted: `'$HOME'` is a literal path to bash and reads as non-literal here,
+# which costs a stood-down probe rather than a wrongly-aimed one.
+NON_LITERAL_PATH_CHARS = frozenset('$`*?[]{}')
 
 # Command substitutions treated as PURE for chain classification. A `$(…)` /
 # backtick substitution (even inside a quoted argument) normally downgrades a
@@ -1008,6 +1015,52 @@ def is_benign_segment(tokens):
     return prog in BENIGN_COMMANDS
 
 
+def is_literal_path(token):
+    """True if a path token resolves without running a shell — no expansion, no
+    substitution, no glob, no `~`."""
+    return bool(token) and not token.startswith('~') \
+        and not (set(token) & NON_LITERAL_PATH_CHARS)
+
+
+def resolve_path(cwd, path):
+    """`path` as an absolute realpath, or None when it is relative and the
+    directory it would resolve against is itself unknown. `realpath` is what
+    makes two spellings of one worktree compare equal."""
+    if os.path.isabs(path):
+        return os.path.realpath(path)
+    if cwd is None:
+        return None
+    return os.path.realpath(os.path.join(cwd, path))
+
+
+def cd_destination(tokens, cwd):
+    """Where a `cd` segment leaves the shell, as (is_cd, directory):
+
+      (True, path)  — a `cd` with a single literal operand
+      (True, None)  — a `cd` the hook can't follow: no operand (`$HOME`),
+                      `cd -` (`$OLDPWD`), or a `$VAR`/`$(…)`/glob/`~` target
+      (False, None) — not a `cd` at all
+
+    The two True cases are what separate re-aiming a probe from standing it
+    down; guessing at the third would answer about the tree the command has
+    already left."""
+    i = 0
+    while i < len(tokens) and is_assignment(tokens[i]):
+        i += 1
+    if i >= len(tokens) or tokens[i].rsplit('/', 1)[-1] != 'cd':
+        return (False, None)
+    # An option is skipped over (`cd -P dir`, `cd -- dir`); the first operand
+    # decides. `cd -` and a bare `cd` have no operand at all, so they fall out
+    # of the loop to the untrackable answer below.
+    for t in tokens[i + 1:]:
+        if t.startswith('-'):
+            continue
+        if not is_literal_path(t):
+            return (True, None)
+        return (True, resolve_path(cwd, t))
+    return (True, None)
+
+
 def ref_to_branch(ref, current):
     """Map one side of a push refspec to (branch_name_or_None, is_wildcard,
     non_branch_ref_or_None). `HEAD` -> current branch; `refs/heads/x` -> `x`; an
@@ -1360,10 +1413,10 @@ def overwrite_verdict(cwd, name, what, probe):
     when everything the move would orphan is a merge git re-runs. Everything
     else — including every case the probes can't answer — keeps the `ask`."""
     if not probe:
-        return ('ask', f"{what} can move an existing branch pointer, and a "
-                       f"`git -C`/`--git-dir` option points at another "
-                       f"repository, so this guard can't check what "
-                       f"'{name}' currently points at")
+        return ('ask', f"{what} can move an existing branch pointer, and this "
+                       f"guard can't tell which working tree the command runs "
+                       f"in, so it can't check what '{name}' currently "
+                       f"points at")
     exists = branch_exists(cwd, name)
     if exists is False:
         return ('allow', None)        # creates a new ref — nothing to overwrite
@@ -1473,10 +1526,10 @@ def classify_branch(flags, short, pos, current, cwd, probe):
         if not pos:
             return ('ask', "`git branch --delete --force` names no branch")
         if not probe:
-            return ('ask', "`git branch -D` force-deletes a branch, and a "
-                           "`git -C`/`--git-dir` option points at another "
-                           "repository, so this guard can't check whether "
-                           "the commits survive elsewhere")
+            return ('ask', "`git branch -D` force-deletes a branch, and this "
+                           "guard can't tell which working tree the command "
+                           "runs in, so it can't check whether the commits "
+                           "survive elsewhere")
         # `-r` deletes a remote-tracking ref (`git branch -rD origin/x`). Such a
         # target sits under refs/remotes, so it satisfies the reachability check
         # by containing itself — which is the right answer for the right reason:
@@ -1564,9 +1617,9 @@ def classify_reset(branch, cwd, probe):
     if is_protected(branch):
         return ('ask-shared', f"`git reset --hard` on protected branch '{branch}'")
     if not probe:
-        return ('ask', "`git reset --hard` discards changes, and a "
-                       "`git -C`/`--git-dir` option points at another "
-                       "repository, so this guard can't check that one")
+        return ('ask', "`git reset --hard` discards changes, and this guard "
+                       "can't tell which working tree the command runs in, "
+                       "so it can't check that one")
     if worktree_is_clean(cwd) is not True:
         return ('ask', "`git reset --hard` discards uncommitted changes to "
                        "tracked files")
@@ -1617,8 +1670,9 @@ def classify_git(sub, args, branch, policy, cwd, probe, mode=''):
         # session that has allowlisted `git push`.
         #
         # `probe` is required for the same reason the `git branch` probes need
-        # it: these read the SESSION cwd, so a `git -C` pointing elsewhere would
-        # measure the wrong repository.
+        # it: these read whichever tree the caller resolved for this segment,
+        # so a target it could not resolve has to stand them down rather than
+        # measure the tree the push is not coming from.
         if decision == 'allow' and probe and not skips_base(flags, short):
             base, paths = push_overlap(cwd, branch)
             if paths:
@@ -1841,11 +1895,41 @@ def classify_gh(sub, args):
 
 def targets_other_repo(globals_):
     """True if a git invocation's global options point it at a repository other
-    than the session's (`-C path`, `--git-dir=…`, `--work-tree=…`, in attached
-    or separate-token form). The ref probes run against the session cwd, so
-    their answers wouldn't be about the repo the command acts on."""
+    than the one its cwd is in (`-C path`, `--git-dir=…`, `--work-tree=…`, in
+    attached or separate-token form). `is_overridable` is what reads this now:
+    the break-glass covers loss in the checkout the session owns, and a redirect
+    puts the loss somewhere else whether or not the hook can name where.
+
+    Aiming the ref probes is a different question, answered by `git_cwd` —
+    a literal `-C` names a directory the probes can run in, so it no longer
+    costs the answer."""
     return any(g == o or g.startswith(o + '=')
                for g in globals_ for o in REPO_REDIRECT_OPTS)
+
+
+def git_cwd(cwd, globals_):
+    """The directory a git invocation runs in: `cwd` walked through every `-C`
+    in its global options, or None when the hook can't follow it.
+
+    `-C` is git's own `chdir` and is cumulative, so each hop resolves against
+    the last. `--git-dir`/`--work-tree` name a repository without naming a
+    working directory to probe from, and a non-literal `-C` names one only the
+    shell can compute — both give up, and the caller stands the probes down
+    rather than measuring the tree the command is not acting on."""
+    i = 0
+    while i < len(globals_):
+        g = globals_[i]
+        if g == '-C':
+            nxt = globals_[i + 1] if i + 1 < len(globals_) else None
+            if nxt is None or not is_literal_path(nxt):
+                return None
+            cwd = resolve_path(cwd, nxt)
+            i += 2
+            continue
+        if targets_other_repo([g]):
+            return None
+        i += 2 if g in GIT_VALUE_OPTS else 1
+    return cwd
 
 
 def override_reason(segments):
@@ -1910,7 +1994,7 @@ def is_overridable(inv, verdict, writes):
             and inv['sub'] in OVERRIDABLE_GIT)
 
 
-def classify_segment(inv, branch, policy, cwd, mode=''):
+def classify_segment(inv, branch, policy, cwd, probe, mode=''):
     """Verdict ('nongit' | 'allow' | 'ask' | 'ask-shared' | 'deny-rebase' |
     'deny-unreachable' | 'defer', reason) for one segment. 'nongit' marks a
     segment that isn't a git/gh invocation (so the whole command can't be
@@ -1920,7 +2004,11 @@ def classify_segment(inv, branch, policy, cwd, mode=''):
     check for itself — 'deny-unreachable' for a reset onto a tip nothing else
     reaches, 'deny-rebase' for a push onto a base that has moved into this
     branch's own lines. The break-glass still lifts both, so they travel with
-    the plain `ask` everywhere else."""
+    the plain `ask` everywhere else.
+
+    `cwd` and `probe` are the caller's answer to *which tree does this segment
+    act on* — see `git_cwd` and `cd_destination`. `probe` false means the hook
+    could not name that tree, so every gated form keeps its unprobed `ask`."""
     if inv is None:
         return ('nongit', None)
     if inv['prog'] == 'gh':
@@ -1928,8 +2016,7 @@ def classify_segment(inv, branch, policy, cwd, mode=''):
     if inv['sub'] is None:
         return ('defer', None)            # bare `git`
     verdict, reason = classify_git(inv['sub'], inv['args'], branch, policy,
-                                   cwd, not targets_other_repo(inv['globals']),
-                                   mode)
+                                   cwd, probe, mode)
     # An inline-config escape hatch blocks auto-allow, but must not weaken a
     # protective `ask` (e.g. `git -c k=v commit` on main still asks).
     if verdict == 'allow' and (set(inv['globals']) & GIT_ESCAPE_HATCHES):
@@ -1961,6 +2048,16 @@ def current_branch(cwd):
     if r is None or r.returncode != 0:
         return None
     return r.stdout.strip() or None
+
+
+def branch_in(cwd, cache):
+    """`current_branch` for one directory, memoized across a command's segments.
+    A `cd` or a `-C` puts segments in different trees, so the branch is resolved
+    per tree — and a command that moved nowhere still costs exactly the one
+    probe it always did."""
+    if cwd not in cache:
+        cache[cwd] = current_branch(cwd)
+    return cache[cwd]
 
 
 def branch_exists(cwd, name):
@@ -2240,8 +2337,15 @@ def main():
 
         policy = push_policy()
         cwd = data.get('cwd') or os.getcwd()
-        branch = current_branch(cwd)
-        verdicts = []
+        # The working directory is a per-segment fact, not a per-command one: a
+        # literal `cd` moves it for everything after it, and a literal `git -C`
+        # moves it for one invocation. Reading it once answered about the tree
+        # the command had already left — a deny for an overlap belonging to the
+        # session's branch rather than the pushed one, and an allow for a
+        # `git -C` push that really did overlap. Where the target is one the
+        # hook can't resolve, `probe` goes false and the probes stand down.
+        seg_cwd = cwd
+        branches, seen, verdicts = {}, set(), []
         for (seg, writes), inv in zip(segments, invs):
             if inv is None:
                 # A non-git segment rides along only if it's a pure read-only
@@ -2259,9 +2363,16 @@ def main():
                     verdicts.append(('benign', None, False))
                 else:
                     verdicts.append(('nongit', None, False))
+                is_cd, dest = cd_destination(seg, seg_cwd)
+                if is_cd:
+                    seg_cwd = dest
             else:
-                verdict, reason = classify_segment(inv, branch, policy, cwd,
-                                                   mode)
+                inv_cwd = git_cwd(seg_cwd, inv['globals'])
+                seg_branch = branch_in(inv_cwd or cwd, branches)
+                seen.add(seg_branch)
+                verdict, reason = classify_segment(
+                    inv, seg_branch, policy, inv_cwd or cwd,
+                    inv_cwd is not None, mode)
                 # An output redirect to a file is a write side-effect the
                 # classifier can't see (`git log --format=… > f` writes
                 # possibly-attacker-influenced content). Downgrade a would-be
@@ -2324,6 +2435,11 @@ def main():
             # left untouched).
             if has_shell_substitution(tokens):
                 return
+            # Name the branch only where every git/gh segment agreed on one:
+            # after a `cd` or a `-C` the segments can sit in different trees,
+            # and naming the session's would be the same misreading the cwd
+            # tracking above exists to remove.
+            branch = seen.pop() if len(seen) == 1 else None
             emit('allow', (f"Safe git/gh operation on branch '{branch}' — auto-approved."
                            if branch else "Safe read-only git/gh operation — auto-approved."))
         return                                     # mixed / unknown -> defer

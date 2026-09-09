@@ -224,9 +224,10 @@ when the ref they overwrite is the one whose tip survives nowhere.
 
 The checks are local `git` queries and never touch the network. They can
 only ever turn a prompt into an approval, and only on a positive answer — if git
-can't be reached, the branch won't resolve, or a `git -C`/`--git-dir` option
-points the command at a different repository than the one the queries read, the
-command asks exactly as it did before.
+can't be reached, the branch won't resolve, or the hook can't tell which working
+tree the command runs in (a `--git-dir`/`--work-tree` option, a `cd` or a `-C`
+whose target only the shell can compute), the command asks exactly as it did
+before.
 
 One caveat worth knowing: "reachable from a remote-tracking branch" trusts your
 last `git fetch`. A stale `refs/remotes/origin/x` left behind after the branch
@@ -554,6 +555,14 @@ counted in that shared ancestor and can be compared at all. Hunks are read with
 six lines of each other meet and edits seven apart do not — sharing a *file* is
 not sharing an edit.
 
+It measures the tree the push runs from, which is not always the session's. A
+literal `cd` moves that tree for everything after it and a literal `git -C` for
+one command, so both are followed; a target only the shell can compute is not,
+and the check stands down rather than measuring a tree the push is not coming
+from. Getting this wrong went both ways — a rebase demanded for an overlap that
+belonged to another worktree's branch, and a `git -C` push waved through when it
+carried the overlap outright.
+
 The check runs only where a push would otherwise be auto-approved, so `protected`
 and `off` never reach it. Every probe fails silent: a detached HEAD, a shallow
 clone, an unresolvable base ref, a git too old for `merge-tree --write-tree`, or
@@ -791,7 +800,8 @@ update step and restart.
    tip proved unreachable that is also proved to orphan more than a
    reproducible merge, which denies; unknown or
    ambiguous forms defer. The branch is resolved with
-   `git symbolic-ref` (the session cwd for Bash, the file's own repo for edits).
+   `git symbolic-ref`, in the tree the segment acts on — for Bash the session
+   cwd, walked through a literal `cd` or `git -C`; for edits the file's own repo.
 5. **Combine** the segment verdicts: any `deny` → deny; else any `ask` → ask;
    else every segment must be
    recognized-safe → allow; else defer. A segment is recognized-safe when it's a
