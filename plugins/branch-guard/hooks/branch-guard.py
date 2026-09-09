@@ -308,7 +308,7 @@ FILTER_WRITE_OPT_RE = re.compile(r'^(-o|--output(=|$))')
 # that can write a file or run code on its own stays out, and the
 # redirect/substitution gating is what keeps even these safe (`echo x > f` and
 # `echo $(…)` both still defer).
-BENIGN_COMMANDS = frozenset({'echo', 'printf', 'true', 'false', ':'})
+BENIGN_COMMANDS = frozenset({'echo', 'printf', 'true', 'false', ':', 'pwd'})
 
 # Characters that make a path token something only a shell can resolve — a
 # parameter or command expansion, or a glob. Quoting is deliberately not
@@ -2066,6 +2066,35 @@ def branch_in(cwd, cache):
     return cache[cwd]
 
 
+def worktree_root(cwd):
+    """The absolute root of the worktree holding `cwd`, or None when that can't
+    be answered. `--show-toplevel` is the WORKTREE identity, which is the one
+    this guard's probes depend on: two worktrees of one repository share a
+    `--git-common-dir` and differ here, so the repository-level read would call
+    a sibling worktree the same tree and hand the break-glass to exactly the
+    case a probe aimed at the wrong tree. It is also absolute from a primary
+    checkout and from a linked worktree alike, unlike `--git-common-dir`, which
+    answers a bare `.git` from a primary checkout."""
+    r = run_git(cwd, 'rev-parse', '--show-toplevel')
+    if r is None or r.returncode != 0:
+        return None
+    root = r.stdout.strip()
+    return os.path.realpath(root) if root else None
+
+
+def same_worktree(here, there, cache):
+    """True when both directories sit in one worktree, memoized per directory
+    like `branch_in` and for the same reason. A `there` of None is False — that
+    is a `cd` target the hook could not place — and so is a root of None, so a
+    directory git cannot answer for fails toward the deny."""
+    if there is None:
+        return False
+    for d in (here, there):
+        if d not in cache:
+            cache[d] = worktree_root(d)
+    return cache[here] is not None and cache[here] == cache[there]
+
+
 def branch_exists(cwd, name):
     """True/False if local branch <name> does/doesn't exist; None when the query
     can't answer (git unavailable, not a repo, malformed ref name). Callers must
@@ -2351,25 +2380,38 @@ def main():
         # `git -C` push that really did overlap. Where the target is one the
         # hook can't resolve, `probe` goes false and the probes stand down.
         seg_cwd = cwd
-        branches, seen, verdicts = {}, set(), []
+        branches, roots, seen, verdicts = {}, {}, set(), []
         for (seg, writes), inv in zip(segments, invs):
             if inv is None:
+                is_cd, dest = cd_destination(seg, seg_cwd)
                 # A non-git segment rides along only if it's a pure read-only
-                # filter (`git log | head`) or a side-effect-free label/no-op
-                # (`echo "---"`). A segment that writes a file, or anything
-                # else, is `nongit` so the command can't be auto-approved.
+                # filter (`git log | head`), a side-effect-free label/no-op
+                # (`echo "---"`), or a `cd` that lands in the worktree the
+                # command is already judged against. A segment that writes a
+                # file, or anything else, is `nongit` so the command can't be
+                # auto-approved.
                 # `not any(invs)` above already guaranteed at least one git/gh
                 # segment, so a filter-/benign-only command (`head -5`,
                 # `echo hi`) defers rather than allows.
+                # The `cd` arm is the one that costs a probe, and it is what
+                # made the break-glass unreachable behind the `cd` most sessions
+                # lead with: `nongit` is outside the set `liftable` accepts, so
+                # `cd . && OVERRIDE=… git reset --hard` re-emitted the
+                # unprefixed denial minus its closing invitation. A `cd`
+                # elsewhere stays `nongit` — the override must not lift a
+                # verdict measured in a tree the command left.
                 if writes:
                     verdicts.append(('nongit', None, False))
+                elif is_cd:
+                    verdicts.append(
+                        ('benign' if same_worktree(cwd, dest, roots)
+                         else 'nongit', None, False))
                 elif is_safe_read_filter(seg):
                     verdicts.append(('filter', None, False))
                 elif is_benign_segment(seg):
                     verdicts.append(('benign', None, False))
                 else:
                     verdicts.append(('nongit', None, False))
-                is_cd, dest = cd_destination(seg, seg_cwd)
                 if is_cd:
                     seg_cwd = dest
             else:

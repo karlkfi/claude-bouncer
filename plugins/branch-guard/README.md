@@ -66,8 +66,9 @@ For a Bash command, every segment is classified and the command-level decision
 is: **any segment needs `ask` → ask; else every segment is recognized-safe →
 allow; else defer.** A segment counts as recognized-safe if it's a safe git/gh
 invocation, a pure read-only filter (a pager like `head`/`tail`/`wc`) piped after
-one, *or* a side-effect-free label/no-op (`echo`/`printf`/`true`) — so
-`git log | head` and `git log … ; echo "---" ; git log …` auto-approve, but a
+one, a side-effect-free label/no-op (`echo`/`printf`/`true`/`pwd`), *or* a `cd`
+whose literal target stays in this worktree — so `git log | head`,
+`git log … ; echo "---" ; git log …` and `cd . && git status` auto-approve, but a
 non-git, non-filter, non-benign command can never ride along into an approval. A
 segment that writes a file via an output redirect (`git log > f`, `echo x > f`;
 `/dev/null` and the standard streams don't count) is downgraded out of `allow`.
@@ -295,9 +296,10 @@ code.
 
 A second narrow relaxation covers the other constant habit: labelling output
 between commands. A segment also counts as recognized-safe when it's a
-**side-effect-free no-op** — `echo`, `printf`, `true`, `false`, `:` — so a label
-line in an all-git chain (`git log … ; echo "---" ; git status`) auto-approves
-instead of dropping the whole command to defer. These write only to stdout (or
+**side-effect-free no-op** — `echo`, `printf`, `true`, `false`, `:`, `pwd` — so a
+label line in an all-git chain (`git log … ; echo "---" ; git status`)
+auto-approves instead of dropping the whole command to defer, and so does the
+`pwd &&` some sessions lead with. These write only to stdout (or
 just set an exit status), so the two ways they could do harm are both already
 closed: an output redirect to a real file (`echo evil > ~/.gitconfig`) downgrades
 the segment via the write check above, and a command substitution (`echo $(…)`)
@@ -320,7 +322,23 @@ substitution's output, this can only lift the defer on an already-safe git/gh
 chain — it never turns a destructive verdict or a protected-branch `ask` into an
 `allow` (`git commit -m "$(pwd)"` on `main` still asks). A non-git segment still
 can't ride along, so `cd "$(git rev-parse --show-toplevel)" && git status` keeps
-deferring (the `cd` is workspace-guard's domain).
+deferring — the registry lifts the substitution guard, not the `cd`, whose target
+is still not a literal this hook can place.
+
+A fourth relaxation covers the habit sessions here lead with most: a `cd` before
+the real command. A `cd` counts as recognized-safe when its target is a literal
+path — no `$VAR`, no `$(…)`, no glob or `~`, and neither a bare `cd` nor `cd -` —
+**and** resolves into the same worktree the command is already being judged
+against, compared by `git rev-parse --show-toplevel`. So `cd . && git status` and
+`cd <this worktree>/sub && git status` auto-approve.
+
+Worktree identity is the test, not repository identity and not path containment.
+Two worktrees of one repository share a `--git-common-dir` and differ in
+`--show-toplevel`, and a linked worktree often sits *inside* the primary
+checkout's directory tree — so either weaker test would call a sibling worktree
+"here" and approve a command against a branch this session never checked out. A
+`cd` anywhere else, or one this hook cannot place, stays outside the safe set and
+the command defers (or keeps its prompt) exactly as before.
 
 Heredoc bodies are treated as **opaque data**, not command segments. A body
 (`git commit -F- <<'EOF' … EOF`, `gh pr create --body-file - <<'EOF' … EOF`) is
@@ -448,7 +466,11 @@ already approved — see the exception below.
   repository all keep the ask.
 - **A command carrying anything unrecognized.** The all-segments rule applies
   unchanged, so `BRANCH_GUARD_OVERRIDE=… git clean -fd && rm -rf junk` still asks.
-  A safe segment alongside is fine: `… git status && git clean -fd` is lifted.
+  A safe segment alongside is fine: `… git status && git clean -fd` is lifted,
+  and so is a leading `cd` that stays in this worktree —
+  `cd . && BRANCH_GUARD_OVERRIDE=… git restore file.txt`. A `cd` into a
+  *different* worktree keeps the ask: the verdict there was measured against a
+  branch this session did not check out, and the override should not lift one.
 
 A denial that the prefix *would* lift says so, so an agent can find the route
 without being told about it in advance. A denial it would not lift doesn't
