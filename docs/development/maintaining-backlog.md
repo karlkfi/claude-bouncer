@@ -24,10 +24,13 @@ The load-bearing invariants, for sessions without the skill available:
    **Incrementing the highest number is the fallback, for a remote that
    refuses a custom ref namespace** — which GitHub does not. It is what this
    invariant used to prescribe, and it collides: claims are not fetched by the
-   default refspec, so they are invisible to a clone. Measured 2026-09-09, the
-   highest ID ever added on `origin/main` was Q181, and Q182 through Q193 were
-   all claimed already. `git ls-remote origin 'refs/queue-ids/*'` is how you
-   see them.
+   default refspec, so they are invisible to a clone. Measured 2026-09-09,
+   before that day's own rows landed: the highest ID ever added on
+   `origin/main` was Q181, and Q182 through Q193 were already claimed. Both
+   figures moved again within the same day, which is the argument rather than a
+   caveat on it — the number a clone reads is a snapshot, and what it cannot
+   see is what makes incrementing it collide.
+   `git ls-remote origin 'refs/queue-ids/*'` is how you see them.
 2. **Never hand-type a `rank`.** `scripts/queue.py rank --head` / `--tail` /
    `--after` / `--before` computes one.
 3. **Isolate backlog edits in their own commit.** Under a per-item store this
