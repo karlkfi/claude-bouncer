@@ -479,10 +479,22 @@ check "[default=strict] lease names a different branch -> ask" ask \
   "$(decision_for "$(push 'git push --force-with-lease=elsewhere origin claude/x:other')" "$WORK")"
 check "[default=strict] leased rewrite of main -> ask" ask \
   "$(decision_for "$(push 'git push --force-with-lease=main origin claude/x:main')" "$WORK")"
-# The source must be the worktree branch: a lease bounds the destination, not
-# which local branch is being sent.
+# The source may be the worktree branch or the destination's own name — the
+# second spells the target three times, which states intent at least as clearly
+# as the `HEAD:other` above. A third branch as the source is neither, so the
+# command says nothing about having seen what it sends, and it keeps asking.
+check "[default=strict] leased rewrite from the destination itself -> allow" allow \
+  "$(decision_for "$(push 'git push --force-with-lease=other origin other:other')" "$WORK")"
+check "[default=strict] leased rewrite, one-sided refspec -> allow" allow \
+  "$(decision_for "$(push 'git push --force-with-lease=other:abc123 origin other')" "$WORK")"
+check "[default=strict] leased rewrite from the dst, qualified -> allow" allow \
+  "$(decision_for "$(push 'git push --force-with-lease=refs/heads/other origin other:refs/heads/other')" "$WORK")"
 check "[default=strict] leased push of a foreign source -> ask" ask \
   "$(decision_for "$(push 'git push --force-with-lease=other origin feature-y:other')" "$WORK")"
+# A protected branch is only protected as a destination, so `main` as the source
+# reaches the source ask rather than the `ask-shared` above it.
+check "[default=strict] leased push sourced from main -> ask" ask \
+  "$(decision_for "$(push 'git push --force-with-lease=other origin main:other')" "$WORK")"
 # A lease bounds what the remote is when the ref goes, not whether removing it
 # is in bounds — so both deletion spellings keep asking.
 check "[default=strict] leased --delete -> ask" ask \
@@ -500,11 +512,15 @@ check "[default=strict] lease on a tag ref -> ask" ask \
 # all — so pin both halves under a mode that denies.
 check "[dontAsk] leased rewrite of another branch -> allow" allow \
   "$(decision_for "$(push_mode 'git push --force-with-lease=other origin HEAD:other' 'dontAsk')" "$WORK")"
+check "[dontAsk] leased rewrite from the destination itself -> allow" allow \
+  "$(decision_for "$(push_mode 'git push --force-with-lease=other origin other:other' 'dontAsk')" "$WORK")"
 check "[dontAsk] cross-name push without a lease -> deny" deny \
   "$(decision_for "$(push_mode 'git push origin HEAD:other' 'dontAsk')" "$WORK")"
 # `protected` never auto-approves, so the lease must not leak a push into it.
 check "[protected] leased rewrite of another branch -> none" none \
   "$(decision_for "$(push 'git push --force-with-lease=other origin HEAD:other')" "$WORK" "$PROT")"
+check "[protected] leased rewrite from the destination itself -> none" none \
+  "$(decision_for "$(push 'git push --force-with-lease=other origin other:other')" "$WORK" "$PROT")"
 
 # 8. protected policy: ask only on a protected target; never auto-approve.
 check "[protected] push origin main -> ask" ask \

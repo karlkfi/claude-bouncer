@@ -1120,8 +1120,9 @@ def push_decision(args, current, policy):
     policy, return (decision, reason) where decision is 'allow', 'ask',
     'ask-shared' (a protected target), or None (defer). strict auto-approves a
     push of the worktree branch (incl. force), and a rewrite of one other
-    unprotected branch from it when an explicit `--force-with-lease=<dst>` names
-    that destination; protected only asks on a protected target. Leans toward
+    unprotected branch, from either the worktree branch or that branch itself,
+    when an explicit `--force-with-lease=<dst>` names the destination; protected
+    only asks on a protected target. Leans toward
     asking (strict) / deferring (protected) on parsing uncertainty, never toward
     allowing. No push verdict is liftable by the break-glass — a push leaves
     this machine, which puts every form of it outside OVERRIDABLE_GIT."""
@@ -1185,11 +1186,16 @@ def push_decision(args, current, policy):
             # twice, so a mistyped refspec still asks. A deletion is excluded:
             # the lease bounds what the remote is when the ref goes, not whether
             # removing it is in bounds.
-            leased_rewrite = (not delete and src_b == current
-                              and dst_b in leased)
+            # The source may also be the destination itself: `sib:sib` under a
+            # lease on `sib` names the target three times, so reading only the
+            # worktree branch as proof asked for the more explicit spelling and
+            # approved the less explicit one. A third branch as the source still
+            # asks — nothing there says the session has seen what it sends.
+            leased_rewrite = (not delete and dst_b in leased
+                              and src_b in (current, dst_b))
             if dst_b is not None and dst_b != current and not leased_rewrite:
                 return ('ask', f"Push targets '{dst_b}', not the worktree branch '{current}'")
-            if src_b is not None and src_b != current:
+            if src_b is not None and src_b != current and not leased_rewrite:
                 return ('ask', f"Push sends local branch '{src_b}', not the worktree branch '{current}'")
 
     if policy == 'strict':
