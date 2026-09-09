@@ -346,6 +346,40 @@ class ParsingTests(unittest.TestCase):
                 self.assertEqual(guard.strip_wrappers(argv, {}),
                                  ["kubectl", "delete"])
 
+    def test_env_split_string_reads_every_spelling(self):
+        # `env -S STRING` puts the command inside STRING (Q159).
+        for argv in (["env", "-S", "kubectl delete"],
+                     ["env", "-Skubectl delete"],
+                     ["env", "--split-string=kubectl delete"],
+                     ["env", "--split-string", "kubectl delete"],
+                     # Operands after STRING are appended to the command, not
+                     # made positional parameters as `bash -c` would.
+                     ["env", "-S", "kubectl", "delete"],
+                     # STRING may carry env's own options, and another wrapper.
+                     ["env", "-S", "-u FOO kubectl delete"],
+                     ["env", "-S", "sudo kubectl delete"]):
+            with self.subTest(argv=argv):
+                self.assertEqual(guard.strip_wrappers(argv, {}),
+                                 ["kubectl", "delete"])
+
+    def test_env_options_stop_at_the_first_assignment(self):
+        # Real env runs a program called `-S` here and fails, so there is no
+        # command behind it: the token must be left as the tool, not read as
+        # a flag. Same for a value-taking flag.
+        self.assertEqual(
+            guard.strip_wrappers(["env", "A=1", "-S", "kubectl delete"], {}),
+            ["-S", "kubectl delete"])
+        self.assertEqual(
+            guard.strip_wrappers(["env", "A=1", "-u", "F", "kubectl"], {}),
+            ["-u", "F", "kubectl"])
+
+    def test_env_split_string_that_will_not_tokenize_is_left_alone(self):
+        # An unterminated quote makes env exit without running anything, so
+        # the guard must not invent a command from it.
+        self.assertIsNone(guard.env_split_string(["-S", 'kubectl "x']))
+        self.assertIsNone(guard.env_split_string(["-S"]))
+        self.assertIsNone(guard.env_split_string(["-u", "FOO"]))
+
     def test_command_wrapper_strips_only_an_invocation(self):
         # `command kubectl delete` runs kubectl, so the wrapper comes off.
         self.assertEqual(
@@ -2528,6 +2562,52 @@ class SpecialCaseTests(unittest.TestCase):
         # Named in Q142 as the fixtures to match: both already defer.
         home = make_home(kubeconfig=KUBECONFIG_PROD)
         for cmd in ("which kubectl", "type kubectl"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(run_hook(cmd, home=home)[0])
+
+    # --- Q159: `env -S` carries the command inside its operand ------------
+
+    def test_env_split_string_does_not_hide_the_command(self):
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        for cmd in ("env -S 'kubectl delete ns foo'",
+                    "env -S'kubectl delete ns foo'",
+                    "env --split-string='kubectl delete ns foo'",
+                    "env --split-string 'kubectl delete ns foo'",
+                    # The command is split across STRING and the operands
+                    # after it -- env appends them, so both halves count.
+                    "env -S 'kubectl' delete ns foo",
+                    "env -S 'kubectl delete' ns foo",
+                    "env -i -S 'kubectl delete ns foo'",
+                    "env -S '-u FOO kubectl delete ns foo'",
+                    "env -S 'sudo kubectl delete ns foo'",
+                    "env -S 'stdbuf -oL kubectl delete ns foo'"):
+            with self.subTest(cmd=cmd):
+                decision, reason = run_hook(cmd, home=home)
+                self.assertEqual(decision, "deny")
+                self.assertIn("kubectl delete", reason)
+
+    def test_env_split_string_is_not_a_shell(self):
+        # env splits STRING into words and runs one command; it honours no
+        # operators. `foo;` is an argument to kubectl, and `rm` never runs --
+        # so the verdict comes from the kubectl, and recursing into a shell
+        # evaluator here would model a second command that does not exist.
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        decision, reason = run_hook(
+            "env -S 'kubectl delete ns foo; rm -rf /tmp/x'", home=home)
+        self.assertEqual(decision, "deny")
+        self.assertIn("kubectl delete", reason)
+
+    def test_env_split_string_false_positive_directions(self):
+        # Three shapes where env runs nothing guarded, so the guard must not
+        # deny: options stop at the first assignment, an unterminated quote
+        # aborts env, and a read-only verb is still read-only.
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        for cmd in ("env FOO=v -S 'kubectl delete ns foo'",
+                    "env -S 'kubectl delete ns \"unbalanced'",
+                    "env -S 'kubectl get pods'",
+                    "env -S 'kubectl delete --help'",
+                    "env -S ''",
+                    "env -S"):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(run_hook(cmd, home=home)[0])
 
