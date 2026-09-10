@@ -257,6 +257,32 @@ class ParsingTests(unittest.TestCase):
     def test_unbalanced_quotes_return_none(self):
         self.assertIsNone(guard.tokenize("kubectl delete 'oops"))
 
+    def test_a_quoted_operator_word_does_not_split(self):
+        # Q202: a word made entirely of punctuation chars has the TEXT of an
+        # operator and is not one. Splitting on it cost the covered tool the
+        # argv the classification reads -- `kubectl` kept its own segment and
+        # `--context=prod` headed the next one, matching no covered tool.
+        for word, operand in (("';'", ";"), ('"|"', "|"),
+                              (r"\;", ";"), ("'&&'", "&&")):
+            with self.subTest(word=word):
+                groups = guard.split_simple_commands(
+                    guard.tokenize("kubectl %s --context=prod delete pod x" % word))
+                self.assertEqual(
+                    ["kubectl", operand, "--context=prod", "delete", "pod", "x"],
+                    [str(t) for t in groups[0]])
+
+    def test_a_real_operator_still_splits(self):
+        # The control the fix must not break, including the `;` this guard
+        # appends itself for a heredoc body -- a plain `str` with no quoting
+        # record, which still separates.
+        groups = guard.split_simple_commands(
+            guard.tokenize("true; kubectl --context=prod delete pod x"))
+        self.assertIn(["kubectl", "--context=prod", "delete", "pod", "x"],
+                      [[str(t) for t in g] for g in groups])
+        self.assertIn(["kubectl", "delete", "ns", "x"],
+                      [[str(t) for t in g] for g in guard.split_simple_commands(
+                          guard.tokenize("echo `kubectl delete ns x`"))])
+
     def test_token_records_its_quoting(self):
         # posix shlex strips quotes, so the `-c` body of these two commands is
         # the same string; only `.quotes` separates them (Q131).
@@ -514,6 +540,33 @@ class HeredocTests(unittest.TestCase):
         tokens = guard.tokenize("cat <<'EOF'\nnoise\nEOF\nkubectl delete ns x")
         self.assertIn(["kubectl", "delete", "ns", "x"],
                       guard.split_simple_commands(tokens))
+
+
+class QuotedOperatorDecisionTests(unittest.TestCase):
+    """End-to-end: a quoted operator word must not hide a covered command.
+
+    Measured 2026-09-10 before the fix: `kubectl --context=prod delete pod x`
+    denied, and the same command with a `';'` after `kubectl` returned no
+    decision at all -- the flags naming the target had been cut into a segment
+    headed by `--context=prod`.
+    """
+
+    def test_a_quoted_operator_does_not_hide_the_target(self):
+        for word in ("';'", '"|"', r"\;", "'&&'"):
+            with self.subTest(word=word):
+                decision, _ = run_hook(
+                    "kubectl %s --context=prod delete pod x" % word)
+                self.assertEqual(decision, "deny")
+
+    def test_a_real_operator_still_splits(self):
+        decision, _ = run_hook("true; kubectl --context=prod delete pod x")
+        self.assertEqual(decision, "deny")
+
+    def test_an_unquoted_backtick_still_splits(self):
+        # The pre-lex `\`` -> `;` rewrite is what makes this a separate
+        # segment, and it must survive a rule keyed on quoting.
+        decision, _ = run_hook("echo `kubectl --context=prod delete pod x`")
+        self.assertEqual(decision, "deny")
 
 
 class HeredocDecisionTests(unittest.TestCase):
