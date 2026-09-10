@@ -298,11 +298,23 @@ def split_segments(tokens):
     operators do NOT split: the operator and its target word are dropped
     from the segment (the target is never a command). Crude splitting only
     ever creates extra segments to inspect, never hides a watch/sleep
-    command behind an operator."""
+    command behind an operator.
+
+    That last argument covers the segment boundary and not the terminator
+    recorded with it, which is why `quoted_from` gates the test (Q203). A
+    word made entirely of punctuation chars has the TEXT of an operator and
+    is not one: `sleep 300 '&'` runs in the FOREGROUND, and reading its `&`
+    as a terminator marked the segment backgrounded and stood the guard down
+    -- the one direction this guard must not move in. Only `&` reaches that
+    far; a quoted `;` or `|` already left a segment this guard judged.
+
+    The `;` tokens the pre-lex backtick and newline rewrite produces are
+    unquoted, so substitutions and multi-line commands still split."""
     segs, cur = [], []
     skip_next_word = False
     for t in tokens:
-        if t and all(c in PUNCT_CHARS for c in t):
+        if t and getattr(t, 'quoted_from', None) is None \
+                and all(c in PUNCT_CHARS for c in t):
             if t in REDIR:
                 skip_next_word = True
                 continue
@@ -573,15 +585,19 @@ def analyze_class_a(raw, cfg, depth=0):
 
     raw = strip_heredoc_bodies(raw)
 
-    # A trailing `&` detaches the whole command (including a backgrounded
-    # subshell or loop): nothing here blocks the main thread.
-    stripped = raw.rstrip()
-    if stripped.endswith('&') and not stripped.endswith('&&'):
-        return findings, None
-
     tokens = tokenize(raw)
     if tokens is None:
         return findings, None  # unparseable: fail-open, defer
+
+    # A trailing `&` detaches the whole command (including a backgrounded
+    # subshell or loop): nothing here blocks the main thread. Asked of the
+    # last TOKEN rather than the last character, because `sleep 300 \&`
+    # ends in `&` and runs in the foreground (Q203). The token form settles
+    # `&&` and `|&` on its own -- neither is the `&` token -- so the
+    # endswith pair this replaced is not needed.
+    if tokens and tokens[-1] == '&' \
+            and getattr(tokens[-1], 'quoted_from', None) is None:
+        return findings, None
 
     matchers = watch_matchers(cfg)
     exempts = exempt_matchers(cfg)
