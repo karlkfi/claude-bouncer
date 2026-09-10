@@ -3749,6 +3749,66 @@ class SplitOperatorRunsTests(unittest.TestCase):
         self.assertEqual(guard.split_operator_runs(["|("]), ["|", "("])
 
 
+class QuotedOperatorEndToEndTests(unittest.TestCase):
+    """A quoted operator-only word is an operand, not a command boundary.
+
+    `cat ';' /etc/passwd` passes `;` to `cat`. Reading it as a separator left
+    `cat` with no operands and read `/etc/passwd` as a command name, so no
+    guarded reader held an outside path and the guard returned a positive
+    ALLOW — suppressing the user's own permission rules on that call rather
+    than merely declining to add one.
+
+    No file named `;` has to exist. Measured on bash 5.3.15 in a directory
+    holding only `ok.txt`: `cat ';' ok.txt` prints
+    `cat: ;: No such file or directory` then `hello`, rc=1 — so the whole
+    reachability bar is a command string containing the quoted word."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = os.path.realpath(self._tmp.name)
+        with open(os.path.join(self.workspace, "in.txt"), "w") as f:
+            f.write("hello\n")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _decision(self, cmd, expected):
+        out = run_hook(cmd, self.workspace, project_dir=self.workspace)
+        self.assertIsNotNone(out, f"expected a decision, got defer for: {cmd!r}")
+        got = out["hookSpecificOutput"]["permissionDecision"]
+        self.assertEqual(
+            got, expected,
+            f"expected {expected!r} for {cmd!r}; got {got!r} "
+            f"(reason: {out['hookSpecificOutput'].get('permissionDecisionReason')!r})",
+        )
+        return out
+
+    def test_quoted_separator_does_not_hide_the_operand(self):
+        for word in ("';'", '";"', r"\;", "'&&'", "'|'", "'&'"):
+            with self.subTest(word=word):
+                out = self._decision(
+                    "cat %s /etc/qop-fake-target" % word, "ask")
+                self.assertIn(
+                    "/etc/qop-fake-target",
+                    out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_a_real_separator_still_splits(self):
+        # The control the fix must not break: an unquoted `;` is a boundary,
+        # so the outside path belongs to the SECOND command and is still named.
+        out = self._decision("cat in.txt; cat /etc/qop-real-target", "ask")
+        self.assertIn(
+            "/etc/qop-real-target",
+            out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_a_word_carrying_an_operator_char_was_never_split(self):
+        # The negative control that localizes the mechanism to the split: a
+        # token with any non-punctuation byte was left whole all along.
+        out = self._decision("cat 'x;y' /etc/qop-mixed-target", "ask")
+        self.assertIn(
+            "/etc/qop-mixed-target",
+            out["hookSpecificOutput"]["permissionDecisionReason"])
+
+
 class NewlineSeparatorEndToEndTests(unittest.TestCase):
     """Newline-only command boundaries split into separate groups (Q18).
 

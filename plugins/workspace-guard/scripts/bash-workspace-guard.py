@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 from bouncer_parse import (                                    # noqa: E402
     ASSIGNMENT_RE, COMMENT_PRECEDERS, DUP, MAX_SUBST_DEPTH, PUNCT_CHARS,
     QuoteTrackingLexer, REDIR, SEPARATORS, SUBST_OPEN,
-    _OPERATORS, is_assignment, is_reserved_word, split_assignment,
+    _OPERATORS, is_assignment, is_operator, is_reserved_word, split_assignment,
     _consume_heredoc_body, _scan_backticks, _scan_dollar_paren,
     _skip_balanced_parens, command_substitutions, glue_dollar_paren,
     split_operator_runs, strip_comments, strip_env_prefix,
@@ -967,7 +967,7 @@ def command_override(cmd):
         return None                               # unbalanced quotes -> no read
     at_head = True                                # start of a segment
     for tok in tokens:
-        if tok in SEPARATORS:
+        if is_operator(tok, SEPARATORS):
             at_head = True
             continue
         if not at_head:
@@ -3593,7 +3593,7 @@ def split_groups(tokens):
     paren, prev_sep, pipe, nhd = 0, '', 0, 0
     while i < len(tokens):
         t = tokens[i]
-        if t in SEPARATORS:
+        if is_operator(t, SEPARATORS):
             if cur or cur_redir:
                 persists = (paren == 0 and prev_sep != '|'
                             and t in (';', '\n', '&&', '||'))
@@ -3607,7 +3607,7 @@ def split_groups(tokens):
                 pipe += 1
             prev_sep = t
             i += 1; continue
-        if t in REDIR or t in DUP:
+        if is_operator(t, REDIR) or is_operator(t, DUP):
             # An fd number written immediately before a redirect/dup operator
             # (`2>file`, `2>&1`) tokenizes as a bare digit token glued to the
             # operator. shlex drops the adjacency, so it lands as the previous

@@ -40,7 +40,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 from bouncer_parse import (                                    # noqa: E402
     ASSIGNMENT_RE, CHAIN_OPS, COMMENT_PRECEDERS, DUP, END_OPS, MAX_SUBST_DEPTH,
     PIPE_OPS, PUNCT_CHARS, QuoteTrackingLexer, REDIR, SEPARATORS,
-    SH_KEYWORDS, _OPERATORS, is_assignment, split_assignment,
+    SH_KEYWORDS, _OPERATORS, is_assignment, is_operator, split_assignment,
     _consume_heredoc_body, _scan_backticks, _scan_dollar_paren,
     _skip_balanced_parens, command_substitutions, glue_dollar_paren,
     split_operator_runs, strip_comments, strip_env_prefix,
@@ -184,7 +184,7 @@ def split_segments(tokens):
     cur, depth, i = [], 0, 0
     while i < len(tokens):
         t = tokens[i]
-        if t in SEPARATORS:
+        if is_operator(t, SEPARATORS):
             if cur:
                 items.append(('cmd', cur)); depths.append(depth)
                 cur = []
@@ -195,7 +195,7 @@ def split_segments(tokens):
                 depth += 1
             i += 1
             continue
-        if t in REDIR or t in DUP:
+        if is_operator(t, REDIR) or is_operator(t, DUP):
             # An fd number written immediately before a redirect operator
             # (`2>file`, `2>&1`) tokenizes as a bare digit that lands in `cur`;
             # pop it so it does not leak into the head.
