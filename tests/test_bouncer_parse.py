@@ -526,6 +526,52 @@ class ReservedWordTests(unittest.TestCase):
         self.assertFalse(bp.is_reserved_word(bp.lex('i"f"')[0]))
 
 
+class OperatorTests(unittest.TestCase):
+    """The operator half of the same quoting rule.
+
+    A word made entirely of punctuation chars has the TEXT of an operator and
+    is not one: `cat ';' f` passes `;` to `cat`. Reading it as a separator
+    cuts the command there, so `cat` keeps no operands and `f` is read as a
+    command name -- for workspace-guard a positive ALLOW rather than a missed
+    prompt, since no guarded reader is left holding a path.
+
+    Measured on bash 5.3.15 in a directory holding only `ok.txt`:
+    ``cat ';' ok.txt`` prints ``cat: ;: No such file or directory`` then
+    ``hello``, rc=1. So no file named `;` has to exist -- `cat` reports the
+    missing operand and reads the rest.
+    """
+
+    def test_a_plain_operator_is_one(self):
+        for op in (';', '|', '&&', '\n', '(', ')'):
+            with self.subTest(op=op):
+                self.assertTrue(bp.is_operator(bp.lex('a %s b' % op)[1],
+                                               bp.SEPARATORS))
+
+    def test_a_quoted_operator_is_a_word(self):
+        for word in ("';'", '";"', r'\;', "'&&'", "'|'", "')'"):
+            with self.subTest(word=word):
+                self.assertFalse(bp.is_operator(bp.lex('cat %s f' % word)[1],
+                                                bp.SEPARATORS))
+
+    def test_a_quoted_redirect_is_a_word(self):
+        self.assertFalse(bp.is_operator(bp.lex("cat '>' f")[1], bp.REDIR))
+        self.assertTrue(bp.is_operator(bp.lex('cat > f')[1], bp.REDIR))
+
+    def test_a_word_outside_the_vocab_is_never_an_operator(self):
+        self.assertFalse(bp.is_operator(bp.lex('cat f')[1], bp.SEPARATORS))
+
+    def test_a_plain_str_reads_as_written_plain(self):
+        """A hand-built token carries no record, so it keeps the old reading."""
+        self.assertTrue(bp.is_operator(';', bp.SEPARATORS))
+
+    def test_a_quoted_operator_run_is_not_decomposed(self):
+        """`split_operator_runs` asks the same question before splitting."""
+        self.assertEqual([';', ';'], bp.split_operator_runs(bp.lex('a ;; b')[1:2]))
+        self.assertEqual([';;'],
+                         [str(t) for t in
+                          bp.split_operator_runs(bp.lex("cat ';;' f")[1:2])])
+
+
 class VendoringTests(unittest.TestCase):
     """The copies under each plugin are what actually ship."""
 

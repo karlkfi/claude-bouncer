@@ -831,6 +831,32 @@ def is_reserved_word(token):
     return token in SH_KEYWORDS and getattr(token, 'quoted_from', None) is None
 
 
+def is_operator(token, vocab):
+    """Whether bash would read `token` as an operator drawn from `vocab`.
+
+    Membership alone answers this for a raw operator run and not for a shlex
+    token: `cat ';' f` produces a word whose TEXT is `;`, and a caller
+    comparing it against `SEPARATORS` cuts the command there, so `cat` is left
+    with no operands and `f` is read as a command name. For a guard reading
+    operands that is a positive allow rather than a missed prompt -- and no
+    file named `;` has to exist, since bash reports the missing operand and
+    reads the rest (`cat: ;: No such file or directory`, then `f`, rc=1 on
+    bash 5.3.15).
+
+    So `quoted_from`, the same test `is_reserved_word` uses: quoting or
+    escaping anywhere in the run makes it a word, and shlex never glues a
+    quoted run to an adjacent real operator, so the record covers the whole
+    token. A plain `str` carries no record and is read as written plain, the
+    fail-open direction the two functions above document.
+
+    Use it for the vocab test that decides whether a token IS an operator.
+    Tests made *after* that decision -- which separator this is, whether a
+    redirect is a dup -- read the text, since the quoting question is already
+    settled.
+    """
+    return token in vocab and getattr(token, 'quoted_from', None) is None
+
+
 def lex(text):
     """shlex-tokenize `text` with bash's quoting and operator grouping.
 
@@ -862,16 +888,18 @@ def split_operator_runs(tokens):
     tokens are read as file args.
 
     Splitting is applied ONLY to pure operator runs (every char in
-    `PUNCT_CHARS`); a quoted filename that happens to contain an operator char
-    (or a newline) is a word token with non-punctuation chars and is left
-    intact. Each run is consumed greedily longest-first against `_OPERATORS`, so
+    `PUNCT_CHARS`) that bash itself read as operators. Text is not enough --
+    `cat ';;' f` is a word, and splitting it costs `cat` its operands -- so the
+    `quoted_from` test is the one `is_operator` documents. Each run is consumed
+    greedily longest-first against `_OPERATORS`, so
     `&>>` wins over `&>` over `&` and `<<<` over `<<`. Every single operator
     char is itself in `_OPERATORS`, so the run always fully decomposes into
     valid `SEPARATORS`/`REDIR`/`DUP` tokens with no leftover.
     """
     out = []
     for t in tokens:
-        if not t or not all(c in PUNCT_CHARS for c in t):
+        if not t or getattr(t, 'quoted_from', None) is not None \
+                or not all(c in PUNCT_CHARS for c in t):
             out.append(t)
             continue
         i, n = 0, len(t)
