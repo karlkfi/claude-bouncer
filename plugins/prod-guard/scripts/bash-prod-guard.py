@@ -424,15 +424,27 @@ def split_simple_commands(tokens):
     """Split a token stream into simple commands on every operator token.
 
     Any all-punctuation token — `&&`, `|`, `;`, `(`, `)`, and also redirects
-    like `>` — ends the current simple command. Treating a redirect as a hard
-    break is deliberately crude: the redirect target becomes a one-token
-    "command" that matches no covered tool and is ignored, while a covered
-    tool AFTER any operator still gets its own segment. Crude splitting only
-    ever creates extra segments to inspect (false-positive direction), never
-    hides one (false-negative direction)."""
+    like `>` — ends the current simple command, PROVIDED bash read it as an
+    operator. Treating a redirect as a hard break is deliberately crude: the
+    redirect target becomes a one-token "command" that matches no covered tool
+    and is ignored, while a covered tool AFTER any operator still gets its own
+    segment. Crude splitting only ever creates extra segments to inspect
+    (false-positive direction), never hides one (false-negative direction).
+
+    Quoting is the one place that argument fails, so `quoted_from` gates it
+    (Q202). A word made entirely of punctuation chars has the TEXT of an
+    operator and is not one: `kubectl ';' --context=prod delete pod x` cut
+    after `kubectl`, and the flags naming the target landed in a segment
+    headed by `--context=prod`, which matches no covered tool. That hides a
+    covered command's argv rather than adding a segment.
+
+    The `;` this guard appends itself for a heredoc body is a plain `str` with
+    no such record, so it still separates — the fail-open direction
+    `is_operator` documents, and the right one here."""
     groups, cur = [], []
     for t in tokens:
-        if t and all(c in PUNCT_CHARS for c in t):
+        if t and getattr(t, 'quoted_from', None) is None \
+                and all(c in PUNCT_CHARS for c in t):
             if cur:
                 groups.append(cur)
             cur = []
