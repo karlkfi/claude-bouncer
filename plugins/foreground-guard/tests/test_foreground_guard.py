@@ -205,6 +205,56 @@ class SplitSegmentTests(unittest.TestCase):
         segs = self.segs("make lint && make test")
         self.assertEqual(segs[0][1], "&&")
 
+    def test_a_quoted_ampersand_is_an_operand(self):
+        # Q203: `sleep 300 '&'` runs in the FOREGROUND -- bash passes `&` to
+        # sleep. Reading it as a terminator marked the segment backgrounded
+        # and stood the guard down.
+        for word in ("'&'", '"&"', r"\&"):
+            with self.subTest(word=word):
+                segs = self.segs("sleep 300 %s" % word)
+                self.assertEqual(segs[0][1], "")
+                self.assertEqual([str(t) for t in segs[0][0]],
+                                 ["sleep", "300", "&"])
+
+    def test_a_quoted_redirect_keeps_its_target(self):
+        # A quoted `>` is an operand, so the word after it is one too and
+        # must not be dropped as a redirect target.
+        segs = self.segs("./server '>' server.log")
+        self.assertEqual([str(t) for t in segs[0][0]],
+                         ["./server", ">", "server.log"])
+
+
+class QuotedAmpersandDecisionTests(unittest.TestCase):
+    """End-to-end: a quoted or escaped `&` must not stand the guard down.
+
+    Two independent sites read the `&` as backgrounding, and each answers a
+    different spelling. `split_segments` recorded a quoted `&` as a
+    terminator; `analyze_class_a` short-circuited on the raw string's last
+    CHARACTER, which `sleep 300 \\&` ends with while running in the
+    foreground. Measured 2026-09-10 before the fix: both returned no
+    decision, where plain `sleep 300` denies.
+    """
+
+    def test_a_quoted_ampersand_does_not_stand_the_guard_down(self):
+        for word in ("'&'", '"&"', r"\&"):
+            with self.subTest(word=word):
+                d, _ = run_hook("sleep 300 %s" % word)
+                self.assertEqual(d, "deny")
+
+    def test_a_real_trailing_ampersand_still_detaches(self):
+        for cmd in ("sleep 300 &", "(sleep 300) &", "sleep 300 &  "):
+            with self.subTest(cmd=cmd):
+                d, _ = run_hook(cmd)
+                self.assertIsNone(d)
+
+    def test_the_operators_the_character_test_had_to_exclude(self):
+        # `&&` and `|&` both end in `&` and neither backgrounds. The token
+        # form settles them without the endswith pair it replaced.
+        d, _ = run_hook("sleep 300 && echo done")
+        self.assertEqual(d, "deny")
+        d, _ = run_hook("sleep 300 |& cat")
+        self.assertEqual(d, "deny")
+
 
 class SleepSecondsTests(unittest.TestCase):
     def test_plain(self):
