@@ -83,8 +83,13 @@ ANSWERED_MARK = "(answered)"
 # backtick rather than by end of line, because in prose nothing says where the
 # quoted text stops; that is also why the fragment may not open with a space,
 # which `grep -n` never emits either.
+#
+# A lookbehind rather than `\b`, because a path can open on a character the
+# class accepts and the boundary does not: `.github/…` and `../…` both start on
+# a dot, so the match begins after it, and the truncated path resolves from
+# neither base below — the note then names a path nobody wrote.
 CITATION_RE = re.compile(
-    r"\b([\w./-]+\.(?:go|py|sh|md|ya?ml|json|ts|js|rs|java)):(\d+)"
+    r"(?<![\w./-])([\w./-]+\.(?:go|py|sh|md|ya?ml|json|ts|js|rs|java)):(\d+)"
     r"(?::(\S[^`\n]*)(?=`))?")
 # How far the fragment may have drifted before the line number stops doing its
 # job. A number is worth writing because it lands a reader within a screen of
