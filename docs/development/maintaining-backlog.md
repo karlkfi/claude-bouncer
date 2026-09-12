@@ -38,9 +38,13 @@ The load-bearing invariants, for sessions without the skill available:
    its second reason: the item is the *why* and the code is the *what*, and a
    reviewer should not have to separate them by hand.
 4. **Completing an item deletes its file.** Git is the archive. Name the reason
-   with a fixed verb in the commit subject — `complete QN`, `prune QN`,
-   `merge QN into QM`, `defer QN` — or `queue.py metrics` cannot tell throughput
-   from garbage collection.
+   with a fixed verb on the item's own `docs(queue):` line — `complete QN`,
+   `prune QN`, `retire QN`, `merge QN into QM` — or `queue.py metrics` cannot
+   tell throughput from garbage collection. Not the subject alone: a squash
+   merge replaces it with the pull request title, so the walk reads the whole
+   message and scopes the verb to its `docs(queue):`/`docs(status):` lines.
+   `defer QN` is not a closure verb — a deferral flips `status` on a row that
+   stays.
 5. **Lint every edit**: `make backlog-lint`.
 
 ## Repo-local tooling
