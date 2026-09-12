@@ -10,16 +10,16 @@ Subcommands:
   render    the ordered backlog — the read path, one call for the whole queue
   next      the top ready item, as a session kickoff prompt
   lint      check the store (frontmatter, ids, ranks, references)
-  claims    check every id this branch adds holds a claim on the remote
+  claims    check every id this branch adds is new: claimed, and never shipped
   metrics   replay git history into flow metrics, per item or per label
   migrate   convert a legacy `docs/STATUS.md` Queue/Deferred table into items
   rank      compute an order key for an insertion
 
 Ranks are base-36 order keys compared as plain strings, under a magnitude-head
-scheme a second implementation of the same algebra also targets, so a store
-written by either tool reads and extends under the other. `rank-vectors.tsv`
-holds that contract and its provenance; it sits beside this file in the
-session-backlog skill and is not vendored with it.
+scheme — ported rather than invented, from a Go implementation that no longer
+exists. `rank-vectors.tsv` sits beside this file and holds the expected keys,
+derived from the scheme's rules rather than from a run, so they are the one
+check on the algebra that this implementation did not produce.
 """
 
 import argparse
@@ -851,6 +851,93 @@ def _git(args, cwd):
                           text=True, check=True).stdout
 
 
+# What a removal was, keyed on the verb the row's own deletion commit used.
+#
+# `Commit discipline` prescribes four — complete, prune, merge, defer — and
+# this widens that list rather than replacing it. The four are what a session
+# is told to write; the rest are what sessions also write, counted over the
+# deletion commits of the heaviest consumer of this store. Widening is safe in
+# a way that narrowing would not be: an unlisted verb lands in the residual,
+# which is honest, while a listed word that means something else classes a row
+# wrongly and looks like data.
+#
+# Three classes rather than two. `retire` is neither of the documented ones: a
+# soaked flake watch leaving for the ledger is not work that shipped and not
+# speculative work discarded, and at 34 of 211 removals there it is far too
+# large to fold into either without moving the number a reader came for.
+CLOSURE_VERBS = {
+    "complete": "completed", "completed": "completed",
+    "close": "completed", "closed": "completed", "closes": "completed",
+    "land": "completed", "lands": "completed", "landed": "completed",
+    "ship": "completed", "ships": "completed", "shipped": "completed",
+    "finish": "completed", "finished": "completed",
+    "resolve": "completed", "resolved": "completed",
+    "prune": "pruned", "pruned": "pruned",
+    "drop": "pruned", "dropped": "pruned",
+    "withdraw": "pruned", "withdrawn": "pruned",
+    "supersede": "pruned", "superseded": "pruned",
+    "fold": "pruned", "folded": "pruned",
+    "dedup": "pruned", "dedupe": "pruned", "deduped": "pruned",
+    "retire": "retired", "retired": "retired", "retires": "retired",
+    # `merge` is documented and is deliberately absent from this table: the
+    # bare word is read as a dedup on one removal in seven even after the
+    # scoping below, every other hit being an ordinary sentence about a git
+    # merge. MERGE_INTO_RE carries it in the form the rule actually specifies.
+    # Recognised so `--events` can name it, and deliberately unclassed: under
+    # the item store a deferral is a status flip on a row that stays, so a
+    # deletion saying `defer` is a table-era artifact rather than a fourth
+    # outcome. It reaches the residual, which is where an outcome this walk
+    # cannot name belongs.
+    "defer": None, "deferred": None, "defers": None,
+    "merge": "pruned",          # reached only via MERGE_INTO_RE, never as a word
+}
+# Built from the table minus `merge`, which is classed through MERGE_INTO_RE
+# below and must never match as a bare word. Longest-first so `completed` is
+# not shadowed by `complete`.
+VERB_RE = re.compile(r"\b(%s)\b" % "|".join(
+    sorted((v for v in CLOSURE_VERBS if v != "merge"), key=len, reverse=True)),
+    re.I)
+# The scope that makes the verb readable rather than merely present. A squash
+# merge folds every commit of a pull request into one message, so the body
+# carries the row-deletion commit's subject beside the work commits' — and a
+# verb grepped over the whole of that measures English. Measured over the same
+# corpus: all six `merge` hits were prose about a git merge driver, the one
+# `defer` hit was a note about another row, and 42 `fix` hits were the
+# conventional-commit type rather than anything about a row. Restricting the
+# read to the `docs(queue):`/`docs(status):` lines takes only the commits whose
+# job is to say what happened to a row, which is the isolated row commit this
+# skill already requires and a lint already enforces.
+ROW_COMMIT_RE = re.compile(r"docs\((?:queue|status)\)\s*:", re.I)
+ANY_ID_RE = re.compile(r"\bQ\d+\b")
+# `merge QN into QM`, the one form `Commit discipline` gives for a dedup. It is
+# matched as a phrase and ahead of the table, because the bare verb collides
+# with the commonest technical noun in these repositories and the phrase does
+# not — `close Q914 — the merge test now reports …` would otherwise turn on
+# which of the two words came first in the line.
+MERGE_INTO_RE = re.compile(r"\bmerges?\s+Q\d+\s+into\b", re.I)
+
+
+def _closure_verb(item, message):
+    """The verb `item`'s deletion was recorded under, or None.
+
+    Declines rather than guesses. A row commit naming *other* ids and not this
+    one is a sibling's, so its verb is not evidence about this row — a groom
+    saying `escalate Q549, retire two soaked flake rows` must not retire the
+    two rows it happens to delete. The unnamed fallback is the single-row case,
+    where `docs(queue): complete Q1` names the row in the diff and not in the
+    subject.
+    """
+    rows = [line for line in message.split("\n") if ROW_COMMIT_RE.search(line)]
+    named = [line for line in rows if re.search(r"\b%s\b" % item, line)]
+    for line in named or [x for x in rows if not ANY_ID_RE.search(x)]:
+        if MERGE_INTO_RE.search(line):
+            return "merge"
+        found = VERB_RE.search(line)
+        if found:
+            return found.group(1).lower()
+    return None
+
+
 def cmd_metrics(args):
     # Both sides get resolved before the relative_to: git reports the real
     # path, and on macOS the usual temp roots (/tmp, /var/folders) are symlinks,
@@ -865,29 +952,42 @@ def cmd_metrics(args):
     # and the printed classes out-sum `filed`. Splitting the rename into the
     # D+A pair this filter already reads is what makes the guarantee hold.
     # `_label_flow` replays the same store and has always passed it.
+    #
+    # `%B` rather than `%s`, which is the whole of why the classes below are
+    # not all residual. The subject a walk reads on `main` is the pull
+    # request's title under a squash merge — 139 of 141 deletion commits in the
+    # consumer measured carried a trailing `(#N)` — and a PR closing several
+    # rows has no single verb-and-row its title could name. The verb is not
+    # lost, it is one level down: the squash preserves every folded commit's
+    # message in the body, so the row commit's own subject is still there to
+    # read. Reading the subject alone classified 8 of 195 removals there;
+    # reading the message classifies 166.
+    #
+    # `%x00`/`%x01`/`%x02` because `%B` is multi-line, so the line-oriented
+    # framing this walk used cannot tell a body line from a name-status line.
+    # The three bytes are ones no path and no message hold.
     log = _git(["log", "--no-renames", "--diff-filter=AD", "--name-status",
                 "--date=short",
-                "--pretty=format:C\t%H\t%ad\t%s", "--", str(rel)], root)
-    filed, closed, reason = {}, {}, {}
-    date, subject = None, ""
-    for line in log.split("\n"):
-        if line.startswith("C\t"):
-            _, _, date, subject = line.split("\t", 3)
-            continue
-        if not line.strip():
-            continue
-        status, _, path = line.partition("\t")
-        item = Path(path).stem
-        if not ID_RE.match(item):
-            continue
-        if status.startswith("A"):
-            filed[item] = date               # log is newest-first; last wins
-        elif status.startswith("D"):
-            if item not in closed:
-                closed[item] = date
-                verb = re.search(r"\b(complete|prune|merge|defer)\w*\b",
-                                 subject, re.I)
-                reason[item] = verb.group(1).lower() if verb else "removed"
+                "--pretty=format:%x00%ad%x01%B%x02", "--", str(rel)], root)
+    filed, closed, reason, outcome = {}, {}, {}, {}
+    for chunk in log.split("\x00")[1:]:
+        date, _, rest = chunk.partition("\x01")
+        message, _, names = rest.partition("\x02")
+        for line in names.split("\n"):
+            if not line.strip():
+                continue
+            status, _, path = line.partition("\t")
+            item = Path(path).stem
+            if not ID_RE.match(item):
+                continue
+            if status.startswith("A"):
+                filed[item] = date           # log is newest-first; last wins
+            elif status.startswith("D"):
+                if item not in closed:
+                    closed[item] = date
+                    verb = _closure_verb(item, message)
+                    reason[item] = verb or "removed"
+                    outcome[item] = CLOSURE_VERBS.get(verb)
     if args.events:
         print("id\tfiled\tclosed\tdays\treason")
         for item in sorted(filed, key=lambda q: int(q[1:])):
@@ -895,35 +995,45 @@ def cmd_metrics(args):
             days = _days(filed[item], c) if c else ""
             print(f"{item}\t{filed[item]}\t{c}\t{days}\t{reason.get(item, 'open')}")
         return 0
-    done = [q for q in closed if reason.get(q) == "complete"]
-    pruned = [q for q in closed if reason.get(q) in ("prune", "merge")]
-    # The residual of the two lists above rather than a third verb match, so
-    # the printed classes always sum to `filed` and no reason can go unshown.
-    # Matching on a name is what left the largest class off this summary: the
-    # walk classes anything it cannot read as `removed`, and `defer` besides,
-    # and neither list held either. A residual cannot drift from the lists it
-    # is taken from.
-    accounted = set(done) | set(pruned)
-    other = [q for q in closed if q not in accounted]
+    # Read off the classification rather than re-matched here, so a verb can
+    # only ever land in one class and the residual cannot drift from the named
+    # lists it is taken from. Matching a name per class is what left the
+    # largest class off this summary once already.
+    done = [q for q in closed if outcome.get(q) == "completed"]
+    pruned = [q for q in closed if outcome.get(q) == "pruned"]
+    retired = [q for q in closed if outcome.get(q) == "retired"]
+    other = [q for q in closed if outcome.get(q) is None]
     spans = sorted(_days(filed[q], closed[q]) for q in closed if q in filed)
     open_now = [q for q in filed if q not in closed]
     print(f"filed        {len(filed)}")
     print(f"completed    {len(done)}")
     print(f"pruned       {len(pruned)}")
+    print(f"retired      {len(retired)}")
     # Printed at zero as well, which the conditional it replaces would not do.
     # A reader cannot tell an absent line from a line reading 0, and telling
-    # those apart is the whole of what this class is for.
-    print(f"removed      {len(other)}  (no verb in the deleting commit subject)")
+    # those apart is the whole of what this class is for. It names the deleting
+    # commit's whole *message*, not its subject: a reader told the subject went
+    # unread reaches for a PR-title convention, and gating PR titles is the
+    # wrong rung for a metric.
+    print(f"removed      {len(other)}  (no row-commit verb in the deleting "
+          f"commit message)")
     print(f"open         {len(open_now)}")
     if spans:
         print(f"cycle time   median {spans[len(spans) // 2]}d  "
               f"mean {sum(spans) // len(spans)}d")
-    if closed:
-        # Named, because the ratio divides by every closed item while the
-        # classes above are read as the removal count — which is how one
-        # summary came to carry two different denominators.
-        print(f"prune ratio  {100 * len(pruned) // len(closed)}% "
-              f"of {len(closed)} closed")
+    # The denominator is what the instrument could have fired on, which is the
+    # classified removals and not every closed row. An unclassified row might
+    # have been a prune; putting it below the line asserts it was not, and that
+    # is the assertion that made this ratio read as 3% while the walk could
+    # name an outcome for nine rows in a store of 210. Both numbers are printed
+    # so a ratio resting on a thin base is visible as one.
+    classified = len(done) + len(pruned) + len(retired)
+    if classified:
+        print(f"prune ratio  {100 * len(pruned) // classified}% of "
+              f"{classified} classified ({len(other)} unclassified)")
+    elif closed:
+        print(f"prune ratio  n/a — no outcome readable for any of "
+              f"{len(closed)} closed")
     return 0
 
 
@@ -1122,8 +1232,75 @@ def _ids_at(rev, rel, root):
     return {p for p in (Path(x).stem for x in out.split("\n")) if ID_RE.match(p)}
 
 
+# `git log --format=` writes the commit line into the same stream as the names,
+# so the two are told apart by a byte no path can hold rather than by shape.
+# `%s` is the subject alone and carries no newline, so a chunk is always one
+# header line followed by names.
+#
+# Two spellings because they are not interchangeable: `%x00` is git's escape
+# and the literal is what comes back on stdout. An argument carrying the byte
+# itself cannot be passed at all — execve refuses it, and subprocess raises
+# `embedded null byte` from inside the check.
+LOG_FORMAT = "%x00commit %h %s"
+LOG_MARK = "\x00commit "
+
+
+def _shipped_ids(rev, rel, root):
+    """({id: "<sha> <subject>"}, None) for ids rev's history deleted.
+
+    (None, why) for a reading that could not be taken, on the discipline
+    `_indexed_names` uses: a history that was truncated can only under-report
+    deletions, and an under-report is indistinguishable from a store that has
+    completed nothing. A shallow clone is the case that produces one, so it is
+    asked about first — `git log` succeeds there and answers from the graft
+    point forward without saying so.
+
+    `--full-history`, because the default simplification drops a deletion that
+    happened on a side branch — two branches completing the same row leaves two
+    deletion commits sharing a parent, and the simplified log shows one.
+    `--no-renames`, because rename detection pairs a completed row's deletion
+    with a newly filed row's addition when the two files are similar enough and
+    reports the pair as `R`, which `--diff-filter=D` never sees.
+    """
+    out, ok = _git_read(["rev-parse", "--is-shallow-repository"], root)
+    if not ok:
+        return None, f"git could not say whether {root} is a shallow clone"
+    if out.strip() == "true":
+        return None, ("this is a shallow clone, so a deletion older than the "
+                      "graft point is unreadable")
+    out, ok = _git_read(["log", "--full-history", "--no-renames",
+                         "--diff-filter=D", "--name-only",
+                         f"--format={LOG_FORMAT}", rev, "--", rel], root)
+    if not ok:
+        return None, f"cannot read the history of {rel} at {rev[:12]}"
+    found = {}
+    for chunk in out.split(LOG_MARK)[1:]:
+        head, _, names = chunk.partition("\n")
+        for name in names.split("\n"):
+            stem = Path(name).stem
+            # setdefault, and the walk is newest-first: an id with two
+            # deletion commits is reported at the one a reader saw last.
+            if ID_RE.match(stem):
+                found.setdefault(stem, head.strip())
+    return found, None
+
+
+def _allowlist(values, env):
+    """Ids excused by a repeatable flag, or by its comma-separated env default.
+
+    The env var is the spelling that reaches a run through `make`, where there
+    is nowhere to put a flag.
+    """
+    raw = values or [os.environ.get(env, "")]
+    return set(",".join(raw).replace(",", " ").split())
+
+
 def cmd_claims(args):
-    def skip(why):
+    # Named for what it does rather than for what one caller does with it. Two
+    # of the reads below abort the subcommand and one does not: the shipped
+    # check needs no network, so a remote that will not answer must not take
+    # its verdict with it.
+    def disclose(why):
         print(f"queue: claims: {why}", file=sys.stderr)
         if args.strict:
             print("queue: claims: --strict was passed, so that is a failure",
@@ -1134,22 +1311,22 @@ def cmd_claims(args):
     store = Path(args.store or store_dir()).resolve()
     out, ok = _git_read(["rev-parse", "--show-toplevel"], store)
     if not ok:
-        return skip(f"{store} is not in a git repository, so there is no branch "
-                    f"to measure against")
+        return disclose(f"{store} is not in a git repository, so there is no "
+                        f"branch to measure against")
     root = Path(out.strip()).resolve()
     try:
         rel = str(store.relative_to(root))
     except ValueError:
-        return skip(f"{store} is outside {root}; point --store inside the repo")
+        return disclose(f"{store} is outside {root}; point --store inside the repo")
 
     base, ok = _git_read(["merge-base", args.base, "HEAD"], root)
     if not ok:
-        return skip(f"no merge base between {args.base} and HEAD — fetch it, or "
-                    f"deepen a shallow clone, or pass --base")
+        return disclose(f"no merge base between {args.base} and HEAD — fetch it, "
+                        f"or deepen a shallow clone, or pass --base")
     base = base.strip()
     before = _ids_at(base, rel, root)
     if before is None:
-        return skip(f"cannot read {rel} at {base[:12]}")
+        return disclose(f"cannot read {rel} at {base[:12]}")
     # The working tree rather than HEAD: the gate runs over a row that has been
     # written and not yet committed, which is when a hand-picked ID is cheapest
     # to fix — and it is the same reason the Makefile's file lists carry
@@ -1160,26 +1337,56 @@ def cmd_claims(args):
         print(f"queue: claims: no ids added since {base[:12]}")
         return 0
 
+    rc = 0
+    # An added id can fail to be new two ways, and a claim only answers one of
+    # them. The claim says nobody else holds the number; this says the number
+    # is not one this repository already finished. Searching the store cannot
+    # find that — a completed row is deleted, so the id is absent from every
+    # place a filing session looks, and the row reads as unfiled rather than as
+    # done. History is the only copy left.
+    #
+    # Measured against `base` rather than HEAD, for the reason the id set is:
+    # filing a row and completing it on the same branch is a documented shape,
+    # and a branch that files, deletes and then restores a row would otherwise
+    # be reporting its own change of mind as resurrection.
+    shipped, why = _shipped_ids(base, rel, root)
+    if shipped is None:
+        rc |= disclose(f"{why}; {len(added)} added id(s) went unchecked "
+                       f"against ids this repository has already completed")
+    else:
+        excused = _allowlist(args.allow_shipped, "QUEUE_SHIPPED_ALLOW")
+        for q in added:
+            if q not in shipped or q in excused:
+                continue
+            rc = 1
+            print(f"queue: {q}.md re-files an id that has already shipped — "
+                  f"{shipped[q]} deleted it. Ids are never reused, so file the "
+                  f"work under a new id from alloc-queue-id.sh; pass "
+                  f"--allow-shipped {q} only if this branch is reverting that "
+                  f"completion, where the row is coming back rather than being "
+                  f"filed again", file=sys.stderr)
+
     out, ok = _git_read(["ls-remote", args.remote, f"{REF_NS}/*"], root,
                         timeout=REMOTE_TIMEOUT)
     if not ok:
-        return skip(f"{args.remote} did not answer, so its claims are unknown "
-                    f"and {len(added)} added id(s) went unchecked")
+        rc |= disclose(f"{args.remote} did not answer, so its claims are "
+                       f"unknown and {len(added)} added id(s) went unchecked")
+        return rc
     # ls-remote exits non-zero when it cannot reach the remote, so exit 0 means
     # the remote answered and an empty list is a real "nothing is claimed"
     # rather than a read that never happened.
     claimed = set(re.findall(r"(Q\d+)$", out, re.M))
-    raw = args.allow or [os.environ.get("QUEUE_CLAIMS_ALLOW", "")]
-    allowed = set(",".join(raw).replace(",", " ").split())
+    allowed = _allowlist(args.allow, "QUEUE_CLAIMS_ALLOW")
     missing = [q for q in added if q not in claimed and q not in allowed]
     for q in missing:
         print(f"queue: {q}.md files an id holding no {REF_NS}/{q} on "
               f"{args.remote}: allocate one with alloc-queue-id.sh and rename "
               f"the file, or pass --allow {q} if it was claimed elsewhere",
               file=sys.stderr)
-    if missing:
+    if missing or rc:
         return 1
-    print(f"queue: claims: {len(added)} added id(s) hold a claim on {args.remote}")
+    print(f"queue: claims: {len(added)} added id(s) hold a claim on "
+          f"{args.remote} and none re-files completed work")
     return 0
 
 
@@ -1389,18 +1596,31 @@ def main(argv=None):
 
     c = sub.add_parser(
         "claims",
-        help="check every id this branch adds holds a claim on the remote",
-        description="Every id this branch adds against its merge base with "
-                    "--base must hold a refs/queue-ids/QN ref on --remote, "
-                    "which is what alloc-queue-id.sh creates. A read that "
-                    "cannot be taken skips, so an offline clone still runs the "
-                    "gate; pass --strict where a network is guaranteed.")
+        help="check every id this branch adds is new",
+        description="Two checks over the ids this branch adds against its "
+                    "merge base with --base. Each must hold a "
+                    "refs/queue-ids/QN ref on --remote, which is what "
+                    "alloc-queue-id.sh creates; and none may be an id this "
+                    "repository has already completed, which git history "
+                    "records as a deletion and the store cannot show, since a "
+                    "completed row is deleted. A read that cannot be taken "
+                    "skips, so an offline clone still runs what it can; pass "
+                    "--strict where a network and a full history are "
+                    "guaranteed.")
     c.add_argument("--remote", default="origin", help="holds the claims")
     c.add_argument("--base", default="origin/main",
                    help="branch this one is measured against")
     c.add_argument("--allow", action="append", metavar="QNNN",
                    help="an id claimed outside this remote; repeatable, and "
                         "QUEUE_CLAIMS_ALLOW is a comma-separated default")
+    c.add_argument("--allow-shipped", action="append", metavar="QNNN",
+                   help="an id whose completion this branch is reverting, so "
+                        "the row is coming back rather than being re-filed; "
+                        "repeatable, and QUEUE_SHIPPED_ALLOW is a "
+                        "comma-separated default. Kept separate from --allow "
+                        "because the two excuse different findings and a "
+                        "waiver that covers both silences a check nobody "
+                        "asked it to.")
     c.add_argument("--strict", action="store_true",
                    help="fail rather than skip when a read cannot be taken")
     c.set_defaults(fn=cmd_claims)
