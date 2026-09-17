@@ -3200,6 +3200,21 @@ DEFER_RUNS_MODES = frozenset({'auto', 'acceptEdits', 'bypassPermissions'})
 INTERPRETER_SIGNAL = 'interpreter'
 
 
+def merge_nested_signal(signal, nested):
+    """Fold a nested body's suppression signal into the enclosing string's.
+
+    First non-None wins, with one exception: `interpreter` yields to anything
+    else. A shell word carrying a readable `-c` body labels its own group
+    `interpreter`, so a `kill` the recursion finds INSIDE that body would
+    otherwise never be seen -- and `interpreter` sits outside the default
+    `scoped` escalation scope, which turned `sh -c 'kill -9 -1'` into a defer
+    that `bypassPermissions` runs unexamined (Q212).
+    """
+    if signal in (None, INTERPRETER_SIGNAL) and nested not in (None, INTERPRETER_SIGNAL):
+        return nested
+    return signal or nested
+
+
 def escalation_scope():
     """`scoped` (default), `all`, or `off`, from ``WORKSPACE_GUARD_ESCALATE``.
 
@@ -4259,7 +4274,7 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
                                                   seed_loops=stable_loops,
                                                   base_cwd_unknown=body_cwd_unknown)
             outside.extend(sub_off)
-            signal = signal or sub_kf.signal
+            signal = merge_nested_signal(signal, sub_kf.signal)
             launder = launder or sub_kf.launder
             patterns.extend(sub_kf.patterns)
 
@@ -4278,7 +4293,7 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
             b_off, _, b_kf = _analyze_command(body, ctx, body_cwd,
                                               subst_depth + 1, in_subst)
             outside.extend(b_off)
-            signal = signal or b_kf.signal
+            signal = merge_nested_signal(signal, b_kf.signal)
             launder = launder or b_kf.launder
             patterns.extend(b_kf.patterns)
     return outside, guarded, KillFacts(signal, launder, patterns)
