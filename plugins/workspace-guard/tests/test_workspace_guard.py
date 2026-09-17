@@ -7650,6 +7650,68 @@ class SuppressionEscalationTests(unittest.TestCase):
         self.assertIn("inside the project root", reason)
 
 
+class ShellCEscalationReadsOnlyUnreachableBodiesTests(unittest.TestCase):
+    """The `sh -c` escalation fires only on a body nobody could read (Q211).
+
+    The suppression scanned for a shell word plus a short-option cluster
+    carrying `c` and never asked `shell_c_bodies` whether the body had in fact
+    been extracted -- so `timeout 240 bash -c 'until grep -q DONE tmp/w.log; do
+    sleep 5; done'; cat tmp/a` asked in `auto` while the hook was checking that
+    body's paths a few lines later. Targets are synthetic (repo rule); nothing
+    here is ever executed.
+    """
+
+    # A local wrapper the hook reads through, and the two shapes it cannot:
+    # a container runtime and a remote shell, both of whose paths name another
+    # filesystem.
+    READABLE = "cat in.txt; timeout 5 bash -c 'grep -q DONE in.txt'"
+    OPAQUE = (
+        "cat in.txt; docker exec c sh -c 'cat /q211-fake-target'",
+        "cat in.txt; ssh host sh -c 'cat /q211-fake-target'",
+    )
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = os.path.realpath(self._tmp.name)
+        with open(os.path.join(self.workspace, "in.txt"), "w") as f:
+            f.write("hello\n")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run(self, cmd, permission_mode=None):
+        return run_hook(cmd, self.workspace, project_dir=self.workspace,
+                        permission_mode=permission_mode,
+                        env_extra={"WORKSPACE_GUARD_ESCALATE": None})
+
+    def test_a_readable_body_does_not_escalate(self):
+        self.assertIsNone(self._run(self.READABLE, "auto"))
+        self.assertIsNone(self._run(self.READABLE, "bypassPermissions"))
+
+    def test_an_unreachable_body_still_escalates(self):
+        for cmd in self.OPAQUE:
+            out = self._run(cmd, "auto")
+            self.assertIsNotNone(out, cmd)
+            self.assertEqual(
+                "ask", out["hookSpecificOutput"]["permissionDecision"], cmd)
+            self.assertIn("could not reach",
+                          out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_the_readable_body_still_withholds_allow(self):
+        # Q60's guarantee is untouched: the `allow` is withheld, by
+        # `interp_code_source` firing on the same shell word. What changed is
+        # the label, and the label is what the escalation reads.
+        self.assertIsNone(self._run(self.READABLE))
+
+    def test_an_offender_inside_a_readable_body_is_still_caught(self):
+        out = self._run("cat in.txt; timeout 5 bash -c 'cat /q211-fake-target'",
+                        "auto")
+        self.assertIsNotNone(out)
+        self.assertEqual("ask", out["hookSpecificOutput"]["permissionDecision"])
+        self.assertIn("/q211-fake-target",
+                      out["hookSpecificOutput"]["permissionDecisionReason"])
+
+
 class PowerShellSuppressionEscalationTests(unittest.TestCase):
     """The PowerShell frontend escalates on the same terms (Q74).
 
