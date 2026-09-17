@@ -4029,10 +4029,22 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
             if sig[1]:
                 launder = launder or sig[0]
                 kill_pipes.add(pipe)
-        elif shell_c_group(g):
+        elif shell_c_group(g) and (group_cwd_unknown or not shell_c_bodies(g)):
             # An unreadable command string: suppress `allow` the same way a
             # signalling command does. Checked in the `elif` so a group that is
             # BOTH (`xargs sh -c 'kill …'`) keeps its signal classification.
+            #
+            # Only where the body is genuinely out of reach, which is the same
+            # condition the extraction below runs under: a container or remote
+            # wrapper, or an untracked cwd. A body `shell_c_bodies` DOES hand
+            # back is re-analyzed as its own command string a few lines down,
+            # so its paths are checked and `escalate_suppression`'s reason --
+            # "a shell `-c` body it could not reach" -- would be false. The
+            # `allow` is withheld either way: `interp_code_source` fires on the
+            # same shell word and suppresses as `interpreter`, which is Q60's
+            # guarantee arriving under the label that says what happened. That
+            # label is what stops the escalation, since `interpreter` sits
+            # outside the default `scoped` scope (Q211).
             signal = signal or 'sh -c'
         # Same suppression for an interpreter, which is opaque for the same
         # reason a `-c` body is. A script operand is exempt while it resolves
