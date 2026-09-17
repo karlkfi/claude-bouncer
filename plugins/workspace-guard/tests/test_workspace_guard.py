@@ -7712,6 +7712,62 @@ class ShellCEscalationReadsOnlyUnreachableBodiesTests(unittest.TestCase):
                       out["hookSpecificOutput"]["permissionDecisionReason"])
 
 
+class NestedSignalOutranksTheInterpreterLabelTests(unittest.TestCase):
+    """A signal found inside a readable `-c` body is not masked by it (Q212).
+
+    Reading the body stopped labelling the group `sh -c` (Q211), so the label
+    left standing was `interpreter`, which the shell word sets on its own group
+    and which the default `scoped` scope does not escalate. An unscoped kill
+    written inside a local `bash -c` body therefore deferred, and under
+    `bypassPermissions` a defer runs. Targets are synthetic (repo rule); nothing
+    here is ever executed.
+    """
+
+    WRAPPED_KILL = (
+        "cat in.txt; bash -c 'kill -9 -1'",
+        "cat in.txt; timeout 5 bash -c 'kill -9 -1'",
+        "cat in.txt; xargs sh -c 'kill -9 -1'",
+    )
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = os.path.realpath(self._tmp.name)
+        with open(os.path.join(self.workspace, "in.txt"), "w") as f:
+            f.write("hello\n")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run(self, cmd, permission_mode=None):
+        return run_hook(cmd, self.workspace, project_dir=self.workspace,
+                        permission_mode=permission_mode,
+                        env_extra={"WORKSPACE_GUARD_ESCALATE": None})
+
+    def test_a_wrapped_kill_escalates_under_the_default_scope(self):
+        for cmd in self.WRAPPED_KILL:
+            out = self._run(cmd, "auto")
+            self.assertIsNotNone(out, cmd)
+            self.assertEqual(
+                "ask", out["hookSpecificOutput"]["permissionDecision"], cmd)
+
+    def test_the_reason_names_the_kill_rather_than_the_body(self):
+        out = self._run(self.WRAPPED_KILL[0], "auto")
+        reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("`kill` whose targets it cannot see", reason)
+        self.assertNotIn("could not reach", reason)
+
+    def test_bypass_permissions_denies_rather_than_running_it(self):
+        out = self._run(self.WRAPPED_KILL[0], "bypassPermissions")
+        self.assertIsNotNone(out)
+        self.assertEqual("deny", out["hookSpecificOutput"]["permissionDecision"])
+
+    def test_a_body_with_no_signal_still_does_not_escalate(self):
+        # The Q211 fix stands: an ordinary readable body keeps its silence.
+        self.assertIsNone(
+            self._run("cat in.txt; timeout 5 bash -c 'grep -q DONE in.txt'",
+                      "auto"))
+
+
 class PowerShellSuppressionEscalationTests(unittest.TestCase):
     """The PowerShell frontend escalates on the same terms (Q74).
 
