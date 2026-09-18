@@ -46,7 +46,7 @@ Then install whichever you want. They're independent and work in any combination
 
 | | Plugin | Version | What it stops at the door |
 | --- | --- | --- | --- |
-| <img src="plugins/workspace-guard/docs/img/favicon-48.png" width="24" height="24" alt=""> | [workspace-guard](plugins/workspace-guard) | 1.12.0 | `grep`/`sed`/`jq`/`cat` reading or writing outside the workspace, and blind process kills |
+| <img src="plugins/workspace-guard/docs/img/favicon-48.png" width="24" height="24" alt=""> | [workspace-guard](plugins/workspace-guard) | 1.12.1 | `grep`/`sed`/`jq`/`cat` reading or writing outside the workspace, and blind process kills |
 | <img src="plugins/branch-guard/docs/img/favicon-48.png" width="24" height="24" alt=""> | [branch-guard](plugins/branch-guard) | 1.11.0 | Commits and pushes to a protected branch, and destructive `git`/`gh` commands. Auto-approves the safe ones |
 | <img src="plugins/prod-guard/docs/img/favicon-48.png" width="24" height="24" alt=""> | [prod-guard](plugins/prod-guard) | 2.6.0 | Mutating `kubectl`/`helm`/`terraform`/`gcloud`/`aws` aimed at production, or relying on ambient context that can change under it |
 | <img src="plugins/exit-status-guard/docs/img/favicon-48.png" width="24" height="24" alt=""> | [exit-status-guard](plugins/exit-status-guard) | 2.1.0 | A gate whose failure reads as success: piped into a filter, backgrounded behind an `echo`, or sequenced before a state change with `;` |

@@ -10,7 +10,7 @@
     {
       "name": "workspace-guard",
       "description": "Prompt before grep/sed/jq/awk/cat/head/tail touch files outside the workspace; deny blind process kills.",
-      "version": "1.12.0",
+      "version": "1.12.1",
       "author": {
         "name": "Karl Isenberg",
         "url": "https://github.com/karlkfi"
