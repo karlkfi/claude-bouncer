@@ -113,6 +113,12 @@ terminator. Put the `&&` on the line carrying `<<`, ahead of the body: bash
 reads the body after the whole line, so `git commit -F - <<'MSG' && git push`
 followed by the body and its terminator is the gated form.
 
+A leading `set -e` does not make the sequence safe, and the deny says so.
+Claude Code runs each Bash call as `… && eval '<command>' && …`, and both bash
+and zsh ignore errexit for a command in a non-final position of an `&&` list,
+which covers the whole `eval` body. `set -e; false; echo ran` prints `ran`
+there, while the same script under a plain `bash -c` exits 1.
+
 `&&` is not the fix when the second command has to run whatever the first did.
 A mutation control mutates a file, runs a gate whose failure *is* the
 assertion, and restores; `&&` skips the restore on the expected failure and
