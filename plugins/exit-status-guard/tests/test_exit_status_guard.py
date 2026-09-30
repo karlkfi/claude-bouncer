@@ -464,6 +464,17 @@ CASES = [
     # whatever the first returned, so the boundary itself has to keep denying.
     ('a bare newline before a mutator is still a sequence',
      'make check\ngit push', False, True, 'is sequenced before'),
+    # Claude Code wraps the call in `&& eval '<cmd>' &&`, where bash ignores
+    # errexit, so a leading `set -e` guards nothing and the deny stands.
+    ('set -e does not make a newline sequence safe',
+     'set -e\ngit add a.py\ngit commit -m x -- a.py', False, True,
+     '`set -e` does not stop it'),
+    ('set -euo pipefail does not make a `;` sequence safe',
+     'set -euo pipefail; make check; git push', False, True,
+     '`set -e` does not stop it'),
+    ('set -o errexit does not make a sequence safe',
+     'set -o errexit\nmake check\ngit push', False, True,
+     '`set -e` does not stop it'),
     # Measured 2026-09-06 on 2.0.1: denied with "`git commit -q -F -` is
     # sequenced before `git commit -q -m docs(queue): complete Q131` with
     # `;`" -- and the command holds no `;`. The separator is the newline
@@ -1013,6 +1024,46 @@ class TestSequencedSeparator(unittest.TestCase):
         self.assertEqual('', pg.decide(
             "git commit -F - <<'MSG' && git push\nsubject\nMSG",
             False, self.reg, '/scratch'))
+
+
+class TestErrexitNote(unittest.TestCase):
+    """A sequence behind `set -e` says why errexit does not guard it.
+
+    The session that wrote `set -e` believes the shell stops at the first
+    failure, so an unexplained deny reads to it as a false positive. The note
+    goes only where errexit was set: elsewhere it answers a question nobody
+    asked.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = shipped_registry()
+
+    def test_spellings_that_set_it(self):
+        for cmd in ('set -e', 'set -eu', 'set -Eeuo pipefail', 'set -xe',
+                    'set -o errexit', 'set -uo errexit'):
+            with self.subTest(cmd):
+                self.assertTrue(pg.sets_errexit(pg.split_segments(
+                    pg.tokenize(cmd)[0])))
+
+    def test_spellings_that_do_not(self):
+        for cmd in ('set +e', 'set -o pipefail', 'set -u', 'set -- -e',
+                    'echo set -e', 'set +o errexit'):
+            with self.subTest(cmd):
+                self.assertFalse(pg.sets_errexit(pg.split_segments(
+                    pg.tokenize(cmd)[0])))
+
+    def test_note_follows_the_and_advice(self):
+        reason = pg.decide('set -e\nmake check\ngit push', False, self.reg,
+                           '/scratch')
+        self.assertLess(reason.index('Join them with `&&`'),
+                        reason.index(pg.ERREXIT_NOTE))
+        self.assertTrue(reason.endswith(pg.OVERRIDE_TAIL),
+                        'the override stays last')
+
+    def test_no_note_without_errexit(self):
+        reason = pg.decide('make check\ngit push', False, self.reg, '/scratch')
+        self.assertNotIn('set -e', reason)
 
 
 class TestSuggestedLogPath(unittest.TestCase):

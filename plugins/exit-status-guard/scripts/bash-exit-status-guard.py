@@ -509,6 +509,29 @@ def sets_pipefail(segs):
     return False
 
 
+def sets_errexit(segs):
+    """Whether any segment turns on errexit: `set -e`, a cluster holding `e`
+    (`set -euo pipefail`), or `set -o errexit`.
+
+    Read only to explain a denial, never to suppress one -- see ERREXIT_NOTE.
+    """
+    for seg in segs:
+        words = head_words(seg)
+        if not words or words[0] != 'set':
+            continue
+        args = words[1:]
+        for i, w in enumerate(args):
+            if w == '--':
+                break
+            if not w.startswith('-') or w == '-':
+                continue
+            if 'e' in w[1:]:
+                return True
+            if 'o' in w[1:] and args[i + 1:i + 2] == ['errexit']:
+                return True
+    return False
+
+
 def has_override(segs):
     """Whether a segment carries the break-glass assignment with a reason.
 
@@ -901,6 +924,17 @@ SEQUENCED_NEWLINE_REASON = (
     "body: `cmd <<'EOF' && next`, then the body and its terminator below."
     + _SEQUENCED_RESTORE)
 SEQUENCED_REASONS = {';': SEQUENCED_REASON, '\n': SEQUENCED_NEWLINE_REASON}
+# Claude Code runs a Bash call as `... && eval '<cmd>' < /dev/null && pwd -P
+# ...`, and bash and zsh both ignore errexit for every command in a non-final
+# position of an `&&` list, including all of an `eval`'s body. So a leading
+# `set -e` is a no-op here and the sequence it appears to guard runs in full.
+# Measured 2026-09-29 on Claude Code 2.1.282: `set -e; false; echo ran` prints
+# `ran`. Without this sentence a session that wrote `set -e` reads the deny as
+# a false positive.
+ERREXIT_NOTE = (
+    " `set -e` does not stop it: this tool runs the command inside an `eval` "
+    "that is itself part of an `&&` list, where the shell ignores errexit, so "
+    "every line runs whatever the line before it returned.")
 
 
 def decide(cmd, background, reg, scratch='', depth=0):
@@ -945,9 +979,12 @@ def decide(cmd, background, reg, scratch='', depth=0):
 
     gate, mutator, sep = sequenced_mutation(segs, reg)
     if gate:
+        reason = SEQUENCED_REASONS[sep]
+        if sets_errexit(segs):
+            reason = reason.replace(_SEQUENCED_RUNS,
+                                    _SEQUENCED_RUNS + ERREXIT_NOTE, 1)
         return with_log_path('`' + truncate(gate) + SEQUENCED_REASON_HEAD
-                             + truncate(mutator) + SEQUENCED_REASONS[sep],
-                             scratch)
+                             + truncate(mutator) + reason, scratch)
 
     # A gate inside a backtick substitution never reaches the segment loop as a
     # command (backticks are ordinary word characters to shlex), so the bodies
