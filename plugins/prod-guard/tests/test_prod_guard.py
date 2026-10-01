@@ -665,6 +665,10 @@ class CommandSubstitutionDecisionTests(unittest.TestCase):
         for command in ("echo \ue000x; %s", 'echo \ue000\ue001 "$(%s)"'):
             with self.subTest(command=command):
                 self.assertEqual(self.decide(command % self.K), "deny")
+        # Every one of the first 256 is taken, so the sentinels must come from
+        # further out.
+        crowded = "".join(map(chr, range(0xe000, 0xe100)))
+        self.assertEqual(self.decide('echo %s "$(%s)"' % (crowded, self.K)), "deny")
         tokens = guard.tokenize('echo "\ue000x$(true)\ue001"')
         self.assertEqual(guard.split_simple_commands(tokens),
                          [["true"], ["echo", "\ue000x$(true)\ue001"]])

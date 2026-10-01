@@ -454,11 +454,16 @@ def tokenize(raw):
 # marker.
 _SUBST_BASE = 0xe100
 _SUBST_MAX = 0xf8ff - _SUBST_BASE
+# Past the first 256, sentinels come from the supplementary private-use planes,
+# so only a command holding over 130,000 of these characters runs out.
+_SENTINEL_RANGES = (range(0xe000, _SUBST_BASE), range(0xf0000, 0x110000))
 
 
 def _subst_sentinels(raw):
-    free = [c for c in map(chr, range(0xe000, _SUBST_BASE)) if c not in raw]
-    return (free[0], free[1]) if len(free) > 1 else None
+    held = set(raw)
+    free = (chr(c) for r in _SENTINEL_RANGES for c in r if chr(c) not in held)
+    pair = (next(free, None), next(free, None))
+    return pair if pair[1] else None
 
 
 def _subst_marker(sentinels, idx, length):
