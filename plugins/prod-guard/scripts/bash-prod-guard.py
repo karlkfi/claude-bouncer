@@ -78,8 +78,9 @@ import sys
 # plugin's `lib/` is vendored from the repository root; see scripts/sync-lib.py.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 from bouncer_parse import (                                    # noqa: E402
-    ASSIGN_APPEND, ASSIGN_SUBSCRIPT, ASSIGNMENT_RE, PUNCT_CHARS,
-    QuoteTrackingLexer, is_assignment, split_assignment, strip_heredoc_bodies,
+    ASSIGN_APPEND, ASSIGN_SUBSCRIPT, ASSIGNMENT_RE, PUNCT_CHARS, QuotedStr,
+    QuoteTrackingLexer, command_substitutions, is_assignment, split_assignment,
+    strip_heredoc_bodies,
 )
 from bouncer_grants import grants_path, load_grants, record_grants  # noqa: E402
 import time
@@ -383,19 +384,33 @@ def strip_quoted_heredocs(raw):
 
 
 def tokenize(raw):
-    """shlex-tokenize with POSIX quoting and punctuation grouping. Backticks
-    and newlines are rewritten to `;` first: a backtick-substituted command
-    must split into its own simple command instead of hiding inside a word,
-    and shlex treats a newline as plain whitespace, which would merge
-    `true\ncmd` into one segment (`$(...)` needs no rewrite — `(` / `)` are
-    punctuation chars and act as separators). Rewriting inside quotes only
-    ever creates extra segments to inspect, never hides one. Returns None on
-    unbalanced quotes (caller defers: fail-open on parse errors)."""
+    """shlex-tokenize with POSIX quoting and punctuation grouping. Newlines
+    are rewritten to `;` first, because shlex treats a newline as plain
+    whitespace, which would merge `true\ncmd` into one segment.
+
+    Each command substitution bash would run -- unquoted or inside double
+    quotes, `$(...)` or backticks -- is found structurally and its body is
+    tokenized as its own commands, inserted ahead of the simple command it
+    sits in, which is where bash runs it. Rewriting the substitution to a
+    separator instead is not enough: inside double quotes the separator lands
+    in a quoted word and shlex keeps the word whole, hiding the command
+    (Q196). Single quotes keep a substitution literal, so it is left alone.
+    The word that held it keeps its original text, so `--context="$(x)"`
+    still reads as unresolved. A backtick the scan could not pair is still
+    rewritten to `;`, the fail-safe direction.
+
+    Returns None on unbalanced quotes (caller defers: fail-open on parse
+    errors)."""
     expanded = []
     raw = strip_heredoc_bodies(raw, expanded, expanded)
-    raw = raw.replace('`', ';').replace('\n', ';')
+    spans = []
+    bodies = command_substitutions(raw, spans=spans)[:_SUBST_MAX]
+    masked = raw
+    for idx, (start, end) in enumerate(spans[:_SUBST_MAX]):
+        masked = masked[:start] + _subst_marker(idx, end - start) + masked[end:]
+    masked = masked.replace('`', ';').replace('\n', ';')
     try:
-        tokens = _lex_semicolons(raw)
+        tokens = _hoist_substitutions(_lex_semicolons(masked), raw, spans, bodies)
         # Every body is stripped above, so the ones this guard still has to see
         # come back through the out-lists and are appended as their own
         # segments: the ones bash would EXPAND, and the ones whose terminator
@@ -406,18 +421,78 @@ def tokenize(raw):
         # appended rather than left inline because a body is data: an
         # apostrophe in one would otherwise open a quote for the rest of the
         # command.
+        #
+        # Quote characters in an expanded body are literal text, so its
+        # substitutions are scanned with quoting off: `'$(cmd)'` there still
+        # runs `cmd`. The same apostrophe can leave the body unlexable, which
+        # costs the body's own words and nothing else.
         for body in expanded:
+            for sub in command_substitutions(body, quotes=False):
+                sub_tokens = tokenize(sub)
+                if sub_tokens:
+                    tokens.append(';')
+                    tokens.extend(sub_tokens)
+            try:
+                body_tokens = _lex_semicolons(body.replace('`', ';').replace('\n', ';'))
+            except ValueError:
+                continue
             tokens.append(';')
-            tokens.extend(_lex_semicolons(body.replace('`', ';').replace('\n', ';')))
+            tokens.extend(body_tokens)
         return tokens
     except ValueError:
         return None
+
+
+# A substitution is masked to a run of private-use characters the same length
+# as its text before lexing, so the lexer reads it as part of whatever word it
+# sits in, and the word can be restored to its original text with every offset
+# `QuotedStr.quoted_from` holds still valid.
+_SUBST_OPEN = ''
+_SUBST_FILL = ''
+_SUBST_BASE = 0xe100
+_SUBST_MAX = 0xf8ff - _SUBST_BASE
+_SUBST_RE = re.compile('%s(.)%s*' % (_SUBST_OPEN, _SUBST_FILL))
+
+
+def _subst_marker(idx, length):
+    return (_SUBST_OPEN + chr(_SUBST_BASE + idx) + _SUBST_FILL * length)[:length]
+
+
+def _hoist_substitutions(tokens, raw, spans, bodies):
+    """Restore every masked word and insert each substitution body it held,
+    tokenized, ahead of the simple command the word belongs to. A marker
+    inside a comment never reaches a token, so a commented-out substitution
+    stays unjudged, as bash leaves it unrun."""
+    out, seg_start = [], 0
+    for t in tokens:
+        if _is_operator_token(t):
+            out.append(t)
+            seg_start = len(out)
+            continue
+        if _SUBST_OPEN in t:
+            for m in _SUBST_RE.finditer(t):
+                sub_tokens = tokenize(bodies[ord(m.group(1)) - _SUBST_BASE])
+                if sub_tokens:
+                    out[seg_start:seg_start] = sub_tokens + [';']
+                    seg_start += len(sub_tokens) + 1
+            restored = QuotedStr(_SUBST_RE.sub(
+                lambda m: raw[slice(*spans[ord(m.group(1)) - _SUBST_BASE])], t))
+            restored.quotes = getattr(t, 'quotes', frozenset())
+            restored.quoted_from = getattr(t, 'quoted_from', None)
+            t = restored
+        out.append(t)
+    return out
 
 
 def _lex_semicolons(raw):
     lex = QuoteTrackingLexer(raw, posix=True, punctuation_chars=';()<>|&\n')
     lex.whitespace_split = True
     return list(lex)
+
+
+def _is_operator_token(t):
+    return bool(t) and getattr(t, 'quoted_from', None) is None \
+        and all(c in PUNCT_CHARS for c in t)
 
 
 def split_simple_commands(tokens):
@@ -443,8 +518,7 @@ def split_simple_commands(tokens):
     `is_operator` documents, and the right one here."""
     groups, cur = [], []
     for t in tokens:
-        if t and getattr(t, 'quoted_from', None) is None \
-                and all(c in PUNCT_CHARS for c in t):
+        if _is_operator_token(t):
             if cur:
                 groups.append(cur)
             cur = []

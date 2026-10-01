@@ -614,6 +614,58 @@ class HeredocDecisionTests(unittest.TestCase):
         self.assertEqual(decision, "deny")
 
 
+class CommandSubstitutionDecisionTests(unittest.TestCase):
+    """End-to-end: a command substitution bash runs is judged wherever it sits
+    (Q196). Measured before the fix: every double-quoted shape below, and every
+    quoted one inside an unquoted heredoc body, returned no decision while bash
+    ran the command."""
+
+    K = "kubectl delete ns payments"
+
+    def decide(self, command):
+        return run_hook(command, home=make_home(kubeconfig=KUBECONFIG_PROD))[0]
+
+    def test_double_quoted_substitution_is_judged(self):
+        for shape in ('echo "`%s`"', 'X="`%s`"', 'echo "$(%s)"', 'X="$(%s)"',
+                      'echo "a $(%s) b" | cat', 'echo "$(echo "$(%s)")"'):
+            with self.subTest(shape=shape):
+                self.assertEqual(self.decide(shape % self.K), "deny")
+
+    def test_single_quoted_substitution_stays_literal(self):
+        for shape in ("echo '`%s`'", "echo '$(%s)'", "echo '\"$(%s)\"'",
+                      'echo "\\$(%s)"', 'echo hi # "$(%s)"'):
+            with self.subTest(shape=shape):
+                self.assertIsNone(self.decide(shape % self.K))
+
+    def test_quotes_in_an_unquoted_heredoc_body_are_text(self):
+        for line in ('x = "`%s`"', "x = '`%s`'", "x = '$(%s)'",
+                     "don't\n$(%s)"):
+            with self.subTest(line=line):
+                self.assertEqual(
+                    self.decide("cat <<EOF\n%s\nEOF" % (line % self.K)), "deny")
+
+    def test_quoted_delimiter_heredoc_still_suppresses(self):
+        self.assertIsNone(
+            self.decide("cat <<'EOF'\n\"`%s`\"\nEOF" % self.K))
+
+    def test_word_holding_a_substitution_keeps_its_text(self):
+        # The body is judged on its own, and the flag it fills reads as an
+        # unresolved target rather than being cut out of the argv -- which is
+        # what the unquoted form's `(` did before, deferring the command.
+        for flag in ('--context="$(cat ctx)"', '--context=$(cat ctx)'):
+            with self.subTest(flag=flag):
+                decision, reason = run_hook(
+                    'kubectl %s delete ns x' % flag, home=make_home())
+                self.assertEqual(decision, "ask")
+                self.assertIn("'$(cat ctx)'", reason)
+
+    def test_substitution_is_hoisted_ahead_of_its_command(self):
+        tokens = guard.tokenize('a; X=1 echo "x$(%s)y" z && b' % self.K)
+        self.assertEqual(guard.split_simple_commands(tokens), [
+            ["a"], ["kubectl", "delete", "ns", "payments"],
+            ["X=1", "echo", "x$(%s)y" % self.K, "z"], ["b"]])
+
+
 class ExpandVarsTests(unittest.TestCase):
     """Unit tests for the conservative $VAR / ${VAR} expander (Q11)."""
 

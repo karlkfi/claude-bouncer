@@ -270,7 +270,9 @@ Compound commands are split and each segment evaluated: `&&`, `||`, `|`,
 `;`, `&`, newlines, subshells, `$(...)`, backticks, plus `bash|sh|zsh -c
 '...'` bodies, `eval`, and wrappers (`sudo`, `env`, `timeout`, `xargs`,
 `nohup`, `time`). A guard that only inspected the first token would be
-trivially bypassed by `echo hi && kubectl --context prod delete ns x`.
+trivially bypassed by `echo hi && kubectl --context prod delete ns x`. A
+substitution is split out inside double quotes and unquoted heredoc bodies
+too, where bash still runs it.
 
 Simple shell variables in a resolved target are expanded before
 classification, so the common `CTX=<ctx> kubectl --context $CTX …` /
