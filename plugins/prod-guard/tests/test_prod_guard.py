@@ -357,6 +357,20 @@ class ParsingTests(unittest.TestCase):
             guard.strip_wrappers(["exec", "-c", "-l", "kubectl", "delete"], {}),
             ["kubectl", "delete"])
 
+    def test_bundled_value_flag_skips_its_value(self):
+        # A value-taking flag at the end of a bundle takes the next word, one
+        # earlier in the bundle takes the rest of the word (Q200).
+        for argv in (["sudo", "-nu", "root"], ["sudo", "-bg", "wheel"],
+                     ["sudo", "-nuroot"], ["env", "-iu", "FOO"],
+                     ["env", "-iC", "/tmp"], ["exec", "-ca", "gate"],
+                     ["timeout", "-vk", "5", "10"], ["timeout", "-vsKILL", "10"],
+                     ["/usr/bin/time", "-po", "out.txt"],
+                     ["command", "-p", "time", "-po", "out.txt"]):
+            with self.subTest(argv=argv):
+                self.assertEqual(
+                    guard.strip_wrappers(argv + ["kubectl", "delete"], {}),
+                    ["kubectl", "delete"])
+
     def test_stdbuf_and_unbuffer_strip_like_other_wrappers(self):
         # Both prefix a command the way `nohup` does (Q161). stdbuf's mode
         # flags take a value attached or separate; the long forms are GNU's.
@@ -2451,6 +2465,15 @@ class BypassBatteryTests(unittest.TestCase):
     def test_flag_equals_form_after_verb(self):
         decision, _ = run_hook("kubectl delete ns x --context=gke_acme_prod-us")
         self.assertEqual(decision, "deny")
+
+    def test_bundled_wrapper_flags(self):
+        # Measured before Q200: each deferred, its flag's value read as the tool.
+        for prefix in ("sudo -nu root", "env -iu FOO", "exec -ca gate",
+                       "timeout -vk 5 10", "/usr/bin/time -po out.txt"):
+            with self.subTest(prefix=prefix):
+                decision, _ = run_hook(
+                    prefix + " kubectl --context gke_acme_prod-us delete ns x")
+                self.assertEqual(decision, "deny")
 
     def test_sudo_wrapper(self):
         decision, _ = run_hook(
