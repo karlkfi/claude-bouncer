@@ -405,12 +405,15 @@ def tokenize(raw):
     raw = strip_heredoc_bodies(raw, expanded, expanded)
     spans = []
     bodies = command_substitutions(raw, spans=spans)[:_SUBST_MAX]
+    sentinels = _subst_sentinels(raw)
     masked = raw
-    for idx, (start, end) in enumerate(spans[:_SUBST_MAX]):
-        masked = masked[:start] + _subst_marker(idx, end - start) + masked[end:]
+    for idx, (start, end) in enumerate(spans[:len(bodies)] if sentinels else ()):
+        masked = (masked[:start] + _subst_marker(sentinels, idx, end - start)
+                  + masked[end:])
     masked = masked.replace('`', ';').replace('\n', ';')
     try:
-        tokens = _hoist_substitutions(_lex_semicolons(masked), raw, spans, bodies)
+        tokens = _hoist_substitutions(_lex_semicolons(masked), raw, spans,
+                                      bodies, sentinels)
         # Every body is stripped above, so the ones this guard still has to see
         # come back through the out-lists and are appended as their own
         # segments: the ones bash would EXPAND, and the ones whose terminator
@@ -446,36 +449,44 @@ def tokenize(raw):
 # A substitution is masked to a run of private-use characters the same length
 # as its text before lexing, so the lexer reads it as part of whatever word it
 # sits in, and the word can be restored to its original text with every offset
-# `QuotedStr.quoted_from` holds still valid.
-_SUBST_OPEN = ''
-_SUBST_FILL = ''
+# `QuotedStr.quoted_from` holds still valid. The opener and fill characters are
+# picked from ones the command does not hold, so its own text never reads as a
+# marker.
 _SUBST_BASE = 0xe100
 _SUBST_MAX = 0xf8ff - _SUBST_BASE
-_SUBST_RE = re.compile('%s(.)%s*' % (_SUBST_OPEN, _SUBST_FILL))
 
 
-def _subst_marker(idx, length):
-    return (_SUBST_OPEN + chr(_SUBST_BASE + idx) + _SUBST_FILL * length)[:length]
+def _subst_sentinels(raw):
+    free = [c for c in map(chr, range(0xe000, _SUBST_BASE)) if c not in raw]
+    return (free[0], free[1]) if len(free) > 1 else None
 
 
-def _hoist_substitutions(tokens, raw, spans, bodies):
+def _subst_marker(sentinels, idx, length):
+    opener, fill = sentinels
+    return (opener + chr(_SUBST_BASE + idx) + fill * length)[:length]
+
+
+def _hoist_substitutions(tokens, raw, spans, bodies, sentinels):
     """Restore every masked word and insert each substitution body it held,
     tokenized, ahead of the simple command the word belongs to. A marker
     inside a comment never reaches a token, so a commented-out substitution
     stays unjudged, as bash leaves it unrun."""
+    if not sentinels:
+        return tokens
+    marker = re.compile('%s(.)%s*' % sentinels)
     out, seg_start = [], 0
     for t in tokens:
         if _is_operator_token(t):
             out.append(t)
             seg_start = len(out)
             continue
-        if _SUBST_OPEN in t:
-            for m in _SUBST_RE.finditer(t):
+        if sentinels[0] in t:
+            for m in marker.finditer(t):
                 sub_tokens = tokenize(bodies[ord(m.group(1)) - _SUBST_BASE])
                 if sub_tokens:
                     out[seg_start:seg_start] = sub_tokens + [';']
                     seg_start += len(sub_tokens) + 1
-            restored = QuotedStr(_SUBST_RE.sub(
+            restored = QuotedStr(marker.sub(
                 lambda m: raw[slice(*spans[ord(m.group(1)) - _SUBST_BASE])], t))
             restored.quotes = getattr(t, 'quotes', frozenset())
             restored.quoted_from = getattr(t, 'quoted_from', None)

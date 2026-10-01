@@ -659,6 +659,16 @@ class CommandSubstitutionDecisionTests(unittest.TestCase):
                 self.assertEqual(decision, "ask")
                 self.assertIn("'$(cat ctx)'", reason)
 
+    def test_private_use_text_is_not_read_as_a_marker(self):
+        # Nerd Font glyphs live in U+E000 onwards, so pasted text can carry the
+        # characters a substitution is masked with.
+        for command in ("echo \ue000x; %s", 'echo \ue000\ue001 "$(%s)"'):
+            with self.subTest(command=command):
+                self.assertEqual(self.decide(command % self.K), "deny")
+        tokens = guard.tokenize('echo "\ue000x$(true)\ue001"')
+        self.assertEqual(guard.split_simple_commands(tokens),
+                         [["true"], ["echo", "\ue000x$(true)\ue001"]])
+
     def test_substitution_is_hoisted_ahead_of_its_command(self):
         tokens = guard.tokenize('a; X=1 echo "x$(%s)y" z && b' % self.K)
         self.assertEqual(guard.split_simple_commands(tokens), [
