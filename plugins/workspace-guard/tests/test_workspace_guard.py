@@ -982,6 +982,19 @@ class CommandOverrideTests(unittest.TestCase):
     def test_an_empty_append_value_does_not_arm(self):
         self.assertIsNone(guard.command_override('WORKSPACE_GUARD_OVERRIDE+= cp a b'))
 
+    def test_a_subscripted_prefix_does_not_arm(self):
+        # bash exports a variable literally called `NAME[0]` and leaves NAME
+        # alone, so arming would accept a spelling the shell never wrote (Q214).
+        for cmd in ('WORKSPACE_GUARD_OVERRIDE[0]=r cp a b',
+                    'WORKSPACE_GUARD_OVERRIDE[0]+=r cp a b'):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(guard.command_override(cmd))
+
+    def test_a_subscripted_prefix_does_not_end_the_run(self):
+        # The control: bash still exports what follows it in the same run.
+        self.assertEqual("r", guard.command_override(
+            'FOO[0]=x WORKSPACE_GUARD_OVERRIDE=r cp a b'))
+
     def test_a_plus_inside_the_name_does_not_arm(self):
         # `WORKSPACE_GUARD+_OVERRIDE=r` is `command not found` to bash.
         self.assertIsNone(
@@ -2892,6 +2905,13 @@ class HookEndToEndTests(unittest.TestCase):
         self.assertIsNone(
             guard.inline_tmpdir(["TMPDIR=/a", "TMPDIR+=./scratch", "mktemp"]))
 
+    def test_inline_tmpdir_ignores_a_subscript(self):
+        # `TMPDIR=./a TMPDIR[0]=/b cmd` hands cmd `./a`: a subscripted prefix
+        # sets no TMPDIR, driven on bash 5.3.15 (Q214).
+        self.assertEqual(
+            guard.inline_tmpdir(["TMPDIR=./a", "TMPDIR[0]=/b", "mktemp"]),
+            "./a")
+
     def test_inline_tmpdir_rejects_unexpanded_value(self):
         # A `$`/backtick value would be expanded by bash; not a trusted literal.
         self.assertIsNone(guard.inline_tmpdir(["TMPDIR=$FOO", "mktemp"]))
@@ -2935,6 +2955,19 @@ class HookEndToEndTests(unittest.TestCase):
 
     def test_multiple_env_prefix_outside_ask(self):
         self._decision("FOO=1 BAR=2 cat /etc/passwd", "ask")
+
+    def test_subscripted_env_prefix_outside_ask(self):
+        # bash 5.3.15 peels `FOO[0]=x` and runs the reader behind it, array or
+        # not; pre-Q214 the hook read `FOO[0]=x` as the command and was silent.
+        for prefix in ("FOO[0]=x", "FOO[0]+=x", "FOO[a[0]]=x", 'FOO["0"]=x',
+                       "A=1 FOO[1]=x B=2"):
+            with self.subTest(prefix=prefix):
+                self._decision(f"{prefix} cat /etc/q214-fake", "ask")
+
+    def test_a_word_bash_runs_as_a_command_is_not_peeled(self):
+        # The first `]` at depth 0 closes, so this is a command name to bash,
+        # which opens no file.
+        self._defer("FOO[a]b]=x cat /etc/q214-fake")
 
     def test_env_prefix_before_grep_outside_ask(self):
         # Make sure prog-suppression still works after stripping env prefix.
@@ -8427,6 +8460,17 @@ class ApplyAssignmentGroupTests(unittest.TestCase):
         m = {"f": "in.txt"}
         guard.apply_assignment_group(["f=$(cmd)"], m, True)
         self.assertEqual(m, {})
+
+    def test_a_subscript_drops_the_name_whatever_the_index(self):
+        # `$P` is `${P[0]}`: `P=/lit; P[0]=/arr` gives `/arr` and `P[1]=/arr`
+        # leaves `/lit`, driven on bash 5.3.15. The subscript can be
+        # arithmetic, so neither value is recorded (Q214).
+        for tok in ("P[0]=/arr", "P[1]=/arr", "P[1-1]=/arr"):
+            with self.subTest(tok=tok):
+                m = {"P": "/lit"}
+                self.assertEqual(
+                    guard.apply_assignment_group([tok], m, True), ["P"])
+                self.assertEqual(m, {})
 
     def test_append_poisons_rather_than_replacing(self):
         # `f+=x` resolves to the old value plus `x`. Treating it as a plain set

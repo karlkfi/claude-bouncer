@@ -78,8 +78,8 @@ import sys
 # plugin's `lib/` is vendored from the repository root; see scripts/sync-lib.py.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 from bouncer_parse import (                                    # noqa: E402
-    ASSIGNMENT_RE, PUNCT_CHARS, QuoteTrackingLexer, is_assignment,
-    split_assignment, strip_heredoc_bodies,
+    ASSIGN_APPEND, ASSIGN_SUBSCRIPT, ASSIGNMENT_RE, PUNCT_CHARS,
+    QuoteTrackingLexer, is_assignment, split_assignment, strip_heredoc_bodies,
 )
 from bouncer_grants import grants_path, load_grants, record_grants  # noqa: E402
 import time
@@ -468,8 +468,14 @@ def extract_env_prefix(argv, base_env=None):
     env = {}
     i = 0
     while i < len(argv) and is_assignment(argv[i]):
-        name, append, value = split_assignment(argv[i])
-        if append:
+        name, form, value = split_assignment(argv[i])
+        if form == ASSIGN_SUBSCRIPT:
+            # `NAME[0]=v cmd` runs cmd and leaves NAME alone -- bash exports a
+            # variable literally called `NAME[0]` -- so it can neither pin a
+            # target nor arm an override (Q214).
+            i += 1
+            continue
+        if form == ASSIGN_APPEND:
             # `NAME+=v` appends to whatever this segment inherits, so it
             # resolves against `base_env` -- an earlier assignment in the same
             # run first, then the shell env the caller passes. An unset name
@@ -2548,10 +2554,10 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None):
             # `export 'A=1'` assigns where a bare `'A=1'` would not (Q170).
             for tok in argv[1:]:
                 if not tok.startswith('-') and ASSIGNMENT_RE.match(tok):
-                    name, append, value = split_assignment(tok)
+                    name, form, value = split_assignment(tok)
                     # `export NAME+=v` appends to the inherited value; unset
                     # gives just `v` (Q174).
-                    if append:
+                    if form == ASSIGN_APPEND:
                         value = shell_env.get(name, '') + value
                     shell_env[name] = value
                     exported[name] = value

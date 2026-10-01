@@ -54,7 +54,18 @@ import shlex
 # appends rather than replaces, and bash decides it is an assignment either
 # way. The `+` is part of the operator, never of the name, so anything
 # recovering a name from the token goes through `split_assignment` (Q174).
+#
+# Command position also accepts `NAME[sub]=v`, which this does not match: bash
+# matches a subscript's brackets by depth, so no regex finds the closing `]`.
+# `is_assignment` walks it. What still matches here is the operand of a
+# builtin or of `env`/`sudo`, which parse their own words.
 ASSIGNMENT_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*\+?=')
+NAME_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*')
+
+# The forms `split_assignment` reports; its docstring says what each means.
+ASSIGN_PLAIN = 'plain'
+ASSIGN_APPEND = 'append'
+ASSIGN_SUBSCRIPT = 'subscript'
 
 # Shell keywords that can precede the real command word in a compound statement.
 SH_KEYWORDS = frozenset({
@@ -781,17 +792,67 @@ class QuoteTrackingLexer(shlex.shlex):
         return out
 
 
+def _subscript_end(token, open_at):
+    """The offset just past the `]` closing the subscript that opens at
+    ``token[open_at]``, or -1 when nothing closes it.
+
+    Depth-counted, because bash's own scan is: `FOO[a[0]]=x` is one subscript,
+    and the first `]` at depth 0 closes, so `FOO[a]b]=x` and `FOO[]]=x` are
+    command names that open no file. Driven on bash 5.3.15.
+    """
+    depth = 0
+    for i in range(open_at, len(token)):
+        if token[i] == '[':
+            depth += 1
+        elif token[i] == ']':
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return -1
+
+
+def assignment_end(token):
+    """The offset just past the `=` of an assignment word, or -1 for a word
+    bash reads as a command name.
+
+    Three spellings, driven on bash 5.3.15: `NAME=v`, `NAME+=v`, and
+    `NAME[sub]=v` with or without the `+`. The subscripted one is peeled like
+    the others -- `FOO[0]=x cat f` prints f whether or not FOO is an array --
+    so a reader behind it is a reader whose operands count.
+
+    It reads the token after shlex removed the quotes, which is where it stops
+    short of bash: `FOO["a]b"]=x` and `FOO[a\\]b]=x` peel in bash, but here the
+    quoted `]` closes the subscript, and `quoted_from` says only where quoting
+    began, not which `]` it covered. A subscript holding whitespace or a shell
+    operator arrives as several tokens. All of these under-peel, so the command
+    behind them is not read.
+    """
+    m = NAME_RE.match(token)
+    if not m:
+        return -1
+    i = m.end()
+    if i < len(token) and token[i] == '[':
+        i = _subscript_end(token, i)
+        if i < 0:
+            return -1
+    if i < len(token) and token[i] == '+':
+        i += 1
+    if i < len(token) and token[i] == '=':
+        return i + 1
+    return -1
+
+
 def is_assignment(token):
     """Whether bash would set a variable from `token` in command position.
 
-    `ASSIGNMENT_RE` alone answers this for a raw word and not for a shlex
+    `assignment_end` alone answers this for a raw word and not for a shlex
     token, because bash decides what a word IS before it removes the quotes:
     `'SP=/x'` looks for a program named `SP=/x`, fails, and leaves `SP` alone
     (Q170). Quoting anywhere in the name or on the `=` disarms the assignment;
     quoting after it does not, so `SP="/x"` and `SP='/x'` still assign -- which
     is how every break-glass reason with a space in it is written.
 
-    `quoted_from` and `m.end()` are both offsets into the same stripped token,
+    `quoted_from` and that end are both offsets into the same stripped token,
     which is what makes comparing them well-founded. A per-word "was this
     quoted" flag cannot stand in, `QuotedStr.quotes` included: `SP='/x'`
     carries a quote and assigns, so only where the quoting starts separates it
@@ -806,12 +867,23 @@ def is_assignment(token):
     concatenates, and prod-guard's `expand_argv` rebuilds every token. Every
     command-position caller in that file runs above its boundary. The other
     guards have not been swept.
+
+    A subscript is the exception to "quoting before the `=` disarms": bash
+    peels `FOO["0"]=x` and `FOO['a']=x`. So quoting that starts strictly
+    inside the subscript still assigns. Whether it ran on past the `]` is not
+    recorded, so `FOO["0]"=x`, a command name to bash, peels here too -- the
+    over-peel direction, which reads a command that never runs.
     """
-    m = ASSIGNMENT_RE.match(token)
-    if not m:
+    end = assignment_end(token)
+    if end < 0:
         return False
     quoted_from = getattr(token, 'quoted_from', None)
-    return quoted_from is None or quoted_from >= m.end()
+    if quoted_from is None or quoted_from >= end:
+        return True
+    open_at = NAME_RE.match(token).end()
+    if token[open_at:open_at + 1] != '[':
+        return False
+    return open_at < quoted_from < _subscript_end(token, open_at) - 1
 
 
 def is_reserved_word(token):
@@ -945,12 +1017,24 @@ def glue_dollar_paren(tokens):
 # -------------------------------------------------- command-head normalising
 
 def split_assignment(token, append_is_operator=True):
-    """Split an assignment token into ``(name, append, value)``.
+    """Split an assignment token into ``(name, form, value)``.
 
-    `NAME=v` gives ``('NAME', False, 'v')`` and `NAME+=v` gives
-    ``('NAME', True, 'v')`` -- the `+` belongs to the operator, so a caller that
-    reached for `partition('=')` would otherwise track a variable called
-    ``NAME+`` and miss every read of ``NAME`` (Q174).
+    `NAME=v` gives ``('NAME', ASSIGN_PLAIN, 'v')``, `NAME+=v` gives
+    ``('NAME', ASSIGN_APPEND, 'v')`` and `NAME[0]=v` gives
+    ``('NAME', ASSIGN_SUBSCRIPT, 'v')``. The `+` and the subscript both sit on
+    the name's side of the `=`, so a caller that reached for `partition('=')`
+    would track ``NAME+`` or ``NAME[0]`` and miss every read of ``NAME``
+    (Q174, Q214).
+
+    The form is a word rather than a bool because three questions get three
+    answers. A tracked value drops the name for anything but plain: an append
+    needs the old value, and `$NAME` is `${NAME[0]}`, so `P=/lit; P[0]=/arr`
+    gives `/arr` and `P[1]=/arr` leaves `/lit` -- one shape, two answers,
+    chosen by a subscript that can be arithmetic. "Did bash set something
+    called NAME" refuses a subscript: as a command prefix bash leaves NAME
+    alone and exports a variable literally called ``NAME[0]``, driven on bash
+    5.3.15. An override hatch armed on one would accept a spelling the shell
+    never wrote.
 
     `append_is_operator=False` is the `env(1)` case. env is an external program
     with no append semantics: it splits on the first `=` and uses the rest as a
@@ -958,15 +1042,20 @@ def split_assignment(token, append_is_operator=True):
     ``NAME+`` and leaves ``NAME`` alone. Measured on coreutils 9.x and bash
     5.3.15. The shell builtins that look identical -- `export`, `declare`,
     `local`, `readonly`, `typeset` -- do append, and take the default.
-
-    Callers decide what an append means for them. A tracked value that cannot
-    be resolved without the old one is the common answer, and dropping the name
-    is the fail-safe form of it.
     """
-    name, _, value = token.partition('=')
-    if append_is_operator and name.endswith('+'):
-        return name[:-1], True, value
-    return name, False, value
+    if not append_is_operator:
+        name, _, value = token.partition('=')
+        return name, ASSIGN_PLAIN, value
+    end = assignment_end(token)
+    if end < 0:
+        name, _, value = token.partition('=')
+        return name, ASSIGN_PLAIN, value
+    name = NAME_RE.match(token).group()
+    if token[len(name):len(name) + 1] == '[':
+        return name, ASSIGN_SUBSCRIPT, token[end:]
+    if token[end - 2] == '+':
+        return name, ASSIGN_APPEND, token[end:]
+    return name, ASSIGN_PLAIN, token[end:]
 
 
 def strip_env_prefix(tokens):

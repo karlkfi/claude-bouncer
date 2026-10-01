@@ -1148,6 +1148,28 @@ class OverrideTests(unittest.TestCase):
             {'AWS_PROFILE': 'prod'})
         self.assertEqual(env, {'AWS_PROFILE': 'prod-readonly'})
 
+    def test_a_subscripted_prefix_reaches_the_command(self):
+        # bash peels `FOO[0]=x` and runs what follows it, array or not (Q214).
+        decision, _ = run_hook(
+            "FOO[0]=x kubectl --context gke_acme_prod-us delete ns x")
+        self.assertEqual(decision, "deny")
+
+    def test_a_subscripted_override_does_not_arm(self):
+        # bash exports a variable literally called `NAME[0]` and leaves NAME
+        # alone, driven on 5.3.15, so the hatch is not set (Q214).
+        decision, _ = run_hook(
+            "PROD_GUARD_OVERRIDE[0]=r "
+            "kubectl --context gke_acme_prod-us delete ns x")
+        self.assertEqual(decision, "deny")
+
+    def test_a_subscripted_prefix_pins_nothing(self):
+        # `AWS_PROFILE=dev AWS_PROFILE[0]=prod cmd` hands cmd `dev`.
+        env, argv = guard.extract_env_prefix(
+            ['AWS_PROFILE=dev', 'KUBECONFIG[0]=/x', 'AWS_PROFILE[0]=prod',
+             'aws', 's3', 'ls'], {})
+        self.assertEqual(env, {'AWS_PROFILE': 'dev'})
+        self.assertEqual(argv, ['aws', 's3', 'ls'])
+
     def test_append_chains_within_one_run(self):
         env, _ = guard.extract_env_prefix(
             ['AWS_PROFILE=prod', 'AWS_PROFILE+=-ro', 'aws', 's3', 'ls'], {})

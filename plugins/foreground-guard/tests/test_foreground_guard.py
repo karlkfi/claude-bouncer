@@ -622,6 +622,17 @@ class PollConfigTests(unittest.TestCase):
         self.assertEqual(state.get('override'), 'demo-run')
         self.assertEqual(argv, ['gh', 'run', 'watch'])
 
+    def test_a_subscripted_prefix_reaches_the_watch(self):
+        # bash peels `FOO[0]=x` and runs what follows it (Q214).
+        d, _ = run_hook("FOO[0]=x gh run watch 123")
+        self.assertEqual(d, "deny")
+
+    def test_a_subscripted_override_does_not_arm(self):
+        # bash exports a variable literally called `NAME[0]` and leaves NAME
+        # alone, driven on 5.3.15, so the hatch is not set (Q214).
+        d, _ = run_hook("FOREGROUND_GUARD_OVERRIDE[0]=demo gh run watch 123")
+        self.assertEqual(d, "deny")
+
     def test_env_append_does_not_arm_but_is_still_consumed(self):
         # env(1) exports `FOREGROUND_GUARD_OVERRIDE+`, so the break-glass does
         # not arm -- while the operand is still consumed, leaving the `gh`

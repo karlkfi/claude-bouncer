@@ -110,7 +110,7 @@ import sys, os, json, re, subprocess, fnmatch
 # copy under this plugin's `lib/` is vendored; see scripts/sync-lib.py.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 from bouncer_parse import (                                   # noqa: E402
-    PUNCT_CHARS, is_assignment, lex, split_assignment,
+    ASSIGN_SUBSCRIPT, PUNCT_CHARS, is_assignment, lex, split_assignment,
 )
 from bouncer_grants import record_grants                      # noqa: E402
 
@@ -1952,8 +1952,10 @@ def override_reason(segments):
             if not is_assignment(tok):
                 break
             # `NAME+=reason` is an assignment in command position too (Q174).
-            name, _append, value = split_assignment(tok)
-            if name == OVERRIDE_VAR and value.strip():
+            # `NAME[0]=reason` sets no NAME, so it does not arm (Q214).
+            name, form, value = split_assignment(tok)
+            if name == OVERRIDE_VAR and form != ASSIGN_SUBSCRIPT \
+                    and value.strip():
                 return value.strip()
     return None
 

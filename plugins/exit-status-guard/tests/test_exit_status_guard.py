@@ -300,6 +300,17 @@ CASES = [
      False, False, ''),
     ('an empty append override still denies',
      'EXIT_STATUS_GUARD_OVERRIDE+= make check | tail -30', False, True, ''),
+    # bash peels `NAME[sub]=v` and runs the command behind it, array or not,
+    # but exports a variable literally called `NAME[0]` and leaves NAME alone
+    # -- driven on 5.3.15 (Q214). So the gate is in view and the hatch is not.
+    ('a subscripted prefix still reaches the gate',
+     'FOO[0]=x make check | tail -5', False, True,
+     "exit status is the filter's"),
+    ('a subscripted override does not lift a deny',
+     'EXIT_STATUS_GUARD_OVERRIDE[0]=r make check | tail -30', False, True, ''),
+    ('a subscripted prefix does not end the assignment run',
+     'FOO[0]=x EXIT_STATUS_GUARD_OVERRIDE=r make check | tail -30',
+     False, False, ''),
     # A `+` anywhere but directly before the `=` is part of no operator, so the
     # word is a command name and the assignment run has ended. As its own
     # statement, so the gate stays in plain view: inline, the unparsed word
