@@ -1193,12 +1193,52 @@ class WiringTests(unittest.TestCase):
         entries = hooks["hooks"]["PreToolUse"]
         self.assertEqual(entries[0]["matcher"], "Bash")
         cmd = entries[0]["hooks"][0]["command"]
-        self.assertIn("bash-foreground-guard.py", cmd)
-        rel = cmd.split("${CLAUDE_PLUGIN_ROOT}/")[1].rstrip('"')
-        script = REPO / rel
-        self.assertTrue(script.is_file(), "hook script missing: %s" % rel)
-        self.assertTrue(os.access(script, os.X_OK),
-                        "hook script must be executable: %s" % rel)
+        self.assertEqual(
+            cmd, '"${CLAUDE_PLUGIN_ROOT}/scripts/run-python-hook.cmd" '
+                 'bash-foreground-guard.py')
+        self.assertTrue(SCRIPT.is_file())
+
+    def test_launcher_ships_executable_and_lf(self):
+        # hooks.json execs the launcher directly: a lost exec bit is exit 126,
+        # and CRLF makes its POSIX half a syntax error. Either way the hook
+        # fails, Claude Code lets the command through, and nothing says so.
+        launcher = REPO / "scripts" / "run-python-hook.cmd"
+        staged = subprocess.run(
+            ["git", "ls-files", "-s", "--", str(launcher)], cwd=REPO,
+            capture_output=True, text=True).stdout
+        self.assertTrue(staged.startswith("100755 "), staged)
+        self.assertNotIn(b"\r", launcher.read_bytes())
+        self.assertIn("*.cmd text eol=lf",
+                      (REPO / ".gitattributes").read_text(encoding="utf-8"))
+
+    @unittest.skipIf(os.name == "nt", "the launcher runs through cmd.exe there")
+    def test_wired_command_survives_a_python3_that_does_not_run(self):
+        # Q205: the Windows Store alias stub is a python3 on PATH that exits
+        # 9009. Model it with a python3 that fails, and a working `python`
+        # beside it: a bare `python3` hook emits nothing, the launcher falls
+        # through to `python` and decides.
+        home = tempfile.mkdtemp(prefix="fg-guard-test-home-")
+        bindir = tempfile.mkdtemp(prefix="fg-guard-test-bin-")
+        stub = os.path.join(bindir, "python3")
+        with open(stub, "w", encoding="utf-8") as f:
+            f.write("#!/bin/sh\nexit 9\n")
+        os.chmod(stub, 0o755)
+        os.symlink(sys.executable, os.path.join(bindir, "python"))
+        env = {"HOME": home, "PATH": bindir + ":/usr/bin:/bin",
+               "CLAUDE_PLUGIN_ROOT": str(REPO)}
+        payload = json.dumps({"tool_name": "Bash",
+                              "tool_input": {"command": "gh run watch 456"}})
+        with open(REPO / "hooks" / "hooks.json", encoding="utf-8") as f:
+            cmd = json.load(f)["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        outputs = []
+        for argv in ([sys.executable, str(SCRIPT)], ["/bin/sh", "-c", cmd]):
+            r = subprocess.run(argv, input=payload, capture_output=True,
+                               text=True, env=env, cwd=home, timeout=30)
+            self.assertEqual(r.returncode, 0, "%s: %r" % (argv[0], r.stderr))
+            outputs.append(r.stdout)
+        # Two silent defers would compare equal, so pin the decision too.
+        self.assertIn("permissionDecision", outputs[1])
+        self.assertEqual(outputs[0], outputs[1])
 
     def test_plugin_and_marketplace_agree(self):
         # One manifest at the monorepo root now lists all five guards, so the

@@ -34,7 +34,8 @@ Before introducing a new pattern or abstraction, check whether the existing mode
 
 ### Python (`scripts/bash-prod-guard.py`)
 
-- Stdlib only — no third-party deps. The hook runs on whatever `python3` the user has on their PATH (3.10+ per CI).
+- Stdlib only — no third-party deps. The hook runs on whatever Python 3 the user has on their PATH (3.10+ per CI); `scripts/run-python-hook.cmd` is the polyglot launcher that resolves one.
+- **Never invoke `python3` directly from `hooks.json`.** On Windows `python3` usually resolves to the Microsoft Store alias stub, which is on PATH but exits 9009 — and because Claude Code treats a failed `PreToolUse` hook as a non-blocking error, the guard would silently enforce nothing. The launcher probes interpreters by *executing* them, ships mode `100755` (set with `git update-index --chmod=+x`, since `hooks.json` execs it), and stays LF via `.gitattributes`. `WiringTests` pins all three and drives the wired command past a `python3` that fails.
 - The per-tool tables are the contract: read-only verb sets are **allowlists** — any verb not listed is mutating. Never "fix" a spurious prompt by widening a default; add the specific read-only verb with a test.
 - On parsing uncertainty the split must err toward *more* segments to inspect, never fewer. False negatives (a missed destructive form) are the failure mode to fear; a false positive costs one prompt.
 - Fail OPEN on infrastructure errors (bad JSON, unreadable config, unexpected exception → silent defer). Fail CLOSED on the security decision (unknown target + mutating verb → ask). Do not mix these up: they point in opposite directions on purpose.
