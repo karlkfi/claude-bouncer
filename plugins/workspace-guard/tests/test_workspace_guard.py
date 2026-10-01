@@ -983,8 +983,9 @@ class CommandOverrideTests(unittest.TestCase):
         self.assertIsNone(guard.command_override('WORKSPACE_GUARD_OVERRIDE+= cp a b'))
 
     def test_a_subscripted_prefix_does_not_arm(self):
-        # bash exports a variable literally called `NAME[0]` and leaves NAME
-        # alone, so arming would accept a spelling the shell never wrote (Q214).
+        # bash 5.3.15 rejects `NAME[0]` as not a valid identifier and leaves
+        # NAME unset, so arming would accept a spelling the shell never wrote
+        # (Q214).
         for cmd in ('WORKSPACE_GUARD_OVERRIDE[0]=r cp a b',
                     'WORKSPACE_GUARD_OVERRIDE[0]+=r cp a b'):
             with self.subTest(cmd=cmd):

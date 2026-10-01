@@ -1699,8 +1699,8 @@ check "append-spelled override -> allow" allow \
 check "a plus inside the name does not arm the override -> ask" ask \
   "$(decision_for "$(bash_payload "BRANCH_GUARD+_OVERRIDE=x; git restore file.txt")" "$WORK")"
 #     A subscripted prefix is peeled -- bash 5.3.15 runs the command behind
-#     `FOO[0]=x`, array or not -- but exports a variable literally called
-#     `NAME[0]` and leaves NAME alone, so it arms nothing (Q214). The third row
+#     `FOO[0]=x`, array or not -- but rejects `NAME[0]` as not a valid
+#     identifier and leaves NAME unset, so it arms nothing (Q214). The third row
 #     is the control that the subscript does not end the assignment run.
 check "subscripted prefix reaches the git -> ask" ask \
   "$(decision_for "$(bash_payload 'FOO[0]=x git restore file.txt')" "$WORK")"

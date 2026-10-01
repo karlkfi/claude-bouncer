@@ -628,8 +628,8 @@ class PollConfigTests(unittest.TestCase):
         self.assertEqual(d, "deny")
 
     def test_a_subscripted_override_does_not_arm(self):
-        # bash exports a variable literally called `NAME[0]` and leaves NAME
-        # alone, driven on 5.3.15, so the hatch is not set (Q214).
+        # bash 5.3.15 rejects `NAME[0]` as not a valid identifier and leaves
+        # NAME unset, so the hatch is not set (Q214).
         d, _ = run_hook("FOREGROUND_GUARD_OVERRIDE[0]=demo gh run watch 123")
         self.assertEqual(d, "deny")
 

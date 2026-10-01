@@ -821,11 +821,13 @@ def assignment_end(token):
     so a reader behind it is a reader whose operands count.
 
     It reads the token after shlex removed the quotes, which is where it stops
-    short of bash: `FOO["a]b"]=x` and `FOO[a\\]b]=x` peel in bash, but here the
-    quoted `]` closes the subscript, and `quoted_from` says only where quoting
-    began, not which `]` it covered. A subscript holding whitespace or a shell
-    operator arrives as several tokens. All of these under-peel, so the command
-    behind them is not read.
+    short of bash: `FOO["a]b"]=x` and `FOO[a\\]b]=x` peel in bash 5.3.15 (3.2
+    runs them as command names), but here the quoted `]` closes the subscript,
+    and `quoted_from` says only where quoting began, not which `]` it covered.
+    A `]` inside an expansion, as in `FOO[${x:-]}]=x`, closes it here too and
+    not in bash. A subscript holding whitespace or a shell operator arrives as
+    several tokens. All of these under-peel, so the command behind them is not
+    read (Q217).
     """
     m = NAME_RE.match(token)
     if not m:
@@ -871,7 +873,7 @@ def is_assignment(token):
     A subscript is the exception to "quoting before the `=` disarms": bash
     peels `FOO["0"]=x` and `FOO['a']=x`. So quoting that starts strictly
     inside the subscript still assigns. Whether it ran on past the `]` is not
-    recorded, so `FOO["0]"=x`, a command name to bash, peels here too -- the
+    recorded, so `FOO["0]"=x`, a syntax error to bash 5.3.15, peels here too -- the
     over-peel direction, which reads a command that never runs.
     """
     end = assignment_end(token)
@@ -1031,10 +1033,11 @@ def split_assignment(token, append_is_operator=True):
     needs the old value, and `$NAME` is `${NAME[0]}`, so `P=/lit; P[0]=/arr`
     gives `/arr` and `P[1]=/arr` leaves `/lit` -- one shape, two answers,
     chosen by a subscript that can be arithmetic. "Did bash set something
-    called NAME" refuses a subscript: as a command prefix bash leaves NAME
-    alone and exports a variable literally called ``NAME[0]``, driven on bash
-    5.3.15. An override hatch armed on one would accept a spelling the shell
-    never wrote.
+    called NAME" refuses a subscript: as a command prefix bash 5.3.15 rejects
+    ``NAME[0]`` as not a valid identifier and runs the command with NAME
+    untouched (3.2 exports a variable literally called ``NAME[0]``, which
+    leaves NAME untouched too). An override hatch armed on one would accept a
+    spelling the shell never wrote.
 
     `append_is_operator=False` is the `env(1)` case. env is an external program
     with no append semantics: it splits on the first `=` and uses the rest as a

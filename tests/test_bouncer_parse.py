@@ -435,10 +435,10 @@ class SubscriptAssignmentTests(unittest.TestCase):
     FOO is an array, and runs the command behind it (Q214).
 
     Both tables are bash's own answer, taken on 5.3.15 as
-    ``env -i bash --norc --noprofile -c '<word> cat f'`` and read for whether
-    f's contents printed. The brackets match by depth, so `FOO[a[0]]=x` is one
-    subscript and the first `]` at depth 0 closes: `FOO[a]b]=x` and `FOO[]]=x`
-    are command names. So are `FOO["a]b"]=x` and `FOO[a\\]b]=x`.
+    ``env -i /opt/homebrew/bin/bash --norc --noprofile -c '<word> cat f'`` and
+    read for whether f's contents printed; 3.2.57 agrees on every row. The
+    brackets match by depth, so `FOO[a[0]]=x` is one subscript and the first
+    `]` at depth 0 closes: `FOO[a]b]=x` and `FOO[]]=x` are command names.
     """
 
     PEELS = ('FOO[0]=x', 'FOO[0]+=x', 'FOO[]=x', 'FOO[a]=x', 'FOO[a[0]]=x',
@@ -448,8 +448,8 @@ class SubscriptAssignmentTests(unittest.TestCase):
              'FOO["0"]=x', "FOO['a']=x")
     RUNS_A_COMMAND = ('FOO[a]b]=x', 'FOO[]]=x', 'FOO[0=x', 'FOO[a[b]=x',
                       '0FOO[0]=x', "'FOO[0]=x'", '"FOO[0]=x"', r'FOO\[0]=x',
-                      "F'O'O[0]=x", 'FOO["a]b"]=x', r'FOO[a\]b]=x',
-                      'FOO[0]"=x"', r'FOO[0]\=x', "'FOO'[0]=x", 'FOO"[0]"=x',
+                      "F'O'O[0]=x", 'FOO[0]"=x"', r'FOO[0]\=x', "'FOO'[0]=x",
+                      'FOO"[0]"=x',
                       'FOO[0]x=y', 'FOO[0]+x=y', 'FOO[0]', '[0]=x',
                       'FOO[0][1]=x')
 
@@ -466,14 +466,18 @@ class SubscriptAssignmentTests(unittest.TestCase):
                 self.assertEqual(toks, bp.strip_env_prefix(toks))
 
     def test_the_lexer_splits_what_bash_keeps_whole(self):
-        """Each of these peels in bash and is read here as a command name: a
-        subscript holding a space, an operator or a substitution arrives as
-        several tokens, and an empty quote pair at the `]` cannot be told from
-        a quoted `]`. A row fails when its gap closes, so the residual stays
-        visible rather than unwritten."""
+        """Each of these peels in bash 5.3.15 and is read here as a command
+        name (Q217): a subscript holding a space, an operator or a
+        substitution arrives as several tokens; quoting records only where it
+        began, so neither a quoted `]` nor an empty pair at the `]` can be
+        placed; and the depth walk counts a `]` inside an expansion. A row
+        fails when its gap closes, so the residual stays visible rather than
+        unwritten."""
         for word in ('FOO[a b]=x', 'FOO[a;b]=x', 'FOO[a|b]=x',
                      'FOO[$(echo 0)]=x', 'FOO[$((1+1))]=x',
-                     'FOO[`echo 0`]=x', 'FOO[""]=x'):
+                     'FOO[`echo 0`]=x', 'FOO[""]=x', 'FOO["a]b"]=x',
+                     r'FOO[a\]b]=x', r'FOO[a\[b]=x', 'FOO[${x:-]}]=x',
+                     'FOO[$(echo ])]=x'):
             with self.subTest(word=word):
                 self.assertNotEqual(['cat', 'f'],
                                     bp.strip_env_prefix(bp.lex(word + ' cat f')))

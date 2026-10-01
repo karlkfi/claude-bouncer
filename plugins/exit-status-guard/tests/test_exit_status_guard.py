@@ -301,7 +301,7 @@ CASES = [
     ('an empty append override still denies',
      'EXIT_STATUS_GUARD_OVERRIDE+= make check | tail -30', False, True, ''),
     # bash peels `NAME[sub]=v` and runs the command behind it, array or not,
-    # but exports a variable literally called `NAME[0]` and leaves NAME alone
+    # but rejects `NAME[0]` as not a valid identifier and leaves NAME unset
     # -- driven on 5.3.15 (Q214). So the gate is in view and the hatch is not.
     ('a subscripted prefix still reaches the gate',
      'FOO[0]=x make check | tail -5', False, True,

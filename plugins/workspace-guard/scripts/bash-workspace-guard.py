@@ -982,8 +982,8 @@ def command_override(cmd):
             at_head = False                       # past the assignment run
             continue
         # `NAME+=reason` assigns in command position exactly as `NAME=reason`
-        # does, so it arms too (Q174). `NAME[0]=reason` does not: bash exports
-        # a variable literally called `NAME[0]` and leaves NAME alone (Q214).
+        # does, so it arms too (Q174). `NAME[0]=reason` does not: bash runs the
+        # command and leaves NAME unset (Q214).
         name, form, value = split_assignment(tok)
         if name == OVERRIDE_VAR and form != ASSIGN_SUBSCRIPT and value.strip():
             return value.strip()

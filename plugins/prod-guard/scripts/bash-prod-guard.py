@@ -470,8 +470,8 @@ def extract_env_prefix(argv, base_env=None):
     while i < len(argv) and is_assignment(argv[i]):
         name, form, value = split_assignment(argv[i])
         if form == ASSIGN_SUBSCRIPT:
-            # `NAME[0]=v cmd` runs cmd and leaves NAME alone -- bash exports a
-            # variable literally called `NAME[0]` -- so it can neither pin a
+            # `NAME[0]=v cmd` runs cmd and leaves NAME alone -- bash rejects
+            # `NAME[0]` as not a valid identifier -- so it can neither pin a
             # target nor arm an override (Q214).
             i += 1
             continue

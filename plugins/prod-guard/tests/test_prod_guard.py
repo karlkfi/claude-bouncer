@@ -1155,8 +1155,8 @@ class OverrideTests(unittest.TestCase):
         self.assertEqual(decision, "deny")
 
     def test_a_subscripted_override_does_not_arm(self):
-        # bash exports a variable literally called `NAME[0]` and leaves NAME
-        # alone, driven on 5.3.15, so the hatch is not set (Q214).
+        # bash 5.3.15 rejects `NAME[0]` as not a valid identifier and leaves
+        # NAME unset, so the hatch is not set (Q214).
         decision, _ = run_hook(
             "PROD_GUARD_OVERRIDE[0]=r "
             "kubectl --context gke_acme_prod-us delete ns x")
