@@ -2373,6 +2373,17 @@ check "[configured] [republish] base unmoved -> ask" ask \
   "$(decision_for "$(bash_cmd "$RESET_MAIN")" "$OVL" \
      'BRANCH_GUARD_PROTECTED_BRANCHES=claude/dup')"
 
+#     Whitespace is content. Re-indenting the published tip locally changes no
+#     word a `--stable` patch-id sees, so it matched and the reset dropped the
+#     fix; the allow above is this case's control.
+make_republish_repo file.txt 0
+numbered "$OVL/other.txt" 30 "  dup thirty"
+git -C "$OVL" commit -q --amend -am "thirty"
+check "[republish] precondition: the re-indented tip is unreachable" 2 \
+  "$(orphan_count)"
+check "[republish] a whitespace-only local amend -> deny" deny \
+  "$(decision_for "$(bash_cmd "$RESET_MAIN")" "$OVL")"
+
 #     The base moved in the same file but outside the diff's context (line 10's
 #     context is 7-13), then in a file the branch never touches. The trees
 #     differ in both; the diffs do not.

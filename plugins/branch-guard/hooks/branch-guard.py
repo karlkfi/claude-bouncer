@@ -2220,8 +2220,8 @@ def orphans_republished(cwd, name):
     Reachability and content come apart exactly there: a replay gives every
     commit a new object name, and where the base moved underneath, a new tree
     too, so neither `tip_is_recoverable` nor a tree comparison can see it. A
-    stable patch-id hashes the diff alone, so it matches across a base that moved
-    in another file or elsewhere in the same one. A base that moved inside the
+    patch-id hashes the diff alone, so it matches across a base that moved in
+    another file or elsewhere in the same one. A base that moved inside the
     diff's context changes the diff text itself, and nothing matches there.
 
     Compared against all of RECOVERY_REV_ARGS rather than a base ref: main is
@@ -2248,15 +2248,18 @@ def orphans_republished(cwd, name):
 
 
 def patch_ids(cwd, *revs):
-    """{commit: stable patch-id} for what `git log <revs>` lists, or None when
-    either process fails. A commit with no diff gets no entry. The format is
+    """{commit: patch-id} for what `git log <revs>` lists, or None when either
+    process fails. A commit with no diff gets no entry. `--verbatim` keeps
+    whitespace in the hash: `--stable` strips it, so a local re-indent of a
+    published commit matched its original and the reset discarded it. A git
+    without the flag exits 129 on it, which reads as None. The format is
     pinned because `git patch-id` finds each commit by a `commit <sha>` line,
     which a configured `format.pretty` would otherwise replace."""
     log = run_git(cwd, 'log', '-p', '--format=commit %H', '--no-color',
                   '--no-ext-diff', '--no-textconv', *revs, '--')
     if log is None or log.returncode != 0:
         return None
-    ids = run_git(cwd, 'patch-id', '--stable', input=log.stdout)
+    ids = run_git(cwd, 'patch-id', '--verbatim', input=log.stdout)
     if ids is None or ids.returncode != 0:
         return None
     return {c: p for p, c in (ln.split() for ln in ids.stdout.splitlines())}
