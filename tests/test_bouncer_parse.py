@@ -386,30 +386,101 @@ class CommandHeadTests(unittest.TestCase):
 
 
 class SplitAssignmentTests(unittest.TestCase):
-    """The `+` belongs to the operator, so a name recovered from the token has
-    to have it removed -- except after `env`, which is not the shell (Q174)."""
+    """The `+` and a subscript sit on the name's side of the `=`, so a name
+    recovered from the token has them removed and the form says which was
+    there -- except after `env`, which is not the shell (Q174, Q214)."""
 
-    def test_a_plain_assignment_does_not_append(self):
-        self.assertEqual(('A', False, '1'), bp.split_assignment('A=1'))
+    def test_a_plain_assignment(self):
+        self.assertEqual(('A', bp.ASSIGN_PLAIN, '1'), bp.split_assignment('A=1'))
 
     def test_an_append_is_reported_with_the_bare_name(self):
-        self.assertEqual(('A', True, '1'), bp.split_assignment('A+=1'))
+        self.assertEqual(('A', bp.ASSIGN_APPEND, '1'),
+                         bp.split_assignment('A+=1'))
+
+    def test_a_subscript_is_reported_with_the_bare_name(self):
+        for word in ('A[0]=1', 'A[0]+=1', 'A[a[0]]=1', 'A[]=1'):
+            with self.subTest(word=word):
+                self.assertEqual(('A', bp.ASSIGN_SUBSCRIPT, '1'),
+                                 bp.split_assignment(word))
+
+    def test_an_equals_inside_the_subscript_is_not_the_operator(self):
+        # `FOO[a=b]=x cat f` reads f on bash 5.3.15, so the value is `x`.
+        self.assertEqual(('A', bp.ASSIGN_SUBSCRIPT, 'x'),
+                         bp.split_assignment('A[a=b]=x'))
 
     def test_env_takes_the_plus_as_part_of_the_name(self):
         # `env 'A+=1' cmd` exports `A+` and leaves `A` alone. Measured:
         # `env 'SP+=/x' printenv 'SP+'` prints `/x`.
-        self.assertEqual(('A+', False, '1'),
+        self.assertEqual(('A+', bp.ASSIGN_PLAIN, '1'),
                          bp.split_assignment('A+=1', append_is_operator=False))
+
+    def test_env_takes_the_subscript_as_part_of_the_name(self):
+        self.assertEqual(('A[0]', bp.ASSIGN_PLAIN, '1'),
+                         bp.split_assignment('A[0]=1', append_is_operator=False))
 
     def test_env_and_shell_agree_on_a_plain_assignment(self):
         self.assertEqual(bp.split_assignment('A=1'),
                          bp.split_assignment('A=1', append_is_operator=False))
 
     def test_an_equals_in_the_value_is_kept(self):
-        self.assertEqual(('A', True, 'b=c'), bp.split_assignment('A+=b=c'))
+        self.assertEqual(('A', bp.ASSIGN_APPEND, 'b=c'),
+                         bp.split_assignment('A+=b=c'))
 
     def test_an_empty_append_value(self):
-        self.assertEqual(('A', True, ''), bp.split_assignment('A+='))
+        self.assertEqual(('A', bp.ASSIGN_APPEND, ''), bp.split_assignment('A+='))
+
+
+class SubscriptAssignmentTests(unittest.TestCase):
+    """`FOO[0]=x cat f` reads f: bash peels a subscripted prefix whether or not
+    FOO is an array, and runs the command behind it (Q214).
+
+    Both tables are bash's own answer, taken on 5.3.15 as
+    ``env -i /opt/homebrew/bin/bash --norc --noprofile -c '<word> cat f'`` and
+    read for whether f's contents printed; 3.2.57 agrees on every row. The
+    brackets match by depth, so `FOO[a[0]]=x` is one subscript and the first
+    `]` at depth 0 closes: `FOO[a]b]=x` and `FOO[]]=x` are command names.
+    """
+
+    PEELS = ('FOO[0]=x', 'FOO[0]+=x', 'FOO[]=x', 'FOO[a]=x', 'FOO[a[0]]=x',
+             'FOO[0]="a b"', 'FOO[1]=x', 'FOO[-1]=x', 'FOO[@]=x', 'FOO[*]=x',
+             'FOO[i+1]=x', 'FOO[0]=', 'FOO[[0]]=x', 'FOO[a=b]=x', '_[0]=x',
+             'F1[0]=x', 'FOO[0]==', 'FOO[$i]=x', 'FOO[${i}]=x',
+             'FOO["0"]=x', "FOO['a']=x")
+    RUNS_A_COMMAND = ('FOO[a]b]=x', 'FOO[]]=x', 'FOO[0=x', 'FOO[a[b]=x',
+                      '0FOO[0]=x', "'FOO[0]=x'", '"FOO[0]=x"', r'FOO\[0]=x',
+                      "F'O'O[0]=x", 'FOO[0]"=x"', r'FOO[0]\=x', "'FOO'[0]=x",
+                      'FOO"[0]"=x',
+                      'FOO[0]x=y', 'FOO[0]+x=y', 'FOO[0]', '[0]=x',
+                      'FOO[0][1]=x')
+
+    def test_a_subscripted_prefix_is_peeled(self):
+        for word in self.PEELS:
+            with self.subTest(word=word):
+                self.assertEqual(['cat', 'f'],
+                                 bp.strip_env_prefix(bp.lex(word + ' cat f')))
+
+    def test_a_word_bash_runs_as_a_command_is_not_peeled(self):
+        for word in self.RUNS_A_COMMAND:
+            with self.subTest(word=word):
+                toks = bp.lex(word + ' cat f')
+                self.assertEqual(toks, bp.strip_env_prefix(toks))
+
+    def test_the_lexer_splits_what_bash_keeps_whole(self):
+        """Each of these peels in bash 5.3.15 and is read here as a command
+        name (Q217): a subscript holding a space, an operator or a
+        substitution arrives as several tokens; quoting records only where it
+        began, so neither a quoted `]` nor an empty pair at the `]` can be
+        placed; and the depth walk counts a `]` inside an expansion. A row
+        fails when its gap closes, so the residual stays visible rather than
+        unwritten."""
+        for word in ('FOO[a b]=x', 'FOO[a;b]=x', 'FOO[a|b]=x',
+                     'FOO[$(echo 0)]=x', 'FOO[$((1+1))]=x',
+                     'FOO[`echo 0`]=x', 'FOO[""]=x', 'FOO["a]b"]=x',
+                     r'FOO[a\]b]=x', r'FOO[a\[b]=x', 'FOO[${x:-]}]=x',
+                     'FOO[$(echo ])]=x'):
+            with self.subTest(word=word):
+                self.assertNotEqual(['cat', 'f'],
+                                    bp.strip_env_prefix(bp.lex(word + ' cat f')))
 
 
 class AssignmentTests(unittest.TestCase):

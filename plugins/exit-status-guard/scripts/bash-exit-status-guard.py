@@ -38,9 +38,9 @@ import sys, os, json, re, collections
 # plugin's `lib/` is vendored from the repository root; see scripts/sync-lib.py.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 from bouncer_parse import (                                    # noqa: E402
-    ASSIGNMENT_RE, CHAIN_OPS, COMMENT_PRECEDERS, DUP, END_OPS, MAX_SUBST_DEPTH,
-    PIPE_OPS, PUNCT_CHARS, QuoteTrackingLexer, REDIR, SEPARATORS,
-    SH_KEYWORDS, _OPERATORS, is_assignment, is_operator, split_assignment,
+    ASSIGN_SUBSCRIPT, ASSIGNMENT_RE, CHAIN_OPS, COMMENT_PRECEDERS, DUP, END_OPS,
+    MAX_SUBST_DEPTH, PIPE_OPS, PUNCT_CHARS, QuoteTrackingLexer, REDIR,
+    SEPARATORS, SH_KEYWORDS, _OPERATORS, is_assignment, is_operator, split_assignment,
     _consume_heredoc_body, _scan_backticks, _scan_dollar_paren,
     _skip_balanced_parens, command_substitutions, glue_dollar_paren,
     split_operator_runs, strip_comments, strip_env_prefix,
@@ -549,8 +549,10 @@ def has_override(segs):
             if not is_assignment(tok):
                 break                             # past the assignment run
             # `NAME+=reason` is an assignment in command position too (Q174).
-            name, _append, value = split_assignment(tok)
-            if name in OVERRIDE_VARS and value.strip():
+            # `NAME[0]=reason` sets no NAME, so it does not arm (Q214).
+            name, form, value = split_assignment(tok)
+            if name in OVERRIDE_VARS and form != ASSIGN_SUBSCRIPT \
+                    and value.strip():
                 return True
     return False
 

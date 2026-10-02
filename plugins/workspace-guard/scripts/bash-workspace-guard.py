@@ -12,8 +12,8 @@ import sys, os, json, re, shutil, fnmatch, collections, tempfile
 # scripts/sync-lib.py for why each plugin carries its own.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 from bouncer_parse import (                                    # noqa: E402
-    ASSIGNMENT_RE, COMMENT_PRECEDERS, DUP, MAX_SUBST_DEPTH, PUNCT_CHARS,
-    QuoteTrackingLexer, REDIR, SEPARATORS, SUBST_OPEN,
+    ASSIGN_APPEND, ASSIGN_PLAIN, ASSIGN_SUBSCRIPT, ASSIGNMENT_RE,
+    COMMENT_PRECEDERS, DUP, MAX_SUBST_DEPTH, PUNCT_CHARS, QuoteTrackingLexer, REDIR, SEPARATORS, SUBST_OPEN,
     _OPERATORS, is_assignment, is_operator, is_reserved_word, split_assignment,
     _consume_heredoc_body, _scan_backticks, _scan_dollar_paren,
     _skip_balanced_parens, command_substitutions, glue_dollar_paren,
@@ -982,9 +982,10 @@ def command_override(cmd):
             at_head = False                       # past the assignment run
             continue
         # `NAME+=reason` assigns in command position exactly as `NAME=reason`
-        # does, so it arms too (Q174).
-        name, _append, value = split_assignment(tok)
-        if name == OVERRIDE_VAR and value.strip():
+        # does, so it arms too (Q174). `NAME[0]=reason` does not: bash runs the
+        # command and leaves NAME unset (Q214).
+        name, form, value = split_assignment(tok)
+        if name == OVERRIDE_VAR and form != ASSIGN_SUBSCRIPT and value.strip():
             return value.strip()
     return None
 
@@ -1471,14 +1472,16 @@ def apply_assignment_group(g, varmap, persists):
         pairs = toks
     names = []
     for t in pairs:
-        name, append, raw = split_assignment(t)
+        name, form, raw = split_assignment(t)
         names.append(name)
         val = literal_assignment_value(substitute_vars(raw, varmap))
         # `NAME+=v` resolves to the old value plus `v`. Paths are resolved from
         # this map, and an append onto a value it cannot prove is not
         # resolvable -- so drop the name, which is what it already does for a
-        # value it cannot prove (Q174).
-        if val is None or append or not persists or name in NEVER_PROPAGATE:
+        # value it cannot prove (Q174). `NAME[sub]=v` too: `$NAME` is
+        # `${NAME[0]}`, and the subscript can be arithmetic (Q214).
+        if val is None or form != ASSIGN_PLAIN or not persists \
+                or name in NEVER_PROPAGATE:
             varmap.pop(name, None)
         else:
             varmap[name] = val
@@ -2328,12 +2331,13 @@ def inline_tmpdir(tokens):
     for tok in tokens:
         if not is_assignment(tok):
             break                                  # first real word ends the prefix
-        name, append, val = split_assignment(tok)
-        if name == 'TMPDIR':
+        name, form, val = split_assignment(tok)
+        if name == 'TMPDIR' and form != ASSIGN_SUBSCRIPT:
             # `TMPDIR+=x` appends to whatever the ambient value is, which is not
             # knowable here -- fall back to the host-temp default (deny
             # direction) rather than trusting the suffix alone (Q174).
-            value = None if append else val
+            # `TMPDIR[0]=x` sets no TMPDIR at all, so it changes nothing (Q214).
+            value = None if form == ASSIGN_APPEND else val
     if not value or '$' in value or '`' in value:
         return None
     return value
@@ -3573,7 +3577,7 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
                 # the string, which is the out-of-order resolve `usable` exists
                 # to stop -- and resolving a cwd removes prompts.
                 if is_assignment(tok):
-                    usable.add(tok.split('=', 1)[0])
+                    usable.add(split_assignment(tok)[0])
 
     out = [(b,) + sub_cwd[i] for i, b in enumerate(bodies)]
     for i, (body, quoted) in enumerate(heredocs):

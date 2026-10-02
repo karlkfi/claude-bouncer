@@ -95,7 +95,7 @@ import sys
 # this plugin's `lib/` is vendored from the root; see scripts/sync-lib.py.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 from bouncer_parse import (                                    # noqa: E402
-    ASSIGNMENT_RE, COMMENT_PRECEDERS, QuoteTrackingLexer,
+    ASSIGN_SUBSCRIPT, ASSIGNMENT_RE, COMMENT_PRECEDERS, QuoteTrackingLexer,
     _consume_heredoc_body, _skip_balanced_parens, is_assignment,
     split_assignment, strip_heredoc_bodies,
 )
@@ -363,8 +363,10 @@ def strip_head(argv, state):
         elif head in OTHER_KEYWORDS:
             argv = argv[1:]
         elif is_assignment(argv[0]):
-            name, _append, _val = split_assignment(argv[0])
-            if name == 'FOREGROUND_GUARD_OVERRIDE':
+            # `NAME[0]=reason` sets no NAME, so it does not arm (Q214).
+            name, form, _val = split_assignment(argv[0])
+            if name == 'FOREGROUND_GUARD_OVERRIDE' \
+                    and form != ASSIGN_SUBSCRIPT:
                 state['override'] = _val
             argv = argv[1:]
         elif head == 'sudo':

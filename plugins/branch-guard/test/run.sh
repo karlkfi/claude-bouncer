@@ -1698,6 +1698,16 @@ check "append-spelled override -> allow" allow \
 #     which is what makes this a negative control rather than a no-op.
 check "a plus inside the name does not arm the override -> ask" ask \
   "$(decision_for "$(bash_payload "BRANCH_GUARD+_OVERRIDE=x; git restore file.txt")" "$WORK")"
+#     A subscripted prefix is peeled -- bash 5.3.15 runs the command behind
+#     `FOO[0]=x`, array or not -- but rejects `NAME[0]` as not a valid
+#     identifier and leaves NAME unset, so it arms nothing (Q214). The third row
+#     is the control that the subscript does not end the assignment run.
+check "subscripted prefix reaches the git -> ask" ask \
+  "$(decision_for "$(bash_payload 'FOO[0]=x git restore file.txt')" "$WORK")"
+check "subscripted override does not arm -> ask" ask \
+  "$(decision_for "$(bash_payload 'BRANCH_GUARD_OVERRIDE[0]=r git restore file.txt')" "$WORK")"
+check "override after a subscripted prefix still arms -> allow" allow \
+  "$(decision_for "$(bash_payload 'FOO[0]=x BRANCH_GUARD_OVERRIDE=r git restore file.txt')" "$WORK")"
 
 #     26b. The reason is mandatory. A bare `BRANCH_GUARD_OVERRIDE=` would be the
 #     switch-it-off spelling, which is the thing this is not.
