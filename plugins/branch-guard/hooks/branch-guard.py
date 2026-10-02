@@ -191,6 +191,14 @@ RECOVERY_REV_ARGS = ('--remotes', 'refs/heads/main', 'refs/heads/master')
 # a low cap costs nothing real and a longer orphan list keeps asking.
 MAX_EXAMINED_ORPHANS = 4
 
+# How many commits on the recovery refs `orphans_republished` hashes, newest
+# first. The orphan side is already bounded above; this bounds the other one,
+# which is every commit on a remote that the branch lacks — 20,739 of them on a
+# kubernetes clone, where an uncapped pass took 26s and `run_git` would kill it.
+# A republish is recent, so `rev-list`'s date order puts it at the front; an
+# old one past the cap keeps the deny.
+MAX_COMPARED_COMMITS = 200
+
 # Read-only git subcommands — auto-allowed on any branch.
 READONLY_GIT = frozenset({
     'status', 'diff', 'log', 'show', 'blame', 'describe', 'shortlog',
@@ -535,7 +543,10 @@ DENY_ROUTES = {
         "needs no reset at all. No pull request is the other answer, not a "
         "failed check — the commits are only here, so read what the move "
         "drops with `git log --oneline <branch> --not --remotes` before "
-        "deciding."),
+        "deciding. A rebase already pushed under another name is checked for "
+        "and still denies where the base moved inside its own diff; "
+        "`git cherry <remote-branch> <branch>` marks each commit with no "
+        "equivalent there with a `+`."),
     'deny-rebase': (
         "run that rebase and push the result. Retrying the push as given "
         "meets the same overlap, because the cause is the base this branch is "
@@ -1593,7 +1604,7 @@ def classify_reset(branch, cwd, probe):
     everywhere else. Every probe that can't answer keeps the `ask`.
 
     An unreachable tip asks the second question too, and only a branch that
-    fails both denies. `orphans_only_reproducible_merges` establishes what a ref
+    fails every question denies. `orphans_only_reproducible_merges` establishes what a ref
     move off this branch would orphan, which is the reset's question as much as
     the delete's — it was scoped to `-D` by its one caller rather than by what
     it proves, and the same branch in the same state answering `allow` to
@@ -1604,12 +1615,17 @@ def classify_reset(branch, cwd, probe):
     subset of what a delete would, so a proof over the larger set covers the
     smaller one whatever the target turns out to be.
 
+    `orphans_republished` asks a third on the same set: whether every orphan
+    already has a patch-equivalent on a remote, which is what a rebased and
+    republished branch leaves behind. It runs only where the first two have
+    failed, so its bounded patch-id pass lands on the deny arm alone.
+
     It costs nothing on the auto-approved path — a recoverable tip returns above
     it — and lands only where the verdict was already a deny. Measured on a
     four-commit repo (git 2.55, macOS): 18ms on the merge case it converts, 6ms
     on a non-merge orphan, against the 13ms the reset probes above already pay.
 
-    What survives both questions is a branch that really did lose content. The
+    What survives all three is a branch that really did lose content. The
     missing input is not intent or a blast radius the guard can't see — it is a
     fact about the world the model can establish for itself, and the commonest
     way to reach it is a squash merge, which leaves a spent branch's tip
@@ -1636,6 +1652,9 @@ def classify_reset(branch, cwd, probe):
         # test-merge orphans nothing a plain `git merge` would not produce
         # again, whichever verb moves the ref off it.
         if orphans_only_reproducible_merges(cwd, branch):
+            return ('allow', None)
+        # The third question: a rebase whose result is already published.
+        if orphans_republished(cwd, branch):
             return ('allow', None)
         return ('deny-unreachable',
                 f"`git reset --hard` moves branch '{branch}', whose tip isn't "
@@ -2032,14 +2051,14 @@ def classify_segment(inv, branch, policy, cwd, probe, mode=''):
     return (verdict, reason)
 
 
-def run_git(cwd, *args):
+def run_git(cwd, *args, input=None):
     """Run `git -C <cwd> <args>` and return the CompletedProcess, or None when
     git can't be run at all (missing binary, timeout). The 5s cap keeps a wedged
     repo or stuck git from blocking the hook until the hook timeout in
     hooks/hooks.json fires, degrading every tool call — a None answer makes
     every caller fail safe."""
     try:
-        return subprocess.run(['git', '-C', cwd] + list(args),
+        return subprocess.run(['git', '-C', cwd] + list(args), input=input,
                               capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -2192,6 +2211,60 @@ def orphans_only_reproducible_merges(cwd, name):
         if merged.stdout.strip() != recorded.stdout.strip():
             return False
     return True
+
+
+def orphans_republished(cwd, name):
+    """True when every commit moving branch <name> would orphan already has a
+    patch-equivalent on the refs outliving it — the branch was rebased and the
+    result published, so the commits are unreachable while their changes are
+    not.
+
+    Reachability and content come apart exactly there: a replay gives every
+    commit a new object name, and where the base moved underneath, a new tree
+    too, so neither `tip_is_recoverable` nor a tree comparison can see it. A
+    patch-id hashes the diff alone, so it matches across a base that moved in
+    another file or elsewhere in the same one. A base that moved inside the
+    diff's context changes the diff text itself, and nothing matches there.
+
+    Compared against all of RECOVERY_REV_ARGS rather than a base ref: main is
+    precisely where a republished branch is not. Scoped like
+    `orphans_only_reproducible_merges` to what losing the whole ref orphans.
+
+    True only on that proof. False on every other answer — an orphan with no
+    patch-id (a merge, an empty commit), one whose equivalent is absent or
+    sits past MAX_COMPARED_COMMITS, more orphans than MAX_EXAMINED_ORPHANS, a
+    timeout — so uncertainty keeps the caller's deny."""
+    r = run_git(cwd, 'rev-list', '--ignore-missing', name,
+                '--not', *RECOVERY_REV_ARGS)
+    if r is None or r.returncode != 0:
+        return False
+    orphans = r.stdout.split()
+    if not orphans or len(orphans) > MAX_EXAMINED_ORPHANS:
+        return False
+    mine = patch_ids(cwd, '--no-walk', *orphans)
+    theirs = patch_ids(cwd, f'--max-count={MAX_COMPARED_COMMITS}',
+                       '--ignore-missing', *RECOVERY_REV_ARGS, '--not', name)
+    if mine is None or theirs is None or set(mine) != set(orphans):
+        return False
+    return set(mine.values()) <= set(theirs.values())
+
+
+def patch_ids(cwd, *revs):
+    """{commit: patch-id} for what `git log <revs>` lists, or None when either
+    process fails. A commit with no diff gets no entry. `--verbatim` keeps
+    whitespace in the hash: `--stable` strips it, so a local re-indent of a
+    published commit matched its original and the reset discarded it. A git
+    without the flag exits 129 on it, which reads as None. The format is
+    pinned because `git patch-id` finds each commit by a `commit <sha>` line,
+    which a configured `format.pretty` would otherwise replace."""
+    log = run_git(cwd, 'log', '-p', '--format=commit %H', '--no-color',
+                  '--no-ext-diff', '--no-textconv', *revs, '--')
+    if log is None or log.returncode != 0:
+        return None
+    ids = run_git(cwd, 'patch-id', '--verbatim', input=log.stdout)
+    if ids is None or ids.returncode != 0:
+        return None
+    return {c: p for p, c in (ln.split() for ln in ids.stdout.splitlines())}
 
 
 def nearest_existing_dir(path):

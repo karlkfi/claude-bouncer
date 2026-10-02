@@ -2308,6 +2308,167 @@ check "[overlap] the break-glass does not lift a -C overlap deny -> deny" deny \
   "$(decision_for "$(bash_payload "$OVL_OVR git -C '$(nat "$OVL_WT_DIRTY")' push")" \
      "$OVL_WT_CLEAN")"
 
+# 28. A `reset --hard` off a branch whose rebase is already published. The
+#     replay gives every commit a new object name, so the tip is unreachable and
+#     the first two reset questions both say deny; the patch-id probe is the
+#     third. One repo per way the base can move, because which of them a
+#     patch-id can see is the whole contract: three allow and the fourth, a base
+#     moved inside the diff's own context, keeps its deny.
+
+# make_republish_repo BASE_FILE BASE_LINE
+#   claude/dup carries two commits (file.txt line 10, other.txt line 30). The
+#   base then moves at BASE_FILE:BASE_LINE (0 leaves it put), and both commits
+#   are replayed onto it under a later committer date and published as
+#   origin/claude/republished. claude/dup is left checked out.
+make_republish_repo() {
+  local bfile="$1" bline="$2" init
+  rm -rf "$OVL"
+  mkdir -p "$OVL"
+  git -C "$OVL" init -q -b main
+  git -C "$OVL" config user.name "Test"
+  git -C "$OVL" config user.email "test@example.com"
+  numbered "$OVL/file.txt" 0 ''
+  numbered "$OVL/other.txt" 0 ''
+  git -C "$OVL" add -A
+  git -C "$OVL" commit -q -m "init"
+  init="$(git -C "$OVL" rev-parse HEAD)"
+  git -C "$OVL" switch -q -c claude/dup
+  numbered "$OVL/file.txt" 10 "dup ten"
+  git -C "$OVL" commit -q -am "ten"
+  numbered "$OVL/other.txt" 30 "dup thirty"
+  git -C "$OVL" commit -q -am "thirty"
+  git -C "$OVL" switch -q -c base-work "$init"
+  if [[ "$bline" != 0 ]]; then
+    numbered "$OVL/$bfile" "$bline" "base edit"
+    git -C "$OVL" add -A
+    git -C "$OVL" commit -q -m "base moves"
+  fi
+  git -C "$OVL" update-ref refs/remotes/origin/main HEAD
+  git -C "$OVL" switch -q -c claude/republished
+  GIT_COMMITTER_DATE='2050-01-01T00:00:00Z' \
+    git -C "$OVL" cherry-pick "$init..claude/dup" >/dev/null
+  git -C "$OVL" update-ref refs/remotes/origin/claude/republished HEAD
+  git -C "$OVL" switch -q claude/dup
+}
+
+# add_noise EPOCH -> 205 commits on origin/noise, the first at EPOCH. One more
+# than the probe's 200-commit window can hold, written by fast-import because a
+# commit per process is minutes on Windows.
+add_noise() {
+  local epoch="$1" i
+  {
+    for i in $(seq 1 205); do
+      printf 'commit refs/remotes/origin/noise\n'
+      printf 'committer Test <test@example.com> %d +0000\n' "$((epoch + i))"
+      printf 'data 5\nnoise\n'
+      [[ "$i" == 1 ]] && printf 'from %s\n' "$(git -C "$OVL" rev-parse main)"
+      printf 'M 644 inline noise.txt\ndata %d\n%d\n' "$(( ${#i} + 1 ))" "$i"
+    done
+  } | git -C "$OVL" fast-import --quiet
+}
+
+orphan_count() { git -C "$OVL" rev-list --count claude/dup --not --remotes; }
+RESET_MAIN='git reset --hard origin/main'
+
+#     The base did not move: a plain republish, where even the trees agree.
+make_republish_repo file.txt 0
+check "[republish] precondition: two commits only claude/dup reaches" 2 \
+  "$(orphan_count)"
+check "[republish] base unmoved -> allow" allow \
+  "$(decision_for "$(bash_cmd "$RESET_MAIN")" "$OVL")"
+check "[dontAsk] [republish] base unmoved -> allow" allow \
+  "$(decision_for "$(push_mode "$RESET_MAIN" 'dontAsk')" "$OVL")"
+#     Shared is answered first, so the proof never reaches a protected branch.
+check "[configured] [republish] base unmoved -> ask" ask \
+  "$(decision_for "$(bash_cmd "$RESET_MAIN")" "$OVL" \
+     'BRANCH_GUARD_PROTECTED_BRANCHES=claude/dup')"
+
+#     Whitespace is content. Re-indenting the published tip locally changes no
+#     word a `--stable` patch-id sees, so it matched and the reset dropped the
+#     fix; the allow above is this case's control.
+make_republish_repo file.txt 0
+numbered "$OVL/other.txt" 30 "  dup thirty"
+git -C "$OVL" commit -q --amend -am "thirty"
+check "[republish] precondition: the re-indented tip is unreachable" 2 \
+  "$(orphan_count)"
+check "[republish] a whitespace-only local amend -> deny" deny \
+  "$(decision_for "$(bash_cmd "$RESET_MAIN")" "$OVL")"
+
+#     The base moved in the same file but outside the diff's context (line 10's
+#     context is 7-13), then in a file the branch never touches. The trees
+#     differ in both; the diffs do not.
+make_republish_repo file.txt 20
+check "[republish] precondition: base moved, two orphans" 2 "$(orphan_count)"
+check "[republish] base moved outside the context -> allow" allow \
+  "$(decision_for "$(bash_cmd "$RESET_MAIN")" "$OVL")"
+make_republish_repo third.txt 5
+check "[republish] base moved in another file -> allow" allow \
+  "$(decision_for "$(bash_cmd "$RESET_MAIN")" "$OVL")"
+
+#     Inside the context: the replayed diff's context lines changed, so no
+#     patch-id can match and the deny stands. This is the floor, not a gap.
+make_republish_repo file.txt 12
+check "[republish] precondition: inside-context replay applied" 2 \
+  "$(git -C "$OVL" rev-list --count origin/main..origin/claude/republished)"
+check "[republish] base moved inside the context -> deny" deny \
+  "$(decision_for "$(bash_cmd "$RESET_MAIN")" "$OVL")"
+check_text "[republish] the surviving deny names the per-commit check" has \
+  'git cherry <remote-branch> <branch>' \
+  "$(reason_for "$(bash_cmd "$RESET_MAIN")" "$OVL")"
+
+#     Partial and extra: every orphan needs an equivalent. Half a republish
+#     leaves one commit only here, and an empty commit has no patch-id at all.
+make_republish_repo third.txt 5
+git -C "$OVL" update-ref refs/remotes/origin/claude/republished \
+  origin/claude/republished~1
+check "[republish] only one of two commits published -> deny" deny \
+  "$(decision_for "$(bash_cmd "$RESET_MAIN")" "$OVL")"
+make_republish_repo third.txt 5
+git -C "$OVL" commit -q --allow-empty -m "only here"
+check "[republish] plus an empty commit of its own -> deny" deny \
+  "$(decision_for "$(bash_cmd "$RESET_MAIN")" "$OVL")"
+
+#     The orphan side keeps the merge probe's bound of four: a complete
+#     republish of five still denies, and four is the control at the edge.
+add_republished() {
+  local n
+  for n in $(seq 1 "$1"); do
+    printf '%s\n' "$n" > "$OVL/extra-$n.txt"
+    git -C "$OVL" add "extra-$n.txt"
+    git -C "$OVL" commit -q -m "extra $n"
+  done
+  git -C "$OVL" switch -q claude/republished
+  GIT_COMMITTER_DATE='2050-01-01T00:00:00Z' \
+    git -C "$OVL" cherry-pick "claude/dup~$1..claude/dup" >/dev/null
+  git -C "$OVL" update-ref refs/remotes/origin/claude/republished HEAD
+  git -C "$OVL" switch -q claude/dup
+}
+make_republish_repo third.txt 5
+add_republished 2
+check "[republish] precondition: four orphans" 4 "$(orphan_count)"
+check "[republish] four commits, all published -> allow" allow \
+  "$(decision_for "$(bash_cmd "$RESET_MAIN")" "$OVL")"
+make_republish_repo third.txt 5
+add_republished 3
+check "[republish] precondition: five orphans" 5 "$(orphan_count)"
+check "[republish] five commits, all published -> deny" deny \
+  "$(decision_for "$(bash_cmd "$RESET_MAIN")" "$OVL")"
+
+#     The comparison window: 205 commits on another remote, older than the
+#     republish, leave it at the front -> allow; the same 205 dated after it
+#     push it past the 200 the probe reads -> deny. The pair pins the window to
+#     date order rather than to how many commits the remotes carry.
+make_republish_repo third.txt 5
+add_noise 946684800
+check "[republish] precondition: more remote commits than the window" 205 \
+  "$(git -C "$OVL" rev-list --count origin/noise --not claude/dup origin/main)"
+check "[republish] recent republish behind 205 older commits -> allow" allow \
+  "$(decision_for "$(bash_cmd "$RESET_MAIN")" "$OVL")"
+make_republish_repo third.txt 5
+add_noise 4102444800
+check "[republish] republish behind 205 newer commits -> deny" deny \
+  "$(decision_for "$(bash_cmd "$RESET_MAIN")" "$OVL")"
+
 # --- Worktree grant recording (Q144) -----------------------------------------
 # The PreToolUse ask above and workspace-guard's exemption are two halves of one
 # contract, and each is green on its own with the other disconnected. This is

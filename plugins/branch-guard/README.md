@@ -52,7 +52,8 @@ The hook produces one of four outcomes per command:
   to you. Used where the missing input is a fact the session can establish for
   itself, so the reason carries the check that settles it. Today that is two
   cases: a `git reset --hard` onto a tip the guard has proved nothing else
-  reaches and proved to be carrying more than a reproducible merge, and a push
+  reaches and proved to be carrying more than a reproducible merge or a
+  published rebase, and a push
   onto a base that has moved into this branch's own lines.
   Asking there would spend your attention on a `gh pr view` or a `git rebase`.
 - **defer** — the hook stays silent; your normal permission settings apply.
@@ -107,6 +108,7 @@ the default `strict` [push policy](#push-guard).
 | `git branch -f tmp-basecheck main` / `git branch -M x tmp-basecheck` *(the ref being overwritten holds only a merge git reproduces)* | allow |
 | `git reset --hard origin/main` *(clean worktree, feature branch whose tip survives elsewhere)* | allow |
 | `git reset --hard HEAD~1` *(clean worktree, scratch ref whose only unshared commit is a merge git reproduces)* | allow |
+| `git reset --hard origin/main` *(clean worktree, a branch whose rebase is already published — every unshared commit has a patch-equivalent on a remote)* | allow |
 | `git stash` / `git stash pop` *(any branch — adds no commit, rewrites no history, recoverable by design)* | allow |
 | `git commit -m "fix"` *(on `main`)* | **ask** |
 | editing a file whose repo is on `main` *(Edit/Write/MultiEdit/NotebookEdit)* | **ask** |
@@ -118,7 +120,7 @@ the default `strict` [push policy](#push-guard).
 | `git push origin v1.3.0` / `git push origin refs/tags/v1.3.0` / `git push --tags` *(publishes a tag, strict policy)* | **ask** |
 | `git push` *(worktree branch, but the base has moved into the same lines this branch edits)* | **deny** |
 | `git reset --hard HEAD~1` *(uncommitted changes to tracked files, or on `main`, or a tip the guard couldn't check)* | **ask** |
-| `git reset --hard HEAD~1` *(clean worktree, feature branch, tip proved to be reachable from nothing else, and its orphaned commits not proved reproducible)* | **deny** |
+| `git reset --hard HEAD~1` *(clean worktree, feature branch, tip proved to be reachable from nothing else, and its orphaned commits proved neither reproducible nor republished)* | **deny** |
 | `git clean -fd` | **ask** |
 | `git stash drop` / `git stash clear` *(discards a stash)* | **ask** |
 | `git branch -D old` *(tip reachable from nothing else, and the branch carries commits of its own)* | **ask** |
@@ -254,7 +256,17 @@ runs on all three: the delete, this reset, and the `-f`/`-M`/`-C` overwrite. It
 costs nothing on the auto-approved path, because a surviving tip has already
 returned above it.
 
-A branch that fails both questions is denied rather than prompted, in every
+The reset asks one more. Rebasing a branch and pushing the result under another
+name gives every commit a new object name, so the old tip is unreachable while
+`origin` already holds its changes. The guard compares the patch-ids of
+the commits the move would orphan against the newest 200 commits on your
+remote-tracking branches (local `main` and `master` included), and allows when every
+orphan has a match. Whitespace counts, so a local re-indent of a pushed commit
+is not a match. Two cases still deny: a base that moved *inside* the lines
+around your change, which alters the diff itself so nothing can match, and a
+republish older than those 200 commits.
+
+A branch that fails every question is denied rather than prompted, in every
 permission mode — the one command here that is. The usual reason for an
 unreachable tip is a squash merge, which leaves a spent branch's tip unreachable
 by construction while its content sits on `main` under another object name, so
@@ -829,7 +841,7 @@ update step and restart.
    via `gh release delete-asset`); a workflow via
    `gh workflow disable`) ask, except a clean-worktree `reset --hard` onto a
    tip proved unreachable that is also proved to orphan more than a
-   reproducible merge, which denies; unknown or
+   reproducible merge or a published rebase, which denies; unknown or
    ambiguous forms defer. The branch is resolved with
    `git symbolic-ref`, in the tree the segment acts on — for Bash the session
    cwd, walked through a literal `cd` or `git -C`; for edits the file's own repo.
@@ -908,7 +920,8 @@ protected branch (main/master) or destructive git commands. To keep work flowing
   answer rather than a dead end — the commits are only here, and the denial
   names the `git log` that lists them. If you still mean it, re-run with
   `BRANCH_GUARD_OVERRIDE="<reason>"`. A scratch branch whose only unshared
-  commit is a merge git can re-run is not denied at all.
+  commit is a merge git can re-run is not denied at all, and neither is a
+  branch whose rebase you have already pushed.
 - **A push onto a base that has moved into your own lines is denied too, and
   the denial carries the rebase.** Run the `git fetch && git rebase` it names and
   push the result; retrying the push unchanged meets the same overlap. If you
