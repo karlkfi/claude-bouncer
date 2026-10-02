@@ -83,6 +83,7 @@ from bouncer_parse import (                                    # noqa: E402
 )
 from bouncer_grants import grants_path, load_grants, record_grants  # noqa: E402
 import time
+from bouncer_parse import note_discarded_writes  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Target classification: PROD / NONPROD / UNKNOWN
@@ -2691,6 +2692,8 @@ def main():
     # route around the target instead of stalling on an unanswerable prompt.
     if decision == 'ask' and data.get('permission_mode') == 'bypassPermissions':
         decision = 'deny'
+    if decision == 'deny':
+        reason = note_discarded_writes(reason, command)
     print(json.dumps({'hookSpecificOutput': {
         'hookEventName': 'PreToolUse',
         'permissionDecision': decision,

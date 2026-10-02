@@ -1645,6 +1645,22 @@ class HookEndToEndTests(unittest.TestCase):
         self.assertTrue(reason.startswith("workspace-guard: "), reason)
         self.assertIn("give cd a literal target", reason)
 
+    def test_a_deny_names_the_write_it_discards(self):
+        # Q204: the deny refuses the whole call, so the bundled write never
+        # happens. The same deny with no write is the control.
+        out = self._decision("echo v > notes.md; cat $TMPDIR/out.log", "deny")
+        self.assertIn("did not happen either: `> notes.md`",
+                      out["hookSpecificOutput"]["permissionDecisionReason"])
+        out = self._decision("cat $TMPDIR/out.log", "deny")
+        self.assertNotIn("did not happen either",
+                         out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_an_ask_carries_no_discarded_write_note(self):
+        # An ask reaches the human, and an approved call runs the write.
+        out = self._decision("echo v > notes.md; cat /q84-fake-outside/x", "ask")
+        self.assertNotIn("did not happen either",
+                         out["hookSpecificOutput"]["permissionDecisionReason"])
+
     def test_resolved_outside_path_still_asks(self):
         # The half that must not move: a person is the only one who can answer
         # whether this file is legitimately outside the root.

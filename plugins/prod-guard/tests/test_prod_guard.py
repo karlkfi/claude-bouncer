@@ -562,6 +562,17 @@ class QuotedOperatorDecisionTests(unittest.TestCase):
         decision, _ = run_hook("true; kubectl --context=prod delete pod x")
         self.assertEqual(decision, "deny")
 
+    def test_a_deny_names_the_write_it_discards(self):
+        # Q204: the deny refuses the whole call, so the bundled write never
+        # happens. The same deny with no write is the control.
+        decision, reason = run_hook(
+            "kubectl --context=prod delete pod x | tee out.log")
+        self.assertEqual(decision, "deny")
+        self.assertIn("did not happen either: `tee out.log`", reason)
+        decision, reason = run_hook("kubectl --context=prod delete pod x")
+        self.assertEqual(decision, "deny")
+        self.assertNotIn("did not happen either", reason)
+
     def test_an_unquoted_backtick_still_splits(self):
         # The pre-lex `\`` -> `;` rewrite is what makes this a separate
         # segment, and it must survive a rule keyed on quoting.

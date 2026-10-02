@@ -255,6 +255,16 @@ class QuotedAmpersandDecisionTests(unittest.TestCase):
         d, _ = run_hook("sleep 300 |& cat")
         self.assertEqual(d, "deny")
 
+    def test_a_deny_names_the_write_it_discards(self):
+        # Q204: the deny refuses the whole call, so the bundled write never
+        # happens. The same deny with no write is the control.
+        d, reason = run_hook("sed -i '' s/a/b/ f.go && sleep 300")
+        self.assertEqual(d, "deny")
+        self.assertIn("did not happen either: `sed -i`", reason)
+        d, reason = run_hook("sleep 300")
+        self.assertEqual(d, "deny")
+        self.assertNotIn("did not happen either", reason)
+
 
 class SleepSecondsTests(unittest.TestCase):
     def test_plain(self):

@@ -43,8 +43,8 @@ from bouncer_parse import (                                    # noqa: E402
     SEPARATORS, SH_KEYWORDS, _OPERATORS, is_assignment, is_operator, split_assignment,
     _consume_heredoc_body, _scan_backticks, _scan_dollar_paren,
     _skip_balanced_parens, command_substitutions, glue_dollar_paren,
-    split_operator_runs, strip_comments, strip_env_prefix,
-    strip_heredoc_bodies, strip_sh_keywords,
+    note_discarded_writes, split_operator_runs, strip_comments,
+    strip_env_prefix, strip_heredoc_bodies, strip_sh_keywords,
 )
 
 # --- Ported from claude-workspace-guard (scripts/bash-workspace-guard.py) ----
@@ -1033,7 +1033,7 @@ def main():
         # Always `deny`, never `ask`. The reason reaches the model, so the fix
         # lands where the command is rewritten; an `ask` goes to the user and
         # the model never sees why.
-        emit('deny', REASON_PREFIX + reason)
+        emit('deny', note_discarded_writes(REASON_PREFIX + reason, cmd))
 
 
 if __name__ == '__main__':

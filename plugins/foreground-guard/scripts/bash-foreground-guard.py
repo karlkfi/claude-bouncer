@@ -97,7 +97,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 from bouncer_parse import (                                    # noqa: E402
     ASSIGN_SUBSCRIPT, ASSIGNMENT_RE, COMMENT_PRECEDERS, QuoteTrackingLexer,
     _consume_heredoc_body, _skip_balanced_parens, is_assignment,
-    split_assignment, strip_heredoc_bodies,
+    note_discarded_writes, split_assignment, strip_heredoc_bodies,
 )
 
 DEFAULT_BASH_TIMEOUT_MS = 120000
@@ -930,7 +930,7 @@ def main():
     if decision == 'ask' and mode in UNATTENDED_MODES:
         decision = 'deny'
     if decision == 'deny':
-        reason += ' ' + deny_tail()
+        reason = note_discarded_writes(reason + ' ' + deny_tail(), command)
     print(json.dumps({'hookSpecificOutput': {
         'hookEventName': 'PreToolUse',
         'permissionDecision': decision,

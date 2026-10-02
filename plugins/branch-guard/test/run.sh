@@ -623,6 +623,15 @@ check_prefix "[dontAsk] tag push deny opens with the guard's name" \
 check_prefix "[bypassPermissions] deny opens with the guard's name too" \
   "branch-guard: " \
   "$(reason_for "$(push_mode 'git push origin v1.3.0' 'bypassPermissions')" "$WORK")"
+
+# 11c. A deny refuses the whole call, so a write bundled into it never happens,
+#      and the reason says so (Q204). The plain tag-push deny above is the
+#      control: no write, no note.
+check_text "[dontAsk] deny names the write it discards" has \
+  'did not happen either: `> notes.md`' \
+  "$(reason_for "$(push_mode 'echo v > notes.md; git push origin v1.3.0' 'dontAsk')" "$WORK")"
+check_text "[dontAsk] deny with no write carries no note" lacks \
+  "did not happen either" "$tag_deny"
 check_prefix "[default] tag push ask opens with the guard's name" \
   "branch-guard: Push targets 'v1.3.0'" "$tag_ask"
 
