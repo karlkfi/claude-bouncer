@@ -117,6 +117,11 @@ class LexTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             bp.lex('echo "unclosed')
 
+    def test_a_word_knows_whether_an_operator_followed_it_directly(self):
+        self.assertTrue(bp.lex('echo 2>f')[1].glued)
+        self.assertFalse(bp.lex('echo 2 > f')[1].glued)
+        self.assertFalse(bp.lex('echo 2 >f')[1].glued)
+
     def lex(self, cmd):
         return bp.glue_dollar_paren(bp.split_operator_runs(bp.lex(cmd)))
 
@@ -664,6 +669,12 @@ class DiscardedWritesTests(unittest.TestCase):
                 ('cp a b && make', ['`cp` to `b`']),
                 ('mv -t dir a b', ['`mv`']),
                 ('FOO=1 tee x < in', ['`tee x`']),
+                # A spaced digit is an argument, so stdout is what is redirected.
+                ('echo 2 > f', ['`> f`']),
+                ('head -n 5 >out', ['`> out`']),
+                ("echo '2'>f", ['`> f`']),
+                ('cp a b 3 > log', ['`> log`', '`cp` to `3`']),
+                ('tee x 2>/dev/null', ['`tee x`']),
                 ('echo $(( 1 > 0 )) > r.txt', ['`> r.txt`'])):
             with self.subTest(cmd=cmd):
                 self.assertEqual(want, bp.discarded_writes(cmd))

@@ -740,9 +740,14 @@ class QuotedStr(str):
     escaping first appeared, or None when the word was written plain -- which
     is what :func:`is_assignment` needs and `quotes` cannot answer, quoting on
     the value side of an assignment being ordinary (`SP="/x"` assigns).
+
+    `glued` is whether an operator character followed with no whitespace
+    between, which is the only thing separating bash's `2>f`, a redirect of
+    fd 2, from `2 > f`, an argument `2` and a redirect of stdout.
     """
     quotes = frozenset()
     quoted_from = None
+    glued = False
 
 
 class QuoteTrackingLexer(shlex.shlex):
@@ -785,6 +790,10 @@ class QuoteTrackingLexer(shlex.shlex):
         out = QuotedStr(token)
         out.quotes = frozenset(self._seen_quotes)
         out.quoted_from = self._quoted_from
+        # shlex parks the punctuation character that ended a word here. It is
+        # private, so a release without it reads every word as unglued rather
+        # than breaking `lex`; LexTests pins the attribute.
+        out.glued = bool(getattr(self, '_pushback_chars', ()))
         return out
 
 
@@ -1133,7 +1142,9 @@ def _segment_writes(seg):
             argv.append(t); j += 1
             continue
         nxt = seg[j + 1] if j + 1 < len(seg) else ''
-        if t.isdigit() and is_operator(nxt, REDIR | DUP):
+        if t.isdigit() and getattr(t, 'glued', False) \
+                and getattr(t, 'quoted_from', None) is None \
+                and is_operator(nxt, REDIR | DUP):
             fd = t                             # `2>`: an fd, not an operand
             j += 1
             continue
