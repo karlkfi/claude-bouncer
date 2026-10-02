@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/bash-foreground-guard.py\"",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/run-python-hook.cmd\" bash-foreground-guard.py",
             "timeout": 10000
           }
         ]

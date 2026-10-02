@@ -244,9 +244,14 @@ class NameAgreementTests(unittest.TestCase):
     the tool-result stream labels a deny from the reason's opener, and the two
     are counted together — so for every installed sibling they must resolve to
     the same word. The hook commands keep the shape each plugin's hooks.json
-    actually uses (read 2026-08-21), with the install path stubbed."""
+    actually uses (read 2026-10-01), with the install path stubbed. The bare
+    `python3` rows are the shape foreground-guard and prod-guard registered
+    before Q205, which transcripts from those installs still carry."""
 
     INSTALLED = (
+        ('"/x/scripts/run-python-hook.cmd" bash-foreground-guard.py',
+         "foreground-guard"),
+        ('"/x/scripts/run-python-hook.cmd" bash-prod-guard.py', "prod-guard"),
         ('python3 "/x/scripts/bash-foreground-guard.py"', "foreground-guard"),
         ('python3 "/x/scripts/bash-prod-guard.py"', "prod-guard"),
         ('"/x/scripts/run-python-hook.cmd" bash-workspace-guard.py',

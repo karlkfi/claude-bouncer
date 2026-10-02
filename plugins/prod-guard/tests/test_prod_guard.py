@@ -3557,8 +3557,52 @@ class WiringTests(unittest.TestCase):
             self.assertEqual(len(entries), 1, event)
             self.assertEqual(entries[0]["matcher"], "Bash", event)
             cmd = entries[0]["hooks"][0]["command"]
-            self.assertIn("scripts/bash-prod-guard.py", cmd, event)
+            self.assertEqual(
+                cmd, '"${CLAUDE_PLUGIN_ROOT}/scripts/run-python-hook.cmd" '
+                     'bash-prod-guard.py', event)
         self.assertTrue(SCRIPT.exists())
+
+    def test_launcher_ships_executable_and_lf(self):
+        # hooks.json execs the launcher directly: a lost exec bit is exit 126,
+        # and CRLF makes its POSIX half a syntax error. Either way the hook
+        # fails, Claude Code lets the command through, and nothing says so.
+        launcher = REPO / "scripts" / "run-python-hook.cmd"
+        staged = subprocess.run(
+            ["git", "ls-files", "-s", "--", str(launcher)], cwd=REPO,
+            capture_output=True, text=True).stdout
+        self.assertTrue(staged.startswith("100755 "), staged)
+        self.assertNotIn(b"\r", launcher.read_bytes())
+        self.assertIn("*.cmd text eol=lf",
+                      (REPO / ".gitattributes").read_text(encoding="utf-8"))
+
+    @unittest.skipIf(os.name == "nt", "the launcher runs through cmd.exe there")
+    def test_wired_command_survives_a_python3_that_does_not_run(self):
+        # Q205: the Windows Store alias stub is a python3 on PATH that exits
+        # 9009. Model it with a python3 that fails, and a working `python`
+        # beside it: a bare `python3` hook emits nothing, the launcher falls
+        # through to `python` and decides.
+        home = make_home(kubeconfig=KUBECONFIG_KIND)
+        bindir = tempfile.mkdtemp(prefix="prod-guard-test-bin-")
+        stub = os.path.join(bindir, "python3")
+        with open(stub, "w", encoding="utf-8") as f:
+            f.write("#!/bin/sh\nexit 9\n")
+        os.chmod(stub, 0o755)
+        os.symlink(sys.executable, os.path.join(bindir, "python"))
+        env = {"HOME": home, "PATH": bindir + ":/usr/bin:/bin",
+               "CLAUDE_PLUGIN_ROOT": str(REPO)}
+        payload = json.dumps({"tool_name": "Bash",
+                              "tool_input": {"command": "kubectl delete pod x"}})
+        with open(REPO / "hooks" / "hooks.json", encoding="utf-8") as f:
+            cmd = json.load(f)["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        outputs = []
+        for argv in ([sys.executable, str(SCRIPT)], ["/bin/sh", "-c", cmd]):
+            r = subprocess.run(argv, input=payload, capture_output=True,
+                               text=True, env=env, cwd=home, timeout=30)
+            self.assertEqual(r.returncode, 0, "%s: %r" % (argv[0], r.stderr))
+            outputs.append(r.stdout)
+        # Two silent defers would compare equal, so pin the decision too.
+        self.assertIn('"deny"', outputs[1])
+        self.assertEqual(outputs[0], outputs[1])
 
     def test_plugin_and_marketplace_versions_match(self):
         # One manifest at the monorepo root lists all five guards, so the entry
