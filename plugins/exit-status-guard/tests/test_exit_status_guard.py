@@ -1182,6 +1182,21 @@ class TestHookEndToEnd(unittest.TestCase):
         self.assertEqual('deny', payload['permissionDecision'])
         self.assertIn("exit status is the filter's",
                       payload['permissionDecisionReason'])
+        self.assertNotIn('did not happen either',
+                         payload['permissionDecisionReason'])
+
+    def test_a_deny_names_the_write_it_discards(self):
+        """Q204, in the shape it was reported in: a heredoc writes a test file
+        and the suite that should run it is piped into a filter. The deny
+        above, with no write, is the control."""
+        out = self.run_hook({
+            'tool_name': 'Bash', 'cwd': REPO,
+            'tool_input': {'command': "cat > t.py <<'EOF'\nx = 1\nEOF\n"
+                                      "make check 2>&1 | tail -30"}})
+        payload = json.loads(out)['hookSpecificOutput']
+        self.assertEqual('deny', payload['permissionDecision'])
+        self.assertIn('did not happen either: `> t.py`',
+                      payload['permissionDecisionReason'])
 
     def test_every_deny_names_the_guard_first(self):
         """The reason is all the model gets, so it is the only place a verdict

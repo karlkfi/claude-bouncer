@@ -17,8 +17,8 @@ from bouncer_parse import (                                    # noqa: E402
     _OPERATORS, is_assignment, is_operator, is_reserved_word, split_assignment,
     _consume_heredoc_body, _scan_backticks, _scan_dollar_paren,
     _skip_balanced_parens, command_substitutions, glue_dollar_paren,
-    split_operator_runs, strip_comments, strip_env_prefix,
-    strip_heredoc_bodies, strip_sh_keywords,
+    note_discarded_writes, split_operator_runs, strip_comments,
+    strip_env_prefix, strip_heredoc_bodies, strip_sh_keywords,
 )
 from bouncer_grants import load_grants, record_grants  # noqa: E402
 
@@ -2907,6 +2907,9 @@ def finish(decision, reason, offenders, data):
     them. Only an `ask` is ever remembered: a `deny` never reached a human, so
     there is no approval to record, and an `allow` had nothing to object to.
     """
+    if decision == 'deny' and data.get('tool_name') != 'PowerShell':
+        reason = note_discarded_writes(
+            reason, (data.get('tool_input') or {}).get('command') or '')
     post = data.get('hook_event_name') == 'PostToolUse'
     if not session_grants_enabled():
         if not post:

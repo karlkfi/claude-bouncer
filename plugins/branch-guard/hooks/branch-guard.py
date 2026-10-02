@@ -110,7 +110,8 @@ import sys, os, json, re, subprocess, fnmatch
 # copy under this plugin's `lib/` is vendored; see scripts/sync-lib.py.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 from bouncer_parse import (                                   # noqa: E402
-    ASSIGN_SUBSCRIPT, PUNCT_CHARS, is_assignment, lex, split_assignment,
+    ASSIGN_SUBSCRIPT, PUNCT_CHARS, is_assignment, lex, note_discarded_writes,
+    split_assignment,
 )
 from bouncer_grants import record_grants                      # noqa: E402
 
@@ -2334,9 +2335,16 @@ def is_protected(branch):
     return any(fnmatch.fnmatchcase(branch, p) for p in protected_patterns())
 
 
+# The Bash command this run judges, so a deny can name the writes it discards.
+# Empty for the file tools, whose deny refuses one edit and nothing else.
+_bash_command = ''
+
+
 def emit(decision, reason):
     if decision in PREFIXED_DECISIONS:
         reason = GUARD_PREFIX + reason
+    if decision == 'deny':
+        reason = note_discarded_writes(reason, _bash_command)
     out = {
         "hookEventName": "PreToolUse",
         "permissionDecision": decision,
@@ -2429,7 +2437,8 @@ def main():
     mode = data.get('permission_mode') or ''
 
     if tool == 'Bash':
-        cmd = tool_input.get('command') or ''
+        global _bash_command
+        cmd = _bash_command = tool_input.get('command') or ''
         if not cmd.strip():
             return
         # Drop heredoc bodies before lexing so their (data) contents aren't

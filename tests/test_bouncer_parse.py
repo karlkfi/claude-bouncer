@@ -117,6 +117,11 @@ class LexTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             bp.lex('echo "unclosed')
 
+    def test_a_word_knows_whether_an_operator_followed_it_directly(self):
+        self.assertTrue(bp.lex('echo 2>f')[1].glued)
+        self.assertFalse(bp.lex('echo 2 > f')[1].glued)
+        self.assertFalse(bp.lex('echo 2 >f')[1].glued)
+
     def lex(self, cmd):
         return bp.glue_dollar_paren(bp.split_operator_runs(bp.lex(cmd)))
 
@@ -641,6 +646,82 @@ class OperatorTests(unittest.TestCase):
         self.assertEqual([';;'],
                          [str(t) for t in
                           bp.split_operator_runs(bp.lex("cat ';;' f")[1:2])])
+
+
+class DiscardedWritesTests(unittest.TestCase):
+    """Q204. Narrow on purpose: every miss leaves a reason as it was, and every
+    phantom write is a false sentence in it."""
+
+    def test_the_writes_it_names(self):
+        for cmd, want in (
+                ('echo hi > out.txt', ['`> out.txt`']),
+                ('echo hi >> out.txt', ['`>> out.txt`']),
+                ('echo hi &> out.txt', ['`&> out.txt`']),
+                ('echo hi >& out.txt', ['`>& out.txt`']),
+                ('echo hi 2>err.log', ['`2> err.log`']),
+                ("cat > t.py <<'EOF'\nx\nEOF\nmake check | tail",
+                 ['`> t.py`']),
+                ("python3 <<'EOF'\nopen('f', 'w')\nEOF\n",
+                 ['the heredoc script fed to `python3`']),
+                ('make check | tee log.txt', ['`tee log.txt`']),
+                ("sed -i '' s/a/b/ f.go", ['`sed -i`']),
+                ('sed --in-place s/a/b/ f.go', ['`sed -i`']),
+                ('cp a b && make', ['`cp` to `b`']),
+                ('mv -t dir a b', ['`mv`']),
+                ('FOO=1 tee x < in', ['`tee x`']),
+                # A spaced digit is an argument, so stdout is what is redirected.
+                ('echo 2 > f', ['`> f`']),
+                ('head -n 5 >out', ['`> out`']),
+                ("echo '2'>f", ['`> f`']),
+                ('cp a b 3 > log', ['`> log`', '`cp` to `3`']),
+                ('tee x 2>/dev/null', ['`tee x`']),
+                ('cp a b 2&>log', ['`&> log`', '`cp` to `2`']),
+                ('cp a b 2&>>log', ['`&>> log`', '`cp` to `2`']),
+                ('echo $(( 1 > 0 )) > r.txt', ['`> r.txt`'])):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(want, bp.discarded_writes(cmd))
+
+    def test_what_writes_nothing_is_not_named(self):
+        for cmd in ('make check | tail',
+                    'make check 2>&1 | tail',
+                    'make check >/dev/null 2>&1',
+                    'echo hi >&2',
+                    'make | tee -a /dev/stderr',
+                    'cat <<EOF | python3\nx\nEOF\n',  # the heredoc feeds cat
+                    "sed -n 's/a/b/p' f.go",
+                    'cp -r src',
+                    '[[ a > b ]] && make',
+                    '(( x > 3 )) && echo y',
+                    'diff <(sort a) <(sort b)',
+                    "echo 'a > b'",
+                    'git status',
+                    "echo 'unbalanced"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual([], bp.discarded_writes(cmd))
+
+    def test_a_digit_the_lexer_could_not_place_names_nothing(self):
+        # A shlex without the lookahead `glued` reads leaves it None, and
+        # `2>/dev/null` would otherwise make `2` cp's destination.
+        tokens = bp.lex('cp a b 2>/dev/null')
+        tokens[3].glued = None
+        self.assertEqual([], bp._segment_writes(tokens))
+
+    def test_the_note_leaves_a_reason_with_no_write_alone(self):
+        self.assertEqual('R.', bp.note_discarded_writes('R.', 'make | tail'))
+
+    def test_the_note_is_appended_after_the_reason(self):
+        self.assertEqual(
+            'R. Nothing in this call ran, so these did not happen either: '
+            '`> a`. Any file they would have written is unchanged.',
+            bp.note_discarded_writes('R.', 'echo x > a; make | tail'))
+
+    def test_the_note_caps_its_list(self):
+        cmd = '; '.join('echo x > f%d' % k for k in range(7))
+        self.assertIn('`> f4`, and 2 more.',
+                      bp.note_discarded_writes('R.', cmd))
+
+    def test_a_failure_costs_the_note_and_never_the_reason(self):
+        self.assertEqual('R.', bp.note_discarded_writes('R.', None))
 
 
 class VendoringTests(unittest.TestCase):

@@ -744,9 +744,15 @@ class QuotedStr(str):
     escaping first appeared, or None when the word was written plain -- which
     is what :func:`is_assignment` needs and `quotes` cannot answer, quoting on
     the value side of an assignment being ordinary (`SP="/x"` assigns).
+
+    `glued` is whether an operator character followed with no whitespace
+    between, which is the only thing separating bash's `2>f`, a redirect of
+    fd 2, from `2 > f`, an argument `2` and a redirect of stdout. None means
+    the lexer could not tell.
     """
     quotes = frozenset()
     quoted_from = None
+    glued = False
 
 
 class QuoteTrackingLexer(shlex.shlex):
@@ -789,6 +795,11 @@ class QuoteTrackingLexer(shlex.shlex):
         out = QuotedStr(token)
         out.quotes = frozenset(self._seen_quotes)
         out.quoted_from = self._quoted_from
+        # shlex parks the punctuation character that ended a word here. It is
+        # private, so a release without it leaves `glued` unknown rather than
+        # breaking `lex`; LexTests pins the attribute.
+        pending = getattr(self, '_pushback_chars', None)
+        out.glued = None if pending is None else bool(pending)
         return out
 
 
@@ -1098,3 +1109,151 @@ def strip_sh_keywords(tokens):
     while i < len(tokens) and is_reserved_word(tokens[i]):
         i += 1
     return tokens[i:]
+
+
+# ---------------------------------------------------------- discarded writes
+
+# Output redirects. `<`, `<<` and `<<<` read, so they write nothing.
+_WRITE_REDIR = frozenset({'>', '>>', '>|', '&>', '&>>'})
+
+# Redirects a leading digit can number. `&>` takes none: `2&>f` is the
+# argument `2`, then both streams to `f`.
+_FD_REDIR = (REDIR | DUP) - {'&>', '&>>'}
+
+# A `>&` target that duplicates or closes a descriptor rather than naming a file.
+_FD_TARGET_RE = re.compile(r'^(?:[0-9]+-?|-)$')
+
+# Programs a heredoc can hand a whole script to.
+_INTERPRETER_RE = re.compile(
+    r'^(?:python[0-9.]*|node|ruby|perl|bash|sh|zsh|dash|ksh)$')
+
+_MAX_NOTED_WRITES = 5
+
+
+def _writes_to(op, target):
+    if not target or target.startswith('/dev/') \
+            or is_operator(target, SEPARATORS | REDIR | DUP):
+        return False
+    if op == '>&':
+        return not _FD_TARGET_RE.match(target)
+    return op in _WRITE_REDIR
+
+
+def _segment_writes(seg):
+    """The writes one simple command makes, from its tokens."""
+    found, argv = [], []
+    heredoc = in_test = False
+    fd = ''
+    j = 0
+    while j < len(seg):
+        t = seg[j]
+        if t in ('[[', ']]') and is_reserved_word(t):
+            in_test = t == '[['                # `>` inside `[[ ]]` compares
+            argv.append(t); j += 1
+            continue
+        nxt = seg[j + 1] if j + 1 < len(seg) else ''
+        if t.isdigit() and getattr(t, 'quoted_from', None) is None \
+                and is_operator(nxt, _FD_REDIR):
+            glued = getattr(t, 'glued', None)
+            if glued is None:
+                return []                      # fd or operand: unknowable
+            if glued:
+                fd = t                         # `2>`: an fd, not an operand
+                j += 1
+                continue
+        if not in_test and is_operator(t, REDIR | DUP):
+            if t == '<<':
+                heredoc = True
+            elif _writes_to(t, nxt):
+                found.append('`%s%s %s`' % (fd, t, nxt))
+            fd = ''
+            j += 2
+            continue
+        argv.append(t); j += 1
+    argv = strip_env_prefix(strip_sh_keywords(argv))
+    if not argv:
+        return found
+    name = argv[0].rsplit('/', 1)[-1]
+    if heredoc and _INTERPRETER_RE.match(name):
+        found.append('the heredoc script fed to `%s`' % name)
+    opts, operands = [], []
+    for k, a in enumerate(argv[1:], 1):
+        if a == '--':
+            operands += argv[k + 1:]
+            break
+        (opts if a.startswith('-') and a != '-' else operands).append(a)
+    operands = [a for a in operands if not a.startswith('/dev/')]
+    if name == 'tee':
+        found += ['`tee %s`' % a for a in operands]
+    elif name == 'sed' and any(o.startswith('-i') or o.startswith('--in-place')
+                               for o in opts):
+        found.append('`sed -i`')
+    elif name in ('cp', 'mv') and operands:
+        if any(o.startswith('-t') or o.startswith('--target-directory')
+               for o in opts):
+            found.append('`%s`' % name)
+        elif len(operands) > 1:
+            found.append('`%s` to `%s`' % (name, operands[-1]))
+    return found
+
+
+def discarded_writes(cmd):
+    """Describe the file writes in `cmd`, for a guard denying the whole call.
+
+    A deny refuses the entire Bash invocation, so a write bundled beside the
+    statement a guard objects to never happens, and nothing in the reason says
+    so -- the next read of that file then reports the old contents as though
+    the edit had landed (Q204). Deliberately narrow, because the description
+    is a disclosure appended to a reason that already carries its fix: a
+    missed write leaves the reason as it was, while a phantom one is a false
+    sentence. Recognised are an output redirect to anything outside `/dev/`, a
+    heredoc fed to an interpreter, and `tee`, `sed -i`, `cp` and `mv`.
+    Anything quoted whole -- a `"$(...)"`, a `bash -c '...'` -- is not looked
+    inside.
+    """
+    try:
+        tokens = split_operator_runs(
+            lex(strip_heredoc_bodies(strip_comments(cmd))))
+    except ValueError:
+        return []
+    found, seg = [], []
+    i, n = 0, len(tokens)
+    while i < n:
+        t = tokens[i]
+        if not is_operator(t, SEPARATORS):
+            seg.append(t); i += 1
+            continue
+        found += _segment_writes(seg)
+        seg = []
+        if t == '(' and i + 1 < n and tokens[i + 1] == '(' \
+                and is_operator(tokens[i + 1], SEPARATORS):
+            depth = 0                          # `((...))`: `>` compares
+            while i < n:
+                if is_operator(tokens[i], SEPARATORS):
+                    depth += {'(': 1, ')': -1}.get(tokens[i], 0)
+                i += 1
+                if depth == 0:
+                    break
+            continue
+        i += 1
+    found += _segment_writes(seg)
+    return list(dict.fromkeys(found))
+
+
+def note_discarded_writes(reason, cmd):
+    """`reason` with a sentence naming the writes a deny of `cmd` discards.
+
+    Additive only: with nothing recognised, or on any failure, `reason` comes
+    back unchanged, since this must never cost the deny it annotates.
+    """
+    try:
+        writes = discarded_writes(cmd)
+    except Exception:  # noqa: BLE001
+        return reason
+    if not writes:
+        return reason
+    shown = ', '.join(writes[:_MAX_NOTED_WRITES])
+    if len(writes) > _MAX_NOTED_WRITES:
+        shown += ', and %d more' % (len(writes) - _MAX_NOTED_WRITES)
+    return ('%s Nothing in this call ran, so these did not happen either: %s. '
+            'Any file they would have written is unchanged.' % (reason, shown))
