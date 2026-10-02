@@ -747,7 +747,8 @@ class QuotedStr(str):
 
     `glued` is whether an operator character followed with no whitespace
     between, which is the only thing separating bash's `2>f`, a redirect of
-    fd 2, from `2 > f`, an argument `2` and a redirect of stdout.
+    fd 2, from `2 > f`, an argument `2` and a redirect of stdout. None means
+    the lexer could not tell.
     """
     quotes = frozenset()
     quoted_from = None
@@ -795,9 +796,10 @@ class QuoteTrackingLexer(shlex.shlex):
         out.quotes = frozenset(self._seen_quotes)
         out.quoted_from = self._quoted_from
         # shlex parks the punctuation character that ended a word here. It is
-        # private, so a release without it reads every word as unglued rather
-        # than breaking `lex`; LexTests pins the attribute.
-        out.glued = bool(getattr(self, '_pushback_chars', ()))
+        # private, so a release without it leaves `glued` unknown rather than
+        # breaking `lex`; LexTests pins the attribute.
+        pending = getattr(self, '_pushback_chars', None)
+        out.glued = None if pending is None else bool(pending)
         return out
 
 
@@ -1114,6 +1116,10 @@ def strip_sh_keywords(tokens):
 # Output redirects. `<`, `<<` and `<<<` read, so they write nothing.
 _WRITE_REDIR = frozenset({'>', '>>', '>|', '&>', '&>>'})
 
+# Redirects a leading digit can number. `&>` takes none: `2&>f` is the
+# argument `2`, then both streams to `f`.
+_FD_REDIR = (REDIR | DUP) - {'&>', '&>>'}
+
 # A `>&` target that duplicates or closes a descriptor rather than naming a file.
 _FD_TARGET_RE = re.compile(r'^(?:[0-9]+-?|-)$')
 
@@ -1146,12 +1152,15 @@ def _segment_writes(seg):
             argv.append(t); j += 1
             continue
         nxt = seg[j + 1] if j + 1 < len(seg) else ''
-        if t.isdigit() and getattr(t, 'glued', False) \
-                and getattr(t, 'quoted_from', None) is None \
-                and is_operator(nxt, REDIR | DUP):
-            fd = t                             # `2>`: an fd, not an operand
-            j += 1
-            continue
+        if t.isdigit() and getattr(t, 'quoted_from', None) is None \
+                and is_operator(nxt, _FD_REDIR):
+            glued = getattr(t, 'glued', None)
+            if glued is None:
+                return []                      # fd or operand: unknowable
+            if glued:
+                fd = t                         # `2>`: an fd, not an operand
+                j += 1
+                continue
         if not in_test and is_operator(t, REDIR | DUP):
             if t == '<<':
                 heredoc = True

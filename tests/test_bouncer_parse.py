@@ -675,6 +675,8 @@ class DiscardedWritesTests(unittest.TestCase):
                 ("echo '2'>f", ['`> f`']),
                 ('cp a b 3 > log', ['`> log`', '`cp` to `3`']),
                 ('tee x 2>/dev/null', ['`tee x`']),
+                ('cp a b 2&>log', ['`&> log`', '`cp` to `2`']),
+                ('cp a b 2&>>log', ['`&>> log`', '`cp` to `2`']),
                 ('echo $(( 1 > 0 )) > r.txt', ['`> r.txt`'])):
             with self.subTest(cmd=cmd):
                 self.assertEqual(want, bp.discarded_writes(cmd))
@@ -696,6 +698,13 @@ class DiscardedWritesTests(unittest.TestCase):
                     "echo 'unbalanced"):
             with self.subTest(cmd=cmd):
                 self.assertEqual([], bp.discarded_writes(cmd))
+
+    def test_a_digit_the_lexer_could_not_place_names_nothing(self):
+        # A shlex without the lookahead `glued` reads leaves it None, and
+        # `2>/dev/null` would otherwise make `2` cp's destination.
+        tokens = bp.lex('cp a b 2>/dev/null')
+        tokens[3].glued = None
+        self.assertEqual([], bp._segment_writes(tokens))
 
     def test_the_note_leaves_a_reason_with_no_write_alone(self):
         self.assertEqual('R.', bp.note_discarded_writes('R.', 'make | tail'))
