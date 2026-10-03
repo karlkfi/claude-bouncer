@@ -1666,6 +1666,15 @@ final output.
   prompt nobody can answer. A `$` bash keeps literal (trailing, or
   before a non-name char like `.`/`/`) is part of the filename and resolved
   normally, so a `price$` or `a$.b` argument no longer prompts spuriously.
+- `sed -i '' SCRIPT FILE` means two things. BSD sed (macOS) reads the `''` as
+  the backup suffix and `SCRIPT` as the script; GNU sed reads `''` as an empty
+  script and `SCRIPT` as a file. The hook keeps judging the token after the
+  `''` as a file, so a GNU file is still caught, with one exception: an `s` or
+  `y` command holding a `$` expansion (`sed -i '' "s/x/$v/" f`) is taken as the
+  script and allowed instead of denied as unexpandable. Any other script there
+  is still read as a path: one starting with an address (`'/^#/d'`) asks as an
+  absolute path, and one with an expansion in another shape (`"${n}d"`) is
+  denied. Use `-i '' -e SCRIPT`, which both seds read the same way.
 - Heredoc body lines are dropped from the raw command string before parsing, so
   path-like body content (`</div>`, `/title`), prose, or an unbalanced quote in
   the body is never mistaken for a file argument and never aborts the parse (a

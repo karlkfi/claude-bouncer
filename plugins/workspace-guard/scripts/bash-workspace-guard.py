@@ -2594,6 +2594,32 @@ def _split_args(tokens, spec):
     return files, flags_seen, positionals
 
 
+# BSD sed's arg-less short options, which may share a cluster ending in `-i`.
+SED_BSD_BARE_FLAGS = frozenset('Eanrsu')
+# An `s` or `y` command with all three delimiters: `s/a/b/`, `s|a|b|g`.
+SED_SUBST_RE = re.compile(r'[sy]([^\w\s\\])(?:(?!\1).)*\1(?:(?!\1).)*\1')
+
+
+def sed_detached_empty_suffix(tokens):
+    """True when the first operand is a `''` written straight after `-i` (or a
+    cluster ending in it, `-ni`) — BSD sed's backup suffix, `sed -i '' SCRIPT F`.
+
+    GNU sed reads the same argv as an empty script followed by files, so the
+    token after the `''` is BSD's script and GNU's first file. The caller keeps
+    judging it as a file, which catches a GNU file; only an `s`/`y` command
+    holding an expansion is dropped, because that is the script
+    `sed -i '' "s/x/$v/"` and it cannot be read as a path. A bare `"$f"` keeps
+    its deny — see README Limitations.
+    """
+    for i, t in enumerate(tokens[1:-1], 1):
+        if t == '--' or not t.startswith('-'):
+            return False
+        if t.endswith('i') and set(t[1:-1]) <= SED_BSD_BARE_FLAGS \
+                and tokens[i + 1] == '':
+            return True
+    return False
+
+
 def files_in_command(tokens):
     """Return list of file-arg tokens for a simple command, or None if unguarded."""
     name = ALIASES.get(os.path.basename(tokens[0]), os.path.basename(tokens[0]))
@@ -2605,6 +2631,10 @@ def files_in_command(tokens):
     prog = 0 if any(f in flags_seen for f in spec.get('prog_suppressed_by', [])) \
              else spec.get('prog', 0)
     file_positionals = positionals[prog:]
+    if name == 'sed' and prog and sed_detached_empty_suffix(tokens) \
+            and file_positionals and EXPANSION_RE.search(file_positionals[0]) \
+            and SED_SUBST_RE.match(file_positionals[0]):
+        file_positionals = file_positionals[1:]
     if spec.get('skip_assignments'):              # awk: drop var=val operands
         file_positionals = [p for p in file_positionals
                             if '=' not in p.split('/')[0]]

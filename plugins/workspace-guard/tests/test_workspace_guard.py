@@ -218,6 +218,39 @@ class FilesInCommandTests(unittest.TestCase):
             ["script.sed", "foo.txt"],
         )
 
+    def test_sed_bsd_empty_suffix_drops_an_expanded_script(self):
+        # `sed -i '' "s/x/$a/" f`: BSD's `''` is the backup suffix, so the
+        # `$a` token is the script, not a path the hook failed to expand.
+        for flag in ("-i", "-ni"):
+            argv = ["sed", flag, "", "s/^rank: .*/rank: $a/", "f"]
+            self.assertEqual(guard.files_in_command(argv), ["f"], argv)
+
+    def test_sed_bsd_empty_suffix_still_judges_a_literal(self):
+        # GNU reads the same argv as an empty script and two files, so a
+        # literal stays judged: harmless for a BSD script, a catch for GNU.
+        self.assertEqual(
+            guard.files_in_command(["sed", "-i", "", "/tmp/q8-fake-target"]),
+            ["/tmp/q8-fake-target"],
+        )
+        self.assertEqual(
+            guard.files_in_command(["sed", "-i", "", "s/a/b/", "f"]),
+            ["s/a/b/", "f"],
+        )
+
+    def test_sed_bsd_empty_suffix_keeps_an_expansion_not_shaped_as_s(self):
+        # GNU `sed -i '' "$f"` edits $f; only an `s`/`y` command is dropped.
+        for operand in ("$f", "$d/s/a/b", "${n}d"):
+            argv = ["sed", "-i", "", operand]
+            self.assertEqual(guard.files_in_command(argv), [operand], argv)
+
+    def test_sed_empty_token_elsewhere_is_not_a_suffix(self):
+        # Only straight after `-i`: `-e ''` and an empty script keep today's
+        # reading, as does `--in-place`, which is GNU-only.
+        for argv in (["sed", "", "$a"],
+                     ["sed", "-ei", "", "$a"],
+                     ["sed", "--in-place", "", "$a"]):
+            self.assertIn("$a", guard.files_in_command(argv), argv)
+
     # --- awk -----------------------------------------------------------------
 
     def test_awk_program_positional(self):
@@ -3301,6 +3334,12 @@ class HookEndToEndTests(unittest.TestCase):
         # Write-mode detection only disables the exemption; in-workspace
         # files are unaffected.
         self._decision("sed -i 's/a/b/' ./notes.txt", "allow")
+
+    def test_sed_bsd_empty_suffix_expanded_script_allow(self):
+        # The reported command: `$a` is the script under BSD sed.
+        self._decision(
+            'a=$(python3 scripts/queue.py rank) && '
+            'sed -i \'\' "s/^rank: .*/rank: $a/" ./notes.txt', "allow")
 
     def test_uniq_output_claude_projects_ask(self):
         # Q37: `uniq IN OUT` writes the second positional — write context,
