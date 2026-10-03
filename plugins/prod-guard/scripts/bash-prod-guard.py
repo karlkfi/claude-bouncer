@@ -720,6 +720,20 @@ def is_sudo_run_nothing(operands):
     return False
 
 
+def flag_arity(tok, value_flags):
+    """How many words a wrapper's option word consumes: 2 when it ends in a
+    flag whose value is the next word, else 1. A short word is walked a
+    character at a time like `is_sudo_run_nothing`, so a bundle (`-nu root`)
+    takes its value too, and the walk stops at the first value-taking flag
+    because the rest of the word is that flag's attached value (`-uroot`)."""
+    if tok.startswith('--'):
+        return 2 if tok in value_flags else 1
+    for pos, char in enumerate(tok[1:], start=2):
+        if '-' + char in value_flags:
+            return 2 if pos == len(tok) else 1
+    return 1
+
+
 def strip_wrappers(argv, env):
     """Remove leading launcher commands (sudo, env, timeout, xargs, ...) so
     the covered tool underneath is classified, not the wrapper. `env`
@@ -735,7 +749,7 @@ def strip_wrappers(argv, env):
                 break
             argv = argv[1:]
             while argv and argv[0].startswith('-'):
-                argv = argv[2:] if argv[0] in value_flags else argv[1:]
+                argv = argv[flag_arity(argv[0], value_flags):]
         elif head == 'env':
             argv = argv[1:]
             assigned = False
@@ -749,7 +763,7 @@ def strip_wrappers(argv, env):
                         words, rest = split
                         argv = words + rest
                         continue
-                    argv = argv[2:] if argv[0] in value_flags else argv[1:]
+                    argv = argv[flag_arity(argv[0], value_flags):]
                 elif ASSIGNMENT_RE.match(argv[0]):
                     # `env` is a program, so its operands reach it after quote
                     # removal: `env 'A=1' cmd` really does set A (Q170). It is
@@ -766,7 +780,7 @@ def strip_wrappers(argv, env):
         elif head == 'timeout':
             argv = argv[1:]
             while argv and argv[0].startswith('-'):
-                argv = argv[2:] if argv[0] in value_flags else argv[1:]
+                argv = argv[flag_arity(argv[0], value_flags):]
             if argv:
                 argv = argv[1:]  # the DURATION operand
         elif head == 'xargs':
@@ -790,7 +804,7 @@ def strip_wrappers(argv, env):
                 break
             argv = argv[1:]
             while argv and argv[0].startswith('-'):
-                argv = argv[2:] if argv[0] in value_flags else argv[1:]
+                argv = argv[flag_arity(argv[0], value_flags):]
         else:
             break
     return argv
