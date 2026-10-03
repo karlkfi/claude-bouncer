@@ -525,6 +525,15 @@ CASES = [
     ('the recommended restore form with kubectl delete',
      'make check > tmp/c.log 2>&1; rc=$?; kubectl delete -f f.yaml; '
      '[ "$rc" -ne 0 ] || exit 1', False, False, ''),
+    # Save the fix as a patch, revert it, prove the test fails, re-apply. The
+    # gate ends an `&&` list here, which is beside the point: the deny this
+    # reproduces was `git apply` missing from `restores`.
+    ('the recommended restore form with git apply',
+     'S=/tmp/s; git diff scripts/hook.py > "$S/hook.patch" && git checkout '
+     'scripts/hook.py && python3 -m unittest tests.test_stop_hook > "$S/st0.log" '
+     '2>&1; rc=$?; git apply "$S/hook.patch" && git diff --stat; '
+     'grep -E \'^(FAIL|ERROR):\' "$S/st0.log"; [ "$rc" -ne 0 ] || exit 1',
+     False, False, ''),
     ('a restore whose capture is read by an echo',
      'make check > tmp/c.log 2>&1; rc=$?; helm uninstall rel; echo "EXIT=$rc"',
      False, False, ''),
@@ -772,7 +781,8 @@ class TestRegistry(unittest.TestCase):
         registered, never reached, and silent about it."""
         reg = shipped_registry()
         self.assertTrue(reg.restores, 'registry lists no restores')
-        for cmd in ('git reset --hard', 'kubectl delete -f x.yaml',
+        for cmd in ('git reset --hard', 'git apply fix.patch',
+                    'kubectl delete -f x.yaml',
                     'kubectl rollout undo deploy/foo', 'helm uninstall rel',
                     'helm rollback rel 1', 'terraform destroy -auto-approve',
                     'tofu destroy'):

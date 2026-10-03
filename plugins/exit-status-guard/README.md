@@ -129,8 +129,8 @@ make check > <scratchpad>/c.log 2>&1; rc=$?; git checkout -- f; [ "$rc" -ne 0 ] 
 ```
 
 The deny names both forms, `&&` first, because most sequencing denials do want
-it. A restore that is itself a registry mutator — `git reset --hard`, `kubectl
-delete` — is passed over rather than denied, so the suggestion above runs as
+it. A restore that is itself a registry mutator — `git reset --hard`, `git
+apply`, `kubectl delete` — is passed over rather than denied, so the suggestion above runs as
 written. The restore has to be in `restores`, the status has to be captured
 before it, and the capture has to be read after it; drop any one and the deny
 comes back. A publish is never a restore, so

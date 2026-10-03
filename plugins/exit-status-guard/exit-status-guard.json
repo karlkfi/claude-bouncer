@@ -71,6 +71,7 @@
 
   "restores": [
     "^git\\s+reset(\\s|$)",
+    "^git\\s+apply(\\s|$)",
     "^kubectl\\s+delete(\\s|$)",
     "^kubectl\\s+rollout\\s+undo(\\s|$)",
     "^helm\\s+(uninstall|rollback)(\\s|$)",
