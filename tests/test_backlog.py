@@ -227,10 +227,22 @@ class ClaimsTests(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
 
     def test_an_added_id_holding_no_claim_fails(self):
+        # Another id's claim, so the namespace exists and the answer for Q2
+        # is a reading rather than the empty-namespace disclosure below.
+        self.claim('Q9')
         self.write('Q2')
         p = self.claims()
         self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertIn('Q2', p.stderr)
+
+    def test_an_empty_claim_namespace_skips_but_fails_under_strict(self):
+        """A remote holding no claims at all reads the same as the wrong remote,
+        so it is disclosed rather than read as every added id unclaimed."""
+        self.write('Q2')
+        p = self.claims()
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn('no refs/queue-ids/', p.stderr)
+        self.assertNotEqual(self.claims('--strict').returncode, 0)
 
     def test_an_added_id_holding_a_claim_passes(self):
         self.write('Q2')
