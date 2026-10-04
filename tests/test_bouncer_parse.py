@@ -500,7 +500,10 @@ class SubscriptAssignmentTests(unittest.TestCase):
                     '( FOO[a;b]=x cat f', '2>/dev/null FOO[a;b]=x cat f',
                     '>/dev/null FOO[a;b]=x cat f', 'time FOO[a;b]=x cat f',
                     'time -p FOO[a;b]=x cat f', 'time -- FOO[a;b]=x cat f',
-                    'x=$(true) FOO[a;b]=x cat f', '(true) && FOO[a;b]=x cat f'):
+                    'x=$(true) FOO[a;b]=x cat f', '(true) && FOO[a;b]=x cat f',
+                    'case x in x) FOO[a;b]=x cat f',
+                    'case x in (x) FOO[a;b]=x cat f',
+                    'case x in y) :;; x) FOO[a;b]=x cat f'):
             with self.subTest(cmd=cmd):
                 toks = bp.lex(cmd)
                 self.assertIn('FOO[a;b]=x', toks)
@@ -520,7 +523,10 @@ class SubscriptAssignmentTests(unittest.TestCase):
         for cmd in ('diff <(true) FOO[a;cat f;]', 'echo $((1)) FOO[a;cat f;]',
                     'echo $(true) FOO[a;cat f;]', 'cat < <(true) FOO[a;cat f;]',
                     'echo $(echo $(true)) FOO[a;cat f;]',
-                    'time echo -p FOO[a;cat f;]'):
+                    'time echo -p FOO[a;cat f;]',
+                    'echo $(case x in x) true;; esac) FOO[a;cat f;]',
+                    'echo $(case x in x) (true);; esac) FOO[a;cat f;]',
+                    'echo $(case x in x|y) :;; z) :;; esac) FOO[a;cat f;]'):
             with self.subTest(cmd=cmd):
                 self.assertIn('FOO[a', bp.lex(cmd))
 

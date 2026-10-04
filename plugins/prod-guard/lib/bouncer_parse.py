@@ -784,7 +784,7 @@ class QuoteTrackingLexer(shlex.shlex):
         self._quoted_from = None
         self._cmd_pos = True      # an assignment word may stand here
         self._redir_target = False
-        self._parens = []         # `_cmd_pos` as it stood at each open `(`
+        self._frames = []         # open `(` and `case` constructs
         self._after_time = False
         super().__init__(*args, **kwargs)
 
@@ -873,16 +873,29 @@ class QuoteTrackingLexer(shlex.shlex):
             and c not in self.punctuation_chars
 
     def _track_cmd_pos(self, tok):
-        if tok.quoted_from is None and tok and all(c in PUNCT_CHARS for c in tok):
-            # A `(` opens a command list; its `)` puts back what stood before
-            # it, so `diff <(true) FOO[a;b]` leaves FOO an operand. A `)` with
-            # no opener ends a `case` pattern, where a command follows.
+        # One stack holds both: a `(` frame keeps the position to restore at
+        # its `)`, so `diff <(true) FOO[a;b]` leaves FOO an operand, and a
+        # `case` frame reads its patterns, whose closing `)` has no opener and
+        # must not pop one -- `$(case x in x) :;; esac) FOO[a;b]` otherwise
+        # ended the `$(` at the pattern.
+        top = self._frames[-1] if self._frames else None
+        punct = tok.quoted_from is None and tok \
+            and all(c in PUNCT_CHARS for c in tok)
+        if top and top[0] == 'case' and top[1] != 'body':
+            self._track_case_head(top, tok, punct)
+            return
+        if punct:
             for c in tok:
                 if c == '(':
-                    self._parens.append(self._cmd_pos)
+                    self._frames.append(['(', self._cmd_pos])
                     self._cmd_pos, self._redir_target = True, False
                 elif c == ')':
-                    self._cmd_pos = self._parens.pop() if self._parens else True
+                    if self._frames and self._frames[-1][0] == '(':
+                        self._cmd_pos = self._frames.pop()[1]
+                    else:
+                        self._cmd_pos = True
+            if top and top[0] == 'case' and tok in (';;', ';&', ';;&'):
+                top[1:] = ['pat', True, 0]
             if any(c in ';|\n' for c in tok) or tok in ('&', '&&'):
                 self._cmd_pos, self._redir_target = True, False
             elif ('<' in tok or '>' in tok) and '(' not in tok:
@@ -896,11 +909,55 @@ class QuoteTrackingLexer(shlex.shlex):
             return
         if self._after_time and tok in ('-p', '--'):
             return                                # `time -p FOO[a;b]=x cmd`
+        if self._cmd_pos and is_reserved_word(tok):
+            if tok == 'case':
+                self._frames.append(['case', 'subject', False, 0])
+                self._cmd_pos = False
+                return
+            if tok == 'esac' and top and top[0] == 'case':
+                self._frames.pop()
+                self._cmd_pos = False
+                return
         self._after_time = self._cmd_pos and tok == 'time' \
             and is_reserved_word(tok)
         self._cmd_pos = self._cmd_pos and (
             is_assignment(tok) or (is_reserved_word(tok)
                                    and tok in _ASSIGN_POS_KEYWORDS))
+
+    def _track_case_head(self, frame, tok, punct):
+        """Read the words of a `case` before a clause body: the subject,
+        `in`, and each pattern list up to the `)` that ends it. A frame is
+        ``['case', state, at_pattern_start, paren_depth]``."""
+        state = frame[1]
+        self._cmd_pos = False
+        if not punct:
+            if state == 'subject':
+                frame[1] = 'in'
+            elif state == 'in' and is_reserved_word(tok) and tok == 'in':
+                frame[1:] = ['pat', True, 0]
+            elif state == 'pat' and frame[2] and is_reserved_word(tok) \
+                    and tok == 'esac':
+                self._frames.pop()
+            elif state == 'pat':
+                frame[2] = False
+            return
+        if state != 'pat':
+            return
+        for c in tok:
+            if c == '(':
+                if frame[2]:
+                    frame[2] = False              # `(x)`: the optional opener
+                else:
+                    frame[3] += 1                 # an extglob's own parens
+            elif c == ')':
+                if frame[3]:
+                    frame[3] -= 1
+                else:
+                    frame[1] = 'body'
+                    self._cmd_pos = True
+                    return
+            elif c == '|':
+                frame[2] = False
 
 
 def _subscript_end(token, open_at):
