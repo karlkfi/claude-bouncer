@@ -344,6 +344,31 @@ SHELL_NAMES = frozenset({'bash', 'sh', 'zsh', 'dash', 'ksh'})
 # sudo flags that take a value (skip flag + value when stripping).
 SUDO_VALUE_FLAGS = frozenset({'-u', '--user', '-g', '--group', '-p', '--prompt'})
 
+# Plain-wrapper flags that take a SEPARATE value. Dropped one word at a time,
+# the value is left standing as the command word and the segment defers
+# (Q160). The sets are the BSD and GNU union: `time` takes `-o` on both and the
+# rest on GNU only, and stdbuf's long forms are GNU's. `unbuffer -p` and the
+# rest of `exec`'s flags carry no value.
+WRAPPER_VALUE_FLAGS = {
+    'exec': frozenset({'-a'}),
+    'time': frozenset({'-o', '--output', '-f', '--format'}),
+    'stdbuf': frozenset({'-i', '--input', '-o', '--output', '-e', '--error'}),
+}
+
+
+def flag_arity(tok, value_flags):
+    """How many words a wrapper's option word consumes: 2 when it ends in a
+    flag whose value is the next word, else 1. A short word is walked a
+    character at a time, so a bundle (`time -ao out`) takes its value too, and
+    the walk stops at the first value-taking flag because the rest of the word
+    is that flag's attached value (`stdbuf -oL`)."""
+    if tok.startswith('--'):
+        return 2 if tok in value_flags else 1
+    for pos, char in enumerate(tok[1:], start=2):
+        if '-' + char in value_flags:
+            return 2 if pos == len(tok) else 1
+    return 1
+
 
 def strip_head(argv, state):
     """Peel shell keywords, env-var prefixes, and launcher wrappers off a
@@ -412,9 +437,10 @@ def strip_head(argv, state):
                 argv = argv[1:]  # the DURATION operand
             state['timeout_wrapped'] = True
         elif head in PLAIN_WRAPPERS:
+            value_flags = WRAPPER_VALUE_FLAGS.get(head, frozenset())
             argv = argv[1:]
             while argv and argv[0].startswith('-'):
-                argv = argv[1:]
+                argv = argv[flag_arity(argv[0], value_flags):]
         else:
             break
     return argv
