@@ -312,6 +312,8 @@ class WatchFormTests(unittest.TestCase):
         "watch -n5 date",
         "sudo journalctl -f",
         "stdbuf -oL tail -f app.log",
+        "stdbuf -o L tail -f app.log",
+        "exec -a x gh run watch 456",
         "echo start && gh run watch 456",
         "bash -c 'tail -f app.log'",
     ]
@@ -895,6 +897,24 @@ class SlowCommandPositionTests(unittest.TestCase):
         self.assert_runs("bash -ox errexit scripts/gate.sh")
         # `-n` here is --rcfile's argument, not noexec.
         self.assert_runs("bash --rcfile -n scripts/gate.sh")
+
+    def test_wrapper_flag_value_is_not_the_command(self):
+        # A wrapper flag taking a separate value consumes it, so the script
+        # sits one word further right (Q160). Attached, bundled and long forms
+        # alike; `time -f` and the long forms are GNU's.
+        self.assert_runs("exec -a gate scripts/gate.sh")
+        self.assert_runs("exec -la gate scripts/gate.sh")
+        self.assert_runs("stdbuf -o L scripts/gate.sh")
+        self.assert_runs("stdbuf -o L -e 0 scripts/gate.sh")
+        self.assert_runs("stdbuf --output L scripts/gate.sh")
+        self.assert_runs("/usr/bin/time -o out.txt scripts/gate.sh")
+        self.assert_runs("/usr/bin/time -ao out.txt scripts/gate.sh")
+        self.assert_runs("/usr/bin/time -f %e scripts/gate.sh")
+        self.assert_runs("stdbuf -oL scripts/gate.sh")
+        self.assert_runs("unbuffer -p scripts/gate.sh")
+        # An attached value ends the walk: `-io` is `-i o`, so stdbuf runs `L`.
+        self.assert_mention("stdbuf -io L scripts/gate.sh")
+        self.assert_mention("stdbuf -o L cat scripts/gate.sh")
 
     def test_plus_options_still_run(self):
         # bash takes the `+` forms at invocation, and `+o noexec` turns
