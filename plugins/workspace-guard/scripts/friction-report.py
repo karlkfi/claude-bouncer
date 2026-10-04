@@ -19,9 +19,11 @@ Usage:
     python3 scripts/friction-report.py --json           # machine-readable
 
 Each hook decision is recorded as an ``attachment`` line of type
-``hook_success`` carrying ``hookName`` (``PreToolUse:Bash``), the hook
-``command`` (which names the guard script), and ``stdout`` (the decision JSON).
-The triggering Bash command is joined back via ``toolUseID``.
+``hook_success`` carrying ``hookName`` (``PreToolUse:Bash``, ``PreToolUse:Read``,
+...), the hook ``command`` (which names the guard script), and ``stdout`` (the
+decision JSON). The triggering tool call is joined back via ``toolUseID``: a
+shell call contributes its command, a native tool (Read, Edit, Write, ...) only
+its name.
 
 A ``deny`` is recorded nowhere in that stream — see ``DENY_TEXT`` below — so it
 is recovered from the error tool result the blocked call handed back instead.
@@ -282,8 +284,11 @@ def deny_from_result(block):
 def iter_decisions(paths):
     """Yield every guard decision found in the given transcript files.
 
-    Builds a per-file toolUseID -> Bash command map (ids are session-scoped)
-    so each decision can name the command that triggered it. Filtering is the
+    Builds a per-file toolUseID -> (tool, command) map (ids are session-scoped)
+    so each decision can name the tool, and for a shell tool the command, that
+    triggered it. The hook is registered on native tools too, and 311 of the
+    2,132 workspace-guard prompts in one 2026-08-24 corpus were Read, Edit or
+    Write calls (Q85), so neither pass is scoped to Bash. Filtering is the
     caller's job (see scan), which keeps the labels this pass saw available
     for diagnosing an empty result.
 
@@ -291,7 +296,7 @@ def iter_decisions(paths):
     then the tool results, which are where a deny survives (see DENY_TEXT).
     """
     for path in paths:
-        cmd_by_id = {}
+        call_by_id = {}
         records = []
         try:
             with open(path, encoding='utf-8') as fh:
@@ -303,12 +308,15 @@ def iter_decisions(paths):
                         rec = json.loads(line)
                     except ValueError:
                         continue
-                    # Index Bash tool_use commands for the join.
+                    # Index every tool_use for the join. Only a shell tool
+                    # carries a command; a native one has a path instead.
                     msg = rec.get('message') or {}
                     for b in (msg.get('content') or []):
                         if (isinstance(b, dict) and b.get('type') == 'tool_use'
-                                and b.get('name') == 'Bash' and b.get('id')):
-                            cmd_by_id[b['id']] = (b.get('input') or {}).get('command', '')
+                                and b.get('id')):
+                            call_by_id[b['id']] = (
+                                b.get('name') or '',
+                                (b.get('input') or {}).get('command') or '')
                     records.append(rec)
         except OSError:
             continue
@@ -316,7 +324,8 @@ def iter_decisions(paths):
         decided = set()   # (guard, toolUseID) that the decision stream carries
         for rec in records:
             att = rec.get('attachment')
-            if not isinstance(att, dict) or att.get('hookName') != 'PreToolUse:Bash':
+            hook = att.get('hookName') if isinstance(att, dict) else None
+            if not isinstance(hook, str) or not hook.startswith('PreToolUse:'):
                 continue
             name = guard_name(att.get('command'))
             if name is None:
@@ -337,8 +346,8 @@ def iter_decisions(paths):
                     pass
             yield {
                 'plugin': name, 'decision': decision, 'reason': reason,
-                'cwd': cwd, 'ts': ts,
-                'command': cmd_by_id.get(att.get('toolUseID'), ''),
+                'cwd': cwd, 'ts': ts, 'tool': hook.split(':', 1)[1],
+                'command': call_by_id.get(att.get('toolUseID'), ('', ''))[1],
             }
 
         # Second pass: the denies the first one structurally cannot see. A
@@ -357,15 +366,14 @@ def iter_decisions(paths):
                     continue
                 name, reason = found
                 tuid = block.get('tool_use_id')
-                # No Bash tool_use behind it means the guard blocked a native
-                # tool (Edit, Write, Read) — out of scope for a Bash report,
-                # whose attachment pass filters on PreToolUse:Bash too.
-                if tuid not in cmd_by_id or (name, tuid) in decided:
+                # No tool_use behind it means nothing joins it to a call.
+                if tuid not in call_by_id or (name, tuid) in decided:
                     continue
+                tool, command = call_by_id[tuid]
                 yield {
                     'plugin': name, 'decision': 'deny', 'reason': reason,
                     'cwd': rec.get('cwd') or '', 'ts': parse_ts(rec),
-                    'command': cmd_by_id[tuid],
+                    'tool': tool, 'command': command,
                 }
 
 
@@ -402,7 +410,7 @@ def explain_empty(survey, plugin, since, repo):
     transcripts do contain. Call only when the result is in fact empty."""
     if not survey['labels']:
         return ["No guard decisions in the scanned transcripts at all "
-                "(no PreToolUse:Bash hook has run, or the transcript root is "
+                "(no PreToolUse hook has run, or the transcript root is "
                 "wrong)."]
     if not survey['plugin_hits']:
         found = ", ".join(f"{k} ({v})" for k, v in survey['labels'].most_common())
@@ -437,14 +445,14 @@ def coverage_note(plugin):
 
     A deny is absent from that stream for a different reason and is recovered
     from the tool result instead (see DENY_TEXT), which bounds it differently:
-    to Bash calls, and to a block text one of the two keys can name.
+    to a block text one of the two keys can name.
     """
     note = ["Emitted decisions only — a silent hook run (a defer, or an early "
             "return on a payload the guard skips before analyzing it) leaves "
             "no transcript record, so these totals are floors.",
             "A deny leaves no decision record either and is read back off the "
-            "error the blocked call handed back, so it is counted only for a "
-            "Bash call, never for a blocked Edit/Write/Read."]
+            "error the blocked call handed back, so it is counted only where "
+            "that error opens with the guard's name or uses its wording."]
     if plugin == 'all':
         note.append("Guards emit on different terms, so the plugins: counts "
                     "are not a like-for-like ranking, and a sibling whose "
@@ -476,12 +484,14 @@ def build_report(decisions, raw):
     paths = collections.Counter()
     cmds = collections.Counter()
     plugins = collections.Counter()
+    tools = collections.Counter()
     total = 0
     for d in decisions:
         total += 1
         decs[d['decision']] += 1
         plugins[d['plugin']] += 1
         if d['decision'] in ('ask', 'deny'):
+            tools[d.get('tool') or '?'] += 1
             for cat, toks in categorize(d['reason']).items():
                 cats[cat] += 1
                 for t in toks:
@@ -491,6 +501,7 @@ def build_report(decisions, raw):
     return {
         'total': total, 'decisions': decs, 'categories': cats,
         'paths': paths, 'commands': cmds, 'plugins': plugins,
+        'tools': tools,
     }
 
 
@@ -509,6 +520,9 @@ def print_text(r, top, stale=None, plugin=THIS_GUARD, notes=()):
     print(f"  outcomes: {', '.join(parts)}")
     pct = (100 * asks / total) if total else 0
     print(f"  friction (ask+deny): {asks} ({pct:.0f}% of decisions)")
+    if r.get('tools'):
+        by_tool = ", ".join(f"{k} {v}" for k, v in r['tools'].most_common())
+        print(f"  friction by tool: {by_tool}")
     for line in textwrap.wrap(' '.join(coverage_note(plugin)), 78,
                               initial_indent='  coverage: ',
                               subsequent_indent='    '):
@@ -539,7 +553,7 @@ def print_text(r, top, stale=None, plugin=THIS_GUARD, notes=()):
             print(f"  {n:5}  {p}")
         print()
     if r['commands']:
-        print(f"Top triggering commands (top {top}):")
+        print(f"Top triggering commands (shell calls only, top {top}):")
         for c, n in r['commands'].most_common(top):
             print(f"  {n:5}  {c}")
 
@@ -585,6 +599,7 @@ def main():
             'total': report['total'],
             'decisions': dict(report['decisions']),
             'plugins': dict(report['plugins']),
+            'friction_by_tool': dict(report['tools']),
             'guards_seen': dict(survey['labels']),
             'categories': dict(report['categories']),
             'top_paths': report['paths'].most_common(args.top),
