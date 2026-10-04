@@ -793,6 +793,33 @@ class PollConfigTests(unittest.TestCase):
         d, _ = run_hook("mytool status", config=cfg)
         self.assertIsNone(d)
 
+    def test_extra_watch_object_carries_label_and_rewrite(self):
+        # The object form gives a config row what a built-in has: a readable
+        # label and a snapshot the agent can run (Q87).
+        cfg = {"poll": {"extra_watch_patterns": [
+            {"pattern": r"^flux\b.*\s--watch\b", "label": "flux --watch",
+             "alternative": "run `flux get` once without `--watch`"}]}}
+        d, r = run_hook("flux get kustomizations --watch", config=cfg)
+        self.assertEqual(d, "deny")
+        self.assertIn("watch/follow mode (flux --watch)", r)
+        self.assertIn("(1) run `flux get` once without `--watch`;", r)
+
+    def test_extra_watch_string_keeps_generic_wording(self):
+        cfg = {"poll": {"extra_watch_patterns": [r"^mytool\s+follow\b"]}}
+        _, r = run_hook("mytool follow --id 7", config=cfg)
+        self.assertIn("watch/follow mode (^mytool\\s+follow\\b)", r)
+        self.assertIn("(1) take one non-blocking snapshot;", r)
+
+    def test_malformed_extra_watch_object_loses_itself(self):
+        cfg = {"poll": {"extra_watch_patterns": [
+            {"label": "no pattern"}, {"pattern": 7},
+            {"pattern": "^x", "alternative": ["not", "a", "string"]},
+            {"pattern": "("}, r"^mytool\s+follow\b"]}}
+        d, _ = run_hook("mytool follow --id 7", config=cfg)
+        self.assertEqual(d, "deny")
+        d, _ = run_hook("x --watch", config=cfg)
+        self.assertIsNone(d)
+
     def test_exempt_watch_pattern_silences_builtin(self):
         # A built-in watch that would normally block is quieted when its
         # segment matches an exempt allowlist entry.
