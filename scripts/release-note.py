@@ -13,7 +13,11 @@ here rather than in a shell pipeline on either side:
   None            no decision moved; fold into the changelog link
   !! UNANSWERED   section present and empty -- nobody answered it
   !! NO SECTION   no section at all; predates the template, or was dropped
+
+`--author LOGIN` is the CI check's: a pull request opened by `EXEMPT_AUTHOR`
+exits 0 whatever its body says (Q108).
 """
+import argparse
 import re
 import sys
 
@@ -25,6 +29,11 @@ COMMENT_RE = re.compile(r'<!--.*?-->', re.S)
 
 UNANSWERED = '!! UNANSWERED'
 NO_SECTION = '!! NO SECTION'
+
+# Dependabot writes its own body and has no option to template one, so it
+# cannot answer the block. Matched exactly: a login merely containing this
+# string is somebody else's account.
+EXEMPT_AUTHOR = 'dependabot[bot]'
 
 
 def extract(body):
@@ -45,7 +54,14 @@ def extract(body):
     return note or UNANSWERED
 
 
-def main():
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.split('\n', 1)[0])
+    parser.add_argument('--author', help='pull request author login')
+    args = parser.parse_args(argv)
+    if args.author == EXEMPT_AUTHOR:
+        print('Dependabot pull request: exempt from the release-note block.')
+        print('The bump itself is the note; see .github/dependabot.yml.')
+        return 0
     note = extract(sys.stdin.read())
     print(note)
     return 1 if note in (UNANSWERED, NO_SECTION) else 0

@@ -99,8 +99,8 @@ class TestShippedTemplate(unittest.TestCase):
 
 
 class TestSubprocess(unittest.TestCase):
-    def run_script(self, text):
-        return subprocess.run([sys.executable, str(SCRIPT)], input=text,
+    def run_script(self, text, *args):
+        return subprocess.run([sys.executable, str(SCRIPT), *args], input=text,
                               capture_output=True, text=True)
 
     def test_answer_exits_zero(self):
@@ -123,6 +123,49 @@ class TestSubprocess(unittest.TestCase):
     def test_shipped_template_exits_nonzero(self):
         p = self.run_script(TEMPLATE.read_text())
         self.assertEqual(p.returncode, 1)
+
+
+class TestDependabotExemption(unittest.TestCase):
+    """Dependabot cannot template its body, so the CI check exempts it (Q108).
+
+    The four cases the exemption was hand-checked with when it lived in the
+    workflow's `run:` block, where no test could reach it.
+    """
+    run_script = TestSubprocess.run_script
+
+    def test_dependabot_with_no_section_exits_zero(self):
+        for text in ('', 'Bumps actions/checkout from 6 to 7.\n', body()):
+            with self.subTest(text=text):
+                p = self.run_script(text, '--author', 'dependabot[bot]')
+                self.assertEqual(p.returncode, 0, p.stdout)
+                self.assertIn('exempt', p.stdout)
+
+    def test_a_human_with_an_unanswered_body_exits_nonzero(self):
+        p = self.run_script(body(), '--author', 'karlkfi')
+        self.assertEqual(p.returncode, 1)
+        self.assertEqual(p.stdout.strip(), release_note.UNANSWERED)
+
+    def test_a_human_with_an_answered_body_exits_zero(self):
+        p = self.run_script(body('None'), '--author', 'karlkfi')
+        self.assertEqual(p.returncode, 0)
+        self.assertEqual(p.stdout.strip(), 'None')
+
+    def test_a_login_merely_containing_the_bot_is_not_exempt(self):
+        for login in ('evil-dependabot[bot]', 'dependabot[bot]-x',
+                      'dependabot', 'Dependabot[bot]', ''):
+            with self.subTest(login=login):
+                p = self.run_script(body(), '--author', login)
+                self.assertEqual(p.returncode, 1, p.stdout)
+
+
+class TestWorkflowWiring(unittest.TestCase):
+    """The exemption is only as good as the author the workflow hands it."""
+
+    def test_the_check_passes_the_pull_request_author(self):
+        wf = (REPO / '.github' / 'workflows' / 'release-note.yml').read_text()
+        self.assertRegex(
+            wf, r'AUTHOR: \$\{\{ github\.event\.pull_request\.user\.login \}\}')
+        self.assertIn('python3 scripts/release-note.py --author "$AUTHOR"', wf)
 
 
 if __name__ == '__main__':
