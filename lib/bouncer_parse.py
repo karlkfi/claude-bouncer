@@ -109,6 +109,9 @@ _CMD_POS_KEYWORDS = frozenset({
 
 _WORD_RE = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
 
+# The same, for the lexer deciding whether an assignment word can follow.
+_ASSIGN_POS_KEYWORDS = _CMD_POS_KEYWORDS | {'!', '{'}
+
 
 # -------------------------------------------------- raw-string preprocessing
 def _skip_balanced_parens(text, start):
@@ -176,6 +179,11 @@ def strip_comments(cmd):
     left in place splits an `&&` chain written across lines into two statements
     and the chain reads as a `;` sequence (#8). This branch is the one place
     this function diverges from workspace-guard's copy, which has no equivalent.
+
+    An assignment's subscript is copied whole, since bash reads `FOO[a #b]=x`
+    as one word and no comment starts inside it (Q217). Only a subscript
+    followed by `=` or `+=` is, because outside an assignment bash does start
+    one there.
     """
     out = []
     in_single = in_double = False
@@ -201,11 +209,17 @@ def strip_comments(cmd):
             in_double = not in_double
             out.append(c); i += 1
             continue
-        if not in_double and c == '#' \
-                and (not out or out[-1] in COMMENT_PRECEDERS):
+        at_word = not out or out[-1] in COMMENT_PRECEDERS
+        if not in_double and c == '#' and at_word:
             while i < n and cmd[i] != '\n':        # keep the newline itself
                 i += 1
             continue
+        m = _WORD_RE.match(cmd, i) if at_word and not in_double else None
+        if m and cmd[m.end():m.end() + 1] == '[':
+            end = _subscript_end(cmd, m.end())   # `FOO[a #b]=x` (Q217)
+            if end > 0 and cmd.startswith(('=', '+='), end):
+                out.append(cmd[i:end]); i = end
+                continue
         out.append(c); i += 1
     return ''.join(out)
 
@@ -764,6 +778,8 @@ class QuoteTrackingLexer(shlex.shlex):
     def __init__(self, *args, **kwargs):
         self._seen_quotes = set()
         self._quoted_from = None
+        self._cmd_pos = True      # an assignment word may stand here
+        self._redir_target = False
         super().__init__(*args, **kwargs)
 
     def _get_state(self):
@@ -783,20 +799,88 @@ class QuoteTrackingLexer(shlex.shlex):
     state = property(_get_state, _set_state)
 
     def read_token(self):
+        prefix = self._read_subscript() if self._cmd_pos else ''
         self._seen_quotes = set()
         self._quoted_from = None
-        token = super().read_token()
-        if token is None or token is self.eof:
-            return token
-        out = QuotedStr(token)
+        if prefix and not self._word_continues():
+            token = ''
+        else:
+            token = super().read_token()
+            if token is None or token is self.eof:
+                if not prefix:
+                    return token
+                token = ''
+        out = QuotedStr(prefix + token)
         out.quotes = frozenset(self._seen_quotes)
-        out.quoted_from = self._quoted_from
+        if self._quoted_from is not None:
+            out.quoted_from = len(prefix) + self._quoted_from
         # shlex parks the punctuation character that ended a word here. It is
         # private, so a release without it leaves `glued` unknown rather than
         # breaking `lex`; LexTests pins the attribute.
         pending = getattr(self, '_pushback_chars', None)
         out.glued = None if pending is None else bool(pending)
+        if prefix and not token:
+            out.glued = self._peek(1) in self.punctuation_chars
+        self._track_cmd_pos(out)
         return out
+
+    # bash keeps `NAME[...]` one word wherever an assignment can stand, however
+    # many spaces, operators or quotes the subscript holds (Q217). shlex splits
+    # on those first, so the subscript is read here from the raw text before
+    # shlex sees it, and only in command position: `echo FOO[a;b]` is two
+    # commands to bash. Driven on bash 5.3.15, where `FOO[a b]=x cat f`,
+    # `FOO[$(echo ])]=x cat f` and `FOO["a]b"]=x cat f` each print f.
+
+    def _raw_pos(self):
+        """Where the next unread character sits in the text, or None when the
+        stream cannot be repositioned."""
+        if self.pushback or not hasattr(self.instream, 'getvalue'):
+            return None
+        pending = getattr(self, '_pushback_chars', None) or ()
+        return self.instream.tell() - len(pending)
+
+    def _peek(self, k):
+        pos = self._raw_pos()
+        return '' if pos is None else self.instream.getvalue()[pos:pos + k]
+
+    def _read_subscript(self):
+        pos = self._raw_pos()
+        if pos is None or self.state != ' ':
+            return ''
+        text = self.instream.getvalue()
+        while pos < len(text) and text[pos] in self.whitespace:
+            pos += 1
+        m = _WORD_RE.match(text, pos)
+        if not m or text[m.end():m.end() + 1] != '[':
+            return ''
+        end = _subscript_end(text, m.end())
+        if end < 0:
+            return ''
+        if getattr(self, '_pushback_chars', None):
+            self._pushback_chars.clear()
+        self.instream.seek(end)
+        return text[pos:end]
+
+    def _word_continues(self):
+        c = self._peek(1)
+        return bool(c) and c not in self.whitespace \
+            and c not in self.punctuation_chars
+
+    def _track_cmd_pos(self, tok):
+        if tok.quoted_from is None and tok and all(c in PUNCT_CHARS for c in tok):
+            if any(c in ';|()\n' for c in tok) or tok in ('&', '&&'):
+                self._cmd_pos, self._redir_target = True, False
+            elif '<' in tok or '>' in tok:
+                self._redir_target = True
+            return
+        if self._redir_target:
+            self._redir_target = False
+            return
+        if tok.isdigit() and tok.glued:           # the fd of `2>f`
+            return
+        self._cmd_pos = self._cmd_pos and (
+            is_assignment(tok) or (is_reserved_word(tok)
+                                   and tok in _ASSIGN_POS_KEYWORDS))
 
 
 def _subscript_end(token, open_at):
@@ -805,17 +889,78 @@ def _subscript_end(token, open_at):
 
     Depth-counted, because bash's own scan is: `FOO[a[0]]=x` is one subscript,
     and the first `]` at depth 0 closes, so `FOO[a]b]=x` and `FOO[]]=x` are
-    command names that open no file. Driven on bash 5.3.15.
+    command names that open no file. A `]` that is quoted, escaped, or inside
+    a `$(…)`, `${…}` or backtick expansion does not count, so `FOO["a]b"]=x`,
+    `FOO[a\\]b]=x` and `FOO[${x:-]}]=x` each close at their last `]`. Driven
+    on bash 5.3.15.
     """
-    depth = 0
-    for i in range(open_at, len(token)):
-        if token[i] == '[':
+    depth, i, n = 0, open_at, len(token)
+    while i < n:
+        c = token[i]
+        if c in '\\\'"`$':
+            i = _skip_quoted(token, i)
+            if i < 0:
+                return -1
+            continue
+        if c == '[':
             depth += 1
-        elif token[i] == ']':
+        elif c == ']':
             depth -= 1
             if depth == 0:
                 return i + 1
+        i += 1
     return -1
+
+
+def _skip_quoted(text, i):
+    """Step over the escape, quoted run or expansion starting at ``text[i]``.
+
+    Returns the index just past it, or -1 when it never closes. A `$` that
+    opens nothing is one character, as it is to bash.
+    """
+    n, c = len(text), text[i]
+    if c == '\\':
+        return min(i + 2, n)
+    if c == "'":
+        j = text.find("'", i + 1)
+        return j + 1 if j >= 0 else -1
+    if c == '`':
+        body, end = _scan_backticks(text, i + 1)
+        return -1 if body is None else end
+    if c == '"':
+        i += 1
+        while i < n:
+            if text[i] == '"':
+                return i + 1
+            if text[i] in '\\`$':
+                i = _skip_quoted(text, i)
+                if i < 0:
+                    return -1
+                continue
+            i += 1
+        return -1
+    if text.startswith('$((', i):
+        return _skip_balanced_parens(text, i + 1)
+    if text.startswith('$(', i):
+        body, end = _scan_dollar_paren(text, i + 2)
+        return -1 if body is None else end
+    if text.startswith('${', i):
+        depth, i = 0, i + 1
+        while i < n:
+            if text[i] in '\\\'"`$':
+                i = _skip_quoted(text, i)
+                if i < 0:
+                    return -1
+                continue
+            if text[i] == '{':
+                depth += 1
+            elif text[i] == '}':
+                depth -= 1
+                if depth == 0:
+                    return i + 1
+            i += 1
+        return -1
+    return i + 1
 
 
 def assignment_end(token):
@@ -827,14 +972,10 @@ def assignment_end(token):
     the others -- `FOO[0]=x cat f` prints f whether or not FOO is an array --
     so a reader behind it is a reader whose operands count.
 
-    It reads the token after shlex removed the quotes, which is where it stops
-    short of bash: `FOO["a]b"]=x` and `FOO[a\\]b]=x` peel in bash 5.3.15 (3.2
-    runs them as command names), but here the quoted `]` closes the subscript,
-    and `quoted_from` says only where quoting began, not which `]` it covered.
-    A `]` inside an expansion, as in `FOO[${x:-]}]=x`, closes it here too and
-    not in bash. A subscript holding whitespace or a shell operator arrives as
-    several tokens. All of these under-peel, so the command behind them is not
-    read (Q217).
+    In command position `QuoteTrackingLexer` hands over the subscript as
+    written, quotes and all, so `FOO["a]b"]=x`, `FOO[a b]=x` and
+    `FOO[$(echo ])]=x` arrive whole and close where bash closes them (Q217).
+    Elsewhere the token is shlex's, quotes already removed.
     """
     m = NAME_RE.match(token)
     if not m:
