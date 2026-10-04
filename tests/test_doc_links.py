@@ -104,6 +104,11 @@ def broken(paths, exists, read):
     """Every link in `paths` that does not resolve, as printable lines."""
     heads, bad = {}, []
     for path in paths:
+        # The list comes from the index and the contents from the working
+        # tree, so a row deleted ahead of its commit is listed and absent.
+        # Every other gate grades the working tree; so does this one.
+        if not exists(path):
+            continue
         for line, target in links(strip_code(read(path))):
             where = '%s:%d -> %s' % (path, line, target)
             body, _, anchor = target.partition('#')
@@ -249,6 +254,16 @@ class DocLinkTests(unittest.TestCase):
         self.assertEqual(2, len(bad), bad)
         self.assertIn('no such file', bad[0])
         self.assertIn('no such heading', bad[1])
+
+    def test_a_listed_page_gone_from_the_tree_is_skipped(self):
+        """A completed row is deleted in its own commit, after the code, so
+        `git ls-files` still names it while the working tree no longer holds
+        it. Reading it anyway raised FileNotFoundError out of the test body."""
+        docs = {'a/doc.md': '[l](gone.md)\n'}
+        bad = broken(['a/gone.md', 'a/doc.md'], lambda p: p in docs,
+                     docs.__getitem__)
+        self.assertEqual(1, len(bad), bad)
+        self.assertIn('no such file', bad[0])
 
 
 if __name__ == '__main__':
