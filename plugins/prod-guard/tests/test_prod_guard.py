@@ -254,6 +254,13 @@ class ParsingTests(unittest.TestCase):
         groups = guard.split_simple_commands(tokens)
         self.assertIn(["kubectl", "delete", "ns", "x"], groups)
 
+    def test_comment_in_a_substitution_body_ends_at_its_newline(self):
+        # Q224: a substitution body is tokenized by recursion, so the body a
+        # scanner hands back must keep its comment to one line as well.
+        groups = guard.split_simple_commands(
+            guard.tokenize("# )\nkubectl delete ns x"))
+        self.assertEqual(groups, [["kubectl", "delete", "ns", "x"]])
+
     def test_unbalanced_quotes_return_none(self):
         self.assertIsNone(guard.tokenize("kubectl delete 'oops"))
 
@@ -1125,6 +1132,30 @@ class CompoundBypassTests(unittest.TestCase):
         decision, _ = run_hook(
             "true\nkubectl --context acme-production delete ns x")
         self.assertEqual(decision, "deny")
+
+    def test_comment_ends_at_its_own_newline(self):
+        # Q224: newlines become `;` before lexing, so shlex's comment, which
+        # reads to the next newline, swallowed every line after it.
+        cmd = "kubectl --context acme-production delete ns x"
+        for prefix, suffix in (("# note\n", ""), ("echo hi # c\n", ""),
+                               ("bash <<EOF\n# c\n", "\nEOF"),
+                               ('echo "$(# c\n', ')"'), ("echo $(# c\n", ")")):
+            with self.subTest(prefix=prefix):
+                decision, _ = run_hook(prefix + cmd + suffix)
+                self.assertEqual(decision, "deny")
+
+    def test_hash_that_starts_no_comment_hides_nothing(self):
+        # shlex started a comment mid-word, as bash does not.
+        for head in ("echo file#1", "echo ${#x} $#", 'echo "a # b"', "echo '#'"):
+            with self.subTest(head=head):
+                decision, _ = run_hook(
+                    head + " && kubectl --context acme-production delete ns x")
+                self.assertEqual(decision, "deny")
+
+    def test_commented_out_command_defers(self):
+        decision, _ = run_hook(
+            "echo hi # kubectl --context acme-production delete ns x")
+        self.assertIsNone(decision)
 
     def test_deny_beats_ask_in_chain(self):
         home = make_home(kubeconfig=KUBECONFIG_KIND)
