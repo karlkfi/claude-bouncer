@@ -142,6 +142,41 @@ class CommandSubstitutionTests(unittest.TestCase):
         self.assertEqual([], bp.command_substitutions('echo $((1+2))'))
 
 
+class BacktickBodyTests(unittest.TestCase):
+    """A backtick body is returned as the command bash runs (Q226).
+
+    bash drops the backslash before a backtick, `$` or backslash inside one,
+    and before `"` too when the substitution sits in double quotes. Returned
+    raw, ``echo `echo \\`id\\``` came back as ``echo \\`id\\``` and re-scanning
+    found nothing. Driven under `env -i /opt/homebrew/bin/bash --norc
+    --noprofile -c` (5.3.15).
+    """
+    def walk(self, cmd):
+        bodies = bp.command_substitutions(cmd)
+        return bodies + [b for body in bodies for b in self.walk(body)]
+
+    def test_a_nested_substitution_is_found_on_the_rescan(self):
+        # bash runs the inner command in each of these.
+        for cmd in ('echo `echo \\`id\\``', 'echo "`echo \\`id\\``"',
+                    'x=`echo \\`id\\``', 'echo `echo $(echo \\`id\\`)`'):
+            with self.subTest(cmd=cmd):
+                self.assertIn('id', self.walk(cmd))
+
+    def test_what_bash_leaves_escaped_stays_escaped(self):
+        # bash runs no inner command for these.
+        for cmd in ('echo `echo \\\\\\`id\\\\\\``', "echo `echo '\\`id\\`'`",
+                    'echo "\\`id\\`"'):
+            with self.subTest(cmd=cmd):
+                self.assertNotIn('id', self.walk(cmd))
+
+    def test_a_double_quote_unescapes_only_inside_double_quotes(self):
+        # printf prints `<a b>` for the first and `<"a><b">` for the second.
+        self.assertEqual(['printf x "a b"'],
+                         bp.command_substitutions('echo "`printf x \\"a b\\"`"'))
+        self.assertEqual(['printf x \\"a b\\"'],
+                         bp.command_substitutions('echo `printf x \\"a b\\"`'))
+
+
 class SubstitutionSpanTests(unittest.TestCase):
     """`spans` says where each body's substitution sat, which its text cannot.
 

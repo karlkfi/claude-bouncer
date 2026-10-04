@@ -647,6 +647,21 @@ def _scan_backticks(text, start):
         i += 1
     return (None, start)
 
+def _unescape_backticks(body, in_double):
+    """The command bash runs for a backtick body: a backslash before a
+    backtick, ``$`` or backslash is dropped, and before ``"`` too when the
+    substitution sits in double quotes. Driven on bash 5.3.15, where
+    ``echo `echo \\`cmd\\``` runs ``cmd`` (Q226)."""
+    special = '`$\\"' if in_double else '`$\\'
+    out, i, n = [], 0, len(body)
+    while i < n:
+        if body[i] == '\\' and i + 1 < n and body[i + 1] in special:
+            out.append(body[i + 1]); i += 2
+            continue
+        out.append(body[i]); i += 1
+    return ''.join(out)
+
+
 def command_substitutions(text, quotes=True, spans=None):
     """Extract the command-substitution bodies bash would evaluate in ``text``.
 
@@ -718,7 +733,7 @@ def command_substitutions(text, quotes=True, spans=None):
             body, end = _scan_backticks(text, i + 1)
             if body is None:
                 break                              # unterminated -> stop
-            bodies.append(body)
+            bodies.append(_unescape_backticks(body, in_double))
             if spans is not None:
                 spans.append((i, end))
             i = end
