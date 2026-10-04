@@ -9,7 +9,7 @@ decisions Claude Code already recorded in your local session transcripts (it add
 no telemetry — see PRIVACY.md). Show it to me verbatim, then add at most one
 sentence naming the biggest source of friction. Do not edit any files.
 
-The report groups prompts by category; each category maps to one fix:
+The report groups findings by category; each category maps to one fix:
 
 - **watch** / **loop-sleep** / **sandwich** / **bare-sleep** (Class A) — the
   session is waiting on a poll. Take one non-blocking snapshot now and re-check
@@ -22,7 +22,7 @@ The report groups prompts by category; each category maps to one fix:
   it in the background.
 
 If a watch form reached through an uncovered wrapper or alias is *not* being
-caught, that is a coverage gap: add an `extra_watch_patterns` entry to
+caught, that is a coverage gap: add a `poll.extra_watch_patterns` entry to
 `.claude/foreground-guard.json` (see the foreground-guard README Configuration
 section).
 
