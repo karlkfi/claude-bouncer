@@ -18,6 +18,7 @@ Three layers:
 """
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -1288,6 +1289,58 @@ class RobustnessTests(unittest.TestCase):
         for cmd in (WatchFormTests.BLOCKS + WatchFormTests.DEFERS
                     + ["sleep 600", "make test-race"]):
             run_hook(cmd, config=SLOW_CFG)
+
+
+# ---------------------------------------------------------------------------
+# README decision table
+# ---------------------------------------------------------------------------
+
+TABLE_CHECK = re.compile(r'\s*<!--\s*check:\s*(\{.*\})\s*-->\s*$')
+COMMAND_CELL = re.compile(r'`[^`]+`(?:, `[^`]+`)*')
+
+
+def readme_decision_rows():
+    """(row, [run_hook kwargs], expected decision) for each row of the README
+    decision table. A command cell of backticked commands alone is read as
+    those commands with no other payload. Any other row carries its payload
+    in a `<!-- check: {...} -->` comment at the end of its Decision cell, and
+    a row with neither comes back with an empty payload list."""
+    with open(REPO / "README.md", encoding="utf-8") as f:
+        lines = f.read().split("\n")
+    start = lines.index("| Command | Decision |") + 2
+    rows = []
+    for line in lines[start:]:
+        if not line.startswith("|"):
+            break
+        cmd_cell, dec_cell = [c.strip() for c in
+                              re.split(r'(?<!\\)\|', line)[1:-1]]
+        m = TABLE_CHECK.search(dec_cell)
+        if m:
+            payloads = [json.loads(m.group(1))]
+            dec_cell = dec_cell[:m.start()]
+        elif COMMAND_CELL.fullmatch(cmd_cell):
+            payloads = [{"command": c.replace("\\|", "|")}
+                        for c in re.findall(r'`([^`]+)`', cmd_cell)]
+        else:
+            payloads = []
+        word = dec_cell.split()[0].strip("*")
+        rows.append((line, payloads, None if word == "defer" else word))
+    return rows
+
+
+class DecisionTableTests(unittest.TestCase):
+    def test_every_row_matches_the_hook(self):
+        rows = readme_decision_rows()
+        # A renamed header or a broken parse would otherwise pass on nothing.
+        self.assertGreaterEqual(len(rows), 20)
+        for row, payloads, want in rows:
+            with self.subTest(row=row):
+                self.assertTrue(payloads, "row is neither plain backticked "
+                                "commands nor carries a check comment")
+                for kw in payloads:
+                    kw = dict(kw)
+                    d, _ = run_hook(kw.pop("command"), **kw)
+                    self.assertEqual(d, want)
 
 
 # ---------------------------------------------------------------------------
