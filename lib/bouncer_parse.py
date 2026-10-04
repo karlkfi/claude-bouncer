@@ -40,6 +40,7 @@ This file is vendored. The canonical copy is `lib/bouncer_parse.py` at the
 repository root; `scripts/sync-lib.py` copies it into each plugin, and CI fails
 if a copy has drifted. Edit the root copy, never a vendored one.
 """
+import io
 import re
 import shlex
 
@@ -133,6 +134,124 @@ def _skip_balanced_parens(text, start):
         i += 1
     return n
 
+def _ansi_c_end(text, i):
+    """The index just past the ANSI-C string ``$'…'`` opening at ``text[i]``,
+    or -1 when ``text[i]`` opens none or it never closes.
+
+    Inside one a backslash escapes the next character, ``'`` included, so
+    ``$'\\''`` is a single apostrophe to bash. Read as an ordinary single quote
+    it closed early and the next ``'`` opened a quoted run that inverted every
+    quote after it (Q225). Callers check this only where bash would: outside
+    double quotes, which leave ``$'`` literal.
+    """
+    if not text.startswith("$'", i):
+        return -1
+    i, n = i + 2, len(text)
+    while i < n:
+        if text[i] == '\\':
+            i += 2
+            continue
+        if text[i] == "'":
+            return i + 1
+        i += 1
+    return -1
+
+
+_ANSI_C_SIMPLE = {'a': '\a', 'b': '\b', 'e': '\x1b', 'E': '\x1b', 'f': '\f',
+                  'n': '\n', 'r': '\r', 't': '\t', 'v': '\v', '\\': '\\',
+                  "'": "'", '"': '"', '?': '?'}
+_ANSI_C_NUMERIC = (('x', 16, 2), ('u', 16, 4), ('U', 16, 8))
+
+
+def _ansi_c_decode(body):
+    """The string bash makes of the inside of ``$'…'``: ``\\n``, ``\\x41``,
+    ``\\101``, ``\\u00e9`` and ``\\cA`` decode, an unknown escape keeps its
+    backslash, and ``\\0`` ends the string. Driven on bash 5.3.15."""
+    out, i, n = [], 0, len(body)
+    while i < n:
+        c = body[i]
+        if c != '\\' or i + 1 >= n:
+            out.append(c); i += 1
+            continue
+        e = body[i + 1]
+        if e in _ANSI_C_SIMPLE:
+            out.append(_ANSI_C_SIMPLE[e]); i += 2
+            continue
+        if e in '01234567':
+            j = i + 1
+            while j < n and j < i + 4 and body[j] in '01234567':
+                j += 1
+            code = int(body[i + 1:j], 8)
+            if code == 0:
+                break
+            out.append(chr(code & 0xff)); i = j
+            continue
+        if e == 'c' and i + 2 < n:
+            out.append(chr(ord(body[i + 2].upper()) ^ 0x40)); i += 3
+            continue
+        for letter, base, width in _ANSI_C_NUMERIC:
+            if e == letter:
+                j = i + 2
+                while j < n and j < i + 2 + width \
+                        and body[j] in '0123456789abcdefABCDEF':
+                    j += 1
+                if j > i + 2:
+                    code = int(body[i + 2:j], base)
+                    if code == 0:
+                        return ''.join(out)
+                    out.append(chr(min(code, 0x10ffff))); i = j
+                    break
+        else:
+            out.append(c + e); i += 2
+            continue
+        if j == i + 2:                            # `\x` with no digits is text
+            out.append(c + e); i += 2
+    return ''.join(out)
+
+
+def requote_ansi_c(text, commenters=''):
+    """Rewrite each ``$'…'`` bash would decode into the single-quoted word it
+    decodes to, so a lexer that knows only POSIX quoting reads the same word.
+
+    Only an unquoted one is rewritten: inside double quotes ``$'`` is text,
+    inside single quotes everything is. A character in ``commenters`` at a
+    word start skips to the newline, the way the caller's lexer will.
+    """
+    out, i, n = [], 0, len(text)
+    in_double = False
+    while i < n:
+        c = text[i]
+        if c == '\\':
+            out.append(text[i:i + 2]); i += 2
+            continue
+        if in_double:
+            out.append(c); i += 1
+            in_double = c != '"'
+            continue
+        if c == '"':
+            in_double = True
+            out.append(c); i += 1
+            continue
+        if c == "'":
+            j = text.find("'", i + 1)
+            j = n if j < 0 else j + 1
+            out.append(text[i:j]); i = j
+            continue
+        if c in commenters and (i == 0 or text[i - 1] in ' \t\n;|&()<>'):
+            j = text.find('\n', i)
+            j = n if j < 0 else j
+            out.append(text[i:j]); i = j
+            continue
+        end = _ansi_c_end(text, i)
+        if end > 0:
+            out.append("'%s'" % _ansi_c_decode(text[i + 2:end - 1])
+                       .replace("'", "'\\''"))
+            i = end
+            continue
+        out.append(c); i += 1
+    return ''.join(out)
+
+
 def _consume_heredoc_body(text, i, delim, strip_tabs):
     """Skip a heredoc body starting at ``i`` (first char after the command
     line's newline) up to and including the terminator line, or end-of-input.
@@ -199,6 +318,10 @@ def strip_comments(cmd):
             in_single = True
             out.append(c); i += 1
             continue
+        end = -1 if in_double else _ansi_c_end(cmd, i)
+        if end > 0:
+            out.append(cmd[i:end]); i = end
+            continue
         if c == '\\' and i + 1 < n:                # escape survives both modes
             if cmd[i+1] == '\n':                   # continuation -> one logical line
                 i += 2
@@ -247,7 +370,12 @@ def _scan_heredoc_delim(text, i):
     quoted = False                                # any quoting -> literal body
     while i < n and text[i] not in ' \t\n;|&()<>':
         d = text[i]
-        if d == "'":
+        end = _ansi_c_end(text, i)
+        if end > 0:                               # `<<$'EOF'` ends at `EOF`
+            quoted = True
+            chars.append(_ansi_c_decode(text[i + 2:end - 1]))
+            i = end
+        elif d == "'":
             quoted = True
             i += 1
             while i < n and text[i] != "'":
@@ -382,6 +510,10 @@ def strip_heredoc_bodies(cmd, expanded=None, unterminated=None,
                 in_double = False
             i += 1
             continue
+        end = _ansi_c_end(cmd, i)
+        if end > 0:
+            out.append(cmd[i:end]); last = "'"; i = end
+            continue
         if c == "'":
             in_single = True; out.append(c); last = c; i += 1
             continue
@@ -469,6 +601,10 @@ def _scan_case_pattern(text, start):
             continue
         if c == '\\':
             i += 2
+            continue
+        end = _ansi_c_end(text, i)
+        if end > 0:
+            i = end
             continue
         if c == "'":
             in_single = True
@@ -574,6 +710,11 @@ def _scan_dollar_paren(text, start):
             continue
         if c == '\\':
             i += 2
+            continue
+        end = _ansi_c_end(text, i)
+        if end > 0:
+            cmd_pos = False
+            i = end
             continue
         if c == "'":
             in_single = True
@@ -719,6 +860,10 @@ def command_substitutions(text, quotes=True, spans=None):
         if c == '\\':                              # escapes next char (not in '')
             i += 2
             continue
+        end = _ansi_c_end(text, i) if quotes and not in_double else -1
+        if end > 0:
+            i = end
+            continue
         if quotes and c == "'" and not in_double:
             in_single = True
             i += 1
@@ -797,6 +942,7 @@ class QuoteTrackingLexer(shlex.shlex):
         self._redir_target = False
         self._frames = []         # open `(` and `case` constructs
         self._after_time = False
+        self._requoted = False
         super().__init__(*args, **kwargs)
 
     def _get_state(self):
@@ -816,6 +962,12 @@ class QuoteTrackingLexer(shlex.shlex):
     state = property(_get_state, _set_state)
 
     def read_token(self):
+        if not self._requoted:
+            # Deferred to the first read so the caller's `commenters` is set.
+            self._requoted = True
+            if isinstance(self.instream, io.StringIO) and not self.instream.tell():
+                self.instream = io.StringIO(requote_ansi_c(
+                    self.instream.getvalue(), self.commenters))
         prefix = self._read_subscript() if self._cmd_pos else ''
         self._seen_quotes = set()
         self._quoted_from = None
