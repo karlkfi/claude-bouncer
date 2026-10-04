@@ -371,6 +371,27 @@ class ParsingTests(unittest.TestCase):
                     guard.strip_wrappers(argv + ["kubectl", "delete"], {}),
                     ["kubectl", "delete"])
 
+    def test_abbreviated_long_value_flag_skips_its_value(self):
+        # getopt_long takes any unique prefix of a long option (Q228).
+        for argv in (["timeout", "--kill", "5", "10"], ["timeout", "--k", "5", "10"],
+                     ["timeout", "--sig", "KILL", "5"], ["sudo", "--us", "root"],
+                     ["env", "--uns", "FOO"], ["env", "--ch", "/tmp"],
+                     ["stdbuf", "--out", "L"], ["/usr/bin/time", "--f", "%e"]):
+            with self.subTest(argv=argv):
+                self.assertEqual(
+                    guard.strip_wrappers(argv + ["kubectl", "delete"], {}),
+                    ["kubectl", "delete"])
+
+    def test_ambiguous_or_bare_long_prefix_stays_one_word(self):
+        # `--c` prefixes four of sudo's value flags, which sudo rejects, and
+        # `--` ends the options rather than abbreviating one.
+        self.assertFalse(guard.is_long_value_flag(
+            "--c", guard.WRAPPER_VALUE_FLAGS["sudo"]))
+        self.assertFalse(guard.is_long_value_flag("--", frozenset({"--only"})))
+        self.assertEqual(
+            guard.strip_wrappers(["timeout", "--", "5", "kubectl", "delete"], {}),
+            ["kubectl", "delete"])
+
     def test_stdbuf_and_unbuffer_strip_like_other_wrappers(self):
         # Both prefix a command the way `nohup` does (Q161). stdbuf's mode
         # flags take a value attached or separate; the long forms are GNU's.
@@ -2470,6 +2491,16 @@ class BypassBatteryTests(unittest.TestCase):
         # Measured before Q200: each deferred, its flag's value read as the tool.
         for prefix in ("sudo -nu root", "env -iu FOO", "exec -ca gate",
                        "timeout -vk 5 10", "/usr/bin/time -po out.txt"):
+            with self.subTest(prefix=prefix):
+                decision, _ = run_hook(
+                    prefix + " kubectl --context gke_acme_prod-us delete ns x")
+                self.assertEqual(decision, "deny")
+
+    def test_abbreviated_long_wrapper_flags(self):
+        # Measured before Q228: each deferred, its option's value read as the
+        # tool. GNU timeout 9.11, env and stdbuf run the command after each.
+        for prefix in ("timeout --kill 5 10", "timeout --sig KILL 5",
+                       "sudo --us root", "env --uns FOO", "stdbuf --out L"):
             with self.subTest(prefix=prefix):
                 decision, _ = run_hook(
                     prefix + " kubectl --context gke_acme_prod-us delete ns x")

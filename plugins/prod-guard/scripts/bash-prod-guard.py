@@ -705,7 +705,7 @@ def is_sudo_run_nothing(operands):
             name = tok.split('=', 1)[0]
             if name in SUDO_RUN_NOTHING_LONG:
                 return True
-            i += 2 if name == tok and tok in value_flags else 1
+            i += 2 if name == tok and is_long_value_flag(tok, value_flags) else 1
         else:
             i += 1
             for pos, char in enumerate(tok[1:], start=2):
@@ -720,6 +720,19 @@ def is_sudo_run_nothing(operands):
     return False
 
 
+def is_long_value_flag(tok, value_flags):
+    """Whether a `--name` word with no `=` takes the next word as its value.
+    getopt_long accepts any unique prefix of a long option, so `--kill` is
+    `--kill-after` (Q228). A prefix of two value-taking spellings is an
+    ambiguity the tool rejects, so it stays one word."""
+    if tok in value_flags:
+        return True
+    if tok == '--':  # ends the options; a prefix of every long spelling
+        return False
+    return len([f for f in value_flags
+                if f.startswith('--') and f.startswith(tok)]) == 1
+
+
 def flag_arity(tok, value_flags):
     """How many words a wrapper's option word consumes: 2 when it ends in a
     flag whose value is the next word, else 1. A short word is walked a
@@ -727,7 +740,7 @@ def flag_arity(tok, value_flags):
     takes its value too, and the walk stops at the first value-taking flag
     because the rest of the word is that flag's attached value (`-uroot`)."""
     if tok.startswith('--'):
-        return 2 if tok in value_flags else 1
+        return 2 if is_long_value_flag(tok, value_flags) else 1
     for pos, char in enumerate(tok[1:], start=2):
         if '-' + char in value_flags:
             return 2 if pos == len(tok) else 1
