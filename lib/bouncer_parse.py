@@ -661,12 +661,22 @@ def _scan_dollar_paren(text, start):
     close and drop a substitution that reads fine today. A ``)`` at depth 0
     still closes whatever the clause state says, which keeps a missed ``esac``
     costing nothing.
+
+    A comment is stepped over to its newline, which is kept because it puts
+    the next line in command position (Q230). Read as syntax, a ``)`` in the
+    comment closed the substitution there and an apostrophe opened a quoted run
+    that never closed. A ``#`` starts one only at a word start, as in
+    ``strip_comments``, and the close of a ``$(…)`` or ``$((…))`` is not one:
+    bash reads ``$(a)#b`` as a single word, where ``(a)#b`` ends a subshell.
     """
-    i, n, depth = start, len(text), 0
+    i, n = start, len(text)
     in_single = in_double = False
     cmd_pos = True        # bash reads a command just past the `$(`
     clauses = []          # one entry per open `case`: 'in' | 'pat' | 'body'
     pending = []          # heredoc delimiters armed, awaiting their bodies
+    parens = []           # one per open `(`: True when it opened a `$(`
+    brk = True            # a `#` here would start a word, so a comment
+    dollar = -2           # index of the last unquoted, unescaped `$`
     while i < n:
         c = text[i]
         if in_single:
@@ -684,6 +694,7 @@ def _scan_dollar_paren(text, start):
             continue
         if c in ' \t\n':
             i += 1
+            brk = True
             if c == '\n':
                 cmd_pos = True
                 while pending and i < n:          # bodies start after this line
@@ -693,6 +704,10 @@ def _scan_dollar_paren(text, start):
                     if not closed:
                         break                     # see below -- not ours to eat
                     i = end
+            continue
+        if c == '#' and brk:
+            while i < n and text[i] != '\n':      # keep the newline itself
+                i += 1
             continue
         if clauses and clauses[-1] == 'pat':
             m = _WORD_RE.match(text, i)
@@ -705,9 +720,10 @@ def _scan_dollar_paren(text, start):
             if end is None:
                 return (None, start)
             clauses[-1] = 'body'
-            cmd_pos = True
+            cmd_pos = brk = True
             i = end
             continue
+        brk = c in ';(<>|&'
         if c == '\\':
             i += 2
             continue
@@ -755,18 +771,19 @@ def _scan_dollar_paren(text, start):
             i = m.end()
             continue
         if c == '(' and i + 1 < n and text[i+1] == '(':
+            brk = dollar != i - 1                 # `$((1))#x` is one word
             i = _skip_balanced_parens(text, i)    # `((…))` / `$((…))` arithmetic
             cmd_pos = False
             continue
         if c == '(':
-            depth += 1
+            parens.append(dollar == i - 1)
             cmd_pos = True
             i += 1
             continue
         if c == ')':
-            if depth == 0:
+            if not parens:
                 return (text[start:i], i + 1)
-            depth -= 1
+            brk = not parens.pop()                # `$(a)#b` is one word too
             cmd_pos = True
             i += 1
             continue
@@ -779,6 +796,8 @@ def _scan_dollar_paren(text, start):
                 pending.append((delim, strip_tabs))
             cmd_pos = False
             continue
+        if c == '$':
+            dollar = i
         cmd_pos = c in '&|{'
         i += 1
     return (None, start)

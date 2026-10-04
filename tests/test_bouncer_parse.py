@@ -354,6 +354,36 @@ class HeredocInSubstitutionTests(unittest.TestCase):
         self.assertEqual([body], bp.command_substitutions('echo "$(%s)" T' % body))
 
 
+class CommentInSubstitutionTests(unittest.TestCase):
+    """A comment inside a `$(…)` is text to its newline (Q230).
+
+    Read as syntax, a `)` in the comment closed the substitution there and an
+    apostrophe opened a quoted run that never closed, so the command on the
+    next line was either outside the body or no body came back at all. Driven
+    under `env -i /opt/homebrew/bin/bash --norc --noprofile -c` (5.3.15), each
+    body below runs its second line.
+    """
+    def test_a_paren_or_apostrophe_in_a_comment_is_text(self):
+        for body in ('# )\ncat /etc/passwd', 'echo a # )\ncat /etc/passwd',
+                     "# don't\ncat /etc/passwd", '# <<EOF\ncat /etc/passwd',
+                     ' (echo a)# )\ncat /etc/passwd', 'echo a;# )\ncat /etc/passwd',
+                     "echo $'a' #b)\ncat /etc/passwd"):
+            with self.subTest(body=body):
+                self.assertEqual([body], bp.command_substitutions(
+                    'echo "$(%s)" T' % body))
+                self.assertEqual([body], bp.command_substitutions(
+                    'x=$(%s) T' % body))
+
+    def test_a_hash_inside_a_word_starts_no_comment(self):
+        # bash prints `a#`, `0`, `a#b`, `1#b`, ` #` and `a#b` for these: none
+        # is a comment, so the `)` after each still closes the substitution.
+        for body in ('echo a#', 'echo $#', 'echo ${#x}', 'echo $(echo a)#b',
+                     'echo $((1))#b', 'echo \\ #', 'echo "a"#b', "echo $'a'#b"):
+            with self.subTest(body=body):
+                self.assertEqual([body], bp.command_substitutions(
+                    'echo "$(%s)" T' % body))
+
+
 class OwnLevelHeredocStripTests(unittest.TestCase):
     """`own_level_only` drops the top level's bodies and copies the rest (Q119).
 
