@@ -14,8 +14,9 @@
 # way five separate PRs a week get reviewed.
 #
 # Dependabot writes its own pull request body and has no option to template
-# one, so it cannot answer the `## Release note` block. The exemption is in
-# .github/workflows/release-note.yml -- keep the two in step.
+# one, so it cannot answer the `## Release note` block. The exemption is
+# `EXEMPT_AUTHOR` in scripts/release-note.py, which
+# .github/workflows/release-note.yml calls with the author -- keep them in step.
 version: 2
 updates:
   - package-ecosystem: github-actions
