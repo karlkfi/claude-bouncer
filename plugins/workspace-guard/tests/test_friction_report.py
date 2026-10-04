@@ -380,6 +380,65 @@ class EndToEndTests(unittest.TestCase):
             self.assertEqual(list(report['paths']), ['passwd'])
 
 
+def native_attachment(hook="PreToolUse:Read", tuid="toolu_R"):
+    """A native tool call and the ask workspace-guard recorded for it."""
+    use = {"message": {"content": [
+        {"type": "tool_use", "name": hook.split(":")[1], "id": tuid,
+         "input": {"file_path": "/etc/passwd"}}]}}
+    attach = {
+        "type": "attachment", "cwd": "/home/u/proj",
+        "timestamp": "2026-06-14T12:03:00.000Z",
+        "attachment": {
+            "type": "hook_success", "hookName": hook, "toolUseID": tuid,
+            "command": '".../scripts/run-python-hook.cmd" bash-workspace-guard.py',
+            "stdout": json.dumps({"hookSpecificOutput": {
+                "permissionDecision": "ask",
+                "permissionDecisionReason":
+                    "Outside-workspace path(s): /etc/passwd. Fix: x."}}),
+        }}
+    return use, attach
+
+
+class NativeToolTests(unittest.TestCase):
+    """workspace-guard registers on nine tools, and the report reads them all
+    (Q85): a Read, Edit or Write prompt is friction like a Bash one."""
+
+    def _scan(self, tmp, *records):
+        path = Path(tmp) / "s.jsonl"
+        path.write_text("".join(json.dumps(r) + "\n" for r in records))
+        return fr.scan([str(path)], 'workspace-guard', None, '')
+
+    def test_a_native_tool_ask_is_counted(self):
+        for hook in ("PreToolUse:Read", "PreToolUse:Edit", "PreToolUse:Write"):
+            with self.subTest(hook=hook), tempfile.TemporaryDirectory() as tmp:
+                decs, _ = self._scan(tmp, *native_attachment(hook))
+                self.assertEqual([(d['decision'], d['tool']) for d in decs],
+                                 [('ask', hook.split(':')[1])])
+                self.assertEqual(decs[0]['command'], '')
+                report = fr.build_report(decs, raw=True)
+                self.assertEqual(report['paths']['/etc/passwd'], 1)
+
+    def test_friction_is_ranked_by_tool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_transcript(tmp)
+            path = Path(tmp) / "s.jsonl"
+            with path.open("a") as fh:
+                for r in native_attachment():
+                    fh.write(json.dumps(r) + "\n")
+            decs, _ = fr.scan([str(path)], 'workspace-guard', None, '')
+            report = fr.build_report(decs, raw=True)
+            self.assertEqual(report['tools'], {'Bash': 1, 'Read': 1})
+            self.assertEqual(list(report['commands']),
+                             ["cd /etc && grep root passwd"])
+
+    def test_a_post_tool_use_record_is_not_a_decision(self):
+        # The same script runs on PostToolUse; what it prints there decides
+        # nothing.
+        with tempfile.TemporaryDirectory() as tmp:
+            decs, _ = self._scan(tmp, *native_attachment("PostToolUse:Read"))
+            self.assertEqual(decs, [])
+
+
 def deny_records(tuid="toolu_D", reason=None, tool="Bash"):
     """A blocked Bash call: the tool_use, and the error result it came back as.
 
@@ -388,9 +447,10 @@ def deny_records(tuid="toolu_D", reason=None, tool="Bash"):
     reason = reason or ("workspace-guard: Host-wide temp path(s): "
                         "/tmp/q83-fake-target. Host-wide temp is shared across "
                         "every session and worktree. Use ./tmp/ instead.")
+    args = ({"command": "echo hi > /tmp/q83-fake-target"} if tool == "Bash"
+            else {"file_path": "/tmp/q83-fake-target"})
     use = {"message": {"content": [
-        {"type": "tool_use", "name": tool, "id": tuid,
-         "input": {"command": "echo hi > /tmp/q83-fake-target"}}]}}
+        {"type": "tool_use", "name": tool, "id": tuid, "input": args}]}}
     result = {"cwd": "/home/u/proj", "timestamp": "2026-06-14T12:02:00.000Z",
               "message": {"content": [
                   {"type": "tool_result", "tool_use_id": tuid,
@@ -433,13 +493,19 @@ class DenyRecoveryTests(unittest.TestCase):
             decs, _ = fr.scan([str(path)], 'workspace-guard', None, '')
             self.assertEqual([d['decision'] for d in decs], ['ask'])
 
-    def test_blocked_native_tool_is_out_of_scope(self):
-        # The attachment pass filters on PreToolUse:Bash, so an Edit or Write
-        # the guard blocked would arrive as friction the rest of the report
-        # cannot account for.
+    def test_blocked_native_tool_is_counted(self):
+        # The hook is registered on Edit, Write and Read too, so a block of one
+        # is the guard's friction like any other (Q85). It names a tool and no
+        # command.
         with tempfile.TemporaryDirectory() as tmp:
             decs, _ = self._scan(tmp, *deny_records(tool="Write"))
-            self.assertEqual(decs, [])
+            self.assertEqual([(d['decision'], d['tool']) for d in decs],
+                             [('deny', 'Write')])
+            self.assertEqual(decs[0]['command'], '')
+            report = fr.build_report(decs, raw=True)
+            self.assertEqual(report['tools'], {'Write': 1})
+            self.assertEqual(report['categories']['hosttemp'], 1)
+            self.assertEqual(report['commands'], {})
 
     def test_sibling_guards_deny_needs_plugin_all(self):
         with tempfile.TemporaryDirectory() as tmp:

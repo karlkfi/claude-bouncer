@@ -9,10 +9,12 @@ one command instead of hand-mining transcripts.
 The hook writes nothing to disk (see [`PRIVACY.md`](../../PRIVACY.md)) — it only
 emits a decision on stdout. But Claude Code records that stdout, along with the
 triggering command, `cwd`, branch, and timestamp, in the session transcripts
-under `~/.claude/projects/**/*.jsonl`. Each `PreToolUse:Bash` invocation lands
-as an `attachment` record (`type: hook_success`) whose `command` names the guard
-script and whose `stdout` carries the decision JSON; the triggering Bash command
-is joined back via `toolUseID`.
+under `~/.claude/projects/**/*.jsonl`. Each `PreToolUse` invocation that writes
+a decision lands as an `attachment` record (`type: hook_success`) whose
+`hookName` names the tool (`PreToolUse:Bash`, `PreToolUse:Read`, ...), whose
+`command` names the guard script, and whose `stdout` carries the decision JSON;
+the triggering call is joined back via `toolUseID`. workspace-guard registers
+on nine tools, and the report reads all of them.
 
 **A deny is not in that stream.** Claude Code persists hook stdout only for a
 call it then runs, so a blocked call records no decision at all. Measured
@@ -57,8 +59,6 @@ So the scan cannot see:
   invisible ([foreground-guard
   #15](https://github.com/karlkfi/claude-foreground-guard/issues/15)).
 - **A guard that never ran** — misconfigured, crashed, or not installed.
-- **A block of a native tool.** The scan is scoped to `PreToolUse:Bash` on both
-  passes, so a guard's deny of an `Edit`, `Write`, or `Read` is out of frame.
 - **A deny neither key finds.** Under `--plugin all`, a companion guard whose
   block text opens with something other than `<name>-guard: ` under-counts its
   denies — pr-sentinel leads with `pr-sentinel: `, for instance. The coverage
@@ -95,7 +95,7 @@ A `--plugin` value is a **guard label**, derived from the hook script's filename
 minus a `bash-` prefix — not the plugin name. They coincide for the guards whose
 hook is `bash-<name>.py`, but not in general: pr-sentinel's hook is
 `pr-sentinel-guard.py`, so its label is `pr-sentinel-guard`. Labels you never
-installed can also appear, since any `PreToolUse:Bash` hook running a `.py`
+installed can also appear, since any `PreToolUse` hook running a `.py`
 script gets one.
 
 ## When nothing matches
@@ -147,8 +147,14 @@ no recorded decisions at all: those are real answers of zero.
   `paths_scope`). Normalized by default so per-session temp paths (e.g.
   `/private/tmp/claude-NNN/...`) collapse into one row; `--raw` to see exact
   tokens.
+- **Friction by tool** — ask+deny counts per tool the hook ran on, so a prompt
+  on any native tool it watches (`Read`, `Grep`, `Glob`, `Edit`, `Write`,
+  `MultiEdit`, `NotebookEdit`) is visible beside the `Bash` ones (`--json`:
+  `friction_by_tool`). A Windows `PowerShell` row appears only in a corpus
+  taken there.
 - **Top triggering commands** — via the `toolUseID` join, so you see what the
-  agent was doing when it got prompted.
+  agent was doing when it got prompted. Only a shell call carries a command, so
+  a native-tool prompt counts everywhere else and adds no row here.
 - **Stale-install banner** — when the installed plugin version
   (`~/.claude/plugins/installed_plugins.json`) is behind the local marketplace
   clone's `plugin.json`, a line above the rankings reads
@@ -158,6 +164,9 @@ no recorded decisions at all: those are real answers of zero.
   local plugin state (no network) and stays silent when the install is current
   or the state is unreadable. The `--json` output carries the same signal in a
   `stale` field (`null` when current).
+
+branch-guard also registers on `Edit|Write|MultiEdit|NotebookEdit` and ships no
+friction report of its own; its prompts appear here under `--plugin all`.
 
 ## Interpreting the output
 
