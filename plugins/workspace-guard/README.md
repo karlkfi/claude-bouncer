@@ -252,7 +252,7 @@ old one. A different project's scratch still asks entirely.
 | `env cat /etc/hosts` · `timeout 5 cat /etc/hosts` · `nohup cp in.txt /etc/x` | **ask** |
 | `command cd /etc && cat hosts` (the shell's own `cd`, behind `command`) | **ask** |
 | `nohup cat in.txt` · `env -C sub cat in.txt` | allow |
-| `git ls-files \| xargs grep foo` (xargs appends its input) | defer |
+| `git ls-files \| xargs grep foo` (xargs appends its input; escalates in `auto`) | defer |
 | `cat in.txt; sh -c 'cat in.txt'` (clean body, still no vouch) | defer |
 | `ps aux \| grep ginkgo` (no kill in the string) | allow |
 | `cat in.txt; bash --version` (shell, no `-c` body) | allow |
@@ -1539,7 +1539,7 @@ escalating would buy a prompt and no protection.
 
 | Env var | Default | Effect |
 | --- | --- | --- |
-| `WORKSPACE_GUARD_ESCALATE` | `scoped` | `scoped` escalates a `sh -c` body and an unscoped kill. `all` adds interpreter code and a command wrapper whose operands it cannot all read. `off` restores the silence every mode had before. Any other value falls back to `scoped`. |
+| `WORKSPACE_GUARD_ESCALATE` | `scoped` | `scoped` escalates a `sh -c` body, an unscoped kill, and a command wrapper whose operands it cannot all read. `all` adds interpreter code. `off` restores the silence every mode had before. Any other value falls back to `scoped`. |
 
 **Interpreter code is left deferring by default, and the cost is why.** Replaying
 89,133 commands from 1,962 local session transcripts through the hook's own
@@ -1929,8 +1929,10 @@ final output.
   expands, is never guessed past: the command is taken from the first later word
   the hook judges, and the string defers rather than allowing, because a wrong
   guess about where the command starts is how a value gets read as the command.
-  `xargs` defers for a second reason, that its operands arrive on stdin. Those
-  two defers escalate only under `WORKSPACE_GUARD_ESCALATE=all`. Wrappers outside
+  `xargs` defers for a second reason, that its operands arrive on stdin. In
+  `auto`, `acceptEdits` and `bypassPermissions` those two escalate the way a
+  `sh -c` body does; replaying 192,953 corpus commands (2026-10-04), they fired
+  on 190, 0.098%. Wrappers outside
   that list — `sudo`, `doas`, `caffeinate`, `chrt`, `taskset`, `flock` — are not
   peeled, so a guarded command behind one defers; nor is bash's `time -p`.
 - **The PowerShell tool is guarded for a known set of cmdlets, and only those.**

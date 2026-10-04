@@ -3477,10 +3477,11 @@ INTERPRETER_SIGNAL = 'interpreter'
 
 # A guarded command behind a wrapper whose operands the hook cannot all read:
 # an `xargs` appending its input, or a wrapper flag outside its grammar (see
-# `peel_wrappers`). It defers in the default scope for the interpreter's
-# reason: `git ls-files | xargs grep x` is an everyday in-workspace idiom, and
-# it deferred in every mode before Q219 too. What changed is that the operands
-# it does name are checked, so an outside one asks. `all` opts in.
+# `peel_wrappers`). Unlike the interpreter it escalates in the default scope,
+# on both of the interpreter's grounds read the other way: the hidden operands
+# are reads and writes this guard exists to judge, and over 192,953 distinct
+# corpus commands (2026-10-04) it fired on 190, 0.098% -- the cost Q74 already
+# accepted for `sh -c` and kills. It yields to their labels when they co-occur.
 WRAPPER_SIGNAL = 'wrapper'
 _LOW_SIGNALS = (None, INTERPRETER_SIGNAL, WRAPPER_SIGNAL)
 
@@ -3503,7 +3504,7 @@ def merge_nested_signal(signal, nested):
 def escalation_scope():
     """`scoped` (default), `all`, or `off`, from ``WORKSPACE_GUARD_ESCALATE``.
 
-    `all` adds the interpreter and wrapper suppressions; `off` restores the silence every
+    `all` adds the interpreter suppression; `off` restores the silence every
     mode had before Q74. Any unrecognised value falls back to the default."""
     v = (os.environ.get('WORKSPACE_GUARD_ESCALATE') or 'scoped').strip().lower()
     return v if v in ('scoped', 'all', 'off') else 'scoped'
@@ -3528,7 +3529,7 @@ def escalate_suppression(signal, mode):
     scope = escalation_scope()
     if signal is None or scope == 'off' or mode not in DEFER_RUNS_MODES:
         return None
-    if signal in (INTERPRETER_SIGNAL, WRAPPER_SIGNAL) and scope != 'all':
+    if signal == INTERPRETER_SIGNAL and scope != 'all':
         return None
     if signal == 'sh -c':
         what = ("a shell `-c` body it could not reach (a container or remote "
@@ -3540,11 +3541,10 @@ def escalate_suppression(signal, mode):
         fix = ("Fix: move the code into a file inside the project root and run "
                "that — a repo-resident script vouches — or approve this one.")
     elif signal == WRAPPER_SIGNAL:
-        what = ("a command wrapper whose operands it cannot all read (an "
-                "`xargs` appending its input, or a wrapper flag it does not "
-                "know)")
-        fix = ("Fix: name the files on the command itself, or approve this "
-               "one.")
+        what = ("an `xargs`, or a wrapper flag it cannot read, that hides "
+                "operands that command will act on")
+        fix = ("Fix: name the files on the command itself (`git grep`, "
+               "`grep -r`), or approve this one.")
     elif signal == 'taskkill':
         what = "a `taskkill` whose targets it cannot see"
         fix = ('Fix: run `tasklist /FI "IMAGENAME eq <name>"` and `taskkill '

@@ -8416,15 +8416,15 @@ class WrappedCommandTests(unittest.TestCase):
     def test_a_wrapped_kill_is_judged(self):
         self._decision("timeout 5 pkill node", "deny")
 
-    def test_xargs_input_withholds_allow_without_escalating(self):
-        # Its operands arrive on stdin, so the hook cannot vouch -- and like the
-        # interpreter, it escalates only under `all`.
+    def test_xargs_input_withholds_allow_and_escalates(self):
+        # Its operands arrive on stdin, so the hook cannot vouch. Where a defer
+        # runs it escalates the way a `sh -c` body does; `off` restores it.
         for cmd in ("xargs cat in.txt", "git ls-files | xargs grep foo"):
             self._decision(cmd, "defer")
-            self._decision(cmd, "defer", permission_mode="auto")
-        reason = self._decision("cat in.txt; xargs cat in.txt", "ask",
-                                permission_mode="auto", escalate="all")
-        self.assertIn("command wrapper", reason)
+            reason = self._decision(cmd, "ask", permission_mode="auto")
+            self.assertIn("an `xargs`, or a wrapper flag", reason)
+            self._decision(cmd, "deny", permission_mode="bypassPermissions")
+            self._decision(cmd, "defer", permission_mode="auto", escalate="off")
 
     def test_the_wrapper_label_does_not_mask_a_kill(self):
         reason = self._decision("cat in.txt; xargs cat in.txt; kill $pid", "ask",
