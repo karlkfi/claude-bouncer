@@ -116,6 +116,9 @@ The table below shows the decision with default config.
 | `bash -c 'while true; do sleep 5; done'` | **deny** (recursed) |
 | `bash poll-forever.sh` | defer (script files stay opaque) |
 | `cat <<EOF` … `tail -f x` … `EOF` | defer (heredoc body is data) |
+| `X="$(gh run watch 456)"` | **deny** (the substitution runs first, quoted or not) |
+| `echo "$(gh run watch 456)" & ls` | defer (substitution backgrounded with its command) |
+| `echo '$(gh run watch 456)'` | defer (single quotes keep it literal) |
 | `make test-race` (configured min 600000 ms, default timeout) | **deny** (names the minimum) |
 | `make test-race` with `timeout: 600000` | defer |
 | `make test-race` with `run_in_background: true` | defer |
@@ -288,11 +291,15 @@ These pass untouched, by design:
 - **A `timeout N ...` wrap** exempts the wrapped command from Class A —
   a silent defer, not a downgraded block. Rationale: an explicit bound is
   precisely the fix the guard teaches, and the Bash tool's own timeout still
-  backstops it. `timeout 30 gh run watch 123` runs without friction.
+  backstops it. `timeout 30 gh run watch 123` runs without friction. A
+  command substitution in its arguments is not bounded by it — the shell
+  runs the substitution before `timeout` starts — so it is still judged.
 - **A `FOREGROUND_GUARD_OVERRIDE=<reason>` prefix** — the agent asserting
   the wait is intended. See [the override](#the-override-escape-hatch).
 - **Heredoc bodies** are stripped before analysis — `tail -f` inside a
-  document you're writing is data, not a command.
+  document you're writing is data, not a command. A `$(...)` in a body whose
+  delimiter is unquoted (`<<EOF`, not `<<'EOF'`) is the exception: bash runs
+  it, so it is judged like any other command.
 
 ## Configuration
 

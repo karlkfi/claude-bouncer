@@ -78,8 +78,12 @@ rather than guessing.
 Parsing rules inherited from the sibling guards:
   * Heredoc bodies are stripped textually BEFORE tokenization, so body text
     is never parsed as command segments (the workspace-guard #83 bug class).
-  * `bash some-script.sh` stays opaque — no script-file inspection. Only
-    quoted `bash -c '...'` / `eval ...` bodies are recursed into (bounded).
+    The command substitutions in an unquoted-delimiter body are the
+    exception: bash runs them, so they are judged and the words around them
+    are not.
+  * `bash some-script.sh` stays opaque — no script-file inspection. Quoted
+    `bash -c '...'` / `eval ...` bodies and command substitutions are
+    recursed into (bounded).
 
 Reads the hook JSON on stdin, emits a PreToolUse decision on stdout.
 """
@@ -96,8 +100,9 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 from bouncer_parse import (                                    # noqa: E402
     ASSIGN_SUBSCRIPT, ASSIGNMENT_RE, COMMENT_PRECEDERS, QuoteTrackingLexer,
-    _consume_heredoc_body, _skip_balanced_parens, is_assignment,
-    note_discarded_writes, split_assignment, strip_heredoc_bodies,
+    _consume_heredoc_body, _skip_balanced_parens, command_substitutions,
+    is_assignment, note_discarded_writes, split_assignment,
+    strip_heredoc_bodies,
 )
 
 DEFAULT_BASH_TIMEOUT_MS = 120000
@@ -270,9 +275,10 @@ PUNCT_CHARS = frozenset(';()<>|&')
 
 def tokenize(raw):
     """shlex-tokenize with POSIX quoting and punctuation grouping. Backticks
-    and newlines are rewritten to `;` first so substitutions and multi-line
-    commands split into their own segments. Returns None on unbalanced
-    quotes (caller defers: fail-open on parse errors)."""
+    and newlines are rewritten to `;` first so multi-line commands split into
+    their own segments; a substitution `mask_substitutions` could not pair
+    still splits off that way, the fail-safe direction. Returns None on
+    unbalanced quotes (caller defers: fail-open on parse errors)."""
     raw = raw.replace('`', ';').replace('\n', ';')
     lex = QuoteTrackingLexer(raw, posix=True, punctuation_chars=';()<>|&')
     lex.whitespace_split = True
@@ -280,6 +286,48 @@ def tokenize(raw):
         return list(lex)
     except ValueError:
         return None
+
+
+def mask_substitutions(raw):
+    """(masked, bodies, marker_re) for the command substitutions bash would
+    run in `raw`, unquoted or inside double quotes.
+
+    Rewriting a substitution to a separator is not enough to see it: inside
+    double quotes the separator lands in a quoted word and shlex keeps the
+    word whole, so `X="$(gh run watch 1)"` hid the watch (Q220). Each one is
+    found structurally instead and replaced by a marker word naming its body,
+    so the caller can judge the body as its own command string under the
+    segment that holds it -- which is what decides whether it runs in the
+    background. Single quotes keep a substitution literal, so it is left
+    alone."""
+    spans = []
+    bodies = command_substitutions(raw, spans=spans)
+    if not bodies:
+        return raw, [], None
+    sentinel = next(chr(c) for c in range(0xe000, 0xf900) if chr(c) not in raw)
+    out, last = [], 0
+    for idx, (start, end) in enumerate(spans):
+        out.append(raw[last:start] + '%s%d%s' % (sentinel, idx, sentinel))
+        last = end
+    out.append(raw[last:])
+    marker_re = re.compile('%s([0-9]+)%s' % (sentinel, sentinel))
+    return ''.join(out), bodies, marker_re
+
+
+def substitutions_in(group, bodies, marker_re):
+    """The substitution bodies whose markers sit in a segment's words."""
+    if marker_re is None:
+        return []
+    return [bodies[int(m)] for t in group for m in marker_re.findall(t)]
+
+
+def heredoc_substitutions(expanded):
+    """Substitution bodies in heredoc bodies whose delimiter is unquoted. bash
+    expands those, and quote characters there are literal text, so `'$(cmd)'`
+    in one still runs `cmd`. Only these are judged: the body's own words stay
+    data."""
+    return [sub for body in expanded
+            for sub in command_substitutions(body, quotes=False)]
 
 
 # Redirect operator tokens: part of the same simple command, not separators.
@@ -611,7 +659,9 @@ def analyze_class_a(raw, cfg, depth=0):
     if depth > 3:
         return findings, None
 
-    raw = strip_heredoc_bodies(raw)
+    expanded = []
+    raw = strip_heredoc_bodies(raw, expanded)
+    raw, bodies, marker_re = mask_substitutions(raw)
 
     tokens = tokenize(raw)
     if tokens is None:
@@ -627,6 +677,14 @@ def analyze_class_a(raw, cfg, depth=0):
             and getattr(tokens[-1], 'quoted_from', None) is None:
         return findings, None
 
+    def recurse(body):
+        # A nested command string: its findings are this command's, and an
+        # override prefix inside it stands the whole call down.
+        sub_f, sub_o = analyze_class_a(body, cfg, depth + 1)
+        findings.extend(sub_f)
+        if state['override'] is None:
+            state['override'] = sub_o
+
     matchers = watch_matchers(cfg)
     exempts = exempt_matchers(cfg)
     floor = cfg['sleep_floor_seconds']
@@ -635,8 +693,15 @@ def analyze_class_a(raw, cfg, depth=0):
     segs = []            # (kind, argv) for the sandwich rule, foreground only
     loop_sleep = False   # a foreground `sleep` seen anywhere (any duration)
     sleep_findings = []
+    any_bg = False
     for group, term in split_segments(tokens):
         bg = (term == '&')
+        any_bg = any_bg or bg
+        # A substitution runs where the segment holding it runs: in the
+        # background job under `&`, and in the foreground under a `timeout`
+        # wrap, because the shell expands it before `timeout` starts.
+        for body in [] if bg else substitutions_in(group, bodies, marker_re):
+            recurse(body)
         state['timeout_wrapped'] = False
         argv = strip_head(list(group), state)
         if not argv:
@@ -660,16 +725,10 @@ def analyze_class_a(raw, cfg, depth=0):
                     body = argv[i + 1]
                     break
             if body:
-                sub_f, sub_o = analyze_class_a(body, cfg, depth + 1)
-                findings += sub_f
-                if state['override'] is None:
-                    state['override'] = sub_o
+                recurse(body)
             continue
         if head == 'eval':
-            sub_f, sub_o = analyze_class_a(' '.join(argv[1:]), cfg, depth + 1)
-            findings += sub_f
-            if state['override'] is None:
-                state['override'] = sub_o
+            recurse(' '.join(argv[1:]))
             continue
         # Basename the head so `/usr/bin/tail -f` still matches `^tail`.
         seg_str = ' '.join([head] + argv[1:])
@@ -682,6 +741,13 @@ def analyze_class_a(raw, cfg, depth=0):
             if rx.search(seg_str):
                 findings.append(finding_watch(cfg, seg_str, label, alt))
                 break
+
+    # A heredoc body is not paired with the segment that reads it, so where
+    # any segment is backgrounded its substitutions are left alone rather than
+    # judged as foreground (parse uncertainty defers).
+    if not any_bg:
+        for body in heredoc_substitutions(expanded):
+            recurse(body)
 
     if state['loop'] and loop_sleep:
         # Loop-with-sleep: the canonical foreground poll. Any sleep duration
@@ -775,16 +841,31 @@ def simple_commands(raw, depth=0):
     heredoc bodies stripped, env prefixes and launcher wrappers peeled, `bash
     -c '...'` / `eval ...` bodies recursed into (bounded), a plain `bash
     script.sh` reduced to the script, and a parse-only `bash -n ...` dropped.
-    Returns None when the string does not tokenize — the caller defers rather
-    than guess."""
+    Command substitutions, and those in an unquoted heredoc body, come out as
+    commands of their own: the shell runs them before the command holding
+    them, so even a parse-only `bash -n` does not stop them. Returns None when
+    the string does not tokenize — the caller defers rather than guess."""
     if depth > 3:
         return []
-    tokens = tokenize(strip_heredoc_bodies(raw))
+    expanded = []
+    masked, bodies, marker_re = mask_substitutions(
+        strip_heredoc_bodies(raw, expanded))
+    tokens = tokenize(masked)
     if tokens is None:
         return None
     out = []
+    for body in heredoc_substitutions(expanded):
+        sub = simple_commands(body, depth + 1)
+        if sub is None:
+            return None
+        out += sub
     state = {'loop': False, 'override': None}
     for group, _term in split_segments(tokens):
+        for body in substitutions_in(group, bodies, marker_re):
+            sub = simple_commands(body, depth + 1)
+            if sub is None:
+                return None
+            out += sub
         state['timeout_wrapped'] = False
         argv = strip_head(list(group), state)
         if not argv:
