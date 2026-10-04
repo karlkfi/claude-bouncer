@@ -575,7 +575,8 @@ class AssignmentTests(unittest.TestCase):
 
     The table is bash's own answer, taken on 5.3.15 with
     ``bash -c "<word>; printf '[%s]' \"$SP\""``: a set variable prints its
-    value, an unset one prints ``[]`` after a ``command not found``. Quoting
+    value, an unset one prints ``[]`` and ``SP=/x: No such file or directory``
+    -- the word holds a `/`, so bash runs it as a path. Quoting
     anywhere up to and including the ``=`` disarms the assignment; quoting
     after it is ordinary, which is how a break-glass reason with a space in it
     is written.
@@ -645,10 +646,11 @@ class ReservedWordTests(unittest.TestCase):
 
     Measured on bash 5.3.15 with ``cd /tmp; <word> cd /etc; pwd``. The plain
     keyword changes directory (``time``, ``!``) or opens a compound command;
-    every quoted spelling prints ``<word>: command not found`` and leaves the
-    shell in ``/tmp``, because the ``cd`` is an argument to a program that does
-    not exist. ``\\if`` is the case a ``.quotes`` check would miss: it carries
-    no quote character and is still not the keyword.
+    every quoted spelling leaves the shell in ``/tmp``, because the ``cd`` is an
+    argument to a program: ``<word>: command not found`` for all but ``'time'``,
+    which finds macOS's ``/usr/bin/time`` and runs ``cd`` in a child (3.2.57
+    agrees on every row). ``\\if`` is the case a ``.quotes`` check would miss:
+    it carries no quote character and is still not the keyword.
     """
 
     RUNS_A_COMMAND = ("'if'", '"if"', 'i"f"', r'\if',   # if
