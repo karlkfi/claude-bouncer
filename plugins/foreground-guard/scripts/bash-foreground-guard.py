@@ -732,16 +732,16 @@ def shell_noexec(opts):
     the script and executes nothing, so the segment can never be slow however
     it is registered. `opts` holds only the words ahead of the script or the
     `-c` body, so `bash gate.sh -n` — where `-n` belongs to the script — is
-    still a real run. `-o noexec` counts (Q138), and a bare `+n` or `+o noexec`
-    carries none. The read is first-match, not last-wins, so a `+n` cancelling
-    an earlier `-n` is missed and the segment defers where bash runs it
-    (Q163)."""
+    still a real run. `-o noexec` counts (Q138), and `+n` or `+o noexec` turns
+    it back off. bash resolves the two spellings as one setting, last wins, so
+    `bash -n +o noexec gate.sh` runs the script (Q163)."""
+    noexec = False
     for opt, arg in opts:
-        if opt[0] != '-' or opt.startswith('--'):
+        if opt.startswith('--'):
             continue
         if 'n' in opt[1:] or ('o' in opt[1:] and arg == 'noexec'):
-            return True
-    return False
+            noexec = opt[0] == '-'
+    return noexec
 
 
 def simple_commands(raw, depth=0):

@@ -911,6 +911,19 @@ class SlowCommandPositionTests(unittest.TestCase):
         self.assert_mention("bash -no errexit scripts/gate.sh")
         self.assert_mention("bash --rcfile /dev/null -n scripts/gate.sh")
 
+    def test_noexec_is_last_wins(self):
+        # bash resolves `-n` and `-o noexec` as one setting, last wins, so a
+        # later `+` form cancels an earlier `-` form across spellings (Q163).
+        self.assert_runs("bash -n +n scripts/gate.sh")
+        self.assert_runs("bash -o noexec +o noexec scripts/gate.sh")
+        self.assert_runs("bash -n +o noexec scripts/gate.sh")
+        self.assert_runs("bash -o noexec +n scripts/gate.sh")
+        self.assert_runs("bash -xn +xn scripts/gate.sh")
+        self.assert_runs("bash -n +n -c 'scripts/gate.sh'")
+        self.assert_mention("bash +n -n scripts/gate.sh")
+        self.assert_mention("bash +o noexec -o noexec scripts/gate.sh")
+        self.assert_mention("bash -nx +x scripts/gate.sh")
+
     def test_script_eaten_as_an_option_argument_defers(self):
         # The option consumes the script itself, so bash runs nothing.
         self.assert_mention("bash -o scripts/gate.sh")
