@@ -49,6 +49,14 @@ class StripCommentsTests(unittest.TestCase):
         self.assertEqual('make check  && echo ok',
                          bp.strip_comments('make check \\\n && echo ok'))
 
+    def test_an_assignment_subscript_holds_no_comment(self):
+        # bash 5.3.15 reads `FOO[a #b]=x cat f` as a prefix and prints f (Q217).
+        for cmd in ('FOO[a #b]=x cat f', 'X=1 FOO[a #b]+=x cat f'):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(cmd, bp.strip_comments(cmd))
+        # Outside an assignment, bash starts the comment there.
+        self.assertEqual('echo a[x ', bp.strip_comments('echo a[x #y]'))
+
 
 class StripHeredocBodiesTests(unittest.TestCase):
     def test_body_and_terminator_go(self):
@@ -505,22 +513,61 @@ class SubscriptAssignmentTests(unittest.TestCase):
                 toks = bp.lex(word + ' cat f')
                 self.assertEqual(toks, bp.strip_env_prefix(toks))
 
-    def test_the_lexer_splits_what_bash_keeps_whole(self):
-        """Each of these peels in bash 5.3.15 and is read here as a command
-        name (Q217): a subscript holding a space, an operator or a
-        substitution arrives as several tokens; quoting records only where it
-        began, so neither a quoted `]` nor an empty pair at the `]` can be
-        placed; and the depth walk counts a `]` inside an expansion. A row
-        fails when its gap closes, so the residual stays visible rather than
-        unwritten."""
-        for word in ('FOO[a b]=x', 'FOO[a;b]=x', 'FOO[a|b]=x',
+    def test_a_subscript_is_one_word_whatever_it_holds(self):
+        """Each of these peels in bash 5.3.15 (Q217). shlex splits on a space
+        or operator first and strips quotes, so the lexer reads the subscript
+        from the raw text, closing at the `]` bash closes at: not a quoted or
+        escaped one, nor one inside an expansion."""
+        for word in ('FOO[a b]=x', 'FOO[a;b]=x', 'FOO[a|b]=x', 'FOO[a<b]=x',
                      'FOO[$(echo 0)]=x', 'FOO[$((1+1))]=x',
                      'FOO[`echo 0`]=x', 'FOO[""]=x', 'FOO["a]b"]=x',
                      r'FOO[a\]b]=x', r'FOO[a\[b]=x', 'FOO[${x:-]}]=x',
-                     'FOO[$(echo ])]=x'):
+                     'FOO[$(echo ])]=x', 'FOO[a\nb]=x', 'FOO[a #b]=x',
+                     'FOO[a b]+=x', 'FOO[a b]="c d"'):
             with self.subTest(word=word):
-                self.assertNotEqual(['cat', 'f'],
-                                    bp.strip_env_prefix(bp.lex(word + ' cat f')))
+                self.assertEqual(['cat', 'f'],
+                                 bp.strip_env_prefix(bp.lex(word + ' cat f')))
+
+    def test_a_subscript_is_read_wherever_an_assignment_can_stand(self):
+        # bash 5.3.15 peels the subscript in each of these and runs `cat f`.
+        for cmd in ('X=1 FOO[a;b]=x cat f', 'true; FOO[a;b]=x cat f',
+                    'true && FOO[a;b]=x cat f', 'if FOO[a;b]=x cat f',
+                    '( FOO[a;b]=x cat f', '2>/dev/null FOO[a;b]=x cat f',
+                    '>/dev/null FOO[a;b]=x cat f', 'time FOO[a;b]=x cat f',
+                    'time -p FOO[a;b]=x cat f', 'time -- FOO[a;b]=x cat f',
+                    'x=$(true) FOO[a;b]=x cat f', '(true) && FOO[a;b]=x cat f',
+                    'case x in x) FOO[a;b]=x cat f',
+                    'case x in (x) FOO[a;b]=x cat f',
+                    'case x in y) :;; x) FOO[a;b]=x cat f'):
+            with self.subTest(cmd=cmd):
+                toks = bp.lex(cmd)
+                self.assertIn('FOO[a;b]=x', toks)
+                self.assertEqual(['cat', 'f'], toks[-2:])
+
+    def test_an_operand_subscript_still_splits(self):
+        # Only an assignment keeps its subscript whole: `echo FOO[a;b]=x` runs
+        # `b]=x` as a second command, and `FOO[a b] cat f` runs `FOO[a b]`.
+        self.assertEqual(['echo', 'FOO[a', ';', 'b]=x'],
+                         bp.lex('echo FOO[a;b]=x'))
+        self.assertEqual(['cat', 'f', '>', 'x', 'FOO[a', ';', 'b]=x'],
+                         bp.lex('cat f >x FOO[a;b]=x'))
+        self.assertEqual(['FOO[a b]', 'cat', 'f'], bp.lex('FOO[a b] cat f'))
+        self.assertEqual(['FOO[a b]', ';', 'cat', 'f'], bp.lex('FOO[a b];cat f'))
+        # A substitution's `)` puts back the position before its `(`: bash
+        # 5.3.15 runs `cat f` in each of these.
+        for cmd in ('diff <(true) FOO[a;cat f;]', 'echo $((1)) FOO[a;cat f;]',
+                    'echo $(true) FOO[a;cat f;]', 'cat < <(true) FOO[a;cat f;]',
+                    'echo $(echo $(true)) FOO[a;cat f;]',
+                    'time echo -p FOO[a;cat f;]',
+                    'echo $(case x in x) true;; esac) FOO[a;cat f;]',
+                    'echo $(case x in x) (true);; esac) FOO[a;cat f;]',
+                    'echo $(case x in x|y) :;; z) :;; esac) FOO[a;cat f;]'):
+            with self.subTest(cmd=cmd):
+                self.assertIn('FOO[a', bp.lex(cmd))
+
+    def test_an_unclosed_subscript_falls_back_to_the_split(self):
+        # bash reports a syntax error and runs nothing; splitting reads more.
+        self.assertEqual(['FOO[a', 'b'], bp.lex('FOO[a b'))
 
 
 class AssignmentTests(unittest.TestCase):
