@@ -59,6 +59,15 @@ So the scan cannot see:
   invisible ([foreground-guard
   #15](https://github.com/karlkfi/claude-foreground-guard/issues/15)).
 - **A guard that never ran** — misconfigured, crashed, or not installed.
+- **Which release made a decision.** Nothing in a transcript records the guard
+  version: the hook command is stored unexpanded, as
+  `${CLAUDE_PLUGIN_ROOT}/...`. An installed copy has no git tags or dated
+  release notes to bucket by either. So a ranking over a window that spans
+  releases mixes them, and a shape a later release stopped prompting on keeps
+  its rank. On 2026-08-22 a 30-day run ranked `$f` top among `expand` paths
+  with 228 prompts, and every one of those shapes already allowed on the
+  installed 1.10.0. Narrow `--since` to the date the installed version shipped
+  to see only what it does now.
 - **A deny neither key finds.** Under `--plugin all`, a companion guard whose
   block text opens with something other than `<name>-guard: ` under-counts its
   denies — pr-sentinel leads with `pr-sentinel: `, for instance. The coverage
