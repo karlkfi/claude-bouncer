@@ -148,13 +148,26 @@ copy of its regex, so the two halves cannot drift apart in silence.
 
 The two streams are counted together, so they have to resolve to the same word.
 The attachment stream has no reason text to read; it labels a decision by the
-`.py` file the hook command names, stripping a leading `bash-`:
+`.py` file the hook command names, stripping a leading `bash-`. A command naming
+no `.py` falls back to its launcher, the command's first word, less its
+extension and a leading `run-`, and keeps that label only when it ends in
+`-guard` or is a listed non-guard name:
 
 | Hook command names | Label |
 | --- | --- |
 | `bash-foreground-guard.py` | `foreground-guard` |
 | `branch-guard.py` | `branch-guard` |
+| `run-python-hook.cmd bash-workspace-guard.py` | `workspace-guard` — the `.py` wins |
+| `run-spill-guard.cmd hook` | `spill-guard` — the launcher, no `.py` named |
+| `run-python-hook.cmd` alone, `claude-go-throttle-hook.sh` | none — not a guard's name |
 | `pr-sentinel-guard.py` | `pr-sentinel-guard` — a word apart from its denies |
+
+A hook command that yields no label loses everything but its denies, because
+those are read from the opener instead. The guard then reads as 100% deny,
+which looks like a measurement rather than a gap. spill-guard read that way
+until the launcher fallback above. Measured 2026-10-04 over 90 days of one
+machine's transcripts, that was 686 denies and nothing else, where 3,823
+decisions were recorded.
 
 pr-sentinel is the case that breaks: its script is `pr-sentinel-guard.py` and its
 reasons open `pr-sentinel: `, so one plugin arrives under two labels, and neither
@@ -162,8 +175,9 @@ reasons open `pr-sentinel: `, so one plugin arrives under two labels, and neithe
 folds that specific name back (`NON_GUARD_PLUGINS` in `friction-report.py`), but
 the fold is a list someone has to edit.
 
-Name the hook script `<plugin-name>.py` or `bash-<plugin-name>.py` and the
-question does not come up.
+Name the hook script `<plugin-name>.py` or `bash-<plugin-name>.py`, or, where
+the hook runs no `.py`, name the launcher `run-<plugin-name>` with any
+extension, and the question does not come up.
 
 ## Checking your own
 
@@ -189,3 +203,6 @@ PY
 ```
 
 A hit there with no deny in the report is the convention not being followed.
+
+The opposite shape, denies and nothing else, is the hook command not naming
+the plugin. See the table above.

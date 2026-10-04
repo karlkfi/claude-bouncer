@@ -209,7 +209,7 @@ def parse_ts(rec):
 
 def guard_name(command):
     """Plugin label from a hook command, e.g. '.../bash-foreground-guard.py'
-    -> 'foreground-guard'. Returns None if the command names no *.py guard.
+    -> 'foreground-guard'. Returns None when no guard can be named.
 
     The label has to be the same word DENY_TEXT reads off a deny, because the
     two streams are counted together. A plugin whose name does not end in
@@ -217,11 +217,23 @@ def guard_name(command):
     `pr-sentinel-guard.py` — and left alone that splits one plugin across two
     labels: its asks under `<name>-guard` and its denies under `<name>`, so
     `--plugin all` lists it twice and neither `--plugin <name>` value gets both
-    halves. Fold the script name back onto the plugin's own."""
+    halves. Fold the script name back onto the plugin's own.
+
+    A hook command naming no *.py falls back to its launcher's basename, less
+    any extension and `run-` prefix, so spill-guard's
+    `".../run-spill-guard.cmd" hook` reads as `spill-guard` (Q207). That label
+    is kept only in the shape DENY_TEXT reads, which leaves the shared
+    `run-python-hook.cmd` and a project's own hook scripts unlabelled."""
     m = re.search(r'([A-Za-z0-9_-]+)\.py', command or '')
-    if not m:
-        return None
-    name = re.sub(r'^bash-', '', m.group(1))
+    if m:
+        name = re.sub(r'^bash-', '', m.group(1))
+    else:
+        m = re.match(r'\s*(?:"([^"]*)"|\'([^\']*)\'|(\S+))', command or '')
+        word = next((g for g in m.groups() if g), '') if m else ''
+        stem = re.sub(r'\.[A-Za-z0-9]+$', '', re.split(r'[/\\]', word)[-1])
+        name = re.sub(r'^run-', '', stem)
+        if not name.endswith('-guard') and name not in NON_GUARD_PLUGINS:
+            return None
     trimmed = re.sub(r'-guard$', '', name)
     return trimmed if trimmed in NON_GUARD_PLUGINS else name
 

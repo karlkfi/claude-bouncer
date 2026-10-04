@@ -238,6 +238,27 @@ class GuardNameTests(unittest.TestCase):
             fr.guard_name('python3 "/x/scripts/pr-sentinel-guard.py"'),
             "pr-sentinel")
 
+    def test_a_launcher_names_the_guard_when_no_script_does(self):
+        # spill-guard wires a launcher and names no *.py at all (Q207).
+        for hook_cmd, plugin in (
+                ('"${CLAUDE_PLUGIN_ROOT}/hooks/run-spill-guard.cmd" hook',
+                 "spill-guard"),
+                ("'/x y/run-spill-guard.cmd' hook", "spill-guard"),
+                ("/x/hooks/spill-guard", "spill-guard"),
+                ('"/x/run-pr-sentinel.cmd"', "pr-sentinel")):
+            with self.subTest(hook_cmd=hook_cmd):
+                self.assertEqual(fr.guard_name(hook_cmd), plugin)
+
+    def test_a_launcher_outside_the_guard_shape_stays_unnamed(self):
+        # The shared launcher with no script argument, and a project's own
+        # hooks, which are not plugins and must not be credited as one.
+        for hook_cmd in ('"/x/scripts/run-python-hook.cmd"',
+                         "${CLAUDE_PROJECT_DIR}/scripts/claude-piped-gate-hook.sh",
+                         "${CLAUDE_PROJECT_DIR}/scripts/claude-go-throttle-hook.sh",
+                         ""):
+            with self.subTest(hook_cmd=hook_cmd):
+                self.assertIsNone(fr.guard_name(hook_cmd))
+
 
 class NameAgreementTests(unittest.TestCase):
     """The attachment stream labels a decision from the hook's script name and
@@ -260,6 +281,9 @@ class NameAgreementTests(unittest.TestCase):
         ('"/x/scripts/run-python-hook.cmd" bash-exit-status-guard.py',
          "exit-status-guard"),
         ('python3 "/x/scripts/pr-sentinel-guard.py"', "pr-sentinel"),
+        # From another repo; spill-guard 0.5.0's hooks.json, read 2026-10-04.
+        ('"${CLAUDE_PLUGIN_ROOT}/hooks/run-spill-guard.cmd" hook',
+         "spill-guard"),
     )
 
     def test_both_streams_resolve_to_one_label(self):
