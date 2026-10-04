@@ -498,7 +498,9 @@ class SubscriptAssignmentTests(unittest.TestCase):
         for cmd in ('X=1 FOO[a;b]=x cat f', 'true; FOO[a;b]=x cat f',
                     'true && FOO[a;b]=x cat f', 'if FOO[a;b]=x cat f',
                     '( FOO[a;b]=x cat f', '2>/dev/null FOO[a;b]=x cat f',
-                    '>/dev/null FOO[a;b]=x cat f', 'time FOO[a;b]=x cat f'):
+                    '>/dev/null FOO[a;b]=x cat f', 'time FOO[a;b]=x cat f',
+                    'time -p FOO[a;b]=x cat f', 'time -- FOO[a;b]=x cat f',
+                    'x=$(true) FOO[a;b]=x cat f', '(true) && FOO[a;b]=x cat f'):
             with self.subTest(cmd=cmd):
                 toks = bp.lex(cmd)
                 self.assertIn('FOO[a;b]=x', toks)
@@ -513,6 +515,14 @@ class SubscriptAssignmentTests(unittest.TestCase):
                          bp.lex('cat f >x FOO[a;b]=x'))
         self.assertEqual(['FOO[a b]', 'cat', 'f'], bp.lex('FOO[a b] cat f'))
         self.assertEqual(['FOO[a b]', ';', 'cat', 'f'], bp.lex('FOO[a b];cat f'))
+        # A substitution's `)` puts back the position before its `(`: bash
+        # 5.3.15 runs `cat f` in each of these.
+        for cmd in ('diff <(true) FOO[a;cat f;]', 'echo $((1)) FOO[a;cat f;]',
+                    'echo $(true) FOO[a;cat f;]', 'cat < <(true) FOO[a;cat f;]',
+                    'echo $(echo $(true)) FOO[a;cat f;]',
+                    'time echo -p FOO[a;cat f;]'):
+            with self.subTest(cmd=cmd):
+                self.assertIn('FOO[a', bp.lex(cmd))
 
     def test_an_unclosed_subscript_falls_back_to_the_split(self):
         # bash reports a syntax error and runs nothing; splitting reads more.
