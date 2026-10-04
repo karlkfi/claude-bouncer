@@ -147,16 +147,14 @@ no recorded decisions at all: those are real answers of zero.
   `paths_scope`). Normalized by default so per-session temp paths (e.g.
   `/private/tmp/claude-NNN/...`) collapse into one row; `--raw` to see exact
   tokens.
-- **Friction by tool** — ask+deny counts per tool the hook ran on, so a native
-  `Read`/`Edit`/`Write` prompt is visible beside the `Bash` ones (`--json`:
+- **Friction by tool** — ask+deny counts per tool the hook ran on, so a prompt
+  on any native tool it watches (`Read`, `Grep`, `Glob`, `Edit`, `Write`,
+  `MultiEdit`, `NotebookEdit`) is visible beside the `Bash` ones (`--json`:
   `friction_by_tool`). A Windows `PowerShell` row appears only in a corpus
   taken there.
 - **Top triggering commands** — via the `toolUseID` join, so you see what the
   agent was doing when it got prompted. Only a shell call carries a command, so
   a native-tool prompt counts everywhere else and adds no row here.
-
-branch-guard also registers on `Edit|Write|MultiEdit|NotebookEdit` and ships no
-friction report of its own; its prompts appear here under `--plugin all`.
 - **Stale-install banner** — when the installed plugin version
   (`~/.claude/plugins/installed_plugins.json`) is behind the local marketplace
   clone's `plugin.json`, a line above the rankings reads
@@ -166,6 +164,9 @@ friction report of its own; its prompts appear here under `--plugin all`.
   local plugin state (no network) and stays silent when the install is current
   or the state is unreadable. The `--json` output carries the same signal in a
   `stale` field (`null` when current).
+
+branch-guard also registers on `Edit|Write|MultiEdit|NotebookEdit` and ships no
+friction report of its own; its prompts appear here under `--plugin all`.
 
 ## Interpreting the output
 
