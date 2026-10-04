@@ -18,7 +18,9 @@ integration branch (RECOVERY_REF_PATTERNS), so the worst case is a
 `git reset --hard <sha>` — and private, meaning not in the protected set. A
 force form has one more way to be in bounds: when every commit the ref move
 would orphan is a merge that `git merge-tree` reproduces from its parents, the
-branch holds nothing original to lose (`orphans_only_reproducible_merges`). This
+branch holds nothing original to lose (`orphans_only_reproducible_merges`), and
+likewise when every one has a patch-equivalent on a remote, which is what a
+rebased and republished branch leaves (`orphans_republished`). This
 only ever relaxes a would-be `ask` into an `allow`, and only on proof from a
 local git query: a working tree the hook can't name (a `--git-dir`, a `cd` it
 can't follow), an unreachable git, or a branch that won't resolve all keep
@@ -1530,7 +1532,8 @@ def overwrite_verdict(cwd, name, what, probe):
     current tip. Creating a ref that doesn't exist yet loses nothing; moving one
     whose tip survives on a remote-tracking ref or main costs a
     `git reset --hard <sha>`; and a tip surviving nowhere is still in bounds
-    when everything the move would orphan is a merge git re-runs. Everything
+    when everything the move would orphan is a merge git re-runs, or is
+    already on a remote under another object name. Everything
     else — including every case the probes can't answer — keeps the `ask`."""
     if not probe:
         return ('ask', f"{what} can move an existing branch pointer, and this "
@@ -1552,7 +1555,8 @@ def overwrite_verdict(cwd, name, what, probe):
         # survives it. Taken over what losing the whole ref would orphan — the
         # start-point belongs to the command and never reaches here, so this
         # over-approximates an overwrite the way it does a reset.
-        if orphans_only_reproducible_merges(cwd, name):
+        if (orphans_only_reproducible_merges(cwd, name)
+                or orphans_republished(cwd, name)):
             return ('allow', None)
         return ('ask', f"{what} moves existing branch '{name}', whose current "
                        f"tip isn't reachable from any remote-tracking branch "
@@ -1605,9 +1609,11 @@ def classify_branch(flags, short, pos, current, cwd, probe):
 
     Recoverability is a property of the tip, and a force-delete cares about
     something slightly wider: what the branch would orphan. The two differ for
-    one shape — a scratch branch that merged an integration ref — which
-    `orphans_only_reproducible_merges` answers for every force form: `-D`
-    below, and `-f`/`-M`/`-C` through `overwrite_verdict`.
+    two shapes — a scratch branch that merged an integration ref, and a branch
+    rebased and republished under another name — which
+    `orphans_only_reproducible_merges` and `orphans_republished` answer for
+    every force form: `-D` below, and `-f`/`-M`/`-C` through
+    `overwrite_verdict`.
 
     This can only ever relax a would-be `ask` into an `allow`, and only on
     proof: every form the probes can't answer for keeps asking, so an
@@ -1662,8 +1668,11 @@ def classify_branch(flags, short, pos, current, cwd, probe):
                 # An unreachable tip is not the same as lost work. A scratch
                 # branch that merged an integration ref to see what would happen
                 # holds exactly one commit nothing else names — that merge — and
-                # re-running it proves the commit stores nothing original.
-                if orphans_only_reproducible_merges(cwd, b):
+                # re-running it proves the commit stores nothing original. A
+                # branch rebased and republished under another name is the
+                # other shape: unreachable, while every change sits on a remote.
+                if (orphans_only_reproducible_merges(cwd, b)
+                        or orphans_republished(cwd, b)):
                     continue
                 return ('ask', f"`git branch -D` force-deletes '{b}', whose "
                                f"tip isn't reachable from any remote-tracking "
@@ -2342,7 +2351,7 @@ def orphans_republished(cwd, name):
     True only on that proof. False on every other answer — an orphan with no
     patch-id (a merge, an empty commit), one whose equivalent is absent or
     sits past MAX_COMPARED_COMMITS, more orphans than MAX_EXAMINED_ORPHANS, a
-    timeout — so uncertainty keeps the caller's deny."""
+    timeout — so uncertainty keeps the caller's deny or ask."""
     r = run_git(cwd, 'rev-list', '--ignore-missing', name,
                 '--not', *RECOVERY_REV_ARGS)
     if r is None or r.returncode != 0:

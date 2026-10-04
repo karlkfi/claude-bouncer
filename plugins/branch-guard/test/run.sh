@@ -2478,6 +2478,49 @@ add_noise 4102444800
 check "[republish] republish behind 205 newer commits -> deny" deny \
   "$(decision_for "$(bash_cmd "$RESET_MAIN")" "$OVL")"
 
+#     The delete and the overwrites take the same third question (Q216): what
+#     they orphan is what the reset's proof is already taken over, so the same
+#     republish covers them. Each repo steps off claude/dup first, since git
+#     refuses to delete the branch it is on. All three overwrite spellings on
+#     the positive, `-f` alone for the rest, since `overwrite_verdict` serves
+#     them from one body. The negatives ask rather than deny: neither caller
+#     has a deny arm.
+DEL_DUP='git branch -D claude/dup'
+OVW_DUP='git branch -f claude/dup origin/main'
+make_republish_repo third.txt 5
+git -C "$OVL" switch -q base-work
+check "[republish] branch -D, base moved in another file -> allow" allow \
+  "$(decision_for "$(bash_cmd "$DEL_DUP")" "$OVL")"
+check "[dontAsk] [republish] branch -D -> allow" allow \
+  "$(decision_for "$(push_mode "$DEL_DUP" 'dontAsk')" "$OVL")"
+check "[configured] [republish] branch -D -> ask" ask \
+  "$(decision_for "$(bash_cmd "$DEL_DUP")" "$OVL" \
+     'BRANCH_GUARD_PROTECTED_BRANCHES=claude/dup')"
+for c in "$OVW_DUP" 'git branch -M base-work claude/dup' \
+         'git branch -C base-work claude/dup'; do
+  check "[republish] $c -> allow" allow \
+    "$(decision_for "$(bash_cmd "$c")" "$OVL")"
+done
+check "[dontAsk] [republish] branch -f -> allow" allow \
+  "$(decision_for "$(push_mode "$OVW_DUP" 'dontAsk')" "$OVL")"
+check "[configured] [republish] branch -f -> ask" ask \
+  "$(decision_for "$(bash_cmd "$OVW_DUP")" "$OVL" \
+     'BRANCH_GUARD_PROTECTED_BRANCHES=claude/dup')"
+make_republish_repo file.txt 12
+git -C "$OVL" switch -q base-work
+check "[republish] branch -D, base moved inside the context -> ask" ask \
+  "$(decision_for "$(bash_cmd "$DEL_DUP")" "$OVL")"
+check "[republish] branch -f, base moved inside the context -> ask" ask \
+  "$(decision_for "$(bash_cmd "$OVW_DUP")" "$OVL")"
+make_republish_repo third.txt 5
+git -C "$OVL" update-ref refs/remotes/origin/claude/republished \
+  origin/claude/republished~1
+git -C "$OVL" switch -q base-work
+check "[republish] branch -D, only one of two published -> ask" ask \
+  "$(decision_for "$(bash_cmd "$DEL_DUP")" "$OVL")"
+check "[republish] branch -f, only one of two published -> ask" ask \
+  "$(decision_for "$(bash_cmd "$OVW_DUP")" "$OVL")"
+
 # --- Worktree grant recording (Q144) -----------------------------------------
 # The PreToolUse ask above and workspace-guard's exemption are two halves of one
 # contract, and each is green on its own with the other disconnected. This is
