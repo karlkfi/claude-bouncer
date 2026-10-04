@@ -25,10 +25,10 @@ into prompts for someone who wants to watch the guard work.
   `timeout` below the registered minimum — it would be killed mid-run.
   `run_in_background: true` **is** the fix here, and exempts it.
 
-So a flood of prompts almost always means the agent keeps waiting on a poll
-instead of snapshotting and re-checking next turn, or keeps under-timing a
-known-slow command — both fixable habits — not that the work genuinely needs to
-block.
+So a flood of denies (or prompts, under `action: ask`) almost always means the
+agent keeps waiting on a poll instead of snapshotting and re-checking next turn,
+or keeps under-timing a known-slow command — both fixable habits — not that the
+work genuinely needs to block.
 
 ## Diagnose
 
@@ -66,9 +66,9 @@ config around it. Useful adjustments:
 unset — try the in-repo path `scripts/friction-report.py`), exits with "No
 transcripts …", or prints "No … decisions found" (a fresh setup
 with no recorded prompts yet), skip the data step and diagnose from the **most
-recent foreground-guard prompts in this session** instead — each prompt's reason
+recent foreground-guard blocks in this session** instead — each block's reason
 text names the offending command and the fix. With neither, walk the user through
-the category → fix map below against the commands they say keep prompting.
+the category → fix map below against the commands they say keep getting blocked.
 
 ## Map categories to fixes
 
@@ -82,8 +82,8 @@ user which categories dominate their report, then apply the matching fix:
    re-check next turn, or arm a Monitor that exits when the run reaches a
    terminal state. Re-running the same call with `run_in_background: true`
    does not quiet this category — the watch still occupies a task slot and the
-   guard still prompts. If the flagged command is a **false positive** — a form
-   you genuinely want to run live and don't want prompted — add a
+   guard still blocks it. If the flagged command is a **false positive** — a form
+   you genuinely want to run live and don't want blocked — add a
    `poll.exempt_watch_patterns` regex (exemptions win over matches; this quiets
    just that form without disabling all of Class A). Conversely, if a real watch
    reached through an uncovered alias (`k logs -f …`) is *not* being caught but
@@ -91,7 +91,7 @@ user which categories dominate their report, then apply the matching fix:
 2. **`loop-sleep`** (Class A) — a `while`/`until`/`for` loop that polls with
    `sleep`. **Reason:** "…loop with `sleep` polls…". Fix the behavior: take one
    status check now and check again next turn — don't spin a poll loop, on the
-   main thread or in the background (a backgrounded loop still prompts).
+   main thread or in the background (a backgrounded loop is still blocked).
 3. **`sandwich`** (Class A) — a chained repeat-with-sleep (`cmd; sleep N; cmd`).
    **Reason:** "…repeat-with-sleep chain…". Same fix as `loop-sleep`: one check
    now; defer the recheck to the next turn.
@@ -101,7 +101,7 @@ user which categories dominate their report, then apply the matching fix:
    …` → just run the `curl` next turn). If the flagged sleeps are legitimately
    *short* startup-grace waits that sit just above the floor, raise
    `poll.sleep_floor_seconds` so they fall below it — but keep the floor low
-   enough that real long waits still prompt.
+   enough that real long waits are still caught.
 5. **`slow-timeout`** (Class B) — a registered slow command about to be killed by
    an inadequate timeout. **Reason:** "…matches the slow-command pattern…" or
    "…matches the slow-command target…". Set an adequate `timeout:` on the Bash
@@ -146,10 +146,10 @@ Config lives in `.claude/foreground-guard.json` (per-repo) or
 | Want to… | Knob |
 | --- | --- |
 | Quiet a specific built-in watch form that's a false positive | `poll.exempt_watch_patterns` (allowlist regexes over the command segment) |
-| Stop short startup-grace sleeps from prompting | raise `poll.sleep_floor_seconds` (default 10) |
+| Stop short startup-grace sleeps from being flagged | raise `poll.sleep_floor_seconds` (default 10) |
 | Stop a slow command being flagged after it got fast | remove/lower its `slow.commands` entry |
 | Watch the guard work instead of letting the agent self-correct | `poll.action: "ask"` / `slow.action: "ask"` — costs you a prompt per finding |
-| Add repo-specific context to Class A prompts | `hint` (e.g. name your own PR-watcher machinery) |
+| Add repo-specific context to Class A reasons | `hint` (e.g. name your own PR-watcher machinery) |
 
 For a genuinely-intentional one-off foreground wait, prefix the command with
 `FOREGROUND_GUARD_OVERRIDE=<why> …` and the guard defers — in every permission
@@ -160,22 +160,23 @@ counts.
 
 **Don't suggest disabling the guard wholesale** (`poll.enabled: false`,
 `slow.enabled: false`, or `FOREGROUND_GUARD_DISABLE=1`) to silence legitimate
-prompts — a real foreground poll is friction worth keeping. Reach for those only
+findings — a real foreground poll is friction worth keeping. Reach for those only
 when the harness itself has subsumed the behavior.
 
 ## Make it stick
 
 Offer to paste the playbook below into the user's `CLAUDE.md` (or `AGENTS.md`) so
 future sessions follow these habits from the start — the guard can only attach
-advice to a prompt, so habits that avoid the prompt entirely have to live in
+advice to a block, so habits that avoid the block entirely have to live in
 project guidance. Only do so with the user's go-ahead.
 
 ```markdown
-## Avoiding foreground-guard prompts
+## Avoiding foreground-guard blocks
 
 This repo uses foreground-guard, a hook that guards the session's main-thread
-time. It prompts before a Bash call parks the main thread on a foreground wait or
-runs a known-slow command that its timeout would kill. To keep work flowing:
+time. It denies a Bash call that would park the main thread on a foreground wait
+or run a known-slow command that its timeout would kill (or prompts instead,
+under `action: ask`). To keep work flowing:
 
 - **Don't watch — snapshot.** Instead of streaming `gh run watch`, `gh pr checks
   --watch`, `kubectl logs -f`, `kubectl get -w`, `tail -f`, `journalctl -f`,

@@ -53,7 +53,7 @@ rather than treating it as zero friction.
 Either way, map what you find to a cause. The report's category names line up
 one-to-one with these:
 
-1. **A `$VAR`, `$(...)`, or leading `~` in a guarded file argument** — category
+1. **A `$VAR`, `$(...)`, or `~user` prefix in a guarded file argument** — category
    `expand`. The hook can't expand these, so it can't tell where the command
    lands — and neither could you at a prompt. It **denies** with the
    literal-path rewrite instead of asking, so this class costs the agent a
@@ -68,9 +68,8 @@ one-to-one with these:
    tracking; relative paths after it land in category `outside` instead,
    with the resolved absolute path named in the reason.)
 3. **A path that genuinely resolves outside the root** (including `../`
-   traversal, or temp files written to `/tmp`) — category `outside`. This is
-   the one that still **prompts**: only you can say whether the file is yours
-   to read. Reason carries "Outside-workspace path(s)".
+   traversal) — category `outside`. This is the one that still **prompts**:
+   only you can say whether the file is yours to read. Reason carries "Outside-workspace path(s)".
 
 Every blocking reason leads with `workspace-guard: ` — a **prompt** and a
 **deny** alike — and the category name follows it. So match the category name
@@ -99,7 +98,7 @@ above, and tell the user the specifics are unverified.)
 
 Which bullets to walk through, by category:
 
-- `expand` — the bullets on `$VAR`/`$(...)`/`~` in a guarded file argument, and
+- `expand` — the bullets on `$VAR`/`$(...)`/`~user` in a guarded file argument, and
   on preferring the Read, Grep, and Glob tools to bash `cat`/`grep`/`sed`.
 - `untracked` — the bullet on giving `cd` a literal target.
 - `outside` — the bullets on temp files, on out-of-tree dependency caches, and
