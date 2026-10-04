@@ -346,6 +346,50 @@ class WatchFormTests(unittest.TestCase):
             self.assertIsNone(decision, "expected defer for %r" % cmd)
 
 
+class SubstitutionTests(unittest.TestCase):
+    # bash runs a command substitution unquoted or inside double quotes, and
+    # the enclosing command waits on it (Q220).
+    BLOCKS = [
+        'echo "$(gh run watch 456)"',
+        'echo "`gh run watch 456`"',
+        'X="$(gh run watch 456)"',
+        'echo "$(echo "$(gh run watch 456)")"',
+        'echo "$(sleep 60)"',
+        # The shell expands it before `timeout` starts, so the wrap bounds
+        # nothing here.
+        'timeout 5 echo "$(gh run watch 456)"',
+        # An unquoted heredoc body expands, and its quotes are literal text.
+        "cat <<EOF\nx = '$(gh run watch 456)'\nEOF",
+        "cat <<EOF\ndon't wait: $(gh run watch 456)\nEOF",
+        'git commit -m "$(cat <<MSG\nnote $(gh run watch 456)\nMSG\n)"',
+    ]
+    DEFERS = [
+        "echo '$(gh run watch 456)'",
+        "cat <<'EOF'\nx = $(gh run watch 456)\nEOF",
+        'echo "$(sleep 2)"',
+        'echo "$(gh run watch 456)" &',
+        # The substitution runs inside the backgrounded job.
+        'echo "$(gh run watch 456)" & ls',
+        'echo $(gh run watch 456) & ls',
+        # A heredoc body is not paired with its segment, so a backgrounded one
+        # anywhere in the command leaves the body's substitutions alone.
+        "cat <<EOF > o & ls\n$(gh run watch 456)\nEOF",
+        'echo "$((1 + 2))"',
+        'git commit -m "$(cat <<\'MSG\'\nrun gh run watch 456, don\'t\nMSG\n)"',
+        'X="$(FOREGROUND_GUARD_OVERRIDE=wanted gh run watch 456)"',
+    ]
+
+    def test_substitutions_deny(self):
+        for cmd in self.BLOCKS:
+            decision, _ = run_hook(cmd)
+            self.assertEqual(decision, "deny", "expected deny for %r" % cmd)
+
+    def test_literal_or_backgrounded_substitutions_defer(self):
+        for cmd in self.DEFERS:
+            decision, _ = run_hook(cmd)
+            self.assertIsNone(decision, "expected defer for %r" % cmd)
+
+
 # ---------------------------------------------------------------------------
 # Class A end-to-end: loops, chains, sleeps
 # ---------------------------------------------------------------------------
@@ -925,6 +969,16 @@ class SlowCommandPositionTests(unittest.TestCase):
 
     def test_heredoc_body_mention_does_not_match(self):
         self.assert_mention("cat <<'EOF' > notes.md\nrun scripts/gate.sh\nEOF")
+
+    def test_substitution_runs_the_script(self):
+        # The shell runs a substitution before the command holding it, so a
+        # parse-only `bash -n` does not stop it either (Q220).
+        self.assert_runs('X="$(scripts/gate.sh)"')
+        self.assert_runs('echo "`scripts/gate.sh`"')
+        self.assert_runs('bash -n -c "$(scripts/gate.sh)"')
+        self.assert_runs("cat <<EOF\n$(scripts/gate.sh)\nEOF")
+        self.assert_mention("echo '$(scripts/gate.sh)'")
+        self.assert_mention("cat <<'EOF'\n$(scripts/gate.sh)\nEOF")
 
     def test_dot_star_prefix_opts_back_into_argument_matching(self):
         # The escape hatch for patterns that name an argument rather than a
