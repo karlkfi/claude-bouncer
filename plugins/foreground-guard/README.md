@@ -87,14 +87,17 @@ are parameters of the Bash call, which only the agent can re-issue. A deny's
 false positive costs the agent one retry; an ask's costs a person a context
 switch on every matching call, forever.
 
-The table below shows the decision with default config.
+The table below shows the decision with default config. The test suite drives
+every row through the hook; a row whose command cell is anything but
+backticked commands carries the exact payload in an HTML comment in its
+Decision cell.
 
 | Command | Decision |
 | --- | --- |
 | `gh pr checks 123` | defer |
 | `gh pr checks 123 --watch` | **deny** |
 | `gh run watch 456` | **deny** |
-| `gh run watch 456` with `run_in_background: true` | **deny** (still a poll — see [Exemptions](#exemptions)) |
+| `gh run watch 456` with `run_in_background: true` | **deny** (still a poll — see [Exemptions](#exemptions)) <!-- check: {"command": "gh run watch 456", "run_in_background": true} --> |
 | `gh run watch 456 &` | defer (detached) |
 | `timeout 30 gh run watch 456` | defer (explicitly bounded) |
 | `FOREGROUND_GUARD_OVERRIDE=demo gh run watch 456` | defer (see [the override](#the-override-escape-hatch)) |
@@ -115,13 +118,13 @@ The table below shows the decision with default config.
 | `sleep 30 & make build` | defer (sleep backgrounded) |
 | `bash -c 'while true; do sleep 5; done'` | **deny** (recursed) |
 | `bash poll-forever.sh` | defer (script files stay opaque) |
-| `cat <<EOF` … `tail -f x` … `EOF` | defer (heredoc body is data) |
+| `cat <<EOF` … `tail -f x` … `EOF` | defer (heredoc body is data) <!-- check: {"command": "cat <<EOF\ntail -f x\nEOF"} --> |
 | `X="$(gh run watch 456)"` | **deny** (the substitution runs first, quoted or not) |
 | `echo "$(gh run watch 456)" & ls` | defer (substitution backgrounded with its command) |
 | `echo '$(gh run watch 456)'` | defer (single quotes keep it literal) |
-| `make test-race` (configured min 600000 ms, default timeout) | **deny** (names the minimum) |
-| `make test-race` with `timeout: 600000` | defer |
-| `make test-race` with `run_in_background: true` | defer |
+| `make test-race` (configured min 600000 ms, default timeout) | **deny** (names the minimum) <!-- check: {"command": "make test-race", "config": {"slow": {"commands": {"make": {"test-race": 600000}}}}} --> |
+| `make test-race` with `timeout: 600000` | defer <!-- check: {"command": "make test-race", "timeout_ms": 600000, "config": {"slow": {"commands": {"make": {"test-race": 600000}}}}} --> |
+| `make test-race` with `run_in_background: true` | defer <!-- check: {"command": "make test-race", "run_in_background": true, "config": {"slow": {"commands": {"make": {"test-race": 600000}}}}} --> |
 
 ## Install
 

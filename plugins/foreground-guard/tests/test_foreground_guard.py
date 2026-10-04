@@ -18,6 +18,7 @@ Three layers:
 """
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -1288,6 +1289,80 @@ class RobustnessTests(unittest.TestCase):
         for cmd in (WatchFormTests.BLOCKS + WatchFormTests.DEFERS
                     + ["sleep 600", "make test-race"]):
             run_hook(cmd, config=SLOW_CFG)
+
+
+# ---------------------------------------------------------------------------
+# README decision table
+# ---------------------------------------------------------------------------
+
+TABLE_CHECK = re.compile(r'\s*<!--\s*check:\s*(\{.*\})\s*-->\s*$')
+COMMAND_CELL = re.compile(r'`[^`]+`(?:, `[^`]+`)*')
+TABLE_ROW = re.compile(r' {0,3}\|')
+
+
+def readme_decision_rows():
+    """(rows, stray) for the README decision table. Each row is (line,
+    [run_hook kwargs], expected decision, and for a row carrying a check
+    comment, its cell's first backticked fragment, which the comment's command
+    must contain). A command cell of backticked commands alone is read as those
+    commands with no other payload. Any other row carries its payload in a
+    `<!-- check: {...} -->` comment at the end of its Decision cell, and a row
+    with neither comes back with an empty payload list.
+
+    Every line up to the next `## ` heading that GitHub would render as a row
+    -- up to three spaces of indent -- is read, so an indented row cannot end
+    the parse early. `stray` holds the row-shaped lines that follow a gap: a
+    blank or other line ends the table, so they render as something else and
+    are checked by nothing."""
+    with open(REPO / "README.md", encoding="utf-8") as f:
+        lines = f.read().split("\n")
+    start = lines.index("| Command | Decision |") + 2
+    rows, stray, ended = [], [], False
+    for line in lines[start:]:
+        if line.startswith("## "):
+            break
+        if not TABLE_ROW.match(line):
+            ended = True
+            continue
+        if ended:
+            stray.append(line)
+            continue
+        cmd_cell, dec_cell = [c.strip() for c in
+                              re.split(r'(?<!\\)\|', line.strip())[1:-1]]
+        m = TABLE_CHECK.search(dec_cell)
+        shown = ""
+        if m:
+            payloads = [json.loads(m.group(1))]
+            dec_cell = dec_cell[:m.start()]
+            first = re.search(r'`([^`]+)`', cmd_cell)
+            shown = first.group(1) if first else ""
+        elif COMMAND_CELL.fullmatch(cmd_cell):
+            payloads = [{"command": c.replace("\\|", "|")}
+                        for c in re.findall(r'`([^`]+)`', cmd_cell)]
+        else:
+            payloads = []
+        word = dec_cell.split()[0].strip("*")
+        rows.append((line, payloads, None if word == "defer" else word, shown))
+    return rows, stray
+
+
+class DecisionTableTests(unittest.TestCase):
+    def test_every_row_matches_the_hook(self):
+        rows, stray = readme_decision_rows()
+        self.assertEqual(stray, [], "rows after a gap end up outside the table")
+        # A renamed header or a broken parse would otherwise pass on nothing.
+        self.assertGreaterEqual(len(rows), 20)
+        for row, payloads, want, shown in rows:
+            with self.subTest(row=row):
+                self.assertTrue(payloads, "row is neither plain backticked "
+                                "commands nor carries a check comment")
+                for kw in payloads:
+                    kw = dict(kw)
+                    cmd = kw.pop("command")
+                    # A check comment must drive the command its row shows.
+                    self.assertIn(shown, cmd)
+                    d, _ = run_hook(cmd, **kw)
+                    self.assertEqual(d, want)
 
 
 # ---------------------------------------------------------------------------
