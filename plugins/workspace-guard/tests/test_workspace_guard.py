@@ -8403,6 +8403,10 @@ class WrappedCommandTests(unittest.TestCase):
         self._decision("command cd / && cat q219-fake-target", "ask")
         self._decision("builtin cd / && cat q219-fake-target", "ask")
         self._decision("env cd / && cat in.txt", "allow")
+        # The same holds where the read is a substitution body.
+        self._decision('command cd / && echo "$(cat q219-fake-target)"', "ask")
+        self._decision('builtin cd / && echo `cat q219-fake-target`', "ask")
+        self._decision('env cd / && echo "$(cat in.txt)"', "defer")
 
     def test_env_chdir_moves_the_command_it_runs(self):
         self._decision("env -C / cat q219-fake-target", "ask")

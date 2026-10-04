@@ -3850,7 +3850,11 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
             # fail-open. Both helpers drop a leading run only, and `restored`
             # is built element-wise from `g`, so the count indexes it exactly.
             head = len(g) - len(strip_env_prefix(strip_sh_keywords(g)))
-            kind, arg = classify_cd(restored[head:])
+            # A `cd` behind `command` or `builtin` moves the shell; behind a
+            # separate program it moves nothing (Q219).
+            wrap = peel_wrappers(restored[head:])
+            kind, arg = (None, None) if wrap.external \
+                else classify_cd(wrap.argv)
             if kind is not None:
                 cwd, unknown = apply_cd(kind, arg, cwd, unknown)
             # Recorded after this group's own `cd`, so a `cd $d` cannot read an
