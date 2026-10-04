@@ -76,10 +76,9 @@ REASON_DENY_AMBIENT = (
     "Mutating commands must pin their target explicitly: add kubectl --context "
     "<ctx> and retry. To run against the ambient target anyway, prefix the "
     "command with PROD_GUARD_OVERRIDE=<reason> for a confirmation prompt.")
-# deny_switch and ask_switch both carry 'is shared by every session', so only
-# deny_switch's 'Switching shared state is blocked' separates them and the
-# CATEGORY_PATTERNS iteration order decides which wins. Both are pinned against
-# live output below.
+# deny_switch and ask_switch both carry 'is shared by every session', so each
+# category keys on the clause only its own reason has. Both are pinned against
+# live output below, and no reason may match two signatures.
 REASON_DENY_SWITCH = (
     "prod-guard: `kubectx bluefin` repoints the shared kubeconfig "
     "current-context, which is shared by every session on this machine — "
@@ -271,6 +270,17 @@ class LiveCategoryTests(unittest.TestCase):
             with self.subTest(category=want):
                 self.assertEqual(
                     fr.category_of(self._live(command, home_kwargs)), want)
+
+    def test_signatures_mutually_exclusive(self):
+        # category_of takes the first match, so a reason matching two
+        # signatures is categorized by dict order alone -- reorder the dict and
+        # every such decision moves category with every test still green.
+        for want, command, home_kwargs in LIVE_CASES:
+            with self.subTest(category=want):
+                reason = self._live(command, home_kwargs)
+                hits = [c for c, rx in fr.CATEGORY_PATTERNS.items()
+                        if rx.search(reason)]
+                self.assertEqual(hits, [want])
 
     def test_every_pattern_has_a_live_case(self):
         # A pattern added without a command that provokes it is a pattern
