@@ -315,6 +315,17 @@ class WatchFormTests(unittest.TestCase):
         "stdbuf -oL tail -f app.log",
         "stdbuf -o L tail -f app.log",
         "exec -a x gh run watch 456",
+        # A bundled or abbreviated sudo/env value flag takes its value (Q221).
+        "sudo -nu root gh run watch 456",
+        "sudo -bu root gh run watch 456",
+        "sudo -nD /tmp gh run watch 456",
+        "sudo --us root gh run watch 456",
+        "env -iu FOO gh run watch 456",
+        "env -iC / gh run watch 456",
+        "env -P /bin gh run watch 456",
+        "env -ia x gh run watch 456",
+        "env --un FOO gh run watch 456",
+        "stdbuf --out L tail -f app.log",
         "echo start && gh run watch 456",
         "bash -c 'tail -f app.log'",
     ]
@@ -960,6 +971,25 @@ class SlowCommandPositionTests(unittest.TestCase):
         # An attached value ends the walk: `-io` is `-i o`, so stdbuf runs `L`.
         self.assert_mention("stdbuf -io L scripts/gate.sh")
         self.assert_mention("stdbuf -o L cat scripts/gate.sh")
+
+    def test_sudo_and_env_flag_value_is_not_the_command(self):
+        # The sudo and env loops share that walk (Q221): a bundle ending in a
+        # value flag takes the next word, an attached value takes none, and a
+        # unique prefix of a long value flag is that flag.
+        for prefix in ("sudo -nu root", "sudo -uroot", "sudo -T 60",
+                       "sudo --user=root", "sudo --us root", "sudo -h",
+                       "env -iu FOO", "env -iC /", "env -P /bin", "env -a x",
+                       "env -uFOO", "env --unset=FOO", "env --ch /",
+                       "/usr/bin/time --form %e", "stdbuf --o L"):
+            with self.subTest(prefix=prefix):
+                self.assert_runs(prefix + " scripts/gate.sh")
+        # The value flag eats the script, so it is not what runs.
+        for prefix in ("sudo -nu", "env -iu", "env --un", "stdbuf --out L cat"):
+            with self.subTest(prefix=prefix):
+                self.assert_mention(prefix + " scripts/gate.sh")
+        # `--c` prefixes four of sudo's value flags, which sudo rejects.
+        self.assertEqual(guard.flag_arity(
+            "--c", guard.WRAPPER_VALUE_FLAGS['sudo']), 1)
 
     def test_plus_options_still_run(self):
         # bash takes the `+` forms at invocation, and `+o noexec` turns
