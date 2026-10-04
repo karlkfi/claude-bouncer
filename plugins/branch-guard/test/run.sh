@@ -2566,11 +2566,17 @@ for w in 'env' 'env -i' 'env -' 'env FOO=1' 'env -u FOO' 'env -uFOO' \
          'timeout --kill-after=2 60' 'timeout --kill 2 60' 'timeout -- 60' \
          'stdbuf -o0' 'stdbuf -o 0' 'setsid -w' 'time' 'time -p' 'exec' \
          'exec -a x' 'sudo' 'sudo -u root' 'sudo -uroot' 'sudo -nu root' \
-         'sudo -r role -t type' 'sudo --us root' 'sudo FOO=1' '/usr/bin/env' \
+         'sudo -r role -t type' 'sudo --us root' 'sudo FOO=1' \
          'sudo -u x env A=1 timeout 5 nohup'; do
   check "[wrap] $w git push --force origin main -> ask" ask \
     "$(decision_for "$(bash_payload "$w git push --force origin main")" "$WRAP")"
 done
+#     A wrapper named by absolute path. The command goes to jq on stdin: as an
+#     argument starting with `/`, Git Bash rewrites it to a Windows path before
+#     jq sees it, so the hook would be judging `C:/Program Files/…`.
+check "[wrap] /usr/bin/env git push --force origin main -> ask" ask \
+  "$(decision_for "$(printf '%s' '/usr/bin/env git push --force origin main' \
+     | jq -Rsc '{tool_name: "Bash", tool_input: {command: .}}')" "$WRAP")"
 #     `env -S` carries the command inside its value, in each spelling.
 for s in "-S 'git push --force origin main'" "-S'git push --force origin main'" \
          "--split-string='git push --force origin main'"; do
