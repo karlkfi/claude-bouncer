@@ -8251,6 +8251,187 @@ class ShellCBodyAnalysisTests(unittest.TestCase):
         self._decision("cd - && sh -c 'cat passwd'", "defer")
 
 
+class PeelWrappersTests(unittest.TestCase):
+    """`peel_wrappers` finds the command behind a wrapper by its grammar (Q219).
+
+    Each spelling was driven on bash 5.3.15 against GNU coreutils 9.11 and the
+    macOS `env`, except GNU `xargs`'s `-i` and `-a`, which are from its manual.
+    """
+
+    def peel(self, cmd):
+        return guard.peel_wrappers(shlex.split(cmd))
+
+    def assertRuns(self, cmd, argv, opaque=False):
+        p = self.peel(cmd)
+        self.assertEqual(p.argv, argv, cmd)
+        self.assertEqual(p.opaque, opaque, cmd)
+
+    def test_each_wrapper_and_its_value_spellings(self):
+        cat = ["cat", "f"]
+        for cmd in ("env cat f", "/usr/bin/env cat f", "nohup cat f",
+                    "nice cat f", "nice -n5 cat f", "nice -n 5 cat f",
+                    "nice -5 cat f", "nice --5 cat f", "nice --adjustment=5 cat f",
+                    "timeout 5 cat f", "timeout -k5 10 cat f",
+                    "timeout -k 5 10 cat f", "timeout --kill-after=5 10 cat f",
+                    "timeout --kill-after 5 10 cat f", "timeout --ki=5 10 cat f",
+                    "timeout -sKILL 5 cat f", "timeout -vk 5 10 cat f",
+                    "timeout -fv -sKILL 5 cat f", "stdbuf -oL -eL cat f",
+                    "stdbuf --output=L cat f", "setsid -fw cat f",
+                    "ionice -c3 cat f", "time cat f", "time -o log cat f",
+                    "command cat f", "command -p cat f", "builtin cat f",
+                    "exec cat f", "exec -a name cat f", "exec -cl cat f"):
+            self.assertRuns(cmd, cat)
+
+    def test_end_of_options(self):
+        for cmd in ("env -- cat f", "nice -- cat f", "timeout -- 5 cat f",
+                    "nohup -- cat f"):
+            self.assertRuns(cmd, ["cat", "f"])
+
+    def test_env_operands_and_flags(self):
+        # env(1) assigns from any operand holding `=`, whatever bash would make
+        # of the name (Q218).
+        for cmd in ("env A=1 cat f", "env 'a b=c' cat f", "env FOO[0]=x cat f",
+                    "env 1=x cat f", "env - cat f", "env -iu FOO cat f",
+                    "env -i0v cat f", "env -S 'cat f'", "env -S'cat f'",
+                    "env --split-string='cat f'", "env -S 'A=1 cat' f"):
+            self.assertRuns(cmd, ["cat", "f"])
+
+    def test_env_chdir_is_recorded_in_order(self):
+        p = self.peel("env -C a --chdir=b cat f")
+        self.assertEqual((p.argv, p.chdirs), (["cat", "f"], ["a", "b"]))
+
+    def test_nested_wrappers(self):
+        self.assertRuns("nice nohup env A=1 timeout 5 cat f", ["cat", "f"])
+        self.assertTrue(self.peel("env cat f").external)
+        self.assertFalse(self.peel("command builtin cd d").external)
+
+    def test_xargs_appends_its_input(self):
+        for cmd in ("xargs cat f", "xargs -0r cat f", "xargs -0n1 cat f",
+                    "xargs -I{} cat f", "xargs -i cat f", "xargs -i{} cat f",
+                    "xargs -- cat f"):
+            p = self.peel(cmd)
+            self.assertEqual((p.argv, p.opaque, p.appends),
+                             (["cat", "f"], True, True), cmd)
+
+    def test_files_the_wrapper_opens(self):
+        self.assertEqual(self.peel("time -o log make").files,
+                         [("log", False, 0)])
+        self.assertEqual(self.peel("xargs --arg-file=list cat").files,
+                         [("list", True, 0)])
+        self.assertEqual(self.peel("env -C d time --output=log make").files,
+                         [("log", False, 1)])
+
+    def test_a_wrapper_that_runs_nothing(self):
+        for cmd in ("command -v cat f", "command -V cat", "ionice -p 1 cat f",
+                    "timeout --help cat f", "env --version", "env", "nohup",
+                    "timeout -k"):
+            self.assertRuns(cmd, [])
+
+    def test_lost_grammar_is_never_guessed_past(self):
+        # A flag outside the row, or a word the shell rewrites, could take any
+        # number of the words after it -- so the command is the first later
+        # word naming one the hook judges, and the peel is marked opaque.
+        for cmd in ("timeout --bogus 5 cat f", "timeout -Z 5 cat f",
+                    "timeout $T cat f", "nice -n $N cat f", "env $OPTS cat f",
+                    "timeout --verbose=1 5 cat f"):
+            self.assertRuns(cmd, ["cat", "f"], opaque=True)
+        # env splits `-S` by its own escape rules, so the scan reads the words.
+        self.assertRuns("env -S 'cat \\f'", ["cat", "\\f"], opaque=True)
+
+    def test_a_lost_env_flag_may_have_been_a_chdir(self):
+        self.assertEqual(self.peel("env --bogus cat f").chdirs, [None])
+        self.assertEqual(self.peel("env -C \"$D\" cat f").chdirs, [None])
+        # Past the options, an assignment cannot move the cwd.
+        self.assertEqual(self.peel('env A="$X" cat f').chdirs, [])
+
+
+class WrappedCommandTests(unittest.TestCase):
+    """A guarded command behind a wrapper gets its bare decision (Q219).
+
+    Measured at 442c86e, every `ask` row below came back silent: the wrapper
+    took the command head and the `SPEC` lookup missed. The two `cd` rows came
+    back `allow`, because the `cd` was never tracked. Targets are synthetic
+    (repo rule); nothing here is ever executed.
+    """
+
+    WRAPPED = ("env cat /q219-fake-target", "env A=1 cat /q219-fake-target",
+               "nohup cat /q219-fake-target", "nice cat /q219-fake-target",
+               "timeout 5 cat /q219-fake-target",
+               "command cat /q219-fake-target",
+               "stdbuf -o0 cat /q219-fake-target",
+               "xargs cat /q219-fake-target",
+               "exec cat /q219-fake-target",
+               "/usr/bin/time cat /q219-fake-target",
+               "nohup cp in.txt /q219-fake-target",
+               "timeout --bogus 5 cat /q219-fake-target")
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = os.path.realpath(self._tmp.name)
+        os.mkdir(os.path.join(self.workspace, "sub"))
+        for name in ("in.txt", os.path.join("sub", "in.txt")):
+            with open(os.path.join(self.workspace, name), "w") as f:
+                f.write("hello\n")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _decision(self, cmd, expected, permission_mode=None, escalate=None):
+        out = run_hook(cmd, self.workspace, project_dir=self.workspace,
+                       permission_mode=permission_mode,
+                       env_extra={"WORKSPACE_GUARD_ESCALATE": escalate})
+        if expected == "defer":
+            self.assertIsNone(out, f"expected defer for {cmd!r}, got {out!r}")
+            return None
+        self.assertIsNotNone(out, f"expected a decision, got defer for: {cmd!r}")
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"],
+                         expected, f"expected {expected!r} for {cmd!r}")
+        return out["hookSpecificOutput"]["permissionDecisionReason"]
+
+    def test_an_outside_operand_behind_a_wrapper_asks(self):
+        for cmd in self.WRAPPED:
+            self.assertIn("/q219-fake-target", self._decision(cmd, "ask"), cmd)
+
+    def test_an_in_workspace_command_behind_a_wrapper_allows(self):
+        for cmd in ("env cat in.txt", "nohup cat in.txt",
+                    "timeout 5 grep x in.txt", "env -C sub cat in.txt"):
+            self._decision(cmd, "allow")
+
+    def test_a_wrapped_cd_moves_only_when_the_shell_runs_it(self):
+        # `command` and `builtin` run the shell's own `cd`; `env cd` runs a
+        # separate program, which moves nothing the next command sees.
+        self._decision("command cd / && cat q219-fake-target", "ask")
+        self._decision("builtin cd / && cat q219-fake-target", "ask")
+        self._decision("env cd / && cat in.txt", "allow")
+
+    def test_env_chdir_moves_the_command_it_runs(self):
+        self._decision("env -C / cat q219-fake-target", "ask")
+        self._decision('env -C "$D" cat in.txt', "deny")
+
+    def test_a_file_the_wrapper_opens_is_checked(self):
+        # The path, not the keyword: bash's `time` takes no `-o`.
+        self._decision("/usr/bin/time -o /q219-fake-target make", "ask")
+        self._decision("xargs -a /q219-fake-target cat", "ask")
+
+    def test_a_wrapped_kill_is_judged(self):
+        self._decision("timeout 5 pkill node", "deny")
+
+    def test_xargs_input_withholds_allow_without_escalating(self):
+        # Its operands arrive on stdin, so the hook cannot vouch -- and like the
+        # interpreter, it escalates only under `all`.
+        for cmd in ("xargs cat in.txt", "git ls-files | xargs grep foo"):
+            self._decision(cmd, "defer")
+            self._decision(cmd, "defer", permission_mode="auto")
+        reason = self._decision("cat in.txt; xargs cat in.txt", "ask",
+                                permission_mode="auto", escalate="all")
+        self.assertIn("command wrapper", reason)
+
+    def test_the_wrapper_label_does_not_mask_a_kill(self):
+        reason = self._decision("cat in.txt; xargs cat in.txt; kill $pid", "ask",
+                                permission_mode="auto")
+        self.assertIn("`kill` whose targets it cannot see", reason)
+
+
 class SiblingSessionScratchE2ETests(unittest.TestCase):
     """#61 end-to-end: read-only guarded commands on a SAME-project sibling
     session's Claude scratch are allowed (the dispatcher-tails-worker case);

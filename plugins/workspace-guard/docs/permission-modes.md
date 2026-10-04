@@ -51,9 +51,9 @@ nothing about. That baseline decides which lever does any work.
 The consequence worth internalizing: **`defer` is a protective decision only in
 `manual`, `dontAsk`, and `plan`.** Every "the hook declines to vouch, so it
 defers" mechanism — the signalling-command suppression, the shell `-c`
-suppression, the interpreter suppression — restores the operator's own
-permission rules, which is worth exactly what those rules are worth in that
-mode. In `auto`, `acceptEdits`, and `bypassPermissions` they are worth nothing:
+suppression, the interpreter suppression, the wrapper suppression — restores
+the operator's own permission rules, which is worth exactly what those rules
+are worth in that mode. In `auto`, `acceptEdits`, and `bypassPermissions` they are worth nothing:
 the fallback is the pre-approval the suppression was trying to withhold.
 
 Q74 closed that for the two suppressions naming a construct this guard already
@@ -64,8 +64,10 @@ judges. A `sh -c` body it could not reach, and a kill it could not scope, now
 inert by default and is the one this paragraph still describes unchanged:
 escalating it costs 4.67% of all commands against 0.09% for the other two
 (measured 2026-09-09 over 89,133 corpus commands), and an interpreter's own
-file access is a documented non-goal. `WORKSPACE_GUARD_ESCALATE` moves that
-line in either direction; see the README's Configuration section.
+file access is a documented non-goal. The wrapper suppression (Q219) — an
+`xargs`, whose operands arrive on stdin, or a wrapper flag the hook cannot read
+— stays inert beside it. `WORKSPACE_GUARD_ESCALATE` moves that line in either
+direction; see the README's Configuration section.
 
 **Do not read the escalation as a reason to treat the three modes alike.** They
 share one property — a defer runs — and differ on the one that picks the

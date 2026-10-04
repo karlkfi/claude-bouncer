@@ -249,6 +249,10 @@ old one. A different project's scratch still asks entirely.
 | `sh -c 'cat /etc/hosts'` · `timeout 5 bash -c 'cat /etc/hosts'` | **ask** |
 | `sh -c 'pkill -f ginkgo'` (kill inside a body) | **deny** |
 | `docker exec c sh -c 'cat /var/lib/x'` · `ssh h sh -c '…'` | defer |
+| `env cat /etc/hosts` · `timeout 5 cat /etc/hosts` · `nohup cp in.txt /etc/x` | **ask** |
+| `command cd /etc && cat hosts` (the shell's own `cd`, behind `command`) | **ask** |
+| `nohup cat in.txt` · `env -C sub cat in.txt` | allow |
+| `git ls-files \| xargs grep foo` (xargs appends its input) | defer |
 | `cat in.txt; sh -c 'cat in.txt'` (clean body, still no vouch) | defer |
 | `ps aux \| grep ginkgo` (no kill in the string) | allow |
 | `cat in.txt; bash --version` (shell, no `-c` body) | allow |
@@ -1535,7 +1539,7 @@ escalating would buy a prompt and no protection.
 
 | Env var | Default | Effect |
 | --- | --- | --- |
-| `WORKSPACE_GUARD_ESCALATE` | `scoped` | `scoped` escalates a `sh -c` body and an unscoped kill. `all` adds interpreter code. `off` restores the silence every mode had before. Any other value falls back to `scoped`. |
+| `WORKSPACE_GUARD_ESCALATE` | `scoped` | `scoped` escalates a `sh -c` body and an unscoped kill. `all` adds interpreter code and a command wrapper whose operands it cannot all read. `off` restores the silence every mode had before. Any other value falls back to `scoped`. |
 
 **Interpreter code is left deferring by default, and the cost is why.** Replaying
 89,133 commands from 1,962 local session transcripts through the hook's own
@@ -1916,6 +1920,19 @@ final output.
   where a relative path in it would resolve against a stale directory. In all
   those cases the string still *defers* — a body never earns the blanket `allow`,
   analyzed or not.
+- **A command wrapper is read through when the hook knows its grammar.** `env`,
+  `nice`, `nohup`, `timeout`, `stdbuf`, `setsid`, `ionice`, `time`, `xargs`,
+  `exec`, `command` and `builtin` are peeled off by their own option tables, so
+  the command behind them gets the decision it would get typed bare, and a `cd`
+  behind `command` or `builtin` moves the tracked cwd while one behind `env`
+  does not. A flag outside a wrapper's table, or an option word the shell
+  expands, is never guessed past: the command is taken from the first later word
+  the hook judges, and the string defers rather than allowing, because a wrong
+  guess about where the command starts is how a value gets read as the command.
+  `xargs` defers for a second reason, that its operands arrive on stdin. Those
+  two defers escalate only under `WORKSPACE_GUARD_ESCALATE=all`. Wrappers outside
+  that list — `sudo`, `doas`, `caffeinate`, `chrt`, `taskset`, `flock` — are not
+  peeled, so a guarded command behind one defers; nor is bash's `time -p`.
 - **The PowerShell tool is guarded for a known set of cmdlets, and only those.**
   Claude Code ships two shell tools. Which one a Windows session gets depends on
   whether Git for Windows is installed — without it there is no Bash tool and
