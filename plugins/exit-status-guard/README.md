@@ -171,8 +171,9 @@ make check; kubectl rollout status web
 
 The last two matter most. Gate patterns are matched against the **head of a
 shell segment** — its command word and arguments, after leading `VAR=val`
-assignments and `bash`/`sudo`/`time`-style wrappers are peeled — never against
-the raw command string. A pattern matched against the raw string also fires on
+assignments and `bash`/`sudo`/`time`-style wrappers are peeled, along with the
+options of a command wrapper (`sudo -u root`, `stdbuf -oL`) — never against the
+raw command string. A pattern matched against the raw string also fires on
 every `git show`, `grep`, and commit message that merely *names* the command. A
 heredoc body is data, so a piped gate quoted in one is text; no rule handles that
 case, the parser does.

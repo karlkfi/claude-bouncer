@@ -22,9 +22,10 @@ that is the only form a PreToolUse hook can see (it reads the command string,
 and the session cannot set a variable in the hook's own environment).
 
 Gate patterns are matched against the HEAD of a shell segment, after leading
-`VAR=val` assignments and `bash`/`sudo`/`time`-style wrappers are peeled --
-never against the raw command string. A raw-string match also fires on every
-`git show`, `grep`, and commit message that merely NAMES the command.
+`VAR=val` assignments and `bash`/`sudo`/`time`-style wrappers are peeled, along
+with the options of a command wrapper such as `sudo` -- never against the raw
+command string. A raw-string match also fires on every `git show`, `grep`, and
+commit message that merely NAMES the command.
 
 The shell analysis here -- heredoc bodies, comments, quote state, command
 substitution, operator runs -- is ported from claude-workspace-guard's
@@ -73,6 +74,37 @@ WRAPPERS = frozenset({'sudo', 'nohup', 'command', 'exec', 'bash', 'sh', 'zsh',
 # does for both, and a guard answering them differently is wrong whichever
 # answer is right.
 ASSIGN_WRAPPERS = frozenset({'env', 'sudo'})
+
+# Wrapper flags that take the next word as their value when written last in a
+# word: `sudo -u root`, `stdbuf -o L`, and the bundled `env -iu FOO`. Any other
+# option comes off one word at a time, so a value-taking flag missing here
+# leaves its value as the command word -- a missed deny, which is the direction
+# this guard already takes on parse uncertainty. sudo's `-h` spells both
+# `--help` and `--host`, so it is held out, as prod-guard holds it out (Q158).
+WRAPPER_VALUE_FLAGS = {
+    'sudo': frozenset({'-C', '--close-from', '-D', '--chdir', '-g', '--group',
+                       '-p', '--prompt', '-R', '--chroot',
+                       '-T', '--command-timeout', '-u', '--user'}),
+    'env': frozenset({'-u', '--unset', '-C', '--chdir', '-P',  # -P is BSD's
+                      '-S', '--split-string'}),
+    'exec': frozenset({'-a'}),
+    'stdbuf': frozenset({'-i', '--input', '-o', '--output', '-e', '--error'}),
+}
+
+# Options that make a wrapper run no command, so the words behind it are names
+# rather than a gate: `command -v make | head` looks make up and runs nothing.
+# Short letters bundle (`sudo -kl` lists). sudo's lowercase `-k` is absent
+# because it runs the command when given one.
+RUN_NOTHING = {
+    'command': (frozenset('vV'), frozenset()),
+    'sudo': (frozenset('lveKUV'),
+             frozenset({'--list', '--validate', '--edit', '--remove-timestamp',
+                        '--other-user', '--version'})),
+}
+
+# Shells take options that mean something else (`-e`, `-o pipefail`, `-c`), so
+# only the shell word itself is peeled.
+SHELL_WRAPPERS = frozenset({'bash', 'sh', 'zsh'})
 
 # A segment: the tokens of one simple command, the operator run that follows it,
 # and its paren-nesting depth. `post_ops` is a tuple rather than a single token
@@ -240,14 +272,56 @@ def split_segments(tokens):
     return segs
 
 
+def wrapper_operands(wrapper, args):
+    """``args`` past the wrapper's own options, or None when one of them puts
+    the wrapper in a mode that runs nothing.
+
+    A short word is walked a character at a time, and the walk stops at the
+    first value-taking flag, because the rest of the word is its value:
+    `sudo -uKarl` names a user and is not `-K`.
+    """
+    if wrapper in SHELL_WRAPPERS:
+        return args
+    value_flags = WRAPPER_VALUE_FLAGS.get(wrapper, frozenset())
+    quiet, quiet_long = RUN_NOTHING.get(wrapper, (frozenset(), frozenset()))
+    while args and args[0].startswith('-'):
+        tok = args[0]
+        if tok == '--':
+            return args[1:]
+        if tok == '-':
+            # A lone `-` is `env -i`; to any other wrapper it is an operand.
+            if wrapper != 'env':
+                break
+            args = args[1:]
+            continue
+        if tok.startswith('--'):
+            if tok.split('=', 1)[0] in quiet_long:
+                return None
+            args = args[2 if tok in value_flags else 1:]
+            continue
+        step = 1
+        for pos, char in enumerate(tok[1:], start=2):
+            if char in quiet:
+                return None
+            if '-' + char in value_flags:
+                step = 2 if pos == len(tok) else 1
+                break
+        args = args[step:]
+    return args
+
+
 def peel_wrappers(tokens):
-    """Strip reserved words, inline assignments, and wrapper commands, in the
-    order bash resolves them, until the real command word is first."""
+    """Strip reserved words, inline assignments, and wrapper commands with
+    their options, in the order bash resolves them, until the real command
+    word is first."""
     while True:
         tokens = strip_env_prefix(strip_sh_keywords(tokens))
         if tokens and os.path.basename(tokens[0]) in WRAPPERS:
             wrapper = os.path.basename(tokens[0])
-            tokens = tokens[1:]
+            rest = wrapper_operands(wrapper, tokens[1:])
+            if rest is None:
+                return tokens
+            tokens = rest
             if wrapper in ASSIGN_WRAPPERS:
                 # Operand position, not command position: see ASSIGN_WRAPPERS.
                 while tokens and ASSIGNMENT_RE.match(tokens[0]):
