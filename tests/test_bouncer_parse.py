@@ -487,6 +487,8 @@ class SubscriptAssignmentTests(unittest.TestCase):
     read for whether f's contents printed; 3.2.57 agrees on every row. The
     brackets match by depth, so `FOO[a[0]]=x` is one subscript and the first
     `]` at depth 0 closes: `FOO[a]b]=x` and `FOO[]]=x` are command names.
+    An unclosed `[` runs nothing at all: both bashes reject the whole string
+    (`unexpected EOF while looking for matching ']'`, rc 2).
     """
 
     PEELS = ('FOO[0]=x', 'FOO[0]+=x', 'FOO[]=x', 'FOO[a]=x', 'FOO[a[0]]=x',
@@ -494,12 +496,13 @@ class SubscriptAssignmentTests(unittest.TestCase):
              'FOO[i+1]=x', 'FOO[0]=', 'FOO[[0]]=x', 'FOO[a=b]=x', '_[0]=x',
              'F1[0]=x', 'FOO[0]==', 'FOO[$i]=x', 'FOO[${i}]=x',
              'FOO["0"]=x', "FOO['a']=x")
-    RUNS_A_COMMAND = ('FOO[a]b]=x', 'FOO[]]=x', 'FOO[0=x', 'FOO[a[b]=x',
+    RUNS_A_COMMAND = ('FOO[a]b]=x', 'FOO[]]=x',
                       '0FOO[0]=x', "'FOO[0]=x'", '"FOO[0]=x"', r'FOO\[0]=x',
                       "F'O'O[0]=x", 'FOO[0]"=x"', r'FOO[0]\=x', "'FOO'[0]=x",
                       'FOO"[0]"=x',
                       'FOO[0]x=y', 'FOO[0]+x=y', 'FOO[0]', '[0]=x',
                       'FOO[0][1]=x')
+    SYNTAX_ERRORS = ('FOO[0=x', 'FOO[a[b]=x')
 
     def test_a_subscripted_prefix_is_peeled(self):
         for word in self.PEELS:
@@ -509,6 +512,14 @@ class SubscriptAssignmentTests(unittest.TestCase):
 
     def test_a_word_bash_runs_as_a_command_is_not_peeled(self):
         for word in self.RUNS_A_COMMAND:
+            with self.subTest(word=word):
+                toks = bp.lex(word + ' cat f')
+                self.assertEqual(toks, bp.strip_env_prefix(toks))
+
+    def test_an_unclosed_subscript_is_not_peeled(self):
+        # bash runs nothing here; reading the word as a command name keeps
+        # every later word in view, which errs toward more checking.
+        for word in self.SYNTAX_ERRORS:
             with self.subTest(word=word):
                 toks = bp.lex(word + ' cat f')
                 self.assertEqual(toks, bp.strip_env_prefix(toks))
@@ -575,7 +586,8 @@ class AssignmentTests(unittest.TestCase):
 
     The table is bash's own answer, taken on 5.3.15 with
     ``bash -c "<word>; printf '[%s]' \"$SP\""``: a set variable prints its
-    value, an unset one prints ``[]`` after a ``command not found``. Quoting
+    value, an unset one prints ``[]`` and ``SP=/x: No such file or directory``
+    -- the word holds a `/`, so bash runs it as a path. Quoting
     anywhere up to and including the ``=`` disarms the assignment; quoting
     after it is ordinary, which is how a break-glass reason with a space in it
     is written.
@@ -645,10 +657,11 @@ class ReservedWordTests(unittest.TestCase):
 
     Measured on bash 5.3.15 with ``cd /tmp; <word> cd /etc; pwd``. The plain
     keyword changes directory (``time``, ``!``) or opens a compound command;
-    every quoted spelling prints ``<word>: command not found`` and leaves the
-    shell in ``/tmp``, because the ``cd`` is an argument to a program that does
-    not exist. ``\\if`` is the case a ``.quotes`` check would miss: it carries
-    no quote character and is still not the keyword.
+    every quoted spelling leaves the shell in ``/tmp``, because the ``cd`` is an
+    argument to a program: ``<word>: command not found`` for all but ``'time'``,
+    which finds macOS's ``/usr/bin/time`` and runs ``cd`` in a child (3.2.57
+    agrees on every row). ``\\if`` is the case a ``.quotes`` check would miss:
+    it carries no quote character and is still not the keyword.
     """
 
     RUNS_A_COMMAND = ("'if'", '"if"', 'i"f"', r'\if',   # if

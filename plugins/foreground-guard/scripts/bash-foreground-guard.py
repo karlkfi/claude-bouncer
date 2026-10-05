@@ -828,8 +828,10 @@ def analyze_class_a(raw, cfg, depth=0):
 
 # Interpreter options that consume the following word, which is what tells an
 # option's argument from the script. Measured against GNU bash 5.3.15: the
-# argument is a separate token and mandatory, and a letter takes it wherever it
-# sits in the cluster, so `bash -ox errexit gate.sh` runs `gate.sh` (Q149).
+# argument is a separate token, taken whenever a word follows (a trailing `-o`
+# or `-O` with nothing after it lists the options instead), and a letter takes
+# it wherever it sits in the cluster, so `bash -ox errexit gate.sh` runs
+# `gate.sh` (Q149).
 # There is no `--rcfile=path` form; bash rejects it as an invalid option.
 SHELL_OPT_ARG_LETTERS = frozenset('coO')
 SHELL_OPT_ARG_WORDS = frozenset({'--rcfile', '--init-file'})
