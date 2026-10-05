@@ -1931,8 +1931,10 @@ final output.
   guess about where the command starts is how a value gets read as the command.
   `xargs` defers for a second reason, that its operands arrive on stdin. In
   `auto`, `acceptEdits` and `bypassPermissions` those two escalate the way a
-  `sh -c` body does; replaying 192,953 corpus commands (2026-10-04), they fired
-  on 190, 0.098%. Wrappers outside
+  `sh -c` body does, but only when the command behind the wrapper is one the
+  hook judges, so `ls | xargs echo` stays silent. Replaying 195,692 corpus
+  commands (2026-10-04), they fired on 132 (0.067%), against 71 (0.036%) for
+  `sh -c` bodies and kills together. Wrappers outside
   that list — `sudo`, `doas`, `caffeinate`, `chrt`, `taskset`, `flock` — are not
   peeled, so a guarded command behind one defers; nor is bash's `time -p`.
 - **The PowerShell tool is guarded for a known set of cmdlets, and only those.**

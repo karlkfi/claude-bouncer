@@ -66,8 +66,11 @@ escalating it costs 4.67% of all commands against 0.09% for the other two
 (measured 2026-09-09 over 89,133 corpus commands), and an interpreter's own
 file access is a documented non-goal. The wrapper suppression (Q219) — an
 `xargs`, whose operands arrive on stdin, or a wrapper flag the hook cannot read
-— escalates with the first two: its hidden operands are file access this guard
-judges, and it fired on 0.098% of 192,953 corpus commands (2026-10-04).
+— escalates with the first two when the command it hides is one this guard
+judges, because those hidden operands are file access the guard exists to
+check. Over 195,692 corpus commands (2026-10-04) it fired on 132 (0.067%),
+against 71 (0.036%) for the first two together, so the default scope
+escalates about three times as often as it would without it.
 `WORKSPACE_GUARD_ESCALATE` moves that line in either direction; see the
 README's Configuration section.
 

@@ -3485,11 +3485,14 @@ INTERPRETER_SIGNAL = 'interpreter'
 
 # A guarded command behind a wrapper whose operands the hook cannot all read:
 # an `xargs` appending its input, or a wrapper flag outside its grammar (see
-# `peel_wrappers`). Unlike the interpreter it escalates in the default scope,
-# on both of the interpreter's grounds read the other way: the hidden operands
-# are reads and writes this guard exists to judge, and over 192,953 distinct
-# corpus commands (2026-10-04) it fired on 190, 0.098% -- the cost Q74 already
-# accepted for `sh -c` and kills. It yields to their labels when they co-occur.
+# `peel_wrappers`). It is raised only when the command the peel exposes is one
+# this guard judges, so `ls | xargs echo` stays silent. Unlike the interpreter
+# it escalates in the default scope: the hidden operands are reads and writes
+# this guard exists to judge, which is Q74's ground for escalating `sh -c` and
+# kills. Over 195,692 distinct corpus commands (2026-10-04) it fired on 132,
+# 0.067%, against 71 (0.036%) for `sh -c` and kills together, so the default
+# scope escalates about three times as often as before. It yields to their
+# labels when they co-occur.
 WRAPPER_SIGNAL = 'wrapper'
 _LOW_SIGNALS = (None, INTERPRETER_SIGNAL, WRAPPER_SIGNAL)
 
