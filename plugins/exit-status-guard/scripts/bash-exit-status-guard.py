@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """PreToolUse hook: deny when a command whose exit status IS the answer loses it.
 
-Reads the hook JSON on stdin, emits a PreToolUse decision on stdout. Three ways
+Reads the hook JSON on stdin, emits a PreToolUse decision on stdout. Four ways
 a status goes missing, all of which turn a failure into a green:
 
   1. Piped into a filter. A pipeline reports its LAST stage's status, so
@@ -13,6 +13,8 @@ a status goes missing, all of which turn a failure into a green:
   3. Sequenced before a state-changing command with `;` or a newline. The
      status is read correctly and then ignored: `make check; git push` pushes
      either way.
+  4. Run inside a process substitution. `tail <(make check)` reads a file
+     name, and bash reports the body's status to nothing.
 
 Every verdict is a `deny`, never an `ask`. A deny's reason is shown to the
 model, so the fix lands where the command gets rewritten; an ask goes to the
@@ -44,6 +46,7 @@ from bouncer_parse import (                                    # noqa: E402
     SEPARATORS, SH_KEYWORDS, _OPERATORS, is_assignment, is_operator, split_assignment,
     _consume_heredoc_body, _scan_backticks, _scan_dollar_paren,
     _skip_balanced_parens, command_substitutions, glue_dollar_paren,
+    process_substitutions,
     note_discarded_writes, split_operator_runs, strip_comments,
     strip_env_prefix, strip_heredoc_bodies, strip_sh_keywords,
 )
@@ -885,9 +888,12 @@ def sequenced_mutation(segs, reg):
     ('', '', '').
 
     `make check; git push` reads the gate's status correctly and then ignores
-    it: the push runs whatever the check did. Only top-level segments count --
-    inside a subshell the sequence is that subshell's own business -- and only a
-    `;`/newline separator, since `&&` is the form that already gates. The
+    it: the push runs whatever the check did. The gate has to be a top-level
+    statement -- inside a subshell the sequence is that subshell's own business
+    -- but a subshell is one, and its status is its last command's, so the gate
+    in `(make check); git push` counts (Q277). A mutator counts at any depth,
+    since `make check; (git push)` pushes all the same. Only a
+    `;`/newline separator counts, since `&&` is the form that already gates. The
     separator comes back because the reason names it, and says where the `&&`
     goes when a heredoc is what left the newline.
 
@@ -903,18 +909,43 @@ def sequenced_mutation(segs, reg):
     """
     gate, gate_at, sep = '', -1, ''
     for i, seg in enumerate(segs):
-        if seg.depth != 0:
-            continue
         words = head_words(seg)
         if gate_at >= 0 and i > gate_at and reg.is_mutator(words):
             if not (restore_form(segs, reg, words, gate_at, i)
                     or tested_form(segs, gate_at, i)):
                 return gate, ' '.join(words), sep
             continue
+        # Closing every group it sits in makes it the status they all yield.
+        if seg.post_ops.count(')') < seg.depth:
+            continue
         op = next_op(seg.post_ops)
         if op in (';', '\n') and reg.is_gate(words):
             gate, gate_at, sep = ' '.join(words), i, op
     return '', '', ''
+
+
+def procsub_gate(bodies, segs, reg):
+    """The head of a gate run inside a `<(…)` or `>(…)`, or ''.
+
+    The command around one reads a file name, so `tail <(make check)` exits 0
+    on a failed check. Only a registered gate counts: `diff <(sort a) <(sort b)`
+    is how a comparison is written, and its bodies carry no verdict. A body
+    that prints `$?` hands the status on in the stream, and `wait $!` is bash's
+    one way to collect it (5.1+), so either one leaves the call alone.
+    """
+    if any(head_words(seg)[:1] == ['wait'] and any('$!' in t for t in seg.tokens)
+           for seg in segs):
+        return ''
+    for body in bodies:
+        if '$?' in body:
+            continue
+        tokens = tokenize(body)[0]
+        inner = split_segments(tokens) if tokens is not None else None
+        if inner:
+            gate = first_gate(inner, reg)
+            if gate:
+                return gate
+    return ''
 
 
 # --- Reasons ----------------------------------------------------------------
@@ -1029,6 +1060,13 @@ LOST_STATUS_REASON = (
     're-raise it: <MKDIR>cmd > <LOG> 2>&1; rc=$?; echo "EXIT=$rc"; exit $rc.'
     + OVERRIDE_HINT)
 
+PROCSUB_REASON = (
+    " runs inside a process substitution, `<(…)` or `>(…)`, whose exit status "
+    "the shell never reports -- the command around it reads a stream that "
+    "ended, so a failure reads exactly like a pass. Run it on its own, then "
+    'read <LOG> in a separate call: <MKDIR>cmd > <LOG> 2>&1; echo "EXIT=$?".'
+    + OVERRIDE_HINT)
+
 SEQUENCED_REASON_HEAD = "` is sequenced before `"
 _SEQUENCED_RUNS = (
     " runs the second whatever the first returned -- the status is read "
@@ -1112,12 +1150,18 @@ def decide(cmd, background, reg, scratch='', depth=0):
         return with_log_path('`' + truncate(gate) + SEQUENCED_REASON_HEAD
                              + truncate(mutator) + reason, scratch)
 
+    processes = process_substitutions(cleaned)
+    gate = procsub_gate(processes, segs, reg)
+    if gate:
+        return with_log_path(
+            '`' + truncate(gate) + '`' + PROCSUB_REASON, scratch)
+
     # A gate inside a backtick substitution never reaches the segment loop as a
     # command (backticks are ordinary word characters to shlex), so the bodies
     # are analyzed on their own. `$(…)` bodies mostly arrive through the `(`
     # already in the stream; recursing costs little and covers the rest.
     if depth < MAX_SUBST_DEPTH:
-        bodies = command_substitutions(cleaned)
+        bodies = command_substitutions(cleaned) + processes
         for body in heredocs:
             bodies.extend(command_substitutions(body, quotes=False))
         for body in bodies:

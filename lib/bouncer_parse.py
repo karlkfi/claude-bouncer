@@ -947,6 +947,75 @@ def command_substitutions(text, quotes=True, spans=None):
     return bodies
 
 
+def process_substitutions(text, spans=None):
+    """Extract the ``<(…)`` and ``>(…)`` bodies bash would run in ``text``.
+
+    The companion to :func:`command_substitutions`, which returns none of them:
+    a process substitution is a separate process whose output (or input) is a
+    file name, so a caller that judges what a body *returns* needs to know it
+    came from one. bash performs it only unquoted -- `"<(x)"` is literal -- and
+    never in a heredoc body, so there is no ``quotes`` switch.
+
+    A ``<`` or ``>`` led by another ``<``, ``>`` or ``&`` is a redirect operator
+    (`>>`, `&>`), and bash rejects the ``(`` after one, so it opens nothing. Only
+    the OUTERMOST bodies are returned: a ``$(…)`` or backtick substitution is
+    stepped over whole, and a process substitution inside one is found when the
+    caller recurses into that body. ``spans`` behaves as it does there.
+    """
+    bodies = []
+    i, n = 0, len(text)
+    in_single = in_double = False
+    while i < n:
+        c = text[i]
+        if in_single:
+            if c == "'":
+                in_single = False
+            i += 1
+            continue
+        if c == '\\':
+            i += 2
+            continue
+        end = _ansi_c_end(text, i) if not in_double else -1
+        if end > 0:
+            i = end
+            continue
+        if c == "'" and not in_double:
+            in_single = True
+            i += 1
+            continue
+        if c == '"':
+            in_double = not in_double
+            i += 1
+            continue
+        if c == '$' and i + 1 < n and text[i + 1] == '(':
+            if i + 2 < n and text[i + 2] == '(':
+                i = _skip_balanced_parens(text, i + 1)
+                continue
+            body, end = _scan_dollar_paren(text, i + 2)
+            if body is None:
+                break
+            i = end
+            continue
+        if c == '`':
+            body, end = _scan_backticks(text, i + 1)
+            if body is None:
+                break
+            i = end
+            continue
+        if (c in '<>' and not in_double and i + 1 < n and text[i + 1] == '('
+                and (i == 0 or text[i - 1] not in '<>&')):
+            body, end = _scan_dollar_paren(text, i + 2)
+            if body is None:
+                break
+            bodies.append(body)
+            if spans is not None:
+                spans.append((i, end))
+            i = end
+            continue
+        i += 1
+    return bodies
+
+
 
 # ------------------------------------------------------------------- lexing
 

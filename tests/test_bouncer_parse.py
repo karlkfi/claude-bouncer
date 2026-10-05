@@ -185,6 +185,47 @@ class CommandSubstitutionTests(unittest.TestCase):
         self.assertEqual([], bp.command_substitutions('echo $((1+2))'))
 
 
+class ProcessSubstitutionTests(unittest.TestCase):
+    """`<(…)` and `>(…)` bodies, which command_substitutions never returns (Q277).
+
+    Each "runs" case created a file under `env -i /opt/homebrew/bin/bash
+    --norc --noprofile -c` (5.3.15) with `touch` as the body, and each "runs
+    nothing" case did not.
+    """
+    def test_bash_runs_these(self):
+        for cmd, body in (('tail <(make check)', 'make check'),
+                          ('true >(rm x)', 'rm x'),
+                          ('echo x 2>(touch two)', 'touch two'),
+                          ('echo a=<(touch eq)', 'touch eq'),
+                          ('make check > >(tee log)', 'tee log'),
+                          ('diff <(a | b) <(c)', 'a | b')):
+            with self.subTest(cmd=cmd):
+                self.assertIn(body, bp.process_substitutions(cmd))
+
+    def test_bash_runs_none_of_these(self):
+        for cmd in ('echo "<(id)"', "echo '<(id)'", 'echo \\<(id)',
+                    'echo >>(id)', 'echo &>(id)', 'cat <<(id)'):
+            with self.subTest(cmd=cmd):
+                self.assertEqual([], bp.process_substitutions(cmd))
+
+    def test_command_substitutions_still_returns_none(self):
+        # The new function is additive: no other guard's view of `<(…)` moves.
+        self.assertEqual([], bp.command_substitutions('tail <(make check)'))
+
+    def test_one_inside_a_command_substitution_is_left_for_the_rescan(self):
+        cmd = 'x=$(cat <(make check))'
+        self.assertEqual([], bp.process_substitutions(cmd))
+        self.assertEqual(['make check'],
+                         bp.process_substitutions(bp.command_substitutions(cmd)[0]))
+
+    def test_a_span_covers_the_whole_substitution(self):
+        text = 'diff <(a) x'
+        spans = []
+        bp.process_substitutions(text, spans=spans)
+        start, end = spans[0]
+        self.assertEqual('<(a)', text[start:end])
+
+
 class BacktickBodyTests(unittest.TestCase):
     """A backtick body is returned as the command bash runs (Q226).
 
