@@ -268,7 +268,11 @@ SHELL_NAMES = frozenset({'bash', 'sh', 'zsh', 'dash', 'ksh'})
 # Wrappers that prefix another command without changing its meaning for our
 # purposes. `xargs` is handled separately (it takes its own flags).
 PLAIN_WRAPPERS = frozenset({'command', 'nohup', 'time', 'builtin', 'exec',
-                            'stdbuf', 'unbuffer'})
+                            'stdbuf', 'unbuffer', 'nice', 'ionice', 'setsid'})
+
+# Wrappers that take one operand between their options and the command:
+# timeout's duration, chrt's priority, taskset's CPU mask.
+OPERAND_WRAPPERS = frozenset({'timeout', 'chrt', 'taskset'})
 
 # Wrapper flags that take a SEPARATE value. Dropped one token at a time, the
 # value is left behind and reads as the tool, so the segment defers (Q152).
@@ -284,6 +288,13 @@ WRAPPER_VALUE_FLAGS = {
     # Long forms are GNU's, as with `time` above; BSD stdbuf rejects them.
     # `unbuffer` needs no entry -- its only flag, `-p`, carries no value.
     'stdbuf': frozenset({'-i', '--input', '-o', '--output', '-e', '--error'}),
+    # The rest are util-linux's, and `setsid` and `taskset` take no value:
+    # `taskset -c` changes how the mask operand reads rather than taking one.
+    'nice': frozenset({'-n', '--adjustment'}),
+    'ionice': frozenset({'-c', '--class', '-n', '--classdata', '-p', '--pid',
+                         '-P', '--pgid', '-u', '--uid'}),
+    'chrt': frozenset({'-T', '--sched-runtime', '-P', '--sched-period',
+                       '-D', '--sched-deadline'}),
 }
 
 
@@ -819,12 +830,12 @@ def strip_wrappers(argv, env):
                     argv = argv[1:]
                 else:
                     break
-        elif head == 'timeout':
+        elif head in OPERAND_WRAPPERS:
             argv = argv[1:]
             while argv and argv[0].startswith('-'):
                 argv = argv[flag_arity(argv[0], value_flags):]
             if argv:
-                argv = argv[1:]  # the DURATION operand
+                argv = argv[1:]
         elif head == 'xargs':
             # Skip xargs and everything up to the first covered tool; if none
             # appears the segment holds nothing we guard.
