@@ -5108,6 +5108,55 @@ class HereStringSubstCwdTests(OutsideParentFixture, unittest.TestCase):
                 self.assertEqual("allow", self._decision(cmd))
 
 
+class FunctionCdTests(OutsideParentFixture, unittest.TestCase):
+    """Q265: a `cd` in a function body moves nothing until the function runs.
+
+    The group loop read the body's `cd` as if the definition had run it, so a
+    `../` read written after the definition resolved back inside the root and
+    earned `allow`. A call does run it, in the calling shell, so after one the
+    cwd is unknown rather than wherever the definition pointed. Every shape here
+    was driven under bash 5.3.15 to see which file it reads.
+    """
+
+    def test_a_definition_does_not_move_the_cwd(self):
+        # Pre-fix the `f()` spellings allowed a read of `<root>/../TARGET`.
+        for cmd in ("f() { cd sub; }; cat ../%s",
+                    "f () { cd sub; }; cat ../%s",
+                    "function f { cd sub; }; cat ../%s",
+                    "function f() { cd sub; }; cat ../%s",
+                    "f() if true; then cd sub; fi; cat ../%s",
+                    "f() { cd sub; }\ncat ../%s",
+                    "f ()\n{\n cd sub\n}\ncat ../%s"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual("ask", self._decision(cmd % self.TARGET))
+
+    def test_a_call_leaves_the_cwd_unknown(self):
+        # bash reads the parent's file in every one. Pre-fix the `function`
+        # spelling allowed it: its `cd` was never seen, so `in.txt` resolved
+        # to the workspace's own.
+        for cmd in ("f() { cd ..; }; f; cat in.txt",
+                    "function f { cd ..; }; f; cat in.txt",
+                    "g() { cd ..; }; f() { g; }; f; cat in.txt",
+                    'f() { cd ..; }; f; echo "$(cat in.txt)"',
+                    'f() { cd ..; }; echo "$(f; cat in.txt)"'):
+            with self.subTest(cmd=cmd):
+                self.assertEqual("deny", self._decision(cmd))
+
+    def test_a_call_that_cannot_move_the_caller_keeps_the_cwd(self):
+        # A subshell body, a `cd` in a subshell inside the body, a call in a
+        # pipeline stage, and a body with no `cd` at all.
+        for cmd in ("f() ( cd ..; ); f; cat in.txt",
+                    "f() { (cd ..); }; f; cat in.txt",
+                    "f() { cd ..; }; f | cat; cat in.txt",
+                    "f() { echo hi; }; f; cat in.txt"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual("allow", self._decision(cmd))
+
+    def test_a_cd_still_moves_the_rest_of_its_body(self):
+        self.assertEqual("allow", self._decision(
+            "f() { cd sub; cat ../in.txt; }"))
+
+
 class SubstBodyVarPropagationTests(unittest.TestCase):
     """Q66: a substitution body inherits the string's literal variables.
 

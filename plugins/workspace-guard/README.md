@@ -177,6 +177,7 @@ old one. A different project's scratch still asks entirely.
 | `cat ~/.aws/credentials`             | **ask**  |
 | `cd /etc && cat passwd`              | **ask**  |
 | `(cd sub) && cat ../x` · `echo $(cd sub) && cat ../x` (the `cd` stays in the subshell) | **ask** |
+| `f() { cd sub; }; cat ../x` (defining `f` runs none of its body) | **ask** |
 | `echo "$(cat /etc/passwd)"` (quoted subst read) | **ask** |
 | `cat > doc.md <<EOF` … `$(cat /etc/x)` … `EOF` (expanded body) | **ask** |
 | `cat > doc.md <<EOF` … `don't` … `$(cat /etc/x)` … `EOF` (apostrophe first) | **ask** |
@@ -943,7 +944,10 @@ through the same boundary rules and produce the same reasons. Symlink staging
    commands in that subshell, and leaving it restores the cwd it was entered
    with, because that is all bash's `cd` reaches there. A `cd` that is itself a
    pipeline stage or backgrounded (`cd sub | …`, `cd sub &`) moves nothing.
-   Two shapes still leak: a `cd` inside a `{ … }` group, loop or `if` that is
+   A `cd` in a function body moves only the rest of that body, because
+   defining a function runs none of it; a later call to that function leaves
+   the cwd unknown, so a relative path after `f() { cd sub; }; f` gets the
+   untracked-`cd` `deny` below. Two shapes still leak: a `cd` inside a `{ … }` group, loop or `if` that is
    piped or backgrounded as a whole, and a `cd` after an unparenthesised
    `case` pattern (`x)`) inside a subshell. Both are open bugs. A
    `cd`/`pushd` target that is a propagated literal variable (step 4)
