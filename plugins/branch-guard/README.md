@@ -106,6 +106,7 @@ the default `strict` [push policy](#push-guard).
 | `git branch -D tmp-basecheck` *(scratch ref whose only unshared commit is a merge git reproduces)* | allow |
 | `git branch -D old` *(rebased, and the result pushed under another name)* | allow |
 | `git branch -f backup claude/x` *(the ref doesn't exist yet — a create)* | allow |
+| `git switch -C old main` / `git checkout -B old main` / `git worktree add -B old ../wt main` *(judged as `git branch -f old main`: a free name, or a tip that survives elsewhere)* | allow |
 | `git branch -f tmp-basecheck main` / `git branch -M x tmp-basecheck` *(the ref being overwritten holds only a merge git reproduces)* | allow |
 | `git reset --hard origin/main` *(clean worktree, feature branch whose tip survives elsewhere)* | allow |
 | `git reset --hard HEAD~1` *(clean worktree, scratch ref whose only unshared commit is a merge git reproduces)* | allow |
@@ -128,6 +129,7 @@ the default `strict` [push policy](#push-guard).
 | `git branch -D tmp-conflict` *(its merge was resolved by hand, so that tree exists nowhere else)* | **ask** |
 | `git branch -d main` / `git branch -D main` / `git branch -m x main` *(protected branch, any spelling)* | **ask** |
 | `git branch -f old main` / `git branch -M x old` *(moves an existing branch off commits nothing else reaches, and that re-running a merge doesn't account for)* | **ask** |
+| `git switch -C main origin/main` / `git checkout -B main …` / `git worktree add -B main …` *(resets a protected branch; on an unprotected one, the `git branch -f` rows above apply)* | **ask** |
 | `gh pr close 5 --delete-branch` / `gh pr close 5 -d` *(deletes a branch whose work was never merged)* | **ask** |
 | `gh repo delete owner/repo` / `gh label delete bug` *(deletes a resource)* | **ask** |
 | `gh release delete v1` / `gh release delete-asset v1 file.zip` / `gh secret delete X` / `gh variable delete Y` / `gh gist delete abc` / `gh cache delete 1` *(deletes a resource; `secret`/`variable` also via the `remove` alias)* | **ask** |
@@ -175,7 +177,9 @@ file and keep allowing (`git fetch 2>/dev/null` stays auto-approved).
 `git checkout file.txt` **defers** because `checkout` is ambiguous — it could
 switch branches or discard a file's changes — and the hook defers on ambiguity
 rather than guess. Only the unambiguous branch-create form (`git checkout -b`)
-auto-approves.
+auto-approves. Its force form, `git checkout -B`, resets a branch that already
+exists, so it is judged with `git switch -C` and `git worktree add -B` as the
+`git branch -f` it amounts to — see the next section.
 
 ### `git branch`: what the session owns, not how the verb looks
 
@@ -201,7 +205,10 @@ which branches you consider shared, so `git branch -d main` prompts exactly like
 `git branch -D main`, as does any branch matching
 [`BRANCH_GUARD_PROTECTED_BRANCHES`](#configuration). `git branch -f backup claude/x` creating a new ref
 loses nothing and auto-approves; the same command pointed at a ref that already
-exists is judged on what that ref currently points at.
+exists is judged on what that ref currently points at. `git switch -C`,
+`git checkout -B` and `git worktree add -B` make the same overwrite when the
+name exists, so they take the same two checks: a protected name asks, and a
+private one is judged on what it would orphan.
 
 A force-delete has one more way to be in bounds, because "the tip survives" and
 "nothing is lost" turn out not to be the same question. Consider a scratch

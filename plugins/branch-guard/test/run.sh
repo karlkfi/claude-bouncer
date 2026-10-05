@@ -1552,6 +1552,50 @@ check_text "the surviving overwrite ask names the unreachable tip" has \
   "tip isn't reachable from any remote-tracking branch or main" \
   "$(reason_for "$(bash_cmd 'git branch -f resolved main')" "$WORK")"
 
+#     The force-create spellings are the same overwrite (Q252): `switch -C`,
+#     `switch --force-create`, `checkout -B` and `worktree add -B` reset a
+#     branch that already exists, and all four used to allow whatever they
+#     named, `main` included. Crossed over protected x recoverable x orphaning
+#     x not-yet-existing for each spelling, since a spelling the parser misses
+#     would pass every other row.
+for fc in 'git switch -C' 'git switch --force-create' 'git checkout -B' \
+          'git worktree add ../wt-fc -B'; do
+  check "$fc protected -> ask" ask \
+    "$(decision_for "$(bash_cmd "$fc main claude/x")" "$WORK")"
+  check "$fc onto a recoverable branch -> allow" allow \
+    "$(decision_for "$(bash_cmd "$fc merged main")" "$WORK")"
+  check "$fc onto an irrecoverable branch -> ask" ask \
+    "$(decision_for "$(bash_cmd "$fc orphan main")" "$WORK")"
+  check "$fc creating a free name -> allow" allow \
+    "$(decision_for "$(bash_cmd "$fc brand-new main")" "$WORK")"
+  check "[dontAsk] $fc protected -> deny" deny \
+    "$(decision_for "$(push_mode "$fc main origin/main" 'dontAsk')" "$WORK")"
+done
+#     The value can be glued or bundled the way git's option parser takes it,
+#     and a lowercase create is untouched -- git refuses an existing name there.
+check "git switch --force-create=main -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git switch --force-create=main claude/x')" "$WORK")"
+check "git switch --force-c main (git expands the prefix) -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git switch --force-c main claude/x')" "$WORK")"
+check "git switch -Cmain (glued) -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git switch -Cmain claude/x')" "$WORK")"
+check "git checkout -qB main (bundled) -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git checkout -qB main claude/x')" "$WORK")"
+check "git worktree add -B ahead of the path -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git worktree add -B main ../wt-fc claude/x')" "$WORK")"
+check "git switch -c onto an existing name -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git switch -c orphan main')" "$WORK")"
+check "git checkout -b onto an existing name -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git checkout -b orphan main')" "$WORK")"
+#     `-f` read from a bundle keeps its own ask on a private, free name.
+check "git switch -fC on a free name -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git switch -fC brand-new main')" "$WORK")"
+check "git switch -C with no name -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git switch -C')" "$WORK")"
+check_text "the switch -C ask names the move" has \
+  "\`git switch -C\` moves existing branch 'orphan'" \
+  "$(reason_for "$(bash_cmd 'git switch -C orphan main')" "$WORK")"
+
 #     Unprovable cases keep today's `ask`: a branch that doesn't exist can't be
 #     shown recoverable, and a `-C` global points the command at another repo
 #     than the one the probes read.
@@ -2531,7 +2575,10 @@ check "[configured] [republish] branch -D -> ask" ask \
   "$(decision_for "$(bash_cmd "$DEL_DUP")" "$OVL" \
      'BRANCH_GUARD_PROTECTED_BRANCHES=claude/dup')"
 for c in "$OVW_DUP" 'git branch -M base-work claude/dup' \
-         'git branch -C base-work claude/dup'; do
+         'git branch -C base-work claude/dup' \
+         'git switch -C claude/dup origin/main' \
+         'git checkout -B claude/dup origin/main' \
+         'git worktree add -B claude/dup ../wt-dup origin/main'; do
   check "[republish] $c -> allow" allow \
     "$(decision_for "$(bash_cmd "$c")" "$OVL")"
 done

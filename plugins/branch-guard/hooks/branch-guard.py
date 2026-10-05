@@ -1608,6 +1608,42 @@ def protected_targets(delete, move, copy, force, pos, current):
     return []
 
 
+def force_create_name(args, letter, value_letters, long_opt=None):
+    """The branch a force-create option names, '' when the option is present
+    with no value, or None when it is absent. Reads the option the way git's
+    parser does: `-C name`, `-Cname`, a bundle ending in it (`-qC name`), and
+    `--force-create[=]name` or any unambiguous prefix of it down to
+    `--force-`, which git expands. A bundle stops at the first letter that
+    takes a value, since the rest of the token is that letter's value."""
+    for i, a in enumerate(args):
+        if a == '--':
+            return None
+        nxt = args[i + 1] if i + 1 < len(args) else ''
+        if a.startswith('--'):
+            opt, eq, val = a.partition('=')
+            if long_opt and len(opt) >= len('--force-') and long_opt.startswith(opt):
+                return val if eq else nxt
+            continue
+        if len(a) > 1 and a[0] == '-':
+            for j, c in enumerate(a[1:], 1):
+                if c in value_letters:
+                    if c == letter:
+                        return a[j + 1:] or nxt
+                    break
+    return None
+
+
+def force_create_verdict(name, what, cwd, probe):
+    """Verdict for `switch -C`, `checkout -B` and `worktree add -B`, which reset
+    <name> when it exists — the overwrite `git branch -f` makes, so it takes
+    the same two checks: shared first, then what the move would orphan."""
+    if not name:
+        return ('ask', f"{what} names no branch")
+    if is_protected(name):
+        return ('ask-shared', f"{what} resets protected branch '{name}'")
+    return overwrite_verdict(cwd, name, what, probe)
+
+
 def classify_branch(flags, short, pos, current, cwd, probe):
     """Verdict for `git branch`, scoped to what the session owns rather than to
     the verb. A target is in bounds when it is *recoverable* — its tip survives
@@ -1837,9 +1873,15 @@ def classify_git(sub, args, branch, policy, cwd, probe, mode=''):
     if sub == 'switch':
         if 'f' in short or flags & {'--force', '--discard-changes'}:
             return ('ask', "`git switch` would discard changes")
+        name = force_create_name(args, 'C', {'c', 'C'}, '--force-create')
+        if name is not None:
+            return force_create_verdict(name, '`git switch -C`', cwd, probe)
         return ('allow', None)            # create (-c) or plain switch; git refuses if unsafe
     if sub == 'checkout':
-        if short & {'b', 'B'}:
+        name = force_create_name(args, 'B', {'b', 'B'})
+        if name is not None:
+            return force_create_verdict(name, '`git checkout -B`', cwd, probe)
+        if 'b' in short:
             return ('allow', None)        # unambiguous branch create
         return ('defer', None)            # ambiguous (branch vs path discard) -> normal flow
     if sub == 'branch':
@@ -1849,6 +1891,13 @@ def classify_git(sub, args, branch, policy, cwd, probe, mode=''):
             return ('ask', "Deleting a git tag")
         return ('allow', None)            # list or create
     if sub == 'worktree':
+        if first == 'add':
+            name = force_create_name(args, 'B', {'b', 'B'})
+            if name is not None:
+                verdict = force_create_verdict(name, '`git worktree add -B`',
+                                               cwd, probe)
+                if verdict[0] != 'allow':
+                    return verdict
         if first == 'add' and worktree_grants_enabled() \
                 and mode not in NON_INTERACTIVE_MODES:
             # Creating a checkout is safe, so this is not a safety ask: it is
