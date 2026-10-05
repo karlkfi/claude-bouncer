@@ -17,6 +17,7 @@ import os
 import subprocess
 import sys
 import unittest
+from unittest import mock
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(REPO, 'scripts', 'bash-exit-status-guard.py')
@@ -32,6 +33,20 @@ def load_report():
 
 
 fr = load_report()
+
+# The hook reads these ahead of the payload's cwd, so one exported in the shell
+# running the suite would hand every hook call a registry no test wrote (Q162).
+# The registry names are the guard's REGISTRY_ENV_VARS.
+ISOLATED_ENV = ('CLAUDE_PROJECT_DIR', 'EXIT_STATUS_GUARD_REGISTRY',
+                'PIPE_GUARD_REGISTRY')
+
+
+def setUpModule():
+    patcher = mock.patch.dict(os.environ)
+    patcher.start()
+    unittest.addModuleCleanup(patcher.stop)
+    for name in ISOLATED_ENV:
+        os.environ.pop(name, None)
 
 
 def hook_reason(command, background=False):

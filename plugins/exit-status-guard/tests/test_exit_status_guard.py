@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(REPO, 'scripts', 'bash-exit-status-guard.py')
@@ -29,6 +30,19 @@ def load_module():
 
 
 pg = load_module()
+
+# The guard reads these ahead of the cwd a test passes, so one exported in the
+# shell running the suite points every registry test at a file it never wrote,
+# and the hook subprocesses inherit it too (Q162).
+ISOLATED_ENV = ('CLAUDE_PROJECT_DIR',) + pg.REGISTRY_ENV_VARS
+
+
+def setUpModule():
+    patcher = mock.patch.dict(os.environ)
+    patcher.start()
+    unittest.addModuleCleanup(patcher.stop)
+    for name in ISOLATED_ENV:
+        os.environ.pop(name, None)
 
 
 def shipped_registry():
