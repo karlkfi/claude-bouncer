@@ -893,22 +893,25 @@ def cmd_lint(args):
             # Its own class, so a caller binding drift need not bind this. A row
             # naming every site of a repeated statement cites each one correctly
             # and fails it, and an indented fragment is a substring of the same
-            # statement indented deeper.
+            # statement indented deeper. Drift is still judged below, against the
+            # nearest match, so an advisory note never unbinds a moved line.
             if len(hits) > 1:
                 shown = ", ".join(map(str, hits[:5])) + (", …" if len(hits) > 5 else "")
                 note("ambiguous-citation",
                      f"{where} cites {cited}, which occurs on {len(hits)} lines "
                      f"of {path} ({shown}); quote text that occurs once")
-                continue
             # No number, so nothing to drift: the window measures distance from
             # a line this form never named, and applying it to line 0 would
             # pass every fragment in the first ten lines of any file.
-            if line is None or abs(hits[0] - line) <= window:
+            if line is None:
+                continue
+            near = min(hits, key=lambda n: abs(n - line))
+            if abs(near - line) <= window:
                 continue
             # The note carries the new number, so a drifted citation is a copy
             # rather than a re-derivation.
             note("stale-citation",
-                 f"{where} cites {cited}, which is now at line {hits[0]}; "
+                 f"{where} cites {cited}, which is now at line {near}; "
                  f"re-point it")
     # An empty store is legal — every item may have shipped — so this is a note
     # rather than a failure. It is worth saying because the usual cause is a

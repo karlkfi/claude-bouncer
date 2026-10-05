@@ -211,14 +211,15 @@ class CitationReachTests(unittest.TestCase):
     TARGET = ('all: check\n' + 'x = 1\n' * 13 +
               'check: drift launchers\n' + 'x = 1\n' * 3)
 
-    def lint_citing(self, citation, extra=('--citation-window', '0')):
+    def lint_citing(self, citation, extra=('--citation-window', '0'),
+                    target=None):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
         store = os.path.join(tmp, 'docs', 'queue')
         os.makedirs(store)
         with open(os.path.join(tmp, 'docs', 'Makefile'), 'w',
                   encoding='utf-8') as fh:
-            fh.write(self.TARGET)
+            fh.write(target or self.TARGET)
         with open(os.path.join(store, 'Q1.md'), 'w', encoding='utf-8') as fh:
             fh.write(GateTests.CLEAN % ('ready', citation))
         return lint(store, list(extra))
@@ -243,6 +244,16 @@ class CitationReachTests(unittest.TestCase):
         p = self.lint_citing(citation,
                              extra=('--strict', 'ambiguous-citation'))
         self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
+
+    def test_a_repeated_fragment_still_fails_drift_past_the_window(self):
+        """The advisory note must not unbind drift. Gate flags, window ten."""
+        target = 'x = 1\n' * 49 + 'dup()\n' + 'x = 1\n' * 39 + 'dup()\n'
+        p = self.lint_citing('`Makefile:20:dup()`', extra=(), target=target)
+        self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn('now at line 50', p.stdout + p.stderr)
+        p = self.lint_citing('`Makefile:85:dup()`', extra=(), target=target)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn('occurs on 2 lines', p.stdout + p.stderr)
 
 
 class ClaimsTests(unittest.TestCase):
