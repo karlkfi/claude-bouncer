@@ -824,9 +824,15 @@ update step and restart.
    `git log 2>/dev/null`) — the leading fd digit and the operator's target are
    both stripped so they aren't read as command arguments.
 3. **Parse** each segment with `parse_invocation`: strip leading
-   `NAME=VALUE` env prefixes (`GIT_AUTHOR_NAME=x git …`) and program global
-   options (`git -C path`, `-c k=v`) to find the `git`/`gh` subcommand and its
-   arguments. Combined short flags (`git clean -fd`) are decomposed.
+   `NAME=VALUE` env prefixes (`GIT_AUTHOR_NAME=x git …`), command wrappers
+   (`env`, `sudo`, `timeout`, `nice`, `nohup`, `command`, `stdbuf`, `setsid`,
+   `time`, `exec`, with their own options), and program global options
+   (`git -C path`, `-c k=v`) to find the `git`/`gh` subcommand and its
+   arguments. Combined short flags (`git clean -fd`) are decomposed. A wrapped
+   command gets every `ask` and `deny` the bare one would, but is never
+   auto-approved and never lifted by the break-glass: the wrapper can change
+   the user, the environment or the directory, none of which the classifier
+   reads.
 4. **Classify** each segment as `allow` / `ask` / `deny` / `defer` / non-git:
    read-only git and gh and harmless mutations (`add`, `restore --staged`,
    `switch -c`, `worktree add`, branch/tag create) allow on any branch;
@@ -1068,6 +1074,10 @@ protected branch (main/master) or destructive git commands. To keep work flowing
   lexical check, not a sandbox — the filesystem boundary is workspace-guard's
   job, and a hard guarantee belongs in a git `pre-push` hook or server-side
   branch protection.
+- Command wrappers are read from a fixed list. One outside it (`xargs`, whose
+  arguments arrive on stdin, or a site-specific launcher) hides the `git`
+  behind it, and the command defers to the normal permission flow. So does
+  `sudo -h <host>`, which a stock sudoers cannot run.
 - The push guard parses the command string, so unusual refspecs may not be
   classified (it asks/defers rather than allowing). Auto-approval is a
   convenience layer, not a security boundary — for hard guarantees use a git

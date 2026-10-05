@@ -102,7 +102,7 @@ Scope note: branch-guard reasons about git/branch *semantics*. The filesystem
 boundary (commands touching paths outside the workspace) is workspace-guard's
 job; the two don't overlap.
 """
-import sys, os, json, re, subprocess, fnmatch
+import sys, os, json, re, shlex, subprocess, fnmatch
 
 # The parsing primitives every claude-bouncer guard shares. This guard keeps its
 # own SEPARATORS/REDIR: it folds the duplicating operators into REDIR and
@@ -159,6 +159,37 @@ GIT_VALUE_OPTS = {
 }
 # gh global options that consume a following value token.
 GH_VALUE_OPTS = {'-R', '--repo'}
+
+# Programs that run the command behind them, keyed to their options that take
+# a SEPARATE value (Q223). `peel_wrappers` drops them before the git/gh lookup,
+# so `timeout 60 git push origin main` is judged as the push. Both arity errors
+# hide the command: a value missed leaves it standing as the program (`sudo -u
+# root git`), a value invented swallows `git` (`env -i git`). `sudo -h` is held
+# out, as in prod-guard (Q158): it is `--help` too, and a host needs a sudoers
+# that runs remote commands, which no stock one does.
+WRAPPER_VALUE_OPTS = {
+    'env': frozenset({'-u', '--unset', '-C', '--chdir', '-P',
+                      '-S', '--split-string'}),                  # -P is BSD's
+    'sudo': frozenset({'-a', '--auth-type', '-C', '--close-from',
+                       '-c', '--login-class', '-D', '--chdir', '-g', '--group',
+                       '--host', '-p', '--prompt', '-R', '--chroot',
+                       '-r', '--role', '-T', '--command-timeout', '-t', '--type',
+                       '-U', '--other-user', '-u', '--user'}),
+    'timeout': frozenset({'-k', '--kill-after', '-s', '--signal'}),
+    'nice': frozenset({'-n', '--adjustment'}),
+    'stdbuf': frozenset({'-i', '--input', '-o', '--output', '-e', '--error'}),
+    'time': frozenset({'-o', '--output', '-f', '--format'}),     # GNU time
+    'exec': frozenset({'-a'}),
+    'command': frozenset(),
+    'nohup': frozenset(),
+    'setsid': frozenset(),
+}
+# Options that run the command somewhere other than the directory it was typed
+# in, so the hook can no longer name the tree it acts on.
+WRAPPER_CHDIR_OPTS = {'env': {'-C', '--chdir'},
+                      'sudo': {'-D', '--chdir', '-R', '--chroot'}}
+# `env -S STRING` splits STRING into the command words (it is not a shell).
+ENV_SPLIT_OPTS = {'-S', '--split-string'}
 
 # git global flags that let an otherwise-safe command run arbitrary code via
 # inline config (`git -c core.pager='!sh -c …' log`). Their presence blocks
@@ -926,6 +957,8 @@ def record_worktree_grant(data):
         inv = parse_invocation(seg)
         if not inv or inv.get('prog') != 'git' or inv.get('sub') != 'worktree':
             continue
+        if inv['wrapped']:
+            continue          # `sudo`, `env -C`: not provably this session's tree
         args = inv.get('args') or []
         if not args or args[0] != 'add':
             continue
@@ -936,17 +969,85 @@ def record_worktree_grant(data):
                   'approved `git worktree add`')
 
 
+def wrapper_option(argv, value_opts):
+    """(words consumed, value-taking option or None, its value) for the option
+    word at argv[0]. A short word is walked a character at a time, so a bundle
+    (`-iu NAME`) takes its value and the walk stops at the first value-taking
+    letter, whose value is the rest of the word (`-uroot`). A long word matches
+    by unique prefix, as getopt_long does: `--ch DIR` is `--chdir DIR`."""
+    tok = argv[0]
+    nxt = argv[1] if len(argv) > 1 else None
+    if tok.startswith('--'):
+        name, eq, value = tok.partition('=')
+        matches = [o for o in value_opts if o.startswith('--') and o.startswith(name)]
+        if name in value_opts:
+            matches = [name]
+        if not matches:
+            return 1, None, None
+        # An ambiguous prefix is getopt's error, so nothing runs behind it.
+        opt = matches[0] if len(matches) == 1 else None
+        return (1, opt, value) if eq else (2, opt, nxt)
+    for pos, char in enumerate(tok[1:], start=2):
+        if '-' + char in value_opts:
+            if pos == len(tok):
+                return 2, '-' + char, nxt
+            return 1, '-' + char, tok[pos:]
+    return 1, None, None
+
+
+def peel_wrappers(argv):
+    """(argv, chdir): `argv` with its leading command wrappers removed, and
+    whether one of them moved the command to another directory first. argv is
+    None when a wrapper runs nothing (`command -v git`)."""
+    chdir = False
+    while argv:
+        head = argv[0].rsplit('/', 1)[-1]
+        if head not in WRAPPER_VALUE_OPTS:
+            break
+        value_opts = WRAPPER_VALUE_OPTS[head]
+        argv = argv[1:]
+        # A bare `-` is env's `-i`; to every other wrapper it is an operand.
+        while argv and argv[0].startswith('-') and (argv[0] != '-' or head == 'env'):
+            if argv[0] == '--':
+                argv = argv[1:]
+                break
+            if head == 'command' and set(argv[0][1:]) & {'v', 'V'}:
+                return None, chdir                  # a lookup: runs nothing
+            used, opt, value = wrapper_option(argv, value_opts)
+            if opt in WRAPPER_CHDIR_OPTS.get(head, ()):
+                chdir = True
+            if head == 'env' and opt in ENV_SPLIT_OPTS and value is not None:
+                try:
+                    argv = shlex.split(value) + argv[used:]
+                except ValueError:
+                    return None, chdir
+                continue
+            argv = argv[used:]
+        if head in ('env', 'sudo'):
+            # env takes any operand holding `=` as an assignment, wider than
+            # the shell's rule (Q218); sudo passes its own the same way.
+            while argv and '=' in argv[0]:
+                argv = argv[1:]
+        elif head == 'timeout' and argv:
+            argv = argv[1:]                         # the DURATION operand
+    return argv, chdir
+
+
 def parse_invocation(tokens):
     """If a segment is a `git` or `gh` invocation, return
-    {'prog', 'sub', 'args', 'globals'}; otherwise None. Strips leading env
-    assignments and program global options so
-    `FOO=bar git -C path -c k=v commit -m x` ->
-    {'prog': 'git', 'sub': 'commit', 'args': ['-m','x'], 'globals': ['-C','path','-c','k=v']}."""
+    {'prog', 'sub', 'args', 'globals', 'wrapped', 'chdir'}; otherwise None.
+    Strips leading env assignments, command wrappers (`peel_wrappers`) and
+    program global options so `FOO=bar git -C path -c k=v commit -m x` ->
+    {'prog': 'git', 'sub': 'commit', 'args': ['-m','x'],
+     'globals': ['-C','path','-c','k=v'], 'wrapped': False, 'chdir': False}."""
     i = 0
     while i < len(tokens) and is_assignment(tokens[i]):
         i += 1
-    if i >= len(tokens):
+    peeled, chdir = peel_wrappers(tokens[i:])
+    if not peeled:
         return None
+    wrapped = tokens[i].rsplit('/', 1)[-1] in WRAPPER_VALUE_OPTS
+    tokens, i = peeled, 0
     prog = tokens[i].rsplit('/', 1)[-1]
     if prog not in ('git', 'gh'):
         return None
@@ -962,7 +1063,8 @@ def parse_invocation(tokens):
         i += 2 if t in value_opts else 1
     sub = tokens[i] if i < len(tokens) else None
     args = tokens[i + 1:] if i < len(tokens) else []
-    return {'prog': prog, 'sub': sub, 'args': args, 'globals': tokens[start:i]}
+    return {'prog': prog, 'sub': sub, 'args': args, 'globals': tokens[start:i],
+            'wrapped': wrapped, 'chdir': chdir}
 
 
 def is_safe_read_filter(tokens):
@@ -2006,13 +2108,14 @@ def is_overridable(inv, verdict, writes):
     can genuinely know better than the guard: an overlap they have read and
     accepted.
 
-    The three exclusions below are what keep the override inside the scope it
+    The four exclusions below are what keep the override inside the scope it
     claims. An output redirect to a file writes content the classifier never
-    saw; a `git -c`/`--config-env` escape hatch can run arbitrary code
-    (`-c core.pager='!sh …'`); and a `git -C`/`--git-dir` pointing elsewhere
-    puts the loss in a checkout this session doesn't own — the one thing
-    "damage stops at this machine" has to rule out."""
-    if inv is None or writes or inv['prog'] != 'git':
+    saw; a command wrapper can run git as another user or in another directory
+    (`sudo`, `env -C`); a `git -c`/`--config-env` escape hatch can run arbitrary
+    code (`-c core.pager='!sh …'`); and a `git -C`/`--git-dir` pointing
+    elsewhere puts the loss in a checkout this session doesn't own — the one
+    thing "damage stops at this machine" has to rule out."""
+    if inv is None or writes or inv['wrapped'] or inv['prog'] != 'git':
         return False
     if set(inv['globals']) & GIT_ESCAPE_HATCHES or targets_other_repo(inv['globals']):
         return False
@@ -2040,14 +2143,19 @@ def classify_segment(inv, branch, policy, cwd, probe, mode=''):
     if inv is None:
         return ('nongit', None)
     if inv['prog'] == 'gh':
-        return classify_gh(inv['sub'] or '', inv['args'])
-    if inv['sub'] is None:
+        verdict, reason = classify_gh(inv['sub'] or '', inv['args'])
+    elif inv['sub'] is None:
         return ('defer', None)            # bare `git`
-    verdict, reason = classify_git(inv['sub'], inv['args'], branch, policy,
-                                   cwd, probe, mode)
+    else:
+        verdict, reason = classify_git(inv['sub'], inv['args'], branch, policy,
+                                       cwd, probe, mode)
     # An inline-config escape hatch blocks auto-allow, but must not weaken a
-    # protective `ask` (e.g. `git -c k=v commit` on main still asks).
-    if verdict == 'allow' and (set(inv['globals']) & GIT_ESCAPE_HATCHES):
+    # protective `ask` (e.g. `git -c k=v commit` on main still asks). A wrapper
+    # does the same: it is peeled to find the protective verdicts (Q223), and
+    # what it adds -- another user, a cleared or extra environment -- is
+    # nothing the classifier read, so it approves nothing.
+    if verdict == 'allow' and (inv['wrapped']
+                               or set(inv['globals']) & GIT_ESCAPE_HATCHES):
         return ('defer', None)
     return (verdict, reason)
 
@@ -2499,7 +2607,7 @@ def main():
                 if is_cd:
                     seg_cwd = dest
             else:
-                inv_cwd = git_cwd(seg_cwd, inv['globals'])
+                inv_cwd = None if inv['chdir'] else git_cwd(seg_cwd, inv['globals'])
                 seg_branch = branch_in(inv_cwd or cwd, branches)
                 seen.add(seg_branch)
                 verdict, reason = classify_segment(

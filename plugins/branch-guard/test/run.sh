@@ -2538,6 +2538,118 @@ check "[grants] add -b records the path, not the branch name" \
   "$(nat "$(cd "$WORK" && cd .. && pwd -P)/wt-b")" \
   "$(grant_target "$GRANT_HOME_B")"
 
+# 29. Command wrappers (Q223). bash runs `timeout 60 git push origin main` as a
+#     push, so the guard has to judge it as one rather than as `timeout`. A
+#     wrapper is peeled for the protective verdicts only: what it adds --
+#     another user, a cleared environment, another directory -- is nothing the
+#     classifier read, so a wrapped `allow` still defers and the break-glass
+#     never lifts through one. Its own repo, so no earlier section's state
+#     leaks in.
+WRAP="$(mktemp -d "$REPO_ROOT/tmp/wrap.XXXXXX")"
+git -C "$WRAP" init -q -b main
+git -C "$WRAP" config user.name "Test"
+git -C "$WRAP" config user.email "test@example.com"
+printf 'hello\n' > "$WRAP/file.txt"
+git -C "$WRAP" add file.txt
+git -C "$WRAP" commit -q -m init
+git -C "$WRAP" checkout -q -b claude/x
+
+#     29a. Every wrapper, and each option shape whose arity decides where the
+#     command starts: a value missed leaves it standing as the program, a value
+#     invented swallows `git`. The bare push is the control.
+check "[wrap] control: push --force origin main -> ask" ask \
+  "$(decision_for "$(bash_payload 'git push --force origin main')" "$WRAP")"
+for w in 'env' 'env -i' 'env -' 'env FOO=1' 'env -u FOO' 'env -uFOO' \
+         'env -iu FOO' 'env --unset FOO' 'env --uns FOO' 'env FOO[0]=x' \
+         "env 'a b=c'" 'env =x' 'command' 'command -p' 'nohup' 'nice' \
+         'nice -n 5' 'nice -10' 'timeout 60' 'timeout -s KILL 60' \
+         'timeout --kill-after=2 60' 'timeout --kill 2 60' 'timeout -- 60' \
+         'stdbuf -o0' 'stdbuf -o 0' 'setsid -w' 'time' 'time -p' 'exec' \
+         'exec -a x' 'sudo' 'sudo -u root' 'sudo -uroot' 'sudo -nu root' \
+         'sudo -r role -t type' 'sudo --us root' 'sudo FOO=1' \
+         'sudo -u x env A=1 timeout 5 nohup'; do
+  check "[wrap] $w git push --force origin main -> ask" ask \
+    "$(decision_for "$(bash_payload "$w git push --force origin main")" "$WRAP")"
+done
+#     A wrapper named by absolute path. The command goes to jq on stdin: as an
+#     argument starting with `/`, Git Bash rewrites it to a Windows path before
+#     jq sees it, so the hook would be judging `C:/Program Files/…`.
+check "[wrap] /usr/bin/env git push --force origin main -> ask" ask \
+  "$(decision_for "$(printf '%s' '/usr/bin/env git push --force origin main' \
+     | jq -Rsc '{tool_name: "Bash", tool_input: {command: .}}')" "$WRAP")"
+#     `env -S` carries the command inside its value, in each spelling.
+for s in "-S 'git push --force origin main'" "-S'git push --force origin main'" \
+         "--split-string='git push --force origin main'"; do
+  check "[wrap] env $s -> ask" ask \
+    "$(decision_for "$(bash_payload "env $s")" "$WRAP")"
+done
+#     The other protective paths reach through a wrapper too, unattended included.
+git -C "$WRAP" checkout -q main
+check "[wrap] nohup git commit on main -> ask" ask \
+  "$(decision_for "$(bash_payload 'nohup git commit -m x')" "$WRAP")"
+check "[wrap][dontAsk] timeout 5 git commit on main -> deny" deny \
+  "$(decision_for "$(bash_mode 'timeout 5 git commit -m x' dontAsk)" "$WRAP")"
+git -C "$WRAP" checkout -q claude/x
+check "[wrap] sudo gh repo delete -> ask" ask \
+  "$(decision_for "$(bash_payload 'sudo gh repo delete o/r --yes')" "$WRAP")"
+
+#     29b. Where nothing runs, there is nothing to judge: `command -v` looks a
+#     name up, and env/sudo stop taking options at the first assignment, so
+#     `env A=1 -i git …` runs a program called `-i` (GNU and BSD env alike).
+check "[wrap] command -v git push origin main -> none" none \
+  "$(decision_for "$(bash_payload 'command -v git push origin main')" "$WRAP")"
+check "[wrap] env A=1 -i git push origin main -> none" none \
+  "$(decision_for "$(bash_payload 'env A=1 -i git push origin main')" "$WRAP")"
+
+#     29c. A wrapped allow defers, each beside the unwrapped control that allows.
+for c in 'git status' 'git push' 'gh pr view 1'; do
+  check "[wrap] control: $c -> allow" allow \
+    "$(decision_for "$(bash_payload "$c")" "$WRAP")"
+  check "[wrap] timeout 5 $c -> none" none \
+    "$(decision_for "$(bash_payload "timeout 5 $c")" "$WRAP")"
+done
+
+#     29d. The break-glass does not lift through a wrapper, and the denial does
+#     not advertise a prefix that would fail. The unwrapped lift is the control.
+printf 'dirty\n' >> "$WRAP/file.txt"
+check "[wrap][dontAsk] control: override on reset --hard, dirty -> allow" allow \
+  "$(decision_for "$(bash_mode "$OVR git reset --hard" dontAsk)" "$WRAP")"
+check "[wrap][dontAsk] override on timeout 5 reset --hard, dirty -> deny" deny \
+  "$(decision_for "$(bash_mode "$OVR timeout 5 git reset --hard" dontAsk)" "$WRAP")"
+check_text "[wrap][dontAsk] wrapped deny does not name the prefix" lacks \
+  'BRANCH_GUARD_OVERRIDE' \
+  "$(reason_for "$(bash_mode 'timeout 5 git reset --hard' dontAsk)" "$WRAP")"
+git -C "$WRAP" checkout -q -- file.txt
+
+#     29e. A wrapper that changes directory leaves the hook unable to name the
+#     tree, so the ref probes stand down to the unprobed ask. A tip nothing else
+#     reaches denies when probed; the plain wrapper keeps the probe, which is
+#     what separates "followed the chdir" from "gave up on every wrapper".
+git -C "$WRAP" checkout -q -b wrap-orphan
+git -C "$WRAP" commit -q --allow-empty -m "unreachable from anything"
+check "[wrap] control: reset --hard on an irrecoverable tip -> deny" deny \
+  "$(decision_for "$(bash_payload 'git reset --hard HEAD~1')" "$WRAP")"
+check "[wrap] timeout 5 reset --hard on an irrecoverable tip -> deny" deny \
+  "$(decision_for "$(bash_payload 'timeout 5 git reset --hard HEAD~1')" "$WRAP")"
+for w in 'env -C .' 'env --chdir=.' 'sudo -D .'; do
+  check "[wrap] $w reset --hard on an irrecoverable tip -> ask" ask \
+    "$(decision_for "$(bash_payload "$w git reset --hard HEAD~1")" "$WRAP")"
+done
+
+#     29f. A wrapped `worktree add` records no grant: `sudo` makes a checkout
+#     the session may not own, and `env -C` puts it somewhere else.
+WRAP_HOME="$(mktemp -d "$REPO_ROOT/tmp/wrap-home.XXXXXX")"
+decision_for "$(post_payload 'git worktree add ../wt-plain' "$(nat "$WRAP")")" \
+  "$WRAP" HOME="$WRAP_HOME" BRANCH_GUARD_WORKTREE_GRANTS=1 >/dev/null
+check "[wrap][grants] control: a plain worktree add records" present \
+  "$(grant_dir_state "$WRAP_HOME")"
+rm -rf "$WRAP_HOME/.claude"
+decision_for "$(post_payload 'env -C .. git worktree add wt-wrapped' "$(nat "$WRAP")")" \
+  "$WRAP" HOME="$WRAP_HOME" BRANCH_GUARD_WORKTREE_GRANTS=1 >/dev/null
+check "[wrap][grants] a wrapped worktree add records nothing" absent \
+  "$(grant_dir_state "$WRAP_HOME")"
+rm -rf "$WRAP" "$WRAP_HOME"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 
 # A FLOOR, not an exact count. The suite used to assert its own size against a
