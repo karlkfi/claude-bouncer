@@ -12505,5 +12505,66 @@ class SupervisePostureTests(unittest.TestCase):
                            env_extra={"WORKSPACE_GUARD_POSTURE": "supervise"})
         self.assertIn("normally denies", reason)
 
+# --- Q276: process-substitution bodies -----------------------------------
+
+
+class ProcessSubstBodyTests(OutsideParentFixture, unittest.TestCase):
+    """Q276: a guarded command in `<(…)` or `>(…)` is judged like a plain one.
+
+    bash runs a process substitution's body, so `true >(rm -rf ../x)` removes
+    `../x` as surely as `rm -rf ../x` does. Only `$(…)` and backtick bodies were
+    recursed into, so on an unguarded outer command the body went unjudged and
+    the string deferred.
+    """
+
+    BODIES = ("rm -rf ../q276-x", "tee ../q276-x", "cat ../q276-x",
+              "rm -rf $HOME/q276-x")
+    WRAPS = ("true <(%s)", "true >(%s)", "true 2>(%s)", "true x<(%s)",
+             "x=<(%s); true", "true <(true >(%s))", "true $(true >(%s))",
+             "true <(echo $(%s))")
+
+    def test_a_body_gets_the_decision_it_gets_written_plainly(self):
+        for body in self.BODIES:
+            plain = self._decision(body)
+            self.assertIn(plain, ("ask", "deny"), body)
+            for wrap in self.WRAPS:
+                cmd = wrap % body
+                with self.subTest(cmd=cmd):
+                    self.assertEqual(plain, self._decision(cmd))
+
+    def test_the_outer_command_still_reads_the_body_words(self):
+        # The control the row keeps: this asked before Q276, through the
+        # outer `cat` reading the body's words as its own operands.
+        self.assertEqual("ask", self._decision("cat <(cat ../q276-x)"))
+        self.assertEqual("allow", self._decision("cat <(cat in.txt)"))
+
+    def test_a_redirect_before_the_substitution_still_asks(self):
+        self.assertEqual("ask", self._decision("true > >(rm -rf ../q276-x)"))
+
+    def test_a_body_resolves_against_its_own_cd(self):
+        # Read from the root, `in.txt` is inside; only the body's own `cd ..`
+        # puts it outside, so this asks only if the body itself was judged.
+        self.assertEqual("ask", self._decision("true <(cd ..; cat in.txt)"))
+
+    def test_a_cd_before_the_substitution_moves_its_body(self):
+        self.assertEqual("ask", self._decision("cd ..; true <(rm -rf q276-x)"))
+        self.assertIsNone(self._decision("cd sub; true <(rm -rf ../in.txt)"))
+
+    def test_a_substitution_inside_one_is_left_to_the_recursion(self):
+        # The `$(id)` inside the `<(…)` is that body's own; listing it beside
+        # the outer one would hand the marker walk two overlapping spans.
+        text = "cd sub; true <(echo $(id)) $(pwd)"
+        pairs = guard.all_substitutions(text)
+        self.assertEqual(["echo $(id)", "pwd"], [b for b, _ in pairs])
+        self.assertEqual(["<(echo $(id))", "$(pwd)"],
+                         [text[s:e] for _, (s, e) in pairs])
+
+    def test_what_bash_does_not_run_is_not_judged(self):
+        for cmd in ('echo "<(rm -rf ../q276-x)"', "echo '>(rm -rf ../q276-x)'",
+                    "true >>(rm -rf ../q276-x)", "true &>(rm -rf ../q276-x)"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self._decision(cmd))
+
+
 if __name__ == "__main__":
     unittest.main()
