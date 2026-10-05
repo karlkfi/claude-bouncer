@@ -106,7 +106,8 @@ def broken(paths, exists, read):
     for path in paths:
         # The list comes from the index and the contents from the working
         # tree, so a row deleted ahead of its commit is listed and absent.
-        # Every other gate grades the working tree; so does this one.
+        # Rejecting that state is backlog-lint's job, which names the file;
+        # crashing on it here is not.
         if not exists(path):
             continue
         for line, target in links(strip_code(read(path))):
