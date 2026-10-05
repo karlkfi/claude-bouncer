@@ -76,7 +76,7 @@ Invoke the `session-backlog` skill for any change to the store.
 
 ```
 make check    # drift, version, path filters, action pins, install refs,
-              # backlog lint, parser tests, all five suites
+              # gate parity, backlog lint, parser tests, all five suites
 ```
 
 Run it before proposing a change is done. A change under `lib/` reaches all
@@ -129,6 +129,13 @@ purpose are a table in the script, reconciled in both directions -- an
 exemption that matches nothing fails, and the pass line says how many are held
 back. It does not read `plugins/*/docs/releases/`, which record what shipped at
 that version.
+
+`make gate-parity-check` is the fourth: every prerequisite of `check:` must be
+run by a CI step that no path filter can skip, either as `make <target>` or as
+its own recipe. Adding a gate means adding it to both lists, and this fails
+until you do. `plugin-tests` and `backlog-lint` are reached differently, one
+job per plugin and the root suite reading the recipe's flags, and the script
+checks each of those on its own terms.
 
 Python 3.9 is the floor. exit-status-guard supports it and CI runs the shared
 parser against it, so 3.10+ syntax in `lib/` breaks that job and nothing else,

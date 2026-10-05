@@ -1,0 +1,137 @@
+"""Tests for the gate-parity check itself.
+
+It asserts agreement between two files, so it stays green whenever they
+happen to agree -- including once it has stopped reading one of them. Each
+case plants one way a gate can go unrun in CI and requires the check to name
+it, beside a clean pair it must pass.
+"""
+import importlib.util
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SCRIPT = os.path.join(ROOT, 'scripts', 'gate-parity-check.py')
+
+spec = importlib.util.spec_from_file_location('gate_parity_check', SCRIPT)
+gpc = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gpc)
+
+MAKEFILE = """PYTHON ?= python3
+PLUGINS := alpha-guard
+
+check: lint-a lint-b suites
+
+# A comment between targets.
+lint-a:
+\t$(PYTHON) scripts/a.py --strict
+
+lint-b:
+\t@$(PYTHON) scripts/b.py \\
+\t  --long-flag
+
+suites:
+\t@for p in $(PLUGINS); do echo $$p; done
+"""
+
+WORKFLOW = """name: tests
+
+on:
+  pull_request:
+
+jobs:
+  root:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # a comment
+      - run: python3 scripts/a.py --strict
+      - name: b
+        run: |
+          make lint-b
+
+  alpha-guard:
+    if: needs.changes.outputs.alpha_guard == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - run: python3 -m unittest discover tests
+        working-directory: plugins/alpha-guard
+"""
+
+
+class GateParityTests(unittest.TestCase):
+
+    def problems(self, makefile=MAKEFILE, workflow=WORKFLOW):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        mk, wf = os.path.join(tmp, 'Makefile'), os.path.join(tmp, 'tests.yml')
+        with open(mk, 'w') as fh:
+            fh.write(makefile)
+        with open(wf, 'w') as fh:
+            fh.write(workflow)
+        variables, targets = gpc.read_makefile(mk)
+        return gpc.check_parity(variables, targets, gpc.read_workflow(wf),
+                                carried={'suites': gpc._plugin_jobs})
+
+    def test_a_matching_pair_passes(self):
+        self.assertEqual([], self.problems())
+
+    def test_a_gate_ci_never_runs_fails(self):
+        bad = self.problems(makefile=MAKEFILE.replace(
+            'check: lint-a', 'check: lint-c lint-a') + 'lint-c:\n\ttrue\n')
+        self.assertEqual(1, len(bad), bad)
+        self.assertIn('lint-c', bad[0])
+
+    def test_a_gate_named_but_undefined_fails(self):
+        bad = self.problems(makefile=MAKEFILE.replace(
+            'check: lint-a', 'check: lint-z lint-a'))
+        self.assertEqual(['lint-z: named by `check:` but has no recipe'], bad)
+
+    def test_a_flag_dropped_from_ci_fails(self):
+        """The recipe is matched whole, so CI running the script with a
+        different flag set is not the same gate."""
+        bad = self.problems(workflow=WORKFLOW.replace(
+            'python3 scripts/a.py --strict', 'python3 scripts/a.py'))
+        self.assertEqual(1, len(bad), bad)
+        self.assertIn('lint-a', bad[0])
+
+    def test_a_step_in_a_path_filtered_job_does_not_count(self):
+        guarded = WORKFLOW.replace(
+            '  root:\n    runs-on',
+            "  root:\n    if: needs.changes.outputs.x == 'true'\n    runs-on")
+        bad = self.problems(workflow=guarded)
+        self.assertEqual(2, len(bad), bad)
+
+    def test_a_step_outside_the_root_does_not_count(self):
+        moved = WORKFLOW.replace(
+            '      - run: python3 scripts/a.py --strict\n',
+            '      - run: python3 scripts/a.py --strict\n'
+            '        working-directory: plugins/alpha-guard\n')
+        bad = self.problems(workflow=moved)
+        self.assertEqual(1, len(bad), bad)
+        self.assertIn('lint-a', bad[0])
+
+    def test_a_multi_line_recipe_is_reached_only_through_make(self):
+        bad = self.problems(workflow=WORKFLOW.replace('make lint-b',
+                                                      'echo lint-b'))
+        self.assertEqual(1, len(bad), bad)
+        self.assertIn('lint-b', bad[0])
+
+    def test_a_plugin_with_no_job_fails(self):
+        bad = self.problems(makefile=MAKEFILE.replace(
+            'PLUGINS := alpha-guard', 'PLUGINS := alpha-guard beta-guard'))
+        self.assertEqual(1, len(bad), bad)
+        self.assertIn('beta-guard', bad[0])
+
+    def test_the_repository_passes(self):
+        p = subprocess.run([sys.executable, SCRIPT], capture_output=True,
+                           text=True)
+        self.assertEqual(0, p.returncode, p.stdout + p.stderr)
+        self.assertIn('ok (', p.stdout)
+
+
+if __name__ == '__main__':
+    unittest.main()
