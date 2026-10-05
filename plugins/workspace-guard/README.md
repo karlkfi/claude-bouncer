@@ -329,6 +329,7 @@ Windows' own `taskkill`.
 | `mkdir x -Value C:\out\y` (content)           | allow    |
 | `Get-Content -Path in.txt,C:\out\x` (array)    | **ask**  |
 | `Set-Location C:\out; Get-Content secret.txt`  | **ask**  |
+| `Set-Location C:\out; Write-Output $(Get-Content secret.txt)` | **ask** |
 | `Write-Output hi > C:\out\x` (redirect)        | **ask**  |
 | `Write-Output "$(Get-Content C:\out\x)"`       | **ask**  |
 | `Get-Content $env:USERPROFILE\x`               | **ask**  |
@@ -348,7 +349,8 @@ unambiguous prefixes (`-Pat` is `-Path`) and the colon form (`-Path:C:\x`) —
 and only then into whatever positional slots are left, so
 `Select-String -Pattern foo C:\x` puts the file in `-Path` however the two are
 ordered. `Set-Location` and `Push-Location` are followed so a later relative
-operand resolves against the right directory; anything the hook can't follow
+operand resolves against the right directory, including one inside a later
+`$(…)`; anything the hook can't follow
 (a bare `cd`, a `$var` target, `Pop-Location`) drops tracking and prompts on
 relative operands rather than guessing.
 
@@ -1852,11 +1854,9 @@ final output.
   *non-`mktemp` tool's* own internal temp location (not a path the hook parses).
 - Command-substitution recursion (step 14) scans the raw command for
   quote-context fidelity, so single-quoted `'$(…)'` is correctly skipped. Its
-  edges degrade to *defer* (never a silent allow): a substitution body resolves
-  relative paths against the command's starting cwd, not a cwd set by an earlier
-  in-chain `cd` (`cd /x && echo "$(cat f)"` judges `f` against the start cwd); a
-  body that itself contains a quoted operator character (`echo "$(grep ")" f)"`)
-  can mis-tokenize on re-parse and defer; and backtick nesting via
+  edges degrade to *defer* (never a silent allow): a body that itself contains
+  a quoted operator character (`echo "$(grep ")" f)"`) can mis-tokenize on
+  re-parse and defer; and backtick nesting via
   `` \` `` or a no-space `$((…))`-shaped subshell isn't decoded. Process substitution
   `<(…)`/`>(…)` is only ever unquoted and is already caught by the subshell
   split.

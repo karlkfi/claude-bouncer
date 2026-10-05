@@ -10382,6 +10382,30 @@ class PowerShellSubexpressionTests(unittest.TestCase):
         masked, _ = guard.ps_subexpressions('Get-Content "unterminated')
         self.assertIsNone(guard.ps_tokenize(masked))
 
+    def _marks(self, cmd):
+        text = guard.ps_strip_here_strings(cmd, literal_only=True)
+        toks = guard.ps_tokenize(
+            guard.ps_subexpressions(guard.ps_strip_here_strings(cmd))[0])
+        return toks, guard.ps_subexpression_marks(text, toks)
+
+    def test_each_token_names_the_bodies_written_in_it(self):
+        # Q172: the numbers index `bodies`, so the segment walk can say where
+        # each one sat.
+        toks, marks = self._marks('Set-Location x; Write-Output "a$(b)c" $(d)')
+        self.assertEqual([t[1] for t in toks],
+                         ['Set-Location', 'x', ';', 'Write-Output', 'a$c', '$'])
+        self.assertEqual(marks, [[], [], [], [], [0], [1]])
+
+    def test_a_body_in_an_expandable_here_string_keeps_its_word(self):
+        _, marks = self._marks('Set-Content x @"\n$(Get-Content y)\n"@')
+        self.assertEqual(marks, [[], [], [0]])
+
+    def test_a_string_already_holding_the_sentinel_places_nothing(self):
+        # Its own byte could not be told from a marker, so every body falls
+        # back to the cwd the string started in, as before Q172.
+        _, marks = self._marks('Write-Output $(Get-Content y) "\x1e0\x1e"')
+        self.assertIsNone(marks)
+
 
 class PowerShellSubexpressionRecursionTests(unittest.TestCase):
     """Nested `$(…)` costs one analysis per level, not 2^n (Q64).
@@ -10413,9 +10437,9 @@ class PowerShellSubexpressionRecursionTests(unittest.TestCase):
         depths = []
         real = guard._ps_analyze_command
 
-        def spy(cmd, ctx, base_cwd, depth=0):
+        def spy(cmd, ctx, base_cwd, depth=0, *rest):
             depths.append(depth)
-            return real(cmd, ctx, base_cwd, depth)
+            return real(cmd, ctx, base_cwd, depth, *rest)
 
         with mock.patch.object(guard, "_ps_analyze_command", spy):
             guard.ps_analyze_command(command, self.ctx, self.workspace)
@@ -11688,6 +11712,48 @@ class PowerShellEndToEndTests(unittest.TestCase):
 
     def test_pop_location_drops_tracking(self):
         self._decide("Push-Location docs; Pop-Location; Get-Content note.md", "deny")
+
+    # --- a subexpression resolves where it sits (Q172) ------------------------
+
+    def test_a_subexpression_after_set_location_resolves_there(self):
+        # Pre-fix every one of these was silent: the body was judged against
+        # the workspace the string started in, where `secret.txt` is inside.
+        for body in ('$(Get-Content secret.txt)', '"$(Get-Content secret.txt)"',
+                     '@(Get-Content secret.txt)',
+                     '$(Write-Output $(Get-Content secret.txt))',
+                     '@"\n$(Get-Content secret.txt)\n"@'):
+            for sep in ('; ', '\n'):
+                with self.subTest(body=body, sep=sep):
+                    self._decide("Set-Location %s%sWrite-Output %s"
+                                 % (ps(self.outside_dir), sep, body), "ask")
+
+    def test_a_subexpression_before_set_location_resolves_where_it_started(self):
+        self._defer("Write-Output $(Get-Content in.txt); Set-Location %s"
+                    % ps(self.outside_dir))
+
+    def test_a_subexpression_in_set_locations_arguments_runs_before_it(self):
+        # The body builds the argument the `Set-Location` then runs with, so it
+        # resolves where the string stood -- not in the location the call
+        # leaves behind, which here is untracked and would deny.
+        self._defer("Set-Location $(Get-Content in.txt)")
+
+    def test_identical_bodies_are_placed_apart(self):
+        # Keying on body text would collapse these into one placement.
+        self._decide("Write-Output $(Get-Content secret.txt); Set-Location %s; "
+                     "Write-Output $(Get-Content secret.txt)"
+                     % ps(self.outside_dir), "ask")
+
+    def test_set_location_inward_stops_naming_a_path_nothing_reads(self):
+        # Pre-fix this asked about `outside/in.txt`, a file the command never
+        # opens.
+        self._defer("Set-Location %s; Write-Output $(Get-Content in.txt)"
+                    % ps(self.workspace), cwd=self.outside_dir)
+
+    def test_an_untracked_location_reaches_the_subexpression(self):
+        out = self._decide("Set-Location $d; Write-Output $(Get-Content secret.txt)",
+                           "deny")
+        self.assertIn("untracked",
+                      out["hookSpecificOutput"]["permissionDecisionReason"])
 
     # --- deferring, and what must not defer ----------------------------------
 

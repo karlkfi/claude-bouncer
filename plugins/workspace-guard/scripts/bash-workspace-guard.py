@@ -5028,7 +5028,7 @@ PS_STATEMENT_OPS = frozenset({';', '\n', '&&', '||', '&'})
 PS_HERE_OPEN_RE = re.compile(r"@([\"'])[ \t]*\r?\n")
 
 
-def ps_strip_here_strings(text, literal_only=False):
+def ps_strip_here_strings(text, literal_only=False, keep_marks=False):
     """Replace here-string bodies with an empty literal, or None if one is open.
 
     Body text is arbitrary data — it may hold unbalanced quotes, `#`, or
@@ -5037,6 +5037,10 @@ def ps_strip_here_strings(text, literal_only=False):
     scan, since PowerShell *does* run a `$(…)` written there; the literal (`@'`)
     form is inert and drops either way. Same split as the bash heredoc handling
     in Q35.
+
+    `keep_marks` keeps the subexpression markers a body holds, appended to the
+    empty literal, so a `$(…)` written in an `@"` here-string still lands in
+    the word the here-string stood for (Q172).
     """
     out, i = [], 0
     while True:
@@ -5053,6 +5057,9 @@ def ps_strip_here_strings(text, literal_only=False):
         else:
             out.append(text[i:m.start()])
             out.append("''")
+            if keep_marks:
+                out.extend(mk.group(0)
+                           for mk in MARK_RE.finditer(text, m.end(), e.start()))
         i = e.end()
 
 
@@ -5101,7 +5108,7 @@ def _ps_scan_paren(text, start):
     return None
 
 
-def ps_subexpressions(text):
+def ps_subexpressions(text, mark=False):
     """Split `$(…)` / `@(…)` out of `text`.
 
     Returns `(masked, bodies)`. Each subexpression is replaced by a bare `$` so
@@ -5109,6 +5116,10 @@ def ps_subexpressions(text):
     returned for analysis in its own right — the same strictly-friction-adding
     treatment bash command substitutions get, and for the same reason: a guarded
     cmdlet written inside one is invisible to the outer tokenizer.
+
+    `mark` numbers the mask: the `$` is followed by the body's index between
+    two `SUBST_MARK`s, so the word it lands in says which body sat there
+    (Q172).
 
     Only the OUTERMOST subexpressions are returned, matching
     `command_substitutions`: a nested `$(… $(…) …)` is found by re-scanning the
@@ -5120,6 +5131,11 @@ def ps_subexpressions(text):
     nothing. (Q64)
     """
     out, bodies, i, n = [], [], 0, len(text)
+
+    def mask():
+        return '$%s%d%s' % (SUBST_MARK, len(bodies) - 1, SUBST_MARK) \
+            if mark else '$'
+
     while i < n:
         c = text[i]
         if c == '`':
@@ -5140,7 +5156,7 @@ def ps_subexpressions(text):
                 i += 1
                 continue
             bodies.append(text[i + 2:j - 1])
-            out.append('$')
+            out.append(mask())
             i = j
             continue
         if c == '"':
@@ -5158,7 +5174,7 @@ def ps_subexpressions(text):
                     if k is None:
                         break
                     bodies.append(text[j + 2:k - 1])
-                    seg.append('$')
+                    seg.append(mask())
                     j = k
                     continue
                 seg.append(text[j])
@@ -5871,7 +5887,33 @@ def ps_analyze_command(cmd, ctx, base_cwd, depth=0, suppressed=None):
     return offenders, guarded and not signal
 
 
-def _ps_analyze_command(cmd, ctx, base_cwd, depth=0):
+def ps_subexpression_marks(expandable_text, toks):
+    """Which subexpression bodies each token in `toks` holds, or None.
+
+    The bodies come from scanning `expandable_text` and the tokens from a
+    second scan over a differently stripped string (Q172), so an index into one
+    is not an index into the other. This re-scans `expandable_text` with the
+    mask numbered, strips its here-strings keeping the numbers, and tokenizes
+    that. The numbers are trusted only when the result, with them taken out, is
+    `toks` token for token; any disagreement returns None and every body is
+    analysed where the string started, which is what happened before Q172.
+    """
+    if SUBST_MARK in expandable_text:
+        return None
+    marked = ps_strip_here_strings(ps_subexpressions(expandable_text, True)[0],
+                                   keep_marks=True)
+    mtoks = None if marked is None else ps_tokenize(marked)
+    if mtoks is None or len(mtoks) != len(toks):
+        return None
+    out = []
+    for tok, mtok in zip(toks, mtoks):
+        if (mtok[0], MARK_RE.sub('', mtok[1])) + mtok[2:] != tuple(tok):
+            return None
+        out.append([int(b) for b in MARK_RE.findall(mtok[1])])
+    return out
+
+
+def _ps_analyze_command(cmd, ctx, base_cwd, depth=0, base_cwd_unknown=False):
     """Analyze one PowerShell string; returns `(offenders, guarded, signal)`."""
     if not cmd.strip():
         return [], False, None
@@ -5884,11 +5926,25 @@ def _ps_analyze_command(cmd, ctx, base_cwd, depth=0):
     if toks is None:
         return [], False, None                # open quote -> defer
 
+    # A relative path inside a subexpression resolves where the subexpression
+    # sits, which a `Set-Location` earlier in the string has already moved --
+    # the bash side's Q169, on this frontend. A body the marks cannot place
+    # keeps the cwd the string started in.
+    marks = ps_subexpression_marks(expandable_text, toks)
+    sub_cwd = [(base_cwd, base_cwd_unknown)] * len(bodies)
+
     offenders, guarded, signal = [], False, None
-    cwd, cwd_unknown, seg, stmt = base_cwd, False, [], []
-    for tok in toks + [('op', ';', False, False)]:
+    cwd, cwd_unknown, seg, stmt = base_cwd, base_cwd_unknown, [], []
+    for at, tok in enumerate(toks + [('op', ';', False, False)]):
         if tok[0] == 'op':
             if seg:
+                # Read before this segment's own location change: a
+                # subexpression is evaluated to build the arguments the
+                # `Set-Location` then runs with.
+                for b in (b for j in range(at - len(seg), at)
+                          for b in (marks[j] if marks else ())):
+                    if b < len(sub_cwd):
+                        sub_cwd[b] = (cwd, cwd_unknown)
                 off, g, sig, cwd, cwd_unknown = ps_analyze_segment(
                     seg, ctx, cwd, cwd_unknown)
                 offenders.extend(off)
@@ -5915,9 +5971,9 @@ def _ps_analyze_command(cmd, ctx, base_cwd, depth=0):
     # the two halves sit on opposite sides of this recursion, and neither is an
     # offender on its own.
     if depth < MAX_SUBST_DEPTH:
-        for body in bodies:
-            sub_off, _, sub_sig = _ps_analyze_command(body, ctx, base_cwd,
-                                                      depth + 1)
+        for body, (b_cwd, b_unknown) in zip(bodies, sub_cwd):
+            sub_off, _, sub_sig = _ps_analyze_command(body, ctx, b_cwd,
+                                                      depth + 1, b_unknown)
             offenders.extend(sub_off)
             signal = signal or sub_sig
     return offenders, guarded, signal
