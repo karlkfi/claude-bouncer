@@ -1139,14 +1139,20 @@ class CompoundBypassTests(unittest.TestCase):
         cmd = "kubectl --context acme-production delete ns x"
         for prefix, suffix in (("# note\n", ""), ("echo hi # c\n", ""),
                                ("bash <<EOF\n# c\n", "\nEOF"),
-                               ('echo "$(# c\n', ')"'), ("echo $(# c\n", ")")):
+                               ('echo "$(# c\n', ')"'), ("echo $(# c\n", ")"),
+                               # A comment inside backticks ends at the closing
+                               # backtick, and one outside hides no substitution.
+                               ("echo `true # c` ; ", ""),
+                               ("bash <<EOF\necho `true # c` ; ", "\nEOF"),
+                               ("# don't\necho \"$(", ')"')):
             with self.subTest(prefix=prefix):
                 decision, _ = run_hook(prefix + cmd + suffix)
                 self.assertEqual(decision, "deny")
 
     def test_hash_that_starts_no_comment_hides_nothing(self):
         # shlex started a comment mid-word, as bash does not.
-        for head in ("echo file#1", "echo ${#x} $#", 'echo "a # b"', "echo '#'"):
+        for head in ("echo file#1", "echo ${#x} $#", 'echo "a # b"', "echo '#'",
+                     "echo `true`#c"):
             with self.subTest(head=head):
                 decision, _ = run_hook(
                     head + " && kubectl --context acme-production delete ns x")
