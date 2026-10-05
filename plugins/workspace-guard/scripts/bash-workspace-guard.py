@@ -3830,7 +3830,11 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
     if tokens is not None:
         cwd, unknown, hd_i = base_cwd, base_cwd_unknown, 0
         usable = set(inherited or ())
-        for g, g_redir, _persists, _pipe, nhd in split_groups(tokens):
+        scopes, saved_shells = [], []
+        groups = split_groups(tokens, scopes)
+        for (g, g_redir, _persists, _pipe, nhd), (shells, own) in zip(groups,
+                                                                    scopes):
+            cwd, unknown = enter_shell(saved_shells, shells, cwd, unknown)
             # Read the positions before applying this group's own `cd`: a
             # substitution is expanded to build the command line the `cd` then
             # runs on, so `cd $(dirname x)` resolves `x` where the string
@@ -3864,7 +3868,7 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
             # A `cd` behind `command` or `builtin` moves the shell; behind a
             # separate program it moves nothing (Q219).
             wrap = peel_wrappers(restored[head:])
-            kind, arg = (None, None) if wrap.external \
+            kind, arg = (None, None) if wrap.external or not own \
                 else classify_cd(wrap.argv)
             if kind is not None:
                 cwd, unknown = apply_cd(kind, arg, cwd, unknown)
@@ -3893,7 +3897,10 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
     return out
 
 
-def split_groups(tokens):
+PIPE_OPS = ('|', '|&')
+
+
+def split_groups(tokens, scopes=None):
     """Split a token list into `(cmd_tokens, redir_targets, persists, pipe,
     heredocs)` groups.
 
@@ -3909,9 +3916,17 @@ def split_groups(tokens):
     reading ordinary files. `heredocs` counts the `<<WORD` operators armed in
     the group, whose bodies bash expands with this group's cwd in force (Q169);
     the delimiter itself is not a path, so it is counted rather than kept.
+
+    ``scopes``, when given, receives one ``(shells, own)`` pair per group (Q173).
+    ``shells`` numbers each `(` the group sits inside, outermost first, so two
+    sibling subshells at the same depth still read as different shells; a
+    bare `$(` reaches here as `$(` then `(`, so a substitution counts too.
+    ``own`` is False for a pipeline segment or a backgrounded command, which
+    bash runs in a subshell of its own.
     """
     groups, cur, cur_redir, i = [], [], [], 0
     paren, prev_sep, pipe, nhd = 0, '', 0, 0
+    shells, opened = [], 0
     while i < len(tokens):
         t = tokens[i]
         if is_operator(t, SEPARATORS):
@@ -3919,11 +3934,18 @@ def split_groups(tokens):
                 persists = (paren == 0 and prev_sep != '|'
                             and t in (';', '\n', '&&', '||'))
                 groups.append((cur, cur_redir, persists, pipe, nhd))
+                if scopes is not None:
+                    scopes.append((tuple(shells), prev_sep not in PIPE_OPS
+                                   and t not in PIPE_OPS + ('&',)))
                 cur, cur_redir, nhd = [], [], 0
             if t == '(':
                 paren += 1
+                opened += 1
+                shells.append(opened)
             elif t == ')':
                 paren = max(0, paren - 1)
+                if shells:
+                    shells.pop()
             if t != '|':
                 pipe += 1
             prev_sep = t
@@ -3960,7 +3982,30 @@ def split_groups(tokens):
         cur.append(t); i += 1
     if cur or cur_redir:
         groups.append((cur, cur_redir, paren == 0 and prev_sep != '|', pipe, nhd))
+        if scopes is not None:
+            scopes.append((tuple(shells), prev_sep not in PIPE_OPS))
     return groups
+
+
+
+def enter_shell(saved, shells, cwd, unknown):
+    """The cwd a group starts in, given the subshells it sits inside (Q173).
+
+    ``saved`` is the caller's stack of ``(shell, cwd, unknown)``, one per
+    subshell entered and not yet left, holding the cwd in force when it was
+    entered. Leaving a subshell restores that cwd, because a `cd` bash ran
+    inside one never reached the shell outside it. Entering one records the
+    current cwd for that restore. Returns the ``(cwd, unknown)`` to use.
+    """
+    k = 0
+    while k < len(saved) and k < len(shells) and saved[k][0] == shells[k]:
+        k += 1
+    if k < len(saved):
+        cwd, unknown = saved[k][1], saved[k][2]
+        del saved[k:]
+    for sh in shells[k:]:
+        saved.append((sh, cwd, unknown))
+    return cwd, unknown
 
 
 def analyze_command(cmd, ctx, base_cwd, depth=0, suppressed=None):
@@ -4053,7 +4098,8 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
     if tokens is None:
         return [], False, KillFacts(None, None, [])   # unbalanced quotes -> defer
 
-    groups = split_groups(tokens)
+    scopes = []
+    groups = split_groups(tokens, scopes)
 
     def is_outside(rp):
         return path_is_outside(rp, proj)
@@ -4272,7 +4318,10 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
     # `(body, cwd)` for every shell `-c` body this string runs locally, recursed
     # into after the loop so each resolves against the cwd of its own group.
     shell_bodies = []
-    for g, g_redir, persists, pipe, _nhd in groups:
+    saved_shells = []
+    for (g, g_redir, persists, pipe, _nhd), (shells, own) in zip(groups, scopes):
+        group_cwd, group_cwd_unknown = enter_shell(
+            saved_shells, shells, group_cwd, group_cwd_unknown)
         track_stable()
         # Substitute known literals for path checking. The pre-substitution
         # tokens are kept for assignment parsing below — bash decides what is
@@ -4445,11 +4494,14 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
         for p in (gp or []):
             grep_pats.append((pipe, p, kill_operand_anchored(
                 p, ctx.kill_anchor, cmd_cwd, cmd_cwd_unknown)))
-        # A `cd` behind a separate program (`env cd`) moves that program only.
+        # A `cd` behind a separate program (`env cd`) moves that program only,
+        # and one in a pipeline segment or backgrounded moves its own subshell
+        # only (Q173).
         kind, arg = (None, None) if wrap.external else classify_cd(g)
         if kind is not None:
-            group_cwd, group_cwd_unknown = apply_cd(
-                kind, arg, group_cwd, group_cwd_unknown)
+            if own:
+                group_cwd, group_cwd_unknown = apply_cd(
+                    kind, arg, group_cwd, group_cwd_unknown)
             continue
         lnop = ln_operands(g)
         if lnop is not None:

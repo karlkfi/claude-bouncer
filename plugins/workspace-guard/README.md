@@ -175,6 +175,7 @@ old one. A different project's scratch still asks entirely.
 | `cat ../../etc/passwd`               | **ask**  |
 | `cat ~/.aws/credentials`             | **ask**  |
 | `cd /etc && cat passwd`              | **ask**  |
+| `(cd sub) && cat ../x` · `echo $(cd sub) && cat ../x` (the `cd` stays in the subshell) | **ask** |
 | `echo "$(cat /etc/passwd)"` (quoted subst read) | **ask** |
 | `cat > doc.md <<EOF` … `$(cat /etc/x)` … `EOF` (expanded body) | **ask** |
 | `cat > doc.md <<EOF` … `don't` … `$(cat /etc/x)` … `EOF` (apostrophe first) | **ask** |
@@ -936,8 +937,15 @@ through the same boundary rules and produce the same reasons. Symlink staging
    re-roots relative file paths — including relative redirect targets — in
    later guarded groups (so `cd /etc && cat passwd` flags `passwd` as
    `/etc/passwd`, and `cd /tmp && cat in.txt > evil` flags `evil` as
-   `/tmp/evil`). A `cd`/`pushd` target that is a propagated literal variable
-   (step 4) re-roots the same way (`d=sub; cd $d && cat x.txt`). Two pure,
+   `/tmp/evil`). A `cd` inside `( … )` or a bare `$( … )` moves only the
+   commands in that subshell, and leaving it restores the cwd it was entered
+   with, because that is all bash's `cd` reaches there. A `cd` that is itself a
+   pipeline stage or backgrounded (`cd sub | …`, `cd sub &`) moves nothing.
+   Two shapes still leak: a `cd` inside a `{ … }` group, loop or `if` that is
+   piped or backgrounded as a whole, and a `cd` after an unparenthesised
+   `case` pattern (`x)`) inside a subshell. Both are open bugs. A
+   `cd`/`pushd` target that is a propagated literal variable (step 4)
+   re-roots the same way (`d=sub; cd $d && cat x.txt`). Two pure,
    deterministic command substitutions are also recognised as `cd`/`pushd`
    targets and resolved from the tracked cwd instead of dropping tracking:
    `$(git rev-parse --show-toplevel)` (computed by walking up to the nearest
