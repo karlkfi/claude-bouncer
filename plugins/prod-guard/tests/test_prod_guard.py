@@ -1271,6 +1271,42 @@ class OverrideTests(unittest.TestCase):
         self.assertEqual(decision, "ask")
         self.assertIn("override acknowledged", reason)
 
+    def test_env_operand_override_downgrades_deny_to_ask(self):
+        # `env NAME=v cmd` hands cmd the same variable the bare prefix does,
+        # so it arms the same way -- through every wrapper the walk peels
+        # (Q176).
+        for prefix in ("env PROD_GUARD_OVERRIDE=incident-42 ",
+                       "env -i PROD_GUARD_OVERRIDE=incident-42 ",
+                       "env 'PROD_GUARD_OVERRIDE=incident 42' ",
+                       "env -S 'PROD_GUARD_OVERRIDE=incident-42' ",
+                       "timeout 5 env PROD_GUARD_OVERRIDE=incident-42 ",
+                       "sudo env PROD_GUARD_OVERRIDE=incident-42 ",
+                       "env A=1 sudo env PROD_GUARD_OVERRIDE=incident-42 "):
+            with self.subTest(prefix=prefix):
+                decision, reason = run_hook(
+                    prefix + "kubectl --context gke_acme_prod-us delete ns x")
+                self.assertEqual(decision, "ask")
+                self.assertIn("override acknowledged", reason)
+
+    def test_env_operands_that_set_another_name_do_not_arm(self):
+        # env(1) takes `NAME+` verbatim, and `-u` unsets rather than sets.
+        for prefix in ("env PROD_GUARD_OVERRIDE+=incident-42 ",
+                       "env -u PROD_GUARD_OVERRIDE "):
+            with self.subTest(prefix=prefix):
+                decision, reason = run_hook(
+                    prefix + "kubectl --context gke_acme_prod-us delete ns x")
+                self.assertEqual(decision, "deny")
+                self.assertNotIn("override acknowledged", reason)
+
+    def test_exported_override_does_not_arm_an_env_wrapped_command(self):
+        # The `env` form arms from its own operand, never from what env
+        # inherits, so Q176 must not let an export through behind it.
+        decision, reason = run_hook(
+            "env A=1 kubectl --context gke_acme_prod-us delete ns x",
+            env_extra={"PROD_GUARD_OVERRIDE": "exported-not-inline"})
+        self.assertEqual(decision, "deny")
+        self.assertNotIn("override acknowledged", reason)
+
     def test_a_quoted_env_operand_still_pins_the_target(self):
         """Q170's other half, and the pair that shows why it is position-sensitive.
 
@@ -3541,6 +3577,19 @@ class SessionOverrideTests(unittest.TestCase):
         decision, _ = run_hook(None, home=home, payload=_event_payload(
             cmd2, "PreToolUse", self.SID))
         self.assertIsNone(decision)
+
+    def test_env_operand_session_override_records_the_grant(self):
+        # Q176: the `env` spelling arms the session form too, on both events.
+        home = make_home()
+        cmd = ("env PROD_GUARD_SESSION_OVERRIDE=e2e-pool-rebuild "
+               "kubectl --context gke_acme_prod-us delete ns x")
+        decision, reason = run_hook(None, home=home, payload=_event_payload(
+            cmd, "PreToolUse", self.SID))
+        self.assertEqual(decision, "ask")
+        self.assertIn("session override acknowledged", reason)
+        self.approve(home, cmd)
+        stored = json.loads(self.grants_file(home).read_text(encoding="utf-8"))
+        self.assertEqual(stored["grants"][0]["reason"], "e2e-pool-rebuild")
 
     def test_unprefixed_command_still_denies_after_grant(self):
         home = make_home()
