@@ -1404,6 +1404,9 @@ class CompoundBypassTests(unittest.TestCase):
                                # A comment inside backticks ends at the closing
                                # backtick, and one outside hides no substitution.
                                ("echo `true # c` ; ", ""),
+                               # Nor does one in `${...}`, which is text (Q254).
+                               ("echo ${x:- #} ; ", ""),
+                               ('echo "${x:-" #"}" ; ', ""),
                                ("bash <<EOF\necho `true # c` ; ", "\nEOF"),
                                ("# don't\necho \"$(", ')"')):
             with self.subTest(prefix=prefix):
