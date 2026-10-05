@@ -288,8 +288,8 @@ WRAPPER_VALUE_FLAGS = {
     # Long forms are GNU's, as with `time` above; BSD stdbuf rejects them.
     # `unbuffer` needs no entry -- its only flag, `-p`, carries no value.
     'stdbuf': frozenset({'-i', '--input', '-o', '--output', '-e', '--error'}),
-    # The rest are util-linux's, and `setsid` and `taskset` take no value:
-    # `taskset -c` changes how the mask operand reads rather than taking one.
+    # nice is GNU's and the rest util-linux's. setsid and taskset take no
+    # value: `taskset -c` changes how the mask operand reads, not a value.
     'nice': frozenset({'-n', '--adjustment'}),
     'ionice': frozenset({'-c', '--class', '-n', '--classdata', '-p', '--pid',
                          '-P', '--pgid', '-u', '--uid'}),
