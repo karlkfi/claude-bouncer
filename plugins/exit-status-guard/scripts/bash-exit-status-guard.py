@@ -684,7 +684,9 @@ def piped_gate(segs, reg):
     """The head of the first gate whose status a pipe swallows, or ''."""
     pipefail = pipefail_in_effect(segs)
     for i, seg in enumerate(segs):
-        if next_op(seg.post_ops) not in PIPE_OPS or pipefail[i]:
+        if next_op(seg.post_ops) not in PIPE_OPS:
+            continue
+        if pipefail[i]:
             continue
         src = status_source(segs, i)
         if src is None:
