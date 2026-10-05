@@ -132,6 +132,44 @@ class GateTests(unittest.TestCase):
         self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
 
 
+class IndentedFragmentTests(unittest.TestCase):
+    """A fragment copied from `grep -n` keeps the line's indentation.
+
+    Before the re-vendor such a fragment failed the regex's fragment group,
+    the citation degraded to a bare `path:N`, and no window caught it moving.
+    The control is a correct citation, without which a checker that reports
+    every citation as stale would pass these tests too.
+    """
+
+    FRAGMENT = '    rec = tip_is_recoverable(cwd, name)'
+
+    def lint_citing(self, line):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        store = os.path.join(tmp, 'docs', 'queue')
+        os.makedirs(store)
+        # The cited file sits in the store's parent, one of the two bases
+        # `lint` resolves a citation path against. Its fragment is line 15.
+        with open(os.path.join(tmp, 'docs', 'target.py'), 'w',
+                  encoding='utf-8') as fh:
+            fh.write('def f():\n' + 'x = 1\n' * 13 + self.FRAGMENT + '\n')
+        with open(os.path.join(store, 'Q1.md'), 'w', encoding='utf-8') as fh:
+            fh.write(GateTests.CLEAN % (
+                'ready', '`target.py:%d:%s`' % (line, self.FRAGMENT)))
+        return lint(store, ['--strict', 'stale-citation',
+                            '--citation-window', '0'])
+
+    def test_an_indented_fragment_cited_off_its_line_fails(self):
+        for line in (9, 2):
+            p = self.lint_citing(line)
+            self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
+            self.assertIn('now at line 15', p.stdout + p.stderr)
+
+    def test_an_indented_fragment_cited_at_its_line_passes(self):
+        p = self.lint_citing(15)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+
+
 class ClaimsTests(unittest.TestCase):
     """`make backlog-claims`, against a real repository and a real remote.
 
@@ -189,10 +227,22 @@ class ClaimsTests(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
 
     def test_an_added_id_holding_no_claim_fails(self):
+        # Another id's claim, so the namespace exists and the answer for Q2
+        # is a reading rather than the empty-namespace disclosure below.
+        self.claim('Q9')
         self.write('Q2')
         p = self.claims()
         self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertIn('Q2', p.stderr)
+
+    def test_an_empty_claim_namespace_skips_but_fails_under_strict(self):
+        """A remote holding no claims at all reads the same as the wrong remote,
+        so it is disclosed rather than read as every added id unclaimed."""
+        self.write('Q2')
+        p = self.claims()
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn('no refs/queue-ids/', p.stderr)
+        self.assertNotEqual(self.claims('--strict').returncode, 0)
 
     def test_an_added_id_holding_a_claim_passes(self):
         self.write('Q2')
