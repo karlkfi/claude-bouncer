@@ -101,7 +101,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 from bouncer_parse import (                                    # noqa: E402
     ASSIGN_SUBSCRIPT, COMMENT_PRECEDERS, QuoteTrackingLexer,
     _consume_heredoc_body, _skip_balanced_parens, command_substitutions,
-    is_assignment, note_discarded_writes, split_assignment,
+    is_assignment, note_discarded_writes, split_assignment, strip_comments,
     strip_heredoc_bodies,
 )
 
@@ -293,9 +293,12 @@ def tokenize(raw):
     and newlines are rewritten to `;` first so multi-line commands split into
     their own segments; a substitution `mask_substitutions` could not pair
     still splits off that way, the fail-safe direction. Returns None on
-    unbalanced quotes (caller defers: fail-open on parse errors)."""
-    raw = raw.replace('`', ';').replace('\n', ';')
+    unbalanced quotes (caller defers: fail-open on parse errors). Comments
+    go by bash's rule: shlex's own handling swallows the newline that ends
+    one, merging the next line into it unjudged (Q267)."""
+    raw = strip_comments(raw).replace('`', ';').replace('\n', ';')
     lex = QuoteTrackingLexer(raw, posix=True, punctuation_chars=';()<>|&')
+    lex.commenters = ''
     lex.whitespace_split = True
     try:
         return list(lex)
