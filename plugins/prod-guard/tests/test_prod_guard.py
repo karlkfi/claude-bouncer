@@ -413,6 +413,9 @@ class ParsingTests(unittest.TestCase):
                      ["env", "-Skubectl delete"],
                      ["env", "--split-string=kubectl delete"],
                      ["env", "--split-string", "kubectl delete"],
+                     # Any prefix from `--s` up is unambiguous to GNU env (Q228).
+                     ["env", "--s", "kubectl delete"],
+                     ["env", "--spl=kubectl delete"],
                      # Operands after STRING are appended to the command, not
                      # made positional parameters as `bash -c` would.
                      ["env", "-S", "kubectl", "delete"],
@@ -2824,6 +2827,7 @@ class SpecialCaseTests(unittest.TestCase):
                     "env -S'kubectl delete ns foo'",
                     "env --split-string='kubectl delete ns foo'",
                     "env --split-string 'kubectl delete ns foo'",
+                    "env --split 'kubectl delete ns foo'",
                     # The command is split across STRING and the operands
                     # after it -- env appends them, so both halves count.
                     "env -S 'kubectl' delete ns foo",
