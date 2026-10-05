@@ -4,7 +4,7 @@ outside the workspace; allow when it only touches workspace files or pipes.
 
 Reads the hook JSON on stdin, emits a PreToolUse decision on stdout.
 """
-import sys, os, json, re, shutil, fnmatch, collections, tempfile
+import sys, os, json, re, shlex, shutil, fnmatch, collections, tempfile
 
 # The parsing primitives every claude-bouncer guard shares -- lexing, comment
 # and heredoc stripping, substitution scanning, command-head normalising. The
@@ -1983,6 +1983,253 @@ LOCAL_SHELL_WRAPPERS = frozenset({
     'timeout', 'xargs',
 })
 
+# Command wrappers peeled off the head so the command they run is judged as if
+# typed bare (Q219): `env cat /etc/hosts` reads `/etc/hosts`, and left in place
+# the wrapper takes the head and every lookup below misses. Each row is the
+# wrapper's own option grammar -- short flags taking no value, short flags
+# taking one (attached or the next word), short flags whose value is attached
+# or absent, and long options as `none`/`req`/`opt` -- because the peel has to
+# know where the command starts, and guessing an arity is how a value gets read
+# as the command. A flag outside the row is not guessed at: see `peel_wrappers`.
+# `external` marks a separate program, so a `cd` behind it moves nothing; only
+# `command` and `builtin` run the shell's own `cd`.
+_Wrapper = collections.namedtuple(
+    '_Wrapper', 'short_none short_val short_opt long external')
+_COMMON_LONG = {'help': 'none', 'version': 'none'}
+WRAPPER_GRAMMAR = {
+    'env': _Wrapper('iv0', 'uCSPa', '', dict(_COMMON_LONG, **{
+        'ignore-environment': 'none', 'null': 'none', 'unset': 'req',
+        'chdir': 'req', 'split-string': 'req', 'argv0': 'req',
+        'block-signal': 'opt', 'default-signal': 'opt', 'ignore-signal': 'opt',
+        'list-signal-handling': 'none', 'debug': 'none'}), True),
+    'nice': _Wrapper('', 'n', '', dict(_COMMON_LONG, adjustment='req'), True),
+    'nohup': _Wrapper('', '', '', _COMMON_LONG, True),
+    'timeout': _Wrapper('fpv', 'ks', '', dict(_COMMON_LONG, **{
+        'foreground': 'none', 'preserve-status': 'none', 'verbose': 'none',
+        'kill-after': 'req', 'signal': 'req'}), True),
+    'stdbuf': _Wrapper('', 'ioe', '', dict(
+        _COMMON_LONG, input='req', output='req', error='req'), True),
+    'setsid': _Wrapper('cfw', '', '', dict(
+        _COMMON_LONG, ctty='none', fork='none', wait='none'), True),
+    'ionice': _Wrapper('t', 'cnpPu', '', dict(_COMMON_LONG, **{
+        'class': 'req', 'classdata': 'req', 'pid': 'req', 'pgid': 'req',
+        'uid': 'req', 'ignore': 'none'}), True),
+    # GNU and BSD `time` together; `-o` names a file the wrapper itself writes.
+    'time': _Wrapper('aphlqvV', 'fo', '', dict(_COMMON_LONG, **{
+        'append': 'none', 'portability': 'none', 'quiet': 'none',
+        'verbose': 'none', 'format': 'req', 'output': 'req'}), True),
+    # GNU and BSD `xargs` together; `-a` names a file it reads its input from.
+    'xargs': _Wrapper('0prtxo', 'aEIdLnPsJRS', 'eil', dict(_COMMON_LONG, **{
+        'null': 'none', 'arg-file': 'req', 'delimiter': 'req', 'eof': 'opt',
+        'replace': 'opt', 'max-lines': 'opt', 'max-args': 'req',
+        'max-procs': 'req', 'max-chars': 'req', 'interactive': 'none',
+        'verbose': 'none', 'exit': 'none', 'no-run-if-empty': 'none',
+        'open-tty': 'none', 'process-slot-var': 'req',
+        'show-limits': 'none'}), True),
+    'command': _Wrapper('pvV', '', '', {}, False),
+    'builtin': _Wrapper('', '', '', {}, False),
+    'exec': _Wrapper('cl', 'a', '', {}, True),
+}
+
+# Short flags spelled as their long option, so one table says what each does.
+_WRAPPER_SHORT_LONG = {
+    'env': {'C': 'chdir', 'S': 'split-string'},
+    'time': {'o': 'output', 'V': 'version'},
+    'xargs': {'a': 'arg-file'},
+    'ionice': {'p': 'pid', 'P': 'pgid', 'u': 'uid'},
+    'command': {'v': 'lookup', 'V': 'lookup'},
+}
+
+# Options after which the wrapper runs no command: the operands are names to
+# look up (`command -v`) or process ids (`ionice -p`), or it prints and exits.
+_WRAPPER_RUNS_NOTHING = frozenset({'help', 'version', 'lookup', 'pid', 'pgid',
+                                   'uid'})
+
+# `nice -5` and `nice --5` are the obsolete adjustment spelling, still taken by
+# both GNU and BSD `nice`.
+_NICE_LEGACY_RE = re.compile(r'^-[-+]?\d+$')
+
+# Bounds the peel, which an `env -S` splice could otherwise keep growing.
+MAX_WRAPPER_PEEL = 16
+
+def _unreadable_word(t):
+    """True when the shell rewrites ``t`` before the wrapper sees it -- an
+    expansion, a backtick, or a substitution the loop marked -- so it may
+    become no word or several."""
+    return bool(EXPANSION_RE.search(t)) or '`' in t or SUBST_MARK in t
+
+
+# Commands whose operands this guard judges as paths, so an operand a wrapper
+# hides from it is one it would have checked. `gh run view {}` behind `xargs`
+# hides nothing the guard reads, and suppressing there is co-occurrence.
+WRAPPED_OPERAND_HEADS = (frozenset(SPEC) | frozenset(ALIASES) | SHELL_C_CMDS
+                         | {'ln', 'dd', 'mktemp'})
+
+
+WrapperPeel = collections.namedtuple(
+    'WrapperPeel', 'argv opaque appends external chdirs files')
+
+
+def _long_option(key, table):
+    """The long option ``key`` names in ``table``: an exact match, or a prefix
+    of exactly one, which is what getopt_long accepts. None otherwise."""
+    if key in table:
+        return key
+    hits = [k for k in table if k.startswith(key)]
+    return hits[0] if key and len(hits) == 1 else None
+
+
+def _peel_one(name, w, args, chdirs, files):
+    """Read one wrapper's options and operands off ``args``.
+
+    Returns ``(rest, True)`` with the command it runs, ``(None, True)`` when it
+    runs none, or ``(rest, False)`` from the word it could not read. A `None`
+    in ``chdirs`` is a directory the hook cannot know.
+    """
+    canon = _WRAPPER_SHORT_LONG.get(name, {})
+    i, n = 0, len(args)
+
+    def lost(words=()):
+        if name == 'env':
+            chdirs.append(None)                   # it may have been a `-C`
+        return list(words) + args[i:], False
+
+    while i < n:
+        t = args[i]
+        if t.startswith(('$', '`', SUBST_MARK)):
+            return lost()                         # may expand to a flag
+        if t == '--':
+            i += 1
+            break
+        if t == '-' and name == 'env':            # `env -` is `env -i`
+            i += 1
+            continue
+        if not t.startswith('-') or t == '-':
+            break
+        if name == 'nice' and _NICE_LEGACY_RE.match(t):
+            i += 1
+            continue
+        if t.startswith('--'):
+            key, eq, val = t[2:].partition('=')
+            opt = _long_option(key, w.long)
+            if opt is None:
+                return lost()
+            arity = w.long[opt]
+            if arity == 'none' and eq:
+                return lost()
+            if arity == 'req' and not eq:
+                if i + 1 >= n:
+                    return None, True             # the wrapper errors out
+                val = args[i + 1]
+                i += 1
+            i += 1
+        else:
+            opt = val = None
+            for j, ch in enumerate(t[1:], 1):
+                if ch in w.short_none:
+                    if canon.get(ch) in _WRAPPER_RUNS_NOTHING:
+                        return None, True
+                    continue
+                if ch in w.short_opt:
+                    break
+                if ch not in w.short_val:
+                    return lost()
+                opt, val = canon.get(ch, ch), t[j + 1:]
+                if not val:
+                    if i + 1 >= n:
+                        return None, True
+                    val = args[i + 1]
+                    i += 1
+                break
+            i += 1
+        if opt in _WRAPPER_RUNS_NOTHING:
+            return None, True
+        if val is not None and _unreadable_word(val):
+            # An `env -S` value is the command itself, so scan its words.
+            return lost(val.split() if opt == 'split-string' else ())
+        if opt == 'chdir':
+            chdirs.append(val)
+        elif opt == 'output':
+            files.append((val, False, len(chdirs)))
+        elif opt == 'arg-file':
+            files.append((val, True, len(chdirs)))
+        elif opt == 'split-string':
+            # `env -S` splits its value into words and runs them, so the
+            # command is inside it. A value carrying an escape or an expansion
+            # is split by env's own rules, which are not the shell's.
+            if '\\' in val:
+                return lost(val.split())
+            try:
+                words = shlex.split(val)
+            except ValueError:
+                return lost(val.split())
+            args = words + args[i:]
+            i, n = 0, len(args)
+    if name == 'env':
+        # env(1) is not the shell: any operand holding `=` is an assignment,
+        # whatever bash would make of its name (Q218).
+        while i < n and '=' in args[i]:
+            if _unreadable_word(args[i]):
+                return args[i:], False
+            i += 1
+    elif name == 'timeout':
+        if i >= n:
+            return None, True
+        if _unreadable_word(args[i]):
+            return args[i:], False
+        i += 1                                    # the DURATION
+    return (args[i:] or None), True
+
+
+def _scan_for_command(tokens):
+    """``tokens`` from the first word naming a command the hook judges, else
+    ``[]``. Used once a wrapper's grammar is lost: taking the first such word
+    can only start the command too early, which reads more words as operands."""
+    heads = (SPEC.keys() | ALIASES.keys() | SIGNAL_CMDS | SHELL_C_CMDS
+             | INTERP_CMDS | WRAPPER_GRAMMAR.keys()
+             | {'ln', 'dd', 'mktemp', 'ps', 'pgrep'})
+    for i, t in enumerate(tokens):
+        if not _unreadable_word(t) and native_cmd_name(t) in heads:
+            return tokens[i:]
+    return []
+
+
+def peel_wrappers(tokens):
+    """The command a group runs once its wrappers are peeled, as a
+    :data:`WrapperPeel`.
+
+    ``argv`` is that command, ``[]`` when the wrappers run none. ``opaque`` is
+    True when its operands are not all in the string -- `xargs` appends its
+    input -- or when a wrapper's grammar was lost to a flag outside its row or
+    a word the shell expands. Lost grammar is never guessed past: the command
+    is taken from the first later word naming one the hook judges, and the
+    caller withholds `allow`, so a wrong guess costs a defer and never a silent
+    read. ``appends`` marks an `xargs` among the wrappers. ``chdirs`` are
+    `env -C` targets, in order; ``files`` are ``(token, is_read, n)`` for files
+    the wrappers open themselves, from the cwd after the first ``n`` chdirs.
+    """
+    argv, lost, appends, external = list(tokens), False, False, False
+    chdirs, files = [], []
+    for _ in range(MAX_WRAPPER_PEEL):
+        if not argv:
+            break
+        name = native_cmd_name(argv[0])
+        w = WRAPPER_GRAMMAR.get(name)
+        if w is None:
+            break
+        external = external or w.external
+        appends = appends or name == 'xargs'
+        rest, ok = _peel_one(name, w, argv[1:], chdirs, files)
+        if rest is None:
+            argv = []
+            break
+        if not ok:
+            lost = True
+            rest = _scan_for_command(rest)
+        argv = rest
+    return WrapperPeel(argv, lost or appends, appends, external, chdirs,
+                       files)
+
 # Stand-in for a grep-family pattern the hook cannot read — `grep -f patterns.txt`
 # takes its patterns from a file, and an invocation may carry no pattern operand
 # at all. It can never anchor, which is the whole point: a grep filtering `ps`
@@ -3236,18 +3483,31 @@ DEFER_RUNS_MODES = frozenset({'auto', 'acceptEdits', 'bypassPermissions'})
 # with a guarded command — co-occurrence rather than the hazard. `all` opts in.
 INTERPRETER_SIGNAL = 'interpreter'
 
+# A guarded command behind a wrapper whose operands the hook cannot all read:
+# an `xargs` appending its input, or a wrapper flag outside its grammar (see
+# `peel_wrappers`). It is raised only when the command the peel exposes is one
+# this guard judges, so `ls | xargs echo` stays silent. Unlike the interpreter
+# it escalates in the default scope: the hidden operands are reads and writes
+# this guard exists to judge, which is Q74's ground for escalating `sh -c` and
+# kills. Over 195,692 distinct corpus commands (2026-10-04) it fired on 132,
+# 0.067%, against 71 (0.036%) for `sh -c` and kills together, so the default
+# scope escalates about three times as often as before. It yields to their
+# labels when they co-occur.
+WRAPPER_SIGNAL = 'wrapper'
+_LOW_SIGNALS = (None, INTERPRETER_SIGNAL, WRAPPER_SIGNAL)
+
 
 def merge_nested_signal(signal, nested):
     """Fold a nested body's suppression signal into the enclosing string's.
 
-    First non-None wins, with one exception: `interpreter` yields to anything
-    else. A shell word carrying a readable `-c` body labels its own group
+    First non-None wins, with one exception: `interpreter` and `wrapper` yield
+    to anything else. A shell word carrying a readable `-c` body labels its own group
     `interpreter`, so a `kill` the recursion finds INSIDE that body would
     otherwise never be seen -- and `interpreter` sits outside the default
     `scoped` escalation scope, which turned `sh -c 'kill -9 -1'` into a defer
     that `bypassPermissions` runs unexamined (Q212).
     """
-    if signal in (None, INTERPRETER_SIGNAL) and nested not in (None, INTERPRETER_SIGNAL):
+    if signal in _LOW_SIGNALS and nested not in _LOW_SIGNALS:
         return nested
     return signal or nested
 
@@ -3291,6 +3551,11 @@ def escalate_suppression(signal, mode):
         what = "interpreter code it cannot read (an inline body, a heredoc, -m)"
         fix = ("Fix: move the code into a file inside the project root and run "
                "that — a repo-resident script vouches — or approve this one.")
+    elif signal == WRAPPER_SIGNAL:
+        what = ("an `xargs`, or a wrapper flag it cannot read, that hides "
+                "operands that command will act on")
+        fix = ("Fix: name the files on the command itself (`git grep`, "
+               "`grep -r`), or approve this one.")
     elif signal == 'taskkill':
         what = "a `taskkill` whose targets it cannot see"
         fix = ('Fix: run `tasklist /FI "IMAGENAME eq <name>"` and `taskkill '
@@ -3596,7 +3861,11 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
             # fail-open. Both helpers drop a leading run only, and `restored`
             # is built element-wise from `g`, so the count indexes it exactly.
             head = len(g) - len(strip_env_prefix(strip_sh_keywords(g)))
-            kind, arg = classify_cd(restored[head:])
+            # A `cd` behind `command` or `builtin` moves the shell; behind a
+            # separate program it moves nothing (Q219).
+            wrap = peel_wrappers(restored[head:])
+            kind, arg = (None, None) if wrap.external \
+                else classify_cd(wrap.argv)
             if kind is not None:
                 cwd, unknown = apply_cd(kind, arg, cwd, unknown)
             # Recorded after this group's own `cd`, so a `cd $d` cannot read an
@@ -4073,15 +4342,43 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
         head = len(g) - len(strip_env_prefix(strip_sh_keywords(g)))
         g = sub_g[head:]
         if not g: continue                        # keyword/env-only or redirect-only group
+        # Judge the command a wrapper runs rather than the wrapper (Q219).
+        # `env -C DIR` moves only the command it runs, so `cmd_cwd` is this
+        # group's alone; a redirect above already resolved against the shell's.
+        raw_g, wrap = g, peel_wrappers(g)
+        g = wrap.argv
+        cmd_cwd, cmd_cwd_unknown = group_cwd, group_cwd_unknown
+        dirs = [(cmd_cwd, cmd_cwd_unknown)]
+        for d in wrap.chdirs:
+            kind, arg = ('unknown', None) if d is None \
+                else classify_cd(['cd', d])
+            cmd_cwd, cmd_cwd_unknown = apply_cd(
+                kind, arg, cmd_cwd, cmd_cwd_unknown)
+            dirs.append((cmd_cwd, cmd_cwd_unknown))
+        for f, f_is_read, at in wrap.files:
+            # A file the wrapper opens itself (`time -o`, `xargs -a`), from
+            # the directory it runs in. It never sets `guarded`: the command
+            # behind the wrapper may be one the hook does not judge.
+            o = check_file(f, *dirs[at], is_read=f_is_read)
+            if o is not None:
+                outside.append(o)
+        if wrap.opaque and g and native_cmd_name(g[0]) in WRAPPED_OPERAND_HEADS:
+            signal = merge_nested_signal(signal, WRAPPER_SIGNAL)
         # Signalling and pid-source classification runs before every `continue`
-        # below, so no command shape can skip past it.
-        sig = signal_command(g)
+        # below, so no command shape can skip past it. `xargs` is read on the
+        # raw group, where `signal_command` finds the kill among its words.
+        sig = signal_command(raw_g)
+        if sig is None:
+            sig = signal_command(g)
+            if sig is not None and wrap.appends:
+                # Behind a nested `xargs` the kill's operands arrive on stdin.
+                sig = (sig[0], not (sig[0] == 'kill' and signals_zero(g[1:])))
         if sig is not None:
-            signal = signal or sig[0]
+            signal = merge_nested_signal(signal, sig[0])
             if sig[1]:
                 launder = launder or sig[0]
                 kill_pipes.add(pipe)
-        elif shell_c_group(g) and (group_cwd_unknown or not shell_c_bodies(g)):
+        elif shell_c_group(g) and (cmd_cwd_unknown or not shell_c_bodies(g)):
             # An unreadable command string: suppress `allow` the same way a
             # signalling command does. Checked in the `elif` so a group that is
             # BOTH (`xargs sh -c 'kill …'`) keeps its signal classification.
@@ -4097,7 +4394,7 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
             # guarantee arriving under the label that says what happened. That
             # label is what stops the escalation, since `interpreter` sits
             # outside the default `scoped` scope (Q211).
-            signal = signal or 'sh -c'
+            signal = merge_nested_signal(signal, 'sh -c')
         # Same suppression for an interpreter, which is opaque for the same
         # reason a `-c` body is. A script operand is exempt while it resolves
         # inside the workspace: that is repo-resident code, which the boundary
@@ -4119,7 +4416,7 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
                 # `auto`, `acceptEdits`, and `bypassPermissions`
                 # (`docs/permission-modes.md`). Read exemptions apply, which is
                 # what keeps installed plugin and skill code quiet.
-                o = check_file(tok, group_cwd, group_cwd_unknown, is_read=True)
+                o = check_file(tok, cmd_cwd, cmd_cwd_unknown, is_read=True)
                 if o is not None:
                     outside.append(o)
                     signal = signal or 'interpreter'
@@ -4127,7 +4424,7 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
                     # Exempt or in-workspace. Vouch only for the workspace case:
                     # an exempt prefix earns silence, not the hook's word for
                     # everything else in the string.
-                    k, rp = resolve_token(tok, group_cwd, group_cwd_unknown)
+                    k, rp = resolve_token(tok, cmd_cwd, cmd_cwd_unknown)
                     if k != 'path' or path_is_outside(rp, ctx.proj):
                         signal = signal or 'interpreter'
         # The body is readable after all when it is a command string this host
@@ -4135,19 +4432,21 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
         # two answer different questions. Skipped once the cwd is untracked: the
         # body's relative paths would resolve against a stale directory and read
         # as in-workspace, and a wrong clean answer is worse than no answer.
-        if not group_cwd_unknown:
-            shell_bodies.extend((b, group_cwd) for b in shell_c_bodies(g))
+        if not cmd_cwd_unknown:
+            shell_bodies.extend((b, cmd_cwd) for b in shell_c_bodies(g))
+        if not g: continue                        # the wrappers run nothing
         if os.path.basename(g[0]) == 'ps':
             ps_pipes.add(pipe)
         pg = pgrep_operands(g)
         gp = grep_pattern_operands(g) if pg is None else None
         for p in (pg or []):
             patterns.append((p, kill_operand_anchored(
-                p, ctx.kill_anchor, group_cwd, group_cwd_unknown)))
+                p, ctx.kill_anchor, cmd_cwd, cmd_cwd_unknown)))
         for p in (gp or []):
             grep_pats.append((pipe, p, kill_operand_anchored(
-                p, ctx.kill_anchor, group_cwd, group_cwd_unknown)))
-        kind, arg = classify_cd(g)
+                p, ctx.kill_anchor, cmd_cwd, cmd_cwd_unknown)))
+        # A `cd` behind a separate program (`env cd`) moves that program only.
+        kind, arg = (None, None) if wrap.external else classify_cd(g)
         if kind is not None:
             group_cwd, group_cwd_unknown = apply_cd(
                 kind, arg, group_cwd, group_cwd_unknown)
@@ -4168,7 +4467,7 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
             guarded = True
             sources, dest, _ = lnop
             for f in sources + ([dest] if dest is not None else []):
-                o = check_file(f, group_cwd, group_cwd_unknown)
+                o = check_file(f, cmd_cwd, cmd_cwd_unknown)
                 if o is not None:
                     outside.append(o)
             # Staged after the checks: staging records the link's resolved path
@@ -4176,13 +4475,13 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
             # set it had just been added to would report the same link twice.
             ln = classify_ln(g)
             if ln is not None:
-                stage_ln(ln[0], ln[1], group_cwd, group_cwd_unknown)
+                stage_ln(ln[0], ln[1], cmd_cwd, cmd_cwd_unknown)
             continue
         dd = classify_dd(g)
         if dd is not None:
             guarded = True
             for f in dd:
-                o = check_file(f, group_cwd, group_cwd_unknown)
+                o = check_file(f, cmd_cwd, cmd_cwd_unknown)
                 if o is not None:
                     outside.append(o)
             continue
@@ -4193,7 +4492,7 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
             # marks the command guarded so a clean invocation emits `allow`.
             guarded = True
             for f in mk:
-                o = check_file(f, group_cwd, group_cwd_unknown)
+                o = check_file(f, cmd_cwd, cmd_cwd_unknown)
                 if o is not None:
                     outside.append(o)
             continue
@@ -4204,8 +4503,8 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
             # permission settings to have their say on a destructive command.
             # An unanchored one is an offender the decision layer denies.
             name, operands = kl
-            if not any(kill_operand_anchored(o, ctx.kill_anchor, group_cwd,
-                                             group_cwd_unknown)
+            if not any(kill_operand_anchored(o, ctx.kill_anchor, cmd_cwd,
+                                             cmd_cwd_unknown)
                        for o in operands):
                 outside.append((g[0], 'kill', {
                     'cmd': name, 'root': proj,
@@ -4220,8 +4519,8 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
             mode, idx = tk
             operands = [g[i] for i in idx]
             if mode != 'pid' and not any(
-                    kill_operand_anchored(o, ctx.kill_anchor, group_cwd,
-                                          group_cwd_unknown)
+                    kill_operand_anchored(o, ctx.kill_anchor, cmd_cwd,
+                                          cmd_cwd_unknown)
                     for o in operands):
                 outside.append((g[0], 'kill', {
                     'cmd': 'taskkill', 'root': proj,
@@ -4247,7 +4546,7 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
             entry_mask = [False] * len(fs)
         for i, f in enumerate(fs):
             f_is_read = is_read and (out_from is None or i < out_from)
-            o = check_file(f, group_cwd, group_cwd_unknown, is_read=f_is_read,
+            o = check_file(f, cmd_cwd, cmd_cwd_unknown, is_read=f_is_read,
                            entry=entry_mask[i])
             if o is not None:
                 outside.append(o)
