@@ -96,9 +96,12 @@ backlog-next:
 
 # `dangling-link` stays advisory: a link across a live batch is legitimately in
 # flight, and failing on it would redden the store after every merge.
+# `stale-citation` binds at the default window, so a code change that moves a
+# cited line more than ten lines repoints the row in its own diff.
 backlog-lint:
 	$(PYTHON) scripts/queue.py lint \
-	  --strict blocked-opener --strict deferred-trigger --strict empty-store
+	  --strict blocked-opener --strict deferred-trigger --strict empty-store \
+	  --strict stale-citation
 
 # Reserving an ID binds only the sessions that ask, so a hand-picked number
 # survives until the rebase it collides with -- which Q146 paid three times
