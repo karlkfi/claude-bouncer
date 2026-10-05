@@ -806,6 +806,79 @@ class DiscardedWritesTests(unittest.TestCase):
         self.assertEqual('R.', bp.note_discarded_writes('R.', None))
 
 
+class AnsiCQuoteTests(unittest.TestCase):
+    """`$'\\''` is one apostrophe to bash (Q225).
+
+    Read as a closed single quote followed by an opening one, it inverted the
+    quote state for everything after it. Driven under
+    `env -i /opt/homebrew/bin/bash --norc --noprofile -c` (5.3.15): each
+    command below runs the one written after the `$'...'`.
+    """
+    def test_substitutions_after_one_are_found(self):
+        for cmd, body in (("echo $'\\'' \"$(id)\"", 'id'),
+                          ("echo $'\\'' $(id)", 'id'),
+                          ("echo $'it\\'s' `id`", 'id'),
+                          ("echo \"$(echo $'\\'' ; id)\"", "echo $'\\'' ; id")):
+            with self.subTest(cmd=cmd):
+                self.assertEqual([body], bp.command_substitutions(cmd))
+
+    def test_its_inside_is_literal(self):
+        # Nothing substitutes inside `$'...'`, and inside double quotes `$'`
+        # is two characters of text.
+        self.assertEqual([], bp.command_substitutions("echo $'$(id)'"))
+        self.assertEqual([], bp.command_substitutions("echo $'\\'' '$(id)'"))
+        self.assertEqual(['id'], bp.command_substitutions("echo \"it's $'\" $(id)"))
+
+    def test_a_hash_inside_one_is_text(self):
+        cmd = "echo $'\\' #' ; id"
+        self.assertEqual(cmd, bp.strip_comments(cmd))
+
+    def test_one_in_a_subscript_closes_where_bash_closes_it(self):
+        # bash runs `id` after `FOO[$'\']=x #'];id`: the subscript holds
+        # `']=x #`. Closed at the escaped quote, the `]=` after it read as an
+        # assignment and the `#` as a comment hiding `id`. Inside double
+        # quotes `$'` is text, so `FOO["$'"]` closes at its first `]`.
+        cmd = "FOO[$'\\']=x #'];id"
+        self.assertEqual(cmd, bp.strip_comments(cmd))
+        for word, end in (("FOO[$'a\\'];b']=x", 14), ("FOO[$'\\']=x #']", 15),
+                          ("FOO[\"$'\"]=x", 9)):
+            with self.subTest(word=word):
+                self.assertEqual(end, bp._subscript_end(word, 3))
+
+    def test_a_heredoc_after_one_is_found(self):
+        self.assertEqual("cat <<EOF ; echo $'\\''\nid",
+                         bp.strip_heredoc_bodies("cat <<EOF ; echo $'\\''\nx\nEOF\nid"))
+
+    def test_one_as_a_heredoc_delimiter_ends_where_bash_ends_it(self):
+        # bash ends `<<$'E\x4fF'` at an `EOF` line, prints `$(echo SUB)`
+        # unexpanded, and runs the line after. Read as `$` and a quoted word,
+        # the body ran to the end of the input and swallowed that line.
+        for word in ("$'EOF'", "$'E\\x4fF'"):
+            with self.subTest(word=word):
+                exp = []
+                self.assertEqual(
+                    'cat <<%s\nid' % word,
+                    bp.strip_heredoc_bodies(
+                        'cat <<%s\n$(echo SUB)\nEOF\nid' % word, exp))
+                self.assertEqual([], exp)
+
+    def test_the_lexer_reads_the_word_bash_does(self):
+        self.assertEqual(['echo', "'", ';', 'id'], bp.lex("echo $'\\'' ; id"))
+        self.assertEqual(["x=a'b", 'id'], bp.lex("x=$'a\\'b' id"))
+        self.assertEqual(['kubectl', 'get'], bp.lex("$'\\x6bubectl' get"))
+        self.assertEqual(['echo', "$'", ';', 'id'], bp.lex('echo "$\'" ; id'))
+        # Quoting, so not an assignment: bash looks for a program `SP=x`.
+        self.assertFalse(bp.is_assignment(bp.lex("$'SP=x'")[0]))
+
+    def test_escapes_decode_as_bash_decodes_them(self):
+        # printf '<%s>' on each of these under bash 5.3.15, read through od -c.
+        for body, word in ((r"a\x41\101\u00e9\q", 'aAA\u00e9\\q'),
+                           (r'\x', '\\x'), (r"\'", "'"), (r'x\0yz', 'x'),
+                           (r'\cA', '\x01'), (r'\e', '\x1b'), (r'\"\?', '"?')):
+            with self.subTest(body=body):
+                self.assertEqual(word, bp._ansi_c_decode(body))
+
+
 class VendoringTests(unittest.TestCase):
     """The copies under each plugin are what actually ship."""
 
