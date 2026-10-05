@@ -248,6 +248,24 @@ class QuotedAmpersandDecisionTests(unittest.TestCase):
                 d, _ = run_hook(cmd)
                 self.assertIsNone(d)
 
+    def test_an_ampersand_glued_to_the_next_operator_still_detaches(self):
+        # Q239: shlex glued `&` to the `;` a newline became, or to a `)`, so
+        # neither check saw a plain `&` and each command denied. Measured
+        # before the fix: every one of these denied.
+        for cmd in ("sleep 300 &\nls", "sleep 300 &\n\nls",
+                    "gh run watch 1 &\n", "while true; do sleep 5; done &\n",
+                    "(sleep 300 &)", "echo $(gh run watch 1) &\nls"):
+            with self.subTest(cmd=cmd):
+                d, _ = run_hook(cmd)
+                self.assertIsNone(d)
+
+    def test_a_split_run_keeps_its_foreground_operators(self):
+        for cmd in ("true &&\nsleep 300", "sleep 300 '&'\nls",
+                    "(true &&sleep 300)"):
+            with self.subTest(cmd=cmd):
+                d, _ = run_hook(cmd)
+                self.assertEqual(d, "deny")
+
     def test_the_operators_the_character_test_had_to_exclude(self):
         # `&&` and `|&` both end in `&` and neither backgrounds. The token
         # form settles them without the endswith pair it replaced.
