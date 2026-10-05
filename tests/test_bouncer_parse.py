@@ -367,7 +367,8 @@ class CommentInSubstitutionTests(unittest.TestCase):
         for body in ('# )\ncat /etc/passwd', 'echo a # )\ncat /etc/passwd',
                      "# don't\ncat /etc/passwd", '# <<EOF\ncat /etc/passwd',
                      ' (echo a)# )\ncat /etc/passwd', 'echo a;# )\ncat /etc/passwd',
-                     "echo $'a' #b)\ncat /etc/passwd"):
+                     "echo $'a' #b)\ncat /etc/passwd", 'cat <(echo a) #b)\ncat /etc/passwd',
+                     'echo a \\\n#b )\ncat /etc/passwd'):
             with self.subTest(body=body):
                 self.assertEqual([body], bp.command_substitutions(
                     'echo "$(%s)" T' % body))
@@ -375,10 +376,13 @@ class CommentInSubstitutionTests(unittest.TestCase):
                     'x=$(%s) T' % body))
 
     def test_a_hash_inside_a_word_starts_no_comment(self):
-        # bash prints `a#`, `0`, `a#b`, `1#b`, ` #` and `a#b` for these: none
-        # is a comment, so the `)` after each still closes the substitution.
+        # None of these `#` starts a comment in bash (`$(echo a)#b` prints
+        # `a#b`, `<(true)#b` prints `/dev/fd/63#b`), so the `)` after each
+        # still closes the substitution.
         for body in ('echo a#', 'echo $#', 'echo ${#x}', 'echo $(echo a)#b',
-                     'echo $((1))#b', 'echo \\ #', 'echo "a"#b', "echo $'a'#b"):
+                     'echo $((1))#b', 'echo \\ #', 'echo "a"#b', "echo $'a'#b",
+                     'cat <(echo a)#b', 'tee >(cat)#b', 'echo a<(true)#b',
+                     'echo a\\\n#b'):
             with self.subTest(body=body):
                 self.assertEqual([body], bp.command_substitutions(
                     'echo "$(%s)" T' % body))
