@@ -3830,16 +3830,16 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
     if tokens is not None:
         cwd, unknown, hd_i = base_cwd, base_cwd_unknown, 0
         usable = set(inherited or ())
-        scopes, saved_shells = [], []
-        groups = split_groups(tokens, scopes)
-        for (g, g_redir, _persists, _pipe, nhd), (shells, own) in zip(groups,
-                                                                    scopes):
+        scopes, saved_shells, hs = [], [], []
+        groups = split_groups(tokens, scopes, hs)
+        for (g, g_redir, _persists, _pipe, nhd), (shells, own), g_hs in zip(
+                groups, scopes, hs):
             cwd, unknown = enter_shell(saved_shells, shells, cwd, unknown)
             # Read the positions before applying this group's own `cd`: a
             # substitution is expanded to build the command line the `cd` then
             # runs on, so `cd $(dirname x)` resolves `x` where the string
             # started, not where it lands.
-            for tok in g + g_redir:
+            for tok in g + g_redir + g_hs:
                 for m in MARK_RE.finditer(tok):
                     idx = int(m.group(1))
                     if idx < len(sub_cwd):
@@ -3900,7 +3900,7 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
 PIPE_OPS = ('|', '|&')
 
 
-def split_groups(tokens, scopes=None):
+def split_groups(tokens, scopes=None, herestrings=None):
     """Split a token list into `(cmd_tokens, redir_targets, persists, pipe,
     heredocs)` groups.
 
@@ -3923,21 +3923,30 @@ def split_groups(tokens, scopes=None):
     bare `$(` reaches here as `$(` then `(`, so a substitution counts too.
     ``own`` is False for a pipeline segment or a backgrounded command, which
     bash runs in a subshell of its own.
+
+    ``herestrings``, when given, receives one list per group of the `<<<`
+    operands written in it (Q177). An operand is string content, not a path, so
+    it joins neither list above -- but a substitution inside one runs with the
+    group's cwd, and placing it needs the word. A caller asking for them also
+    gets a group for a bare `<<<"$(…)"` with no command word, which bash still
+    expands.
     """
     groups, cur, cur_redir, i = [], [], [], 0
     paren, prev_sep, pipe, nhd = 0, '', 0, 0
-    shells, opened = [], 0
+    shells, opened, cur_hs = [], 0, []
     while i < len(tokens):
         t = tokens[i]
         if is_operator(t, SEPARATORS):
-            if cur or cur_redir:
+            if cur or cur_redir or cur_hs:
                 persists = (paren == 0 and prev_sep != '|'
                             and t in (';', '\n', '&&', '||'))
                 groups.append((cur, cur_redir, persists, pipe, nhd))
                 if scopes is not None:
                     scopes.append((tuple(shells), prev_sep not in PIPE_OPS
                                    and t not in PIPE_OPS + ('&',)))
-                cur, cur_redir, nhd = [], [], 0
+                if herestrings is not None:
+                    herestrings.append(cur_hs)
+                cur, cur_redir, nhd, cur_hs = [], [], 0, []
             if t == '(':
                 paren += 1
                 opened += 1
@@ -3976,14 +3985,18 @@ def split_groups(tokens, scopes=None):
                 if t in ('<<', '<<<'):
                     if t == '<<':
                         nhd += 1
+                    elif herestrings is not None:
+                        cur_hs.append(tokens[i+1])
                     i += 2; continue
                 cur_redir.append(tokens[i+1]); i += 2; continue
             i += 1; continue
         cur.append(t); i += 1
-    if cur or cur_redir:
+    if cur or cur_redir or cur_hs:
         groups.append((cur, cur_redir, paren == 0 and prev_sep != '|', pipe, nhd))
         if scopes is not None:
             scopes.append((tuple(shells), prev_sep not in PIPE_OPS))
+        if herestrings is not None:
+            herestrings.append(cur_hs)
     return groups
 
 

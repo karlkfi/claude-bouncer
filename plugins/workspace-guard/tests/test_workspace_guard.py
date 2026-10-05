@@ -4979,20 +4979,9 @@ class SubstBodyCwdTests(unittest.TestCase):
         self._is_clean('d=sub; echo "$(cd $d && cat ../in.txt)"')
 
 
-class SubshellCdTests(unittest.TestCase):
-    """Q173: a `cd` in a subshell moves that subshell and nothing after it.
-
-    The group loop applied every `cd` it met to the rest of the string, so one
-    inside `( … )` or a bare `$( … )` moved the tracked cwd for the commands
-    after the subshell closed. Into a subdirectory, that made a `../` read
-    outside the workspace resolve back inside it and earn `allow`; out of the
-    root, it named a path the command never touches. A pipeline segment and a
-    backgrounded command run in subshells too. Every shape here was driven under
-    bash 5.3.15 to see which file it reads.
-
-    The workspace lives under $HOME so the parent directory is a plain outside
-    path that asks, rather than host temp that denies.
-    """
+class OutsideParentFixture(object):
+    """A workspace under $HOME with a `sub/` and an `in.txt`, whose parent is a
+    plain outside directory that asks rather than host temp that denies."""
 
     TARGET = "q173-fake-target"
 
@@ -5012,6 +5001,19 @@ class SubshellCdTests(unittest.TestCase):
     def _decision(self, cmd):
         out = run_hook(cmd, self.workspace, project_dir=self.workspace)
         return out and out["hookSpecificOutput"]["permissionDecision"]
+
+
+class SubshellCdTests(OutsideParentFixture, unittest.TestCase):
+    """Q173: a `cd` in a subshell moves that subshell and nothing after it.
+
+    The group loop applied every `cd` it met to the rest of the string, so one
+    inside `( … )` or a bare `$( … )` moved the tracked cwd for the commands
+    after the subshell closed. Into a subdirectory, that made a `../` read
+    outside the workspace resolve back inside it and earn `allow`; out of the
+    root, it named a path the command never touches. A pipeline segment and a
+    backgrounded command run in subshells too. Every shape here was driven under
+    bash 5.3.15 to see which file it reads.
+    """
 
     def test_a_subshell_cd_does_not_reach_the_commands_after_it(self):
         # Pre-fix every one of these allowed a read of `<root>/../TARGET`.
@@ -5044,6 +5046,49 @@ class SubshellCdTests(unittest.TestCase):
         # never left the subshell, so `in.txt` is the workspace's own.
         self.assertEqual("allow", self._decision('(cd "$X") && cat in.txt'))
         self.assertEqual("deny", self._decision('cd "$X" && cat in.txt'))
+
+
+class HereStringSubstCwdTests(OutsideParentFixture, unittest.TestCase):
+    """Q177: a substitution in a `<<<` operand runs where the here-string sits.
+
+    `split_groups` drops a here-string operand from both of its lists, because
+    it is content rather than a path, so the walk that places substitution
+    bodies (Q169) never saw the marker in it and resolved the body where the
+    string started. After a `cd ..`, a read outside the workspace landed back
+    inside it and earned `allow`. Each shape was driven
+    under bash 5.3.15 to see which file it reads.
+    """
+
+    def _names_target(self, cmd):
+        out = run_hook(cmd, self.workspace, project_dir=self.workspace)
+        self.assertIsNotNone(out, f"expected a decision, got defer for {cmd!r}")
+        h = out["hookSpecificOutput"]
+        self.assertEqual("ask", h["permissionDecision"], f"for {cmd!r}")
+        self.assertIn(self.TARGET, h["permissionDecisionReason"], f"for {cmd!r}")
+
+    def test_a_here_string_body_resolves_after_the_cd(self):
+        # Pre-fix the first allowed, the second was silent.
+        for cmd in ('cd .. && cat <<<"$(cat %s)"',
+                    'cd .. && <<<"$(cat %s)"',
+                    'cd .. && cat <<<"a $(cat %s) b"',
+                    'cd .. && cat <<<"$(cat in.txt)" <<<"$(cat %s)"'):
+            with self.subTest(cmd=cmd):
+                self._names_target(cmd % self.TARGET)
+
+    def test_a_here_string_body_inside_stops_prompting(self):
+        # Pre-fix this asked about `<root>/../in.txt`, a file the command never
+        # opens: bash reads the root's own `in.txt` from `sub/`.
+        self.assertEqual("allow", self._decision(
+            'cd sub && cat <<<"$(cat ../in.txt)"'))
+
+    def test_a_here_string_operand_is_still_not_a_path(self):
+        # The operand is content. Collecting it as a redirect target would
+        # check it as a path, which is the shape this row first proposed and
+        # measured as wrong.
+        for cmd in ('cat <<<"/q177-fake-target"', 'cat <<<"$FOO"',
+                    'cat <<<"~/q177-fake-target"'):
+            with self.subTest(cmd=cmd):
+                self.assertEqual("allow", self._decision(cmd))
 
 
 class SubstBodyVarPropagationTests(unittest.TestCase):
