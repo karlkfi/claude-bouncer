@@ -8337,6 +8337,9 @@ class PeelWrappersTests(unittest.TestCase):
             self.assertRuns(cmd, ["cat", "f"], opaque=True)
         # env splits `-S` by its own escape rules, so the scan reads the words.
         self.assertRuns("env -S 'cat \\f'", ["cat", "\\f"], opaque=True)
+        # And it expands `${VAR}` there itself, so the value is the command.
+        self.assertRuns("env -S 'cat ${HOME}/f'", ["cat", "${HOME}/f"],
+                        opaque=True)
 
     def test_a_lost_env_flag_may_have_been_a_chdir(self):
         self.assertEqual(self.peel("env --bogus cat f").chdirs, [None])
@@ -8429,6 +8432,17 @@ class WrappedCommandTests(unittest.TestCase):
             self.assertIn("an `xargs`, or a wrapper flag", reason)
             self._decision(cmd, "deny", permission_mode="bypassPermissions")
             self._decision(cmd, "defer", permission_mode="auto", escalate="off")
+
+    def test_env_split_string_expansion_keeps_the_command(self):
+        # Both `env`s expand `${HOME}` inside `-S` and run the `cat`.
+        self._decision("env -S 'cat ${HOME}/q219-fake-target'", "deny")
+
+    def test_xargs_running_an_unjudged_command_does_not_suppress(self):
+        # The hidden operands go to `echo`, which reads no file, so `allow`
+        # still speaks for the clean `cat` beside it.
+        for mode in (None, "auto", "bypassPermissions"):
+            self._decision("cat in.txt; ls | xargs -n1 echo", "allow",
+                           permission_mode=mode)
 
     def test_the_wrapper_label_does_not_mask_a_kill(self):
         reason = self._decision("cat in.txt; xargs cat in.txt; kill $pid", "ask",

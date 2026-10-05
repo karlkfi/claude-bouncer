@@ -2059,6 +2059,13 @@ def _unreadable_word(t):
     return bool(EXPANSION_RE.search(t)) or '`' in t or SUBST_MARK in t
 
 
+# Commands whose operands this guard judges as paths, so an operand a wrapper
+# hides from it is one it would have checked. `gh run view {}` behind `xargs`
+# hides nothing the guard reads, and suppressing there is co-occurrence.
+WRAPPED_OPERAND_HEADS = (frozenset(SPEC) | frozenset(ALIASES) | SHELL_C_CMDS
+                         | {'ln', 'dd', 'mktemp'})
+
+
 WrapperPeel = collections.namedtuple(
     'WrapperPeel', 'argv opaque appends external chdirs files')
 
@@ -2138,7 +2145,8 @@ def _peel_one(name, w, args, chdirs, files):
         if opt in _WRAPPER_RUNS_NOTHING:
             return None, True
         if val is not None and _unreadable_word(val):
-            return lost()
+            # An `env -S` value is the command itself, so scan its words.
+            return lost(val.split() if opt == 'split-string' else ())
         if opt == 'chdir':
             chdirs.append(val)
         elif opt == 'output':
@@ -4351,7 +4359,7 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
             o = check_file(f, *dirs[at], is_read=f_is_read)
             if o is not None:
                 outside.append(o)
-        if wrap.opaque:
+        if wrap.opaque and g and native_cmd_name(g[0]) in WRAPPED_OPERAND_HEADS:
             signal = merge_nested_signal(signal, WRAPPER_SIGNAL)
         # Signalling and pid-source classification runs before every `continue`
         # below, so no command shape can skip past it. `xargs` is read on the
