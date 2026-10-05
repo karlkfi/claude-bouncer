@@ -1329,6 +1329,25 @@ class ExportedEnvironmentTests(unittest.TestCase):
             decision, reason = run_hook(cmd)
             self.assertIsNone(decision, (cmd, reason))
 
+    def test_env_operand_outranks_an_export(self):
+        # `env NAME=v` sets the child's value over an earlier export; reading
+        # the export instead would defer on the kind file.
+        home = make_home()
+        kind = os.path.join(home, "kc-kind")
+        prod = os.path.join(home, "kc-prod")
+        for path, body in ((kind, KUBECONFIG_KIND), (prod, KUBECONFIG_PROD)):
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(body)
+        decision, reason = run_hook(
+            "export KUBECONFIG=%s; env KUBECONFIG=%s kubectl apply -f x.yaml"
+            % (kind, prod), home=home)
+        self.assertEqual(decision, "deny")
+        self.assertIn("gke_acme_prod-us", reason)
+        decision, reason = run_hook(
+            "export AWS_PROFILE=dev; env AWS_PROFILE=acme-prod aws s3 rm s3://b/k")
+        self.assertEqual(decision, "deny")
+        self.assertIn("acme-prod", reason)
+
     def test_exported_override_still_does_not_arm(self):
         decision, _ = run_hook(
             "export PROD_GUARD_OVERRIDE=why; "

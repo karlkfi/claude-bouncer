@@ -2738,7 +2738,7 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None):
         inline = resolve_assignments(seg_env.items(), shell_env)
         seg_inline = {k: inline[k] for k in seg_env}
         same_shell = {**shell_env, **seg_inline}   # for this command's args
-        child_env = {**exported, **seg_inline}     # for the tool and its `sh -c` body
+        child_env = {**exported, **seg_inline}     # for its `sh -c` body
         # Expanded view for classification; raw view (nested-body extraction)
         # is left unexpanded so the child re-expands it against child_env.
         argv = strip_wrappers(expand_argv(argv_raw, same_shell), seg_inline)
@@ -2813,7 +2813,9 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None):
             continue
         # The env a child inherits: an `export` earlier in the command counts
         # like the inline prefix, and a never-exported `P=x` does not (Q168).
-        findings += evaluator(argv, child_env, ctx)
+        # Built here rather than taken from child_env, so it carries the
+        # `env NAME=v` operands the wrapper walk merged into seg_inline.
+        findings += evaluator(argv, {**exported, **seg_inline}, ctx)
     return findings, override, session_reason
 
 
