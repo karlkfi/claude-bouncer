@@ -106,6 +106,9 @@ jobs:
       # Before the tests: a plugin suite passing against a stale vendored copy
       # is the exact failure this gate exists to catch.
       - run: python3 scripts/sync-lib.py --check
+      # The five hook launchers are copies nothing syncs; a fix that misses one
+      # leaves that guard behind on Windows.
+      - run: python3 scripts/launcher-check.py
       # The marketplace entry is what `claude plugin update` compares, so a
       # bump that misses it ships nothing while the README announces it.
       - run: python3 scripts/version-check.py
