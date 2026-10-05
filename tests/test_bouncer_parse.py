@@ -487,6 +487,8 @@ class SubscriptAssignmentTests(unittest.TestCase):
     read for whether f's contents printed; 3.2.57 agrees on every row. The
     brackets match by depth, so `FOO[a[0]]=x` is one subscript and the first
     `]` at depth 0 closes: `FOO[a]b]=x` and `FOO[]]=x` are command names.
+    An unclosed `[` runs nothing at all: both bashes reject the whole string
+    (`unexpected EOF while looking for matching ']'`, rc 2).
     """
 
     PEELS = ('FOO[0]=x', 'FOO[0]+=x', 'FOO[]=x', 'FOO[a]=x', 'FOO[a[0]]=x',
@@ -494,12 +496,13 @@ class SubscriptAssignmentTests(unittest.TestCase):
              'FOO[i+1]=x', 'FOO[0]=', 'FOO[[0]]=x', 'FOO[a=b]=x', '_[0]=x',
              'F1[0]=x', 'FOO[0]==', 'FOO[$i]=x', 'FOO[${i}]=x',
              'FOO["0"]=x', "FOO['a']=x")
-    RUNS_A_COMMAND = ('FOO[a]b]=x', 'FOO[]]=x', 'FOO[0=x', 'FOO[a[b]=x',
+    RUNS_A_COMMAND = ('FOO[a]b]=x', 'FOO[]]=x',
                       '0FOO[0]=x', "'FOO[0]=x'", '"FOO[0]=x"', r'FOO\[0]=x',
                       "F'O'O[0]=x", 'FOO[0]"=x"', r'FOO[0]\=x', "'FOO'[0]=x",
                       'FOO"[0]"=x',
                       'FOO[0]x=y', 'FOO[0]+x=y', 'FOO[0]', '[0]=x',
                       'FOO[0][1]=x')
+    SYNTAX_ERRORS = ('FOO[0=x', 'FOO[a[b]=x')
 
     def test_a_subscripted_prefix_is_peeled(self):
         for word in self.PEELS:
@@ -509,6 +512,14 @@ class SubscriptAssignmentTests(unittest.TestCase):
 
     def test_a_word_bash_runs_as_a_command_is_not_peeled(self):
         for word in self.RUNS_A_COMMAND:
+            with self.subTest(word=word):
+                toks = bp.lex(word + ' cat f')
+                self.assertEqual(toks, bp.strip_env_prefix(toks))
+
+    def test_an_unclosed_subscript_is_not_peeled(self):
+        # bash runs nothing here; reading the word as a command name keeps
+        # every later word in view, which errs toward more checking.
+        for word in self.SYNTAX_ERRORS:
             with self.subTest(word=word):
                 toks = bp.lex(word + ' cat f')
                 self.assertEqual(toks, bp.strip_env_prefix(toks))
