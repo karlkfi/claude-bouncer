@@ -303,10 +303,17 @@ def strip_comments(cmd):
     as one word and no comment starts inside it (Q217). Only a subscript
     followed by `=` or `+=` is, because outside an assignment bash does start
     one there.
+
+    The close of a `$(…)`, `<(…)`, `>(…)` or `$((…))` does not end a word, so
+    a `#` straight after one is text: bash reads `$(a)#b` as one word, where
+    `(a)#b` ends a subshell (Q264). Each opener's close is found with the
+    substitution scanner and only a close found that way joins the word.
     """
     out = []
     in_single = in_double = False
     i, n = 0, len(cmd)
+    closes = set()        # indices of the `)` that close a substitution
+    glued = -1            # len(out) just past such a `)`
     while i < n:
         c = cmd[i]
         if in_single:
@@ -332,7 +339,11 @@ def strip_comments(cmd):
             in_double = not in_double
             out.append(c); i += 1
             continue
-        at_word = not out or out[-1] in COMMENT_PRECEDERS
+        if c == '(' and not in_double and i and cmd[i-1] in '$<>':
+            body, end = _scan_dollar_paren(cmd, i + 1)   # `$((` nests in it
+            if body is not None:
+                closes.add(end - 1)
+        at_word = (not out or out[-1] in COMMENT_PRECEDERS) and len(out) != glued
         if not in_double and c == '#' and at_word:
             while i < n and cmd[i] != '\n':        # keep the newline itself
                 i += 1
@@ -343,7 +354,10 @@ def strip_comments(cmd):
             if end > 0 and cmd.startswith(('=', '+='), end):
                 out.append(cmd[i:end]); i = end
                 continue
-        out.append(c); i += 1
+        out.append(c)
+        if i in closes:
+            glued = len(out)
+        i += 1
     return ''.join(out)
 
 def _scan_heredoc_delim(text, i):

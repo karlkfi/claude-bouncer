@@ -57,6 +57,22 @@ class StripCommentsTests(unittest.TestCase):
         # Outside an assignment, bash starts the comment there.
         self.assertEqual('echo a[x ', bp.strip_comments('echo a[x #y]'))
 
+    def test_a_substitution_close_holds_no_comment(self):
+        # bash 5.3.15 prints each `#b` as part of its word and runs `id`: the
+        # close of a substitution does not end the word (Q264). Read as a
+        # comment, the `#b` took the `; id` with it.
+        for cmd in ('echo $(true)#b; id', 'cat <(true)#b; id', 'echo >(true)#b; id',
+                    'echo $((1))#b; id', 'x=$(cat <(echo a)#b); id',
+                    'echo $(case x in a) echo;; esac)#b; id',
+                    'echo $(echo ")")#b; id'):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(cmd, bp.strip_comments(cmd))
+        # A continuation joins `$(true)` and `#b` into the same word.
+        self.assertEqual('echo $(true)#b; id', bp.strip_comments('echo $(true)\\\n#b; id'))
+        # A subshell's close does end the word, and so does a space.
+        self.assertEqual('(true)', bp.strip_comments('(true)#b; id'))
+        self.assertEqual('echo $(true) ', bp.strip_comments('echo $(true) #b; id'))
+
 
 class StripHeredocBodiesTests(unittest.TestCase):
     def test_body_and_terminator_go(self):
