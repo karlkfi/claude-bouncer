@@ -209,13 +209,19 @@ def _ansi_c_decode(body):
     return ''.join(out)
 
 
-def requote_ansi_c(text, commenters=''):
-    """Rewrite each ``$'…'`` bash would decode into the single-quoted word it
-    decodes to, so a lexer that knows only POSIX quoting reads the same word.
+def requote(text, commenters=''):
+    """Rewrite what POSIX quoting cannot read the way bash does, so a lexer
+    that knows only POSIX quoting reads the same words.
 
-    Only an unquoted one is rewritten: inside double quotes ``$'`` is text,
-    inside single quotes everything is. A character in ``commenters`` at a
-    word start skips to the newline, the way the caller's lexer will.
+    Each ``$'…'`` becomes the single-quoted word it decodes to. Each backtick
+    substitution becomes a double-quoted run holding it verbatim, so it stays
+    one word with what is glued to it: bash parses its body separately, and
+    split on whitespace and operators it reached a guard as fragments, each
+    judged as a path or a command of its own (Q274). Only an unquoted one of
+    either is rewritten: inside double quotes ``$'`` is text and a backtick
+    span is already one word, inside single quotes everything is. A character
+    in ``commenters`` at a word start skips to the newline, the way the
+    caller's lexer will.
     """
     out, i, n = [], 0, len(text)
     in_double = False
@@ -248,6 +254,13 @@ def requote_ansi_c(text, commenters=''):
                        .replace("'", "'\\''"))
             i = end
             continue
+        if c == '`':
+            body, end = _scan_backticks(text, i + 1)
+            if body is not None:
+                out.append('"%s"' % text[i:end].replace('\\', '\\\\')
+                           .replace('"', '\\"'))
+                i = end
+                continue
         out.append(c); i += 1
     return ''.join(out)
 
@@ -1003,7 +1016,7 @@ class QuoteTrackingLexer(shlex.shlex):
             # Deferred to the first read so the caller's `commenters` is set.
             self._requoted = True
             if isinstance(self.instream, io.StringIO) and not self.instream.tell():
-                self.instream = io.StringIO(requote_ansi_c(
+                self.instream = io.StringIO(requote(
                     self.instream.getvalue(), self.commenters))
         prefix = self._read_subscript() if self._cmd_pos else ''
         self._seen_quotes = set()

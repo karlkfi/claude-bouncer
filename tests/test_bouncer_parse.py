@@ -146,6 +146,25 @@ class LexTests(unittest.TestCase):
         self.assertFalse(bp.lex('echo 2 > f')[1].glued)
         self.assertFalse(bp.lex('echo 2 >f')[1].glued)
 
+    def test_a_backtick_substitution_is_one_word(self):
+        # bash parses the body on its own, so neither its spaces nor its `;`
+        # split the word it sits in (Q274). Split, each fragment was judged as
+        # a path or a command of its own.
+        for cmd, words in (('cat `cat list.txt`', ['cat', '`cat list.txt`']),
+                           ('echo `a; b` c', ['echo', '`a; b`', 'c']),
+                           ('echo a`b c`d e', ['echo', 'a`b c`d', 'e']),
+                           ('echo `echo "a b"` c', ['echo', '`echo "a b"`', 'c']),
+                           ('echo `echo \\`x\\`` c', ['echo', '`echo \\`x\\``', 'c']),
+                           ('x=`date` cmd', ['x=`date`', 'cmd'])):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(words, self.lex(cmd))
+        self.assertTrue(bp.is_assignment(bp.lex('x=`date` cmd')[0]))
+        # Quoted or escaped, a backtick opens nothing, and one that never
+        # closes is left as it was.
+        self.assertEqual(['cat', 'a`b', 'c'], self.lex("cat 'a`b' c"))
+        self.assertEqual(['echo', '`', 'a'], self.lex('echo \\` a'))
+        self.assertEqual(['echo', '`a', 'b'], self.lex('echo `a b'))
+
     def lex(self, cmd):
         return bp.glue_dollar_paren(bp.split_operator_runs(bp.lex(cmd)))
 
