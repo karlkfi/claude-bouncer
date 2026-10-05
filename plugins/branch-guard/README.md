@@ -820,7 +820,10 @@ update step and restart.
    substitution guard still defers; an unterminated one is left unchanged.
 1. **Tokenize** the command with Python's `shlex` (POSIX mode, punctuation
    grouping) so quotes are respected and shell operators (`|`, `&&`, `>`, `;`,
-   newlines) become their own tokens.
+   newlines) become their own tokens. shlex glues adjacent operators into one
+   token, so a run made only of separators (`);`, `)&&`, `))`) is split back
+   into them. A run holding a redirect or an unknown operator (`<>`, `|&`)
+   stays whole, and step 5 defers on it.
 2. **Split** into simple-command segments on those operators and drop redirect
    targets aside, including fd-redirect forms (`git push … 2>&1`,
    `git log 2>/dev/null`) — the leading fd digit and the operator's target are

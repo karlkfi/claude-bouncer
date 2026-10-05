@@ -113,7 +113,7 @@ import sys, os, json, re, shlex, subprocess, fnmatch
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 from bouncer_parse import (                                   # noqa: E402
     ASSIGN_SUBSCRIPT, PUNCT_CHARS, is_assignment, lex, note_discarded_writes,
-    split_assignment,
+    split_assignment, split_operator_runs,
 )
 from bouncer_grants import record_grants                      # noqa: E402
 
@@ -588,18 +588,25 @@ DENY_ROUTES = {
 }
 
 
-def split_newline_separators(tokens):
-    """Peel newlines out of operator-run tokens so each becomes its own token.
+def split_separator_runs(tokens):
+    """Split operator-run tokens made only of command separators, and peel
+    newlines out of any other run.
 
-    `\\n` is a punctuation char, so a newline command boundary surfaces as a
-    token, but it can glue onto adjacent operators (`;\\n`, `|\\n`). Those
-    wouldn't match SEPARATORS, so a newline-only boundary would merge two
-    commands. Split applies only to pure operator runs; a quoted filename
-    containing a newline is a word token and is left intact.
+    shlex glues adjacent punctuation into one token, so a boundary after a
+    subshell or substitution surfaces as `);`, `)&&` or `))`, and a newline
+    boundary as `;\\n` or `|\\n`. None of those match SEPARATORS, so the next
+    command merged into the previous segment and was never classified: the
+    `git commit` in `x=$(true); git commit` lost its ask (Q268). A run with a
+    redirect or an unknown operator in it (`<>`, `|&`, `;>`) stays whole, so
+    `has_shell_substitution` still flags it. A quoted run is a word and is
+    left intact.
     """
     out = []
     for t in tokens:
-        if t and '\n' in t and all(c in PUNCT_CHARS for c in t):
+        parts = split_operator_runs([t])
+        if len(parts) > 1 and all(p in SEPARATORS for p in parts):
+            out += parts
+        elif t and '\n' in t and all(c in PUNCT_CHARS for c in t):
             out += [p for p in re.split(r'(\n)', t) if p]
         else:
             out.append(t)
@@ -750,7 +757,7 @@ def tokenize(cmd):
     grouping) with newline separators peeled out of operator runs. Quotes are
     respected and shell operators (`|`, `&&`, `>`, `;`, …) become their own
     tokens. Raises ValueError on unbalanced quotes."""
-    return split_newline_separators(lex(cmd))
+    return split_separator_runs(lex(cmd))
 
 
 def extract_command_substitutions(token):
@@ -809,8 +816,9 @@ def has_shell_substitution(tokens):
     """True if any raw token hides a command the classifier never inspects:
     command substitution (`` `…` `` or `$(…)`, including inside a quoted arg),
     process substitution (`<(…)`/`>(…)`), or an unrecognized operator run
-    (`|&`, `;;`, `;&`) that would otherwise merge a trailing command into a
-    git segment's args. Must run over the RAW token stream (before redirect
+    (`|&`, `<>`) that would otherwise merge a trailing command into a git
+    segment's args. A run of separators alone (`);`, `;;`) never reaches here
+    whole: `split_separator_runs` has already split it. Must run over the RAW token stream (before redirect
     targets are stripped) so a substitution in a redirect target
     (`git diff > `evil``) is caught too. Like GIT_ESCAPE_HATCHES, this only
     downgrades a would-be `allow` to defer — it never suppresses an `ask`.

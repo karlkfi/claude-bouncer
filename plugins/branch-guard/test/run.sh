@@ -259,6 +259,24 @@ git -C "$WORK" checkout -q main
 check "commit && rm on main -> ask" ask \
   "$(decision_for '{"tool_name":"Bash","tool_input":{"command":"git commit -m x && rm -rf foo"}}' "$WORK")"
 
+# 3d2. A `)` glued to the operator after it (`);`, `)&&`, `))`) lexes as one
+#      token, which matched no separator, so the commit merged into the segment
+#      before it and lost its ask (Q268). bash 5.3.15 runs the commit in each.
+#      `echo a;` is the control that always split.
+for pre in 'echo a; ' 'x=$(true); ' 'cat <(true); ' 'x=$(cat <(echo a)); ' \
+           '(true); ' '(true)&& ' '(true)|| ' '(true)| ' '(true)& ' '((1)); '; do
+  check "[glued] ${pre}commit on main -> ask" ask \
+    "$(decision_for "$(bash_payload "${pre}git commit -m x")" "$WORK")"
+done
+#      The split reaches the allow side the same way: the glued spelling now
+#      matches the spaced one. A run holding a redirect stays whole and defers.
+check "[glued] (git status) && git log -> allow" allow \
+  "$(decision_for "$(bash_payload '(git status) && git log')" "$WORK")"
+check "[glued] (git status)&& git log -> allow" allow \
+  "$(decision_for "$(bash_payload '(git status)&& git log')" "$WORK")"
+check "[glued] git status <>f -> none" none \
+  "$(decision_for "$(bash_payload 'git status <>f')" "$WORK")"
+
 # 3e. env-prefixed / global-flag commit still detected on main -> ask
 #     The path is single-quoted because that is how a real command names a
 #     native Windows path: the hook lexes with shlex, which eats an unquoted
