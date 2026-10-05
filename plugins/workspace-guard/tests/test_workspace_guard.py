@@ -2456,6 +2456,23 @@ class HookEndToEndTests(unittest.TestCase):
         # it stays runtime-expanded and denies.
         self._decision('cd - && cat "$(pwd)/in.txt"', "deny")
 
+    def test_backtick_file_operand_is_runtime_expanded(self):
+        # Q274: bash decides a backtick substitution's value at runtime, as it
+        # does `$(...)`'s, so ``cat `cat list.txt` `` reads whatever list.txt
+        # names. Read as a literal filename it sat inside the workspace and
+        # was allowed.
+        for cmd in ('cat `cat list.txt`', 'cat "`cat list.txt`"',
+                    'grep x `cat list.txt`', 'cp `cat list.txt` out.txt'):
+            with self.subTest(cmd=cmd):
+                self._decision(cmd, "deny")
+
+    def test_backtick_body_is_judged_as_its_own_command(self):
+        # Split on its `;`, the body reached the group loop as a command `rm`
+        # whose operand still carried the closing backtick, which read as
+        # runtime-expanded and denied. bash runs `rm /etc/...` there, an
+        # outside write the user may approve.
+        self._decision('echo `cat a; rm /etc/q274-target`', "ask")
+
     # --- ln -s symlink staging (Q8) -----------------------------------------
     #
     # The synthetic targets here sit at the filesystem root rather than under

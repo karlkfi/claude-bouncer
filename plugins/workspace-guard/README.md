@@ -57,7 +57,7 @@ The hook produces one of four outcomes:
   the kill's own (`pkill -f`) or reached it through a `pgrep` or a `ps` pipeline
   (all below). Configurable down to `ask`; see [Configuration](#configuration).
   It is also the default for an argument the hook **could not read** — a
-  `$VAR`/`$(…)`/`~user` token, or a relative path after a `cd` it couldn't
+  `$VAR`/`$(…)`/`` `…` ``/`~user` token, or a relative path after a `cd` it couldn't
   follow. That is the hook failing to parse rather than a boundary question, so
   the reason carries the literal-path rewrite and the agent applies it without
   anyone being prompted (see [Unreadable arguments deny](#unreadable-arguments-deny)).
@@ -983,8 +983,9 @@ through the same boundary rules and produce the same reasons. Symlink staging
    home comes from the same lookup Claude Code itself uses, not from `$HOME`,
    which is unset on Windows. Tokens that bash would still expand unpredictably
    at runtime — `~user`/`~+`/`~-`, or a `$` that introduces an expansion
-   (`$VAR`, `${VAR}`, `$(...)`, `$1`, `$?`) — short-circuit to
-   `ask`, since `realpath` would otherwise lexically place them inside `cwd`.
+   (`$VAR`, `${VAR}`, `$(...)`, `$1`, `$?`), or a backtick substitution —
+   short-circuit to `ask`, since `realpath` would otherwise lexically place
+   them inside `cwd`.
    The two whitelisted pure substitutions from step 6
    (`$(git rev-parse --show-toplevel)`, `$(pwd)`) are the exception: when one
    *leads* a file operand or redirect target it is resolved against the tracked
