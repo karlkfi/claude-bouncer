@@ -130,6 +130,9 @@ the opener is what identifies which guard decided when several are installed.
 | `echo done && kubectl --context prod-us delete ns x` | **deny** |
 | `bash -c 'kubectl --context prod-us delete ns x'` | **deny** |
 | `kubectl delete pod x` (ambient kind context, no `--context`) | **deny** (pin `--context`) |
+| `kubectl --kubeconfig /work/kc apply -f m.yaml` (that file's current-context is `kind-ci`) | defer |
+| `export KUBECONFIG=/work/kc; kubectl apply -f m.yaml` (same file) | defer |
+| `KUBECONFIG=/work/kc; kubectl apply -f m.yaml` (never exported, so kubectl reads `~/.kube/config`) | **deny** (pin `--context`) |
 | `kubectl --context bluefin apply -f m.yaml` (unclassified) | **ask** |
 | `terraform apply` (no workspace pinned) | **deny** (pin `TF_WORKSPACE`) |
 | `aws s3 rm s3://bucket/key` (no profile pinned) | **deny** (pin `--profile`) |
@@ -245,8 +248,8 @@ because a missed destructive form is the failure mode that matters.
 
 | Tool | Explicit target | Ambient fallback |
 | --- | --- | --- |
-| `kubectl`, `oc`, `flux` | `--context` | `current-context` in `$KUBECONFIG` / `~/.kube/config`; `oc login` / `oc project` prompt as kubeconfig writers. A context resolves to its cluster's `server:` URL in the kubeconfig, which is classified alongside the context name — so a prod cluster reached through an innocuously named context is still denied |
-| `helm` | `--kube-context` | same kubeconfig `current-context` |
+| `kubectl`, `oc`, `flux` | `--context`, or the `current-context` of a kubeconfig the command names by absolute path (`--kubeconfig`, or a `KUBECONFIG` it exports or prefixes) | `current-context` in `$KUBECONFIG` / `~/.kube/config`; `oc login` / `oc project` prompt as kubeconfig writers. A context resolves to its cluster's `server:` URL in the kubeconfig, which is classified alongside the context name — so a prod cluster reached through an innocuously named context is still denied |
+| `helm` | `--kube-context`, or a kubeconfig the command names, as above | same kubeconfig `current-context` |
 | `gcloud` | `--project` / `--zone` / `--region` / `--account`, `CLOUDSDK_CORE_PROJECT` | project of the active gcloud configuration |
 | `aws` | `--profile` / `--region`, `AWS_PROFILE`. An unknown-named profile is resolved to its `[profile NAME]` account (`sso_start_url` / `role_arn` / `sso_session`) in `~/.aws/config`, so a prod account behind an innocuous name still denies | the `[default]` profile's `sso_start_url` / `role_arn` / `sso_session` in `~/.aws/config` (or `$AWS_CONFIG_FILE`) — a prod account denies; an unpinned mutation denies with a pin-`--profile` fix-it either way, naming what resolved |
 | `eksctl` | `--profile` / `--region`, `AWS_PROFILE` / `AWS_DEFAULT_PROFILE` | the `[default]` profile in `~/.aws/config`, resolved exactly as for `aws` — a prod account denies; an unpinned mutation denies (pin `--profile`) |
