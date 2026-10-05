@@ -12,6 +12,7 @@ Three layers:
     marketplace.json) is valid and points the hook at the real script.
 """
 import contextlib
+import io
 import json
 import ntpath
 import os
@@ -5141,11 +5142,19 @@ class SubstDepthCapTests(unittest.TestCase):
 
     def test_pathological_nesting_does_not_kill_the_hook(self):
         # 1000 levels overflowed the interpreter stack pre-fix, so the hook
-        # exited non-zero with no decision at all. `run_hook` raises on a
-        # non-zero exit, which is what fails this test if the cap regresses.
-        out = run_hook(self._nest(1000), self.workspace,
-                       project_dir=self.workspace)
-        self.assertIsNotNone(out)
+        # died with no decision at all. `main` has no catch-all, so a regressed
+        # cap raises RecursionError here. In-process rather than `run_hook`:
+        # its 10s subprocess bound timed out under parallel load (Q213), and
+        # the assertion is about the stack, not the clock.
+        payload = json.dumps({"tool_input": {"command": self._nest(1000)},
+                              "cwd": self.workspace})
+        out = io.StringIO()
+        with mock.patch.dict(os.environ,
+                             {"CLAUDE_PROJECT_DIR": self.workspace}), \
+                mock.patch.object(sys, "stdin", io.StringIO(payload)), \
+                contextlib.redirect_stdout(out):
+            guard.main()
+        self.assertIn('"permissionDecision"', out.getvalue())
 
     def test_capping_recursion_does_not_hide_the_inner_read(self):
         # The cap stops the recursion, not the analysis: shlex does not track
