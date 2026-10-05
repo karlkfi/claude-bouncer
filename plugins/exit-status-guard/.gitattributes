@@ -1,0 +1,3 @@
+# run-python-hook.cmd is a batch/POSIX polyglot. A CRLF checkout makes the
+# shell half a syntax error, so it must stay LF even on Windows.
+*.cmd text eol=lf

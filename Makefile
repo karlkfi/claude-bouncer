@@ -7,8 +7,8 @@ PLUGINS := workspace-guard branch-guard prod-guard exit-status-guard foreground-
 # sets CI itself, which is why nothing has to pass this by hand.
 CLAIMS_FLAGS := $(if $(CI),--strict)
 
-.PHONY: check sync sync-check version-check path-filter-check action-pin-check \
-        install-ref-check gate-parity-check lib-test plugin-tests \
+.PHONY: check sync sync-check launcher-check version-check path-filter-check \
+        action-pin-check install-ref-check gate-parity-check lib-test plugin-tests \
         validate images help backlog backlog-next backlog-lint backlog-claims \
         backlog-claim
 
@@ -16,6 +16,7 @@ help:
 	@echo "make check             run everything CI runs"
 	@echo "make sync              copy lib/bouncer_parse.py into each plugin"
 	@echo "make sync-check        fail if a vendored copy has drifted"
+	@echo "make launcher-check    fail if the five hook launchers differ or lose LF"
 	@echo "make version-check     fail if a plugin's three version strings disagree"
 	@echo "make path-filter-check fail if a plugin's CI jobs are unfiltered or misfiltered"
 	@echo "make action-pin-check  fail if a workflow action is not pinned to a SHA"
@@ -31,8 +32,9 @@ help:
 	@echo "make backlog-claim     claim a Q-ID (ARGS='The row title')"
 	@echo "make backlog-claims    fail if an id this branch adds holds no claim"
 
-check: sync-check version-check path-filter-check action-pin-check \
-       install-ref-check gate-parity-check backlog-lint backlog-claims lib-test \
+check: sync-check launcher-check version-check path-filter-check \
+       action-pin-check install-ref-check gate-parity-check backlog-lint \
+       backlog-claims lib-test \
        plugin-tests
 
 sync:
@@ -43,6 +45,11 @@ sync:
 # failure mode the gate exists to catch.
 sync-check:
 	$(PYTHON) scripts/sync-lib.py --check
+
+# Each guard's run-python-hook.cmd is a copy sync-lib.py cannot write: it has
+# to sit beside its script, and a `#` banner breaks the polyglot's first line.
+launcher-check:
+	$(PYTHON) scripts/launcher-check.py
 
 # The marketplace entry is what `claude plugin update` compares, so a bump
 # that misses it ships nothing while the README announces the new version.

@@ -29,6 +29,12 @@ marketplace sibling are dereferenced for a git-hosted install but skipped for
 `--plugin-dir` and local-path installs, which is how this repo gets tested, so
 vendoring is the only form that behaves the same everywhere.
 
+The Windows hook launcher, `run-python-hook.cmd`, is the one shared file
+`sync-lib.py` cannot write. It has to sit beside the script it runs, and a `#`
+banner breaks its first line. Edit all five copies together. `make
+launcher-check` fails if they differ, if one loses its executable bit, or if
+one loses its LF pin.
+
 ## What belongs in the shared parser
 
 A primitive belongs in `lib/` when the guards must agree on it. Tokenizing a
@@ -75,7 +81,7 @@ Invoke the `session-backlog` skill for any change to the store.
 ## Checks
 
 ```
-make check    # drift, version, path filters, action pins, install refs,
+make check    # drift, launchers, version, path filters, action pins, install refs,
               # gate parity, backlog lint, parser tests, all five suites
 ```
 
