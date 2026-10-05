@@ -20,12 +20,19 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 QUEUE = os.path.join(ROOT, 'scripts', 'queue.py')
 STORE = os.path.join(ROOT, 'docs', 'queue')
 
-# The flags `make backlog-lint` runs. Kept here rather than shelling out to
-# make, so a Windows runner can still exercise the gate.
-STRICT = ['--strict', 'blocked-opener',
-          '--strict', 'deferred-trigger',
-          '--strict', 'empty-store',
-          '--strict', 'stale-citation']
+def recipe_flags(target):
+    """The `--strict` flags a Makefile recipe passes, read rather than restated
+    so CI cannot drift from `make check`. Read rather than run, so a Windows
+    runner can still exercise the gate without make."""
+    with open(os.path.join(ROOT, 'Makefile'), encoding='utf-8') as fh:
+        text = fh.read().replace('\\\n', ' ')
+    m = re.search(r'^%s:.*\n\t(.*)$' % re.escape(target), text, re.M)
+    words = m.group(1).split()
+    return [w for i, w in enumerate(words)
+            if w == '--strict' or (i and words[i - 1] == '--strict')]
+
+
+STRICT = recipe_flags('backlog-lint')
 
 PLUGINS = ['workspace-guard', 'branch-guard', 'prod-guard',
            'exit-status-guard', 'foreground-guard']
@@ -51,6 +58,12 @@ def items(store):
 
 
 class StoreTests(unittest.TestCase):
+    def test_the_gate_flags_were_read_from_the_makefile(self):
+        """A recipe parse that matched nothing would lint with no --strict at
+        all and pass every store."""
+        self.assertIn('stale-citation', STRICT)
+        self.assertEqual(STRICT[::2], ['--strict'] * (len(STRICT) // 2))
+
     def test_the_gate_passes_on_the_real_store(self):
         p = lint(STORE)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)

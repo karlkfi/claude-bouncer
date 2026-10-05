@@ -119,6 +119,9 @@ jobs:
       # instruction resolves and reads correctly -- a link checker passes on
       # every one of them.
       - run: python3 scripts/install-ref-check.py
+      # `make check` names its gates in one list and this job in another; a
+      # gate on only the first goes green here by never running.
+      - run: python3 scripts/gate-parity-check.py
       - run: python3 -m unittest discover tests
 
   # ----------------------------------------------------------- backlog claims

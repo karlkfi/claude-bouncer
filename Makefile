@@ -8,7 +8,7 @@ PLUGINS := workspace-guard branch-guard prod-guard exit-status-guard foreground-
 CLAIMS_FLAGS := $(if $(CI),--strict)
 
 .PHONY: check sync sync-check version-check path-filter-check action-pin-check \
-        install-ref-check lib-test plugin-tests \
+        install-ref-check gate-parity-check lib-test plugin-tests \
         validate images help backlog backlog-next backlog-lint backlog-claims \
         backlog-claim
 
@@ -20,6 +20,7 @@ help:
 	@echo "make path-filter-check fail if a plugin's CI jobs are unfiltered or misfiltered"
 	@echo "make action-pin-check  fail if a workflow action is not pinned to a SHA"
 	@echo "make install-ref-check fail if a README names a retired repo or marketplace"
+	@echo "make gate-parity-check fail if a gate in \`make check\` is not run by CI"
 	@echo "make lib-test          test the shared parser"
 	@echo "make plugin-tests      test every plugin"
 	@echo "make validate          validate the marketplace manifest"
@@ -31,7 +32,8 @@ help:
 	@echo "make backlog-claims    fail if an id this branch adds holds no claim"
 
 check: sync-check version-check path-filter-check action-pin-check \
-       install-ref-check backlog-lint backlog-claims lib-test plugin-tests
+       install-ref-check gate-parity-check backlog-lint backlog-claims lib-test \
+       plugin-tests
 
 sync:
 	$(PYTHON) scripts/sync-lib.py
@@ -65,6 +67,11 @@ action-pin-check:
 # the manifest can.
 install-ref-check:
 	$(PYTHON) scripts/install-ref-check.py
+
+# `check:` and tests.yml list the gates twice, and a gate on only the first
+# passes every local run and is never run where a pull request is decided.
+gate-parity-check:
+	$(PYTHON) scripts/gate-parity-check.py
 
 lib-test:
 	$(PYTHON) -m unittest discover tests
