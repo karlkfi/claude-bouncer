@@ -104,6 +104,7 @@ the default `strict` [push policy](#push-guard).
 | `git branch -d old` / `git branch -m old new` / `git branch -c old copy` *(unprotected target; git refuses the unsafe cases itself)* | allow |
 | `git branch -D old` *(tip survives on a remote-tracking branch or `main`)* | allow |
 | `git branch -D tmp-basecheck` *(scratch ref whose only unshared commit is a merge git reproduces)* | allow |
+| `git branch -D old` *(rebased, and the result pushed under another name)* | allow |
 | `git branch -f backup claude/x` *(the ref doesn't exist yet — a create)* | allow |
 | `git branch -f tmp-basecheck main` / `git branch -M x tmp-basecheck` *(the ref being overwritten holds only a merge git reproduces)* | allow |
 | `git reset --hard origin/main` *(clean worktree, feature branch whose tip survives elsewhere)* | allow |
@@ -123,7 +124,7 @@ the default `strict` [push policy](#push-guard).
 | `git reset --hard HEAD~1` *(clean worktree, feature branch, tip proved to be reachable from nothing else, and its orphaned commits proved neither reproducible nor republished)* | **deny** |
 | `git clean -fd` | **ask** |
 | `git stash drop` / `git stash clear` *(discards a stash)* | **ask** |
-| `git branch -D old` *(tip reachable from nothing else, and the branch carries commits of its own)* | **ask** |
+| `git branch -D old` *(tip reachable from nothing else, and the branch carries commits of its own that no remote has a patch-equivalent of)* | **ask** |
 | `git branch -D tmp-conflict` *(its merge was resolved by hand, so that tree exists nowhere else)* | **ask** |
 | `git branch -d main` / `git branch -D main` / `git branch -m x main` *(protected branch, any spelling)* | **ask** |
 | `git branch -f old main` / `git branch -M x old` *(moves an existing branch off commits nothing else reaches, and that re-running a merge doesn't account for)* | **ask** |
@@ -256,7 +257,7 @@ runs on all three: the delete, this reset, and the `-f`/`-M`/`-C` overwrite. It
 costs nothing on the auto-approved path, because a surviving tip has already
 returned above it.
 
-The reset asks one more. Rebasing a branch and pushing the result under another
+All three ask one more. Rebasing a branch and pushing the result under another
 name gives every commit a new object name, so the old tip is unreachable while
 `origin` already holds its changes. The guard compares the patch-ids of
 the commits the move would orphan against the newest 200 commits on your
