@@ -262,8 +262,9 @@ name gives every commit a new object name, so the old tip is unreachable while
 `origin` already holds its changes. The guard compares the patch-ids of
 the commits the move would orphan against the newest 200 commits on your
 remote-tracking branches (local `main` and `master` included), and allows when every
-orphan has a match. Whitespace counts, so a local re-indent of a pushed commit
-is not a match. Two cases still deny: a base that moved *inside* the lines
+orphan has a match carrying the same commit message, since a rebase keeps each
+message as it was. Whitespace counts, so a local re-indent of a pushed commit
+is not a match, and neither is a local reword of one. Two cases still deny: a base that moved *inside* the lines
 around your change, which alters the diff itself so nothing can match, and a
 republish older than those 200 commits.
 

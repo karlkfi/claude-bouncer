@@ -2344,6 +2344,10 @@ def orphans_republished(cwd, name):
     another file or elsewhere in the same one. A base that moved inside the
     diff's context changes the diff text itself, and nothing matches there.
 
+    A patch-id never sees the message, so each orphan's match must also carry
+    the orphan's own message: a rebase keeps it, and a local reword matched its
+    published original and lost the new one.
+
     Compared against all of RECOVERY_REV_ARGS rather than a base ref: main is
     precisely where a republished branch is not. Scoped like
     `orphans_only_reproducible_merges` to what losing the whole ref orphans.
@@ -2364,7 +2368,29 @@ def orphans_republished(cwd, name):
                        '--ignore-missing', *RECOVERY_REV_ARGS, '--not', name)
     if mine is None or theirs is None or set(mine) != set(orphans):
         return False
-    return set(mine.values()) <= set(theirs.values())
+    matches = {}
+    for c, p in theirs.items():
+        matches.setdefault(p, []).append(c)
+    if not set(mine.values()) <= set(matches):
+        return False
+    msgs = commit_messages(cwd, *orphans,
+                           *(c for p in mine.values() for c in matches[p]))
+    if msgs is None:
+        return False
+    return all(o in msgs and any(msgs.get(c) == msgs[o] for c in matches[p])
+               for o, p in mine.items())
+
+
+def commit_messages(cwd, *commits):
+    """{commit: raw message} for <commits>, or None when git fails. Records
+    are NUL-terminated (`-z`); one that does not parse is left out, so its
+    commit compares equal to nothing."""
+    r = run_git(cwd, 'log', '--no-walk', '-z', '--format=%H%n%B', *commits,
+                '--')
+    if r is None or r.returncode != 0:
+        return None
+    recs = (rec.partition('\n') for rec in r.stdout.split('\0'))
+    return {c: m for c, sep, m in recs if sep}
 
 
 def patch_ids(cwd, *revs):

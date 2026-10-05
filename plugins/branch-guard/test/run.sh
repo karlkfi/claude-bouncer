@@ -2403,6 +2403,22 @@ check "[republish] precondition: the re-indented tip is unreachable" 2 \
 check "[republish] a whitespace-only local amend -> deny" deny \
   "$(decision_for "$(bash_cmd "$RESET_MAIN")" "$OVL")"
 
+#     A patch-id never sees the message, so a local reword matched its published
+#     original and the reset dropped the new one (Q227). A rebase carries each
+#     message over, so the match must carry the orphan's message too. The
+#     second reword borrows the OTHER commit's message, which a check against
+#     every published message would accept: the pairing is per commit.
+make_republish_repo file.txt 0
+git -C "$OVL" commit -q --amend -m "thirty, reworded"
+check "[republish] precondition: the reworded tip is unreachable" 2 \
+  "$(orphan_count)"
+check "[republish] a message-only local amend -> deny" deny \
+  "$(decision_for "$(bash_cmd "$RESET_MAIN")" "$OVL")"
+make_republish_repo file.txt 0
+git -C "$OVL" commit -q --amend -m "ten"
+check "[republish] a reword to the other commit's message -> deny" deny \
+  "$(decision_for "$(bash_cmd "$RESET_MAIN")" "$OVL")"
+
 #     The base moved in the same file but outside the diff's context (line 10's
 #     context is 7-13), then in a file the branch never touches. The trees
 #     differ in both; the diffs do not.
@@ -2519,6 +2535,13 @@ git -C "$OVL" switch -q base-work
 check "[republish] branch -D, only one of two published -> ask" ask \
   "$(decision_for "$(bash_cmd "$DEL_DUP")" "$OVL")"
 check "[republish] branch -f, only one of two published -> ask" ask \
+  "$(decision_for "$(bash_cmd "$OVW_DUP")" "$OVL")"
+make_republish_repo third.txt 5
+git -C "$OVL" commit -q --amend -m "thirty, reworded"
+git -C "$OVL" switch -q base-work
+check "[republish] branch -D, a message-only local amend -> ask" ask \
+  "$(decision_for "$(bash_cmd "$DEL_DUP")" "$OVL")"
+check "[republish] branch -f, a message-only local amend -> ask" ask \
   "$(decision_for "$(bash_cmd "$OVW_DUP")" "$OVL")"
 
 # --- Worktree grant recording (Q144) -----------------------------------------
