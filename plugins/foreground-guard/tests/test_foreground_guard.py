@@ -948,7 +948,7 @@ class SlowCommandPositionTests(unittest.TestCase):
         # looks for a program named `A=1` and fails, so nothing runs (Q178).
         for prefix in ("nohup", "command", "stdbuf -oL", "exec", "builtin",
                        "unbuffer", "/usr/bin/time", "nohup --", "B=1 time",
-                       "nohup time"):
+                       "nohup time", "time nohup"):
             with self.subTest(prefix=prefix):
                 self.assert_mention(prefix + " A=1 scripts/gate.sh")
                 self.assert_mention(prefix + " A=1 gh run watch 456")
@@ -958,6 +958,10 @@ class SlowCommandPositionTests(unittest.TestCase):
                         "time -p A=1 scripts/gate.sh",
                         "! time A=1 scripts/gate.sh",
                         "true && time A=1 scripts/gate.sh",
+                        "time time A=1 scripts/gate.sh",
+                        "time -p time A=1 scripts/gate.sh",
+                        "time ! time A=1 scripts/gate.sh",
+                        "time time A=1 gh run watch 456",
                         "while true; do time A=1 gh run watch 456; done",
                         "env A=1 scripts/gate.sh", "sudo A=1 scripts/gate.sh",
                         "A=1 nohup scripts/gate.sh"):

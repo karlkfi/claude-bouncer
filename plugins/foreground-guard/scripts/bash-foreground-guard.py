@@ -494,6 +494,9 @@ def strip_head(argv, state):
             argv = argv[1:]
             while argv and argv[0].startswith('-'):
                 argv = argv[flag_arity(argv[0], value_flags):]
+            # The keyword leaves the next word in keyword position, so a
+            # second `time` is the keyword too (`time time A=1 cmd` runs).
+            reserved = keyword_time
             if argv and not keyword_time and is_assignment(argv[0]):
                 # Unlike `env` and `sudo`, these take no assignment operands:
                 # `nohup A=1 cmd` looks for a program named `A=1` and runs
