@@ -142,6 +142,7 @@ old one. A different project's scratch still asks entirely.
 | `grep foo data.txt 2>/dev/null`      | allow    |
 | `grep foo data.txt 2>&1`             | allow    |
 | `cat <<<"/etc/foo"` (here-string)    | allow    |
+| `cd .. && cat <<<"$(cat x)"` (the substitution reads `../x`) | **ask** |
 | `cat > page.html <<'EOF'` … `</div>` … `EOF` (heredoc body) | allow |
 | `cat > doc.md <<'EOF'` … `$(cat /etc/x)` … `EOF` (literal body) | allow |
 | `cat ~/proj/notes.md` (root `~/proj`) | allow   |
@@ -843,7 +844,8 @@ through the same boundary rules and produce the same reasons. Symlink staging
    the command itself is unguarded — `echo secret > /tmp/out` and `ls >
    /etc/out.txt` are honored on their targets. The token after `<<`
    (heredoc delimiter) or `<<<` (here-string content) is skipped — it isn't a
-   path. An fd number written before a redirect (`2>file`) and an
+   path — though a substitution inside a here-string is still analysed, from
+   the cwd its command runs in. An fd number written before a redirect (`2>file`) and an
    fd-duplication or close (`2>&1`, `2>&-`) are recognised so the digit and the
    dup target don't leak as phantom file arguments; `>&file` (a redirect to a
    file, not a dup) still has its target checked.
