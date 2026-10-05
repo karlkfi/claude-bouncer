@@ -3908,7 +3908,7 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
 PIPE_OPS = ('|', '|&')
 
 # The reserved word that opens each compound command, mapped to its closer.
-# `select` is one too, though `SH_KEYWORDS` leaves it out.
+# `for` and `select` are too, though `SH_KEYWORDS` leaves them out.
 COMPOUND_CLOSERS = {'{': '}', 'if': 'fi', 'case': 'esac', 'for': 'done',
                     'select': 'done', 'while': 'done', 'until': 'done'}
 # Reserved words after which the next word is still in command position. A
@@ -4039,7 +4039,7 @@ def split_groups(tokens, scopes=None, herestrings=None):
                 pipe += 1
             prev_sep, cmd_pos = t, True
             i += 1; continue
-        if cmd_pos and (is_reserved_word(t) or t == 'select'
+        if cmd_pos and (is_reserved_word(t) or t in ('for', 'select')
                         and getattr(t, 'quoted_from', None) is None):
             if t == 'function' and i + 1 < len(tokens):
                 fn = tokens[i + 1]                # `function f [()]`

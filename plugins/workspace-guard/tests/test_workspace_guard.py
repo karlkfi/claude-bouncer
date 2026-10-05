@@ -5125,6 +5125,8 @@ class FunctionCdTests(OutsideParentFixture, unittest.TestCase):
                     "function f { cd sub; }; cat ../%s",
                     "function f() { cd sub; }; cat ../%s",
                     "f() if true; then cd sub; fi; cat ../%s",
+                    "f() for i in 1; do cd sub; done; cat ../%s",
+                    "f() while true; do cd sub; break; done; cat ../%s",
                     "f() { cd sub; }\ncat ../%s",
                     "f ()\n{\n cd sub\n}\ncat ../%s"):
             with self.subTest(cmd=cmd):
