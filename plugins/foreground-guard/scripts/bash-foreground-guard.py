@@ -389,15 +389,20 @@ PLAIN_WRAPPERS = frozenset({'command', 'nohup', 'builtin', 'time', 'exec',
                             'stdbuf', 'unbuffer'})
 SHELL_NAMES = frozenset({'bash', 'sh', 'zsh', 'dash', 'ksh'})
 
-# sudo flags that take a value (skip flag + value when stripping).
-SUDO_VALUE_FLAGS = frozenset({'-u', '--user', '-g', '--group', '-p', '--prompt'})
-
-# Plain-wrapper flags that take a SEPARATE value. Dropped one word at a time,
-# the value is left standing as the command word and the segment defers
-# (Q160). The sets are the BSD and GNU union: `time` takes `-o` on both and the
-# rest on GNU only, and stdbuf's long forms are GNU's. `unbuffer -p` and the
-# rest of `exec`'s flags carry no value.
+# Wrapper flags that take a SEPARATE value. Dropped one word at a time, the
+# value is left standing as the command word and the segment defers (Q160,
+# Q221). The sets are the BSD and GNU union: `time` takes `-o` on both and the
+# rest on GNU only, stdbuf's long forms are GNU's, `env -P` is BSD's and
+# `env -a` GNU's. sudo's `-h` (also `--help`) and `-U` (list mode only) are
+# held out, as in prod-guard. `env -S` carries the command inside its value,
+# so skipping it would be no truer than not. `unbuffer -p` and the rest of
+# `exec`'s flags carry no value.
 WRAPPER_VALUE_FLAGS = {
+    'sudo': frozenset({'-C', '--close-from', '-D', '--chdir', '-g', '--group',
+                       '-p', '--prompt', '-R', '--chroot',
+                       '-T', '--command-timeout', '-u', '--user'}),
+    'env': frozenset({'-u', '--unset', '-C', '--chdir', '-P', '-a',
+                      '--argv0'}),
     'exec': frozenset({'-a'}),
     'time': frozenset({'-o', '--output', '-f', '--format'}),
     'stdbuf': frozenset({'-i', '--input', '-o', '--output', '-e', '--error'}),
@@ -407,11 +412,20 @@ WRAPPER_VALUE_FLAGS = {
 def flag_arity(tok, value_flags):
     """How many words a wrapper's option word consumes: 2 when it ends in a
     flag whose value is the next word, else 1. A short word is walked a
-    character at a time, so a bundle (`time -ao out`) takes its value too, and
-    the walk stops at the first value-taking flag because the rest of the word
-    is that flag's attached value (`stdbuf -oL`)."""
+    character at a time, so a bundle (`sudo -nu root`) takes its value too,
+    and the walk stops at the first value-taking flag because the rest of the
+    word is that flag's attached value (`stdbuf -oL`). getopt_long takes any
+    unique prefix of a long option, so `stdbuf --out L` is `--output L`
+    (Q221); a prefix of two value-taking spellings is an ambiguity the tool
+    rejects, so it stays one word, and so does `--`, which ends the options."""
     if tok.startswith('--'):
-        return 2 if tok in value_flags else 1
+        if tok in value_flags:
+            return 2
+        if tok == '--':
+            return 1
+        matches = [f for f in value_flags
+                   if f.startswith('--') and f.startswith(tok)]
+        return 2 if len(matches) == 1 else 1
     for pos, char in enumerate(tok[1:], start=2):
         if '-' + char in value_flags:
             return 2 if pos == len(tok) else 1
@@ -443,9 +457,10 @@ def strip_head(argv, state):
                 state['override'] = _val
             argv = argv[1:]
         elif head == 'sudo':
+            value_flags = WRAPPER_VALUE_FLAGS['sudo']
             argv = argv[1:]
             while argv and argv[0].startswith('-'):
-                argv = argv[2:] if argv[0] in SUDO_VALUE_FLAGS else argv[1:]
+                argv = argv[flag_arity(argv[0], value_flags):]
             while argv and ASSIGNMENT_RE.match(argv[0]):
                 # Sudo's operands, like `env`'s below. The shell removes the
                 # quotes before sudo is executed, so `sudo A=1 cmd` and
@@ -458,11 +473,11 @@ def strip_head(argv, state):
                     state['override'] = _val
                 argv = argv[1:]
         elif head == 'env':
+            value_flags = WRAPPER_VALUE_FLAGS['env']
             argv = argv[1:]
             while argv:
                 if argv[0].startswith('-'):
-                    argv = argv[2:] if argv[0] in ('-u', '--unset', '-C',
-                                                   '--chdir') else argv[1:]
+                    argv = argv[flag_arity(argv[0], value_flags):]
                 elif ASSIGNMENT_RE.match(argv[0]):
                     # `env` is a program: its operands reach it after quote
                     # removal, so `env 'A=1' cmd` really does set A (Q170), and
