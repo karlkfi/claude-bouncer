@@ -150,7 +150,8 @@ class GateParityTests(unittest.TestCase):
                 '          true\n',
                 '      - run: make -n lint-a\n',
                 '      - run: make -C plugins/alpha-guard lint-a\n',
-                '      - run: make lint-b && echo lint-a\n'):
+                '      - run: make lint-b && echo lint-a\n',
+                '      - run: python3 scripts/a.py --strict | tail -5\n'):
             bad = self.lint_a_rewritten(rewrite)
             self.assertEqual(['lint-a'], [b.split(':')[0] for b in bad],
                              rewrite)
@@ -172,6 +173,14 @@ class GateParityTests(unittest.TestCase):
     def test_a_job_needing_a_path_filtered_job_does_not_count(self):
         moved = WORKFLOW.replace(self.STEP_A, '') + (
             '\n  late:\n    needs: [alpha-guard]\n    runs-on: ubuntu-latest\n'
+            '    steps:\n      - run: python3 scripts/a.py --strict\n')
+        bad = self.problems(workflow=moved)
+        self.assertEqual(['lint-a'], [b.split(':')[0] for b in bad])
+
+    def test_a_block_list_needs_is_read(self):
+        moved = WORKFLOW.replace(self.STEP_A, '') + (
+            '\n  late:\n    needs:\n      - root\n      - alpha-guard\n'
+            '    runs-on: ubuntu-latest\n'
             '    steps:\n      - run: python3 scripts/a.py --strict\n')
         bad = self.problems(workflow=moved)
         self.assertEqual(['lint-a'], [b.split(':')[0] for b in bad])

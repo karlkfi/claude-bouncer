@@ -96,7 +96,7 @@ def read_workflow(path=WORKFLOW):
     with open(path) as f:
         lines = f.read().splitlines()
     jobs, job, step, block = {}, None, None, None
-    default_wd, top_wd, in_jobs = None, None, False
+    default_wd, top_wd, in_jobs, in_needs = None, None, False, False
 
     def close_step():
         if job and step is not None and step.get('run') is not None \
@@ -126,6 +126,11 @@ def read_workflow(path=WORKFLOW):
                 continue
             block = None
         if step is None:
+            if in_needs and line.startswith('      - '):
+                jobs[job]['needs'].append(line.strip()[2:].strip())
+                continue
+            in_needs = line.startswith('    needs:') and \
+                not line.split(':', 1)[1].strip()
             if line.startswith(('    if:', '    continue-on-error:')):
                 jobs[job]['guarded'] = True
             elif line.startswith('    needs:'):
@@ -188,15 +193,18 @@ def _reached(target, recipe, commands):
 
     The gate has to open the line, so `echo`, a `cd` first, or a comment does
     not count, and the line must carry no `||`, which would swallow its exit
-    status. `make` counts only when every other word is a target, so `make -n`
-    and `make -C elsewhere` do not.
+    status, nor a pipe, whose last stage's status is the step's under the
+    default shell. `make` counts only when every other word is a target, so
+    `make -n` and `make -C elsewhere` do not.
     """
     want = _normal(recipe[0]) if len(recipe) == 1 else None
     for cmd in commands:
         for line in _command_lines(cmd):
             if '||' in line:
                 continue
-            first = re.split(r'\s(?:&&|;|\|)\s', line)[0]
+            first = re.split(r'\s(?:&&|;)\s', line)[0]
+            if re.search(r'\s\|\s', first):
+                continue
             words = first.split()
             if words[:1] == ['make'] and target in words[1:] \
                     and not any(w.startswith('-') for w in words[1:]):
