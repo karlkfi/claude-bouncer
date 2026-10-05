@@ -112,6 +112,8 @@ backlog-next:
 # flight, and failing on it would redden the store after every merge.
 # `stale-citation` binds at the default window, so a code change that moves a
 # cited line more than ten lines repoints the row in its own diff.
+# `ambiguous-citation` stays advisory: a row naming every site of a repeated
+# statement cites each one correctly, and binding it would reject them.
 backlog-lint:
 	$(PYTHON) scripts/queue.py lint \
 	  --strict blocked-opener --strict deferred-trigger --strict empty-store \

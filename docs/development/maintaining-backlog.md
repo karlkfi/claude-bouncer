@@ -89,6 +89,9 @@ last binds at the default window of ten lines, so a code change that moves a
 cited line further than that repoints the row in its own diff. `dangling-link` stays
 advisory on purpose — a link across a live batch is legitimately in flight, and
 a gate that failed on it would redden the store for the hours after every merge.
+`ambiguous-citation`, a cited fragment found on more than one line, stays
+advisory too: a row naming every site of a repeated statement cites each one
+correctly and still fails it.
 No CI step runs this target; what covers it there is `tests/test_backlog.py`,
 which reads the four flags out of the recipe rather than restating them, so a
 flag added to the `Makefile` reaches CI with it. `make gate-parity-check` fails

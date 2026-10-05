@@ -133,12 +133,29 @@ EXHIBIT_PREFIX = "exhibit:"
 # exactly. The opening backtick has to sit immediately before the path, or
 # immediately before an `exhibit:` on it; each lookbehind is fixed-width on its
 # own, which is what lets the two be written as an alternation that compiles.
-_CITED_PATH = r"[\w./-]+\.(?:go|py|sh|md|ya?ml|json|ts|js|rs|java)"
+#
+# The path takes any extension or none, so the pattern alone over-matches —
+# `Q92:1` and `localhost:8080` fit it — and `split_citations` decides what is a
+# citation. A source extension is distinctive enough to count unresolved, which
+# is what lets a pointer whose file was renamed be reported rather than lost.
+# Anything else counts only where it names a file in the tree: `Makefile:85`,
+# `.gitattributes:4` and `hook.cmd:40` were invisible under a fixed extension
+# list, and widening the list would only have moved the next one outside it.
+# The cost is that an extensionless pointer whose file goes away stops being a
+# citation instead of being reported.
+_CITED_PATH = r"[\w./-]+"
+_CITED_EXT = re.compile(r"\.(?:go|py|sh|md|ya?ml|json|ts|js|rs|java)$")
 _CITED_FRAGMENT = r"[ \t]*\S[^`\n]*"
 CITATION_RE = re.compile(
     rf"(?<![\w./-])({_CITED_PATH}):(\d+)(?::({_CITED_FRAGMENT})(?=`))?"
     rf"|(?:(?<=`)|(?<=`{EXHIBIT_PREFIX}))({_CITED_PATH}):"
     rf"({_CITED_FRAGMENT})(?=`)")
+
+
+def cited_file(store, path):
+    """The file a citation names, from either base a row is written against."""
+    return next((base / path for base in (Path(store).parent, Path(store).parent.parent)
+                 if (base / path).is_file()), None)
 
 
 def citation_fields(m):
@@ -152,16 +169,26 @@ def citation_fields(m):
     return m.group(4), None, m.group(5)
 
 
-def split_citations(notes):
+def split_citations(notes, store):
     """(checked, marked) — the citations `lint` reads, and the ones exempted.
 
     One predicate for both, because the checked list is also what a coverage
     count is taken from: a count that disagreed with the checks it claims to
     count would report a row as covered on the strength of a citation nothing
     read.
+
+    A match that is not a citation consumes nothing: the scan resumes one
+    character in rather than past it. Otherwise `exhibit:` in front of a path
+    reads as an extensionless numberless citation and swallows the one after it.
     """
     checked, marked = [], []
-    for m in CITATION_RE.finditer(notes):
+    pos = 0
+    while m := CITATION_RE.search(notes, pos):
+        path = citation_fields(m)[0]
+        if not (_CITED_EXT.search(path) or cited_file(store, path)):
+            pos = m.start() + 1
+            continue
+        pos = m.end()
         target = marked if notes[:m.start()].endswith(EXHIBIT_PREFIX) else checked
         target.append(m)
     return checked, marked
@@ -200,7 +227,8 @@ NOTE_CLASSES = (
     "deferred-trigger",  # a deferred item names no condition that revives it
     "question-route",    # an open-question item names no route to an answer
     "orphan-route",      # a route marker outlived the label that justified it
-    "stale-citation",    # a `file.ext:N` pointer that no longer finds its line
+    "stale-citation",    # a `path:N` pointer that no longer finds its line
+    "ambiguous-citation",  # a cited fragment that occurs on more than one line
     "wikilink-ref",      # an item referenced as `[[QN]]`, a form nothing renders
     "empty-store",       # no items loaded, the usual cause being a wrong --store
     "untracked-item",    # a row on disk that no commit would carry
@@ -810,13 +838,13 @@ def cmd_lint(args):
                  f"record of where the answer came from. If the route is still "
                  f"open, put the label back. If it was retired rather than "
                  f"taken, span it")
-        # A `file.ext:N` pointer rots silently as the code moves, and which of
-        # the four things below went wrong decides what a reader has to do about
-        # it, so each says so. All four warn rather than fail: a bare filename is
+        # A `path:N` pointer rots silently as the code moves, and which of the
+        # things below went wrong decides what a reader has to do about it, so
+        # each says so. All of them warn rather than fail: a bare filename is
         # genuinely ambiguous about which directory it was written against, and
         # a fragment is the row author's judgement about what was distinctive.
         notes = i.notes or ""
-        checked, marked = split_citations(notes)
+        checked, marked = split_citations(notes, store)
         # Marked as an exhibit, so every check below would report a defect the
         # row is deliberately showing — and hand over the repair.
         for m in marked:
@@ -830,8 +858,7 @@ def cmd_lint(args):
         covered[where] = len(checked)
         for m in checked:
             path, line, fragment = citation_fields(m)
-            target = next((base / path for base in (store.parent, store.parent.parent)
-                           if (base / path).exists()), None)
+            target = cited_file(store, path)
             if target is None:
                 note("stale-citation",
                      f"{where} cites {path}:{line}, which does not resolve from "
@@ -841,40 +868,48 @@ def cmd_lint(args):
             # source file ends with would otherwise add a phantom last line, and
             # a citation landing on it would read as resolving.
             body = target.read_text(encoding="utf-8", errors="replace").splitlines()
-            # No number, so there is nothing to resolve past and nothing to
-            # drift: the file carries the text or it does not. The window is
-            # deliberately not applied — it measures distance from a line this
-            # form never named, and applying it to line 0 would pass every
-            # fragment in the first ten lines of any file.
-            if line is None:
-                if not any(fragment in text for text in body):
-                    note("stale-citation",
-                         f"{where} cites {path}:{fragment}, which {path} no "
-                         f"longer carries; re-derive it, or re-point the path")
-                continue
-            if line > len(body):
+            if line is not None and line > len(body):
                 note("stale-citation",
                      f"{where} cites {path}:{line}, which is past the end of a "
                      f"{len(body)}-line file; re-point or drop it")
                 continue
             if fragment is None:
                 continue
-            lo = max(0, line - 1 - window)
-            if any(fragment in text for text in body[lo:line + window]):
+            cited = f"{path}:{line}:{fragment}" if line is not None else f"{path}:{fragment}"
+            hits = [n for n, text in enumerate(body, 1) if fragment in text]
+            if not hits:
+                note("stale-citation",
+                     f"{where} cites {cited}, which {path} no longer carries; "
+                     + ("re-derive it, or re-point the path" if line is None
+                        else "re-derive it or drop the fragment"))
                 continue
-            # Where the text still exists the note carries the new number, so a
-            # drifted citation is a copy rather than a re-derivation. Reporting
-            # the first match only: a fragment matching several lines is one
-            # that was never distinctive, and naming them all buries that.
-            at = next((n for n, text in enumerate(body, 1) if fragment in text), None)
-            if at:
-                note("stale-citation",
-                     f"{where} cites {path}:{line}:{fragment}, which is now at "
-                     f"line {at}; re-point it")
-            else:
-                note("stale-citation",
-                     f"{where} cites {path}:{line}:{fragment}, which {path} no "
-                     f"longer carries; re-derive it or drop the fragment")
+            # One invariant rather than a check per way a fragment goes vague.
+            # A fragment cut short at an inline backtick, a common line, a
+            # repeated statement: each passes a window that holds any of its
+            # matches, and each asserts nothing about which line was meant. A
+            # new number is not the repair — the note below would name the
+            # first match, and the citation would still pin all of them.
+            #
+            # Its own class, so a caller binding drift need not bind this. A row
+            # naming every site of a repeated statement cites each one correctly
+            # and fails it, and an indented fragment is a substring of the same
+            # statement indented deeper.
+            if len(hits) > 1:
+                shown = ", ".join(map(str, hits[:5])) + (", …" if len(hits) > 5 else "")
+                note("ambiguous-citation",
+                     f"{where} cites {cited}, which occurs on {len(hits)} lines "
+                     f"of {path} ({shown}); quote text that occurs once")
+                continue
+            # No number, so nothing to drift: the window measures distance from
+            # a line this form never named, and applying it to line 0 would
+            # pass every fragment in the first ten lines of any file.
+            if line is None or abs(hits[0] - line) <= window:
+                continue
+            # The note carries the new number, so a drifted citation is a copy
+            # rather than a re-derivation.
+            note("stale-citation",
+                 f"{where} cites {cited}, which is now at line {hits[0]}; "
+                 f"re-point it")
     # An empty store is legal — every item may have shipped — so this is a note
     # rather than a failure. It is worth saying because the usual cause is a
     # --store pointed somewhere with no items in it, a table directory being the
@@ -1470,7 +1505,7 @@ def _coverage_at(store, base_ref):
         data, body, _ = _parse_frontmatter(text, Path(name).name)
         if data is None:
             continue
-        counts[Path(name).name] = len(split_citations(_body_fields(body)[1])[0])
+        counts[Path(name).name] = len(split_citations(_body_fields(body)[1], store)[0])
     return counts, base, None
 
 
