@@ -29,8 +29,9 @@ def guards():
 def roster(text):
     """[(name, bullet text)] from the companion section, or None without one.
 
-    A bullet runs from its `- [**name**]` line through the indented lines
-    under it, kept as written so a re-wrap counts as a difference.
+    A bullet runs from its `- ` line through the indented lines under it, kept
+    as written so a re-wrap counts as a difference. One not opening with a
+    `[**name**]` link is named by its whole first line, so it still fails.
     """
     start = text.find(START)
     if start < 0:
@@ -40,9 +41,9 @@ def roster(text):
         return None
     bullets = []
     for line in text[start:end].splitlines():
-        m = BULLET_NAME.match(line)
-        if m:
-            bullets.append([m.group(1), line])
+        if line.startswith('- '):
+            m = BULLET_NAME.match(line)
+            bullets.append([m.group(1) if m else line, line])
         elif bullets and line.startswith('  '):
             bullets[-1][1] += '\n' + line
     return [(name, body) for name, body in bullets]
@@ -113,6 +114,12 @@ class CheckerControls(unittest.TestCase):
         broken['branch-guard'] = entries
         self.assertTrue(any(p.startswith(f'{name}: worded 2 ways')
                             for p in problems(broken, self.order)))
+
+    def test_an_entry_without_a_link_is_found(self):
+        text = ('## Companion plugins\n\n- **rogue-guard** — the **rogue** '
+                'boundary.\n\nThey run side by side\n')
+        self.assertEqual(['- **rogue-guard** — the **rogue** boundary.'],
+                         [name for name, _ in roster(text)])
 
     def test_a_guard_added_to_the_marketplace_is_found(self):
         found = problems(self.clean, self.order + ['sixth-guard'])
