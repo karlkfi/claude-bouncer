@@ -39,7 +39,7 @@ import sys, os, json, re, collections
 # plugin's `lib/` is vendored from the repository root; see scripts/sync-lib.py.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 from bouncer_parse import (                                    # noqa: E402
-    ASSIGN_SUBSCRIPT, ASSIGNMENT_RE, CHAIN_OPS, COMMENT_PRECEDERS, DUP, END_OPS,
+    ASSIGN_SUBSCRIPT, CHAIN_OPS, COMMENT_PRECEDERS, DUP, END_OPS,
     MAX_SUBST_DEPTH, PIPE_OPS, PUNCT_CHARS, QuoteTrackingLexer, REDIR,
     SEPARATORS, SH_KEYWORDS, _OPERATORS, is_assignment, is_operator, split_assignment,
     _consume_heredoc_body, _scan_backticks, _scan_dollar_paren,
@@ -63,8 +63,8 @@ WRAPPERS = frozenset({'sudo', 'nohup', 'command', 'exec', 'bash', 'sh', 'zsh',
 # Wrappers that take `NAME=v` OPERANDS and assign from them. They receive their
 # arguments after the shell has removed the quotes, so `env 'A=1' make` really
 # does assign where a bare `'A=1' make` runs a program of that name (Q170) --
-# which is why these two peel with `ASSIGNMENT_RE` while command position uses
-# `is_assignment`. Measured on bash 5.3.15: `env 'A=1' bash -c 'echo $A'` prints
+# which is why these two peel with `assigns_operand` while command position
+# uses `is_assignment`. Measured on bash 5.3.15: `env 'A=1' bash -c 'echo $A'` prints
 # 1, while `nohup`, `command`, `exec`, `stdbuf` and `setsid` all exit non-zero
 # trying to execute a program called `A=1`. `sudo` is here on a warrant
 # stronger than its own env policy, which needs a password to drive: the shell
@@ -74,6 +74,20 @@ WRAPPERS = frozenset({'sudo', 'nohup', 'command', 'exec', 'bash', 'sh', 'zsh',
 # does for both, and a guard answering them differently is wrong whichever
 # answer is right.
 ASSIGN_WRAPPERS = frozenset({'env', 'sudo'})
+
+
+def assigns_operand(wrapper, word):
+    """Whether an ASSIGN_WRAPPERS operand is an assignment rather than the command.
+
+    Neither program applies bash's identifier rule, so `env FOO[0]=x`,
+    `env 'a b=c'` and `env 1=x` all assign and run what follows (Q218). env
+    takes any word holding `=`: GNU env 9.11 exports `=x` under an empty name
+    and runs the command, where macOS env refuses it and runs nothing. sudo
+    takes one that starts with neither `/` nor `=` (its `is_envar`).
+    """
+    if wrapper == 'env':
+        return '=' in word
+    return '=' in word and word[0] not in '/='
 
 # Wrapper flags that take the next word as their value when written last in a
 # word: `sudo -u root`, `stdbuf -o L`, and the bundled `env -iu FOO`. Any other
@@ -324,7 +338,7 @@ def peel_wrappers(tokens):
             tokens = rest
             if wrapper in ASSIGN_WRAPPERS:
                 # Operand position, not command position: see ASSIGN_WRAPPERS.
-                while tokens and ASSIGNMENT_RE.match(tokens[0]):
+                while tokens and assigns_operand(wrapper, tokens[0]):
                     tokens = tokens[1:]
             continue
         return tokens

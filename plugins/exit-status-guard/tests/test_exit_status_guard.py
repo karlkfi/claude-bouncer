@@ -325,6 +325,26 @@ CASES = [
      "nohup 'A=1' make check | tail -5", False, False, ''),
     ('a quoted operand after command runs no gate',
      "command 'A=1' make check | tail -5", False, False, ''),
+    # Neither program applies bash's identifier rule (Q218). env assigns from
+    # any operand holding `=`: driven on bash 5.3.15, `env 'a b=c'` and
+    # `env 1=x` run the command on macOS env and GNU env 9.11, and `env =x` on
+    # GNU. sudo assigns from one starting with neither `/` nor `=`.
+    ('an env operand naming no identifier still reaches the gate',
+     "env 'a b=c' make check | tail -5", False, True, ''),
+    ('an env operand naming a digit still reaches the gate',
+     'env 1=x make check | tail -5', False, True, ''),
+    ('an env operand with no name still reaches the gate',
+     'env =x make check | tail -5', False, True, ''),
+    ('a sudo operand naming no identifier still reaches the gate',
+     "sudo 'a b=c' make check | tail -5", False, True, ''),
+    ('a sudo operand after a flag still reaches the gate',
+     'sudo -u root 1=x make check | tail -5', False, True, ''),
+    # The control: sudo runs a word starting with `=` or `/` as the command,
+    # so no gate runs.
+    ('a sudo operand starting with = is the command',
+     'sudo =x make check | tail -5', False, False, ''),
+    ('a sudo operand starting with / is the command',
+     'sudo /x=y make check | tail -5', False, False, ''),
     # A wrapper's own options come off with it, or the first one becomes the
     # command word and the gate behind it goes unread (Q222).
     ('a flag after sudo still reaches the gate',

@@ -99,7 +99,7 @@ import sys
 # this plugin's `lib/` is vendored from the root; see scripts/sync-lib.py.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 from bouncer_parse import (                                    # noqa: E402
-    ASSIGN_SUBSCRIPT, ASSIGNMENT_RE, COMMENT_PRECEDERS, QuoteTrackingLexer,
+    ASSIGN_SUBSCRIPT, COMMENT_PRECEDERS, QuoteTrackingLexer,
     _consume_heredoc_body, _skip_balanced_parens, command_substitutions,
     is_assignment, note_discarded_writes, split_assignment,
     strip_heredoc_bodies,
@@ -481,9 +481,11 @@ def strip_head(argv, state):
             argv = argv[1:]
             while argv and argv[0].startswith('-'):
                 argv = argv[flag_arity(argv[0], value_flags):]
-            while argv and ASSIGNMENT_RE.match(argv[0]):
-                # Sudo's operands, like `env`'s below. The shell removes the
-                # quotes before sudo is executed, so `sudo A=1 cmd` and
+            while argv and '=' in argv[0] and argv[0][0] not in '/=':
+                # Sudo's operands, like `env`'s below, by sudo's own rule (its
+                # `is_envar`) rather than bash's, so `sudo 'a b=c' cmd` assigns
+                # and runs cmd (Q218). The shell removes the quotes before sudo
+                # is executed, so `sudo A=1 cmd` and
                 # `sudo 'A=1' cmd` hand it byte-identical argv -- measured,
                 # both `[A=1] [cmd]`. Sudo cannot tell them apart, so whatever
                 # its env policy does it does for both, and a guard answering
@@ -498,9 +500,12 @@ def strip_head(argv, state):
             while argv:
                 if argv[0].startswith('-'):
                     argv = argv[flag_arity(argv[0], value_flags):]
-                elif ASSIGNMENT_RE.match(argv[0]):
-                    # `env` is a program: its operands reach it after quote
-                    # removal, so `env 'A=1' cmd` really does set A (Q170), and
+                elif '=' in argv[0]:
+                    # `env` is a program: any operand holding `=` assigns,
+                    # whatever bash would make of the name, so `env 1=x cmd`
+                    # runs cmd, and GNU env runs it behind `=x` too (Q218).
+                    # Its operands reach it after quote removal, so
+                    # `env 'A=1' cmd` really does set A (Q170), and
                     # it exports `NAME+` for a `NAME+=v` operand, so the append
                     # spelling names a different variable and does not arm the
                     # break-glass (Q174).

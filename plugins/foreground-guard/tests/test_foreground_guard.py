@@ -782,6 +782,37 @@ class PollConfigTests(unittest.TestCase):
                 d, _ = run_hook(raw)
                 self.assertEqual("deny", d)
 
+    def test_an_operand_bash_would_not_assign_does_not_hide_the_command(self):
+        # Neither program applies bash's identifier rule (Q218). env assigns
+        # from any operand holding `=`, and `env =x` runs the command on GNU
+        # env 9.11. sudo assigns from one starting with neither `/` nor `=`.
+        for raw in ("env 'a b=c' gh run watch 123",
+                    "env 1=x gh run watch 123",
+                    "env =x gh run watch 123",
+                    "sudo 'a b=c' gh run watch 123",
+                    "sudo -u root 1=x gh run watch 123"):
+            with self.subTest(raw=raw):
+                d, _ = run_hook(raw)
+                self.assertEqual("deny", d)
+
+    def test_sudo_runs_an_operand_it_cannot_assign(self):
+        # The control: sudo runs a word starting with `=` or `/` as the
+        # command, so nothing behind it is watched.
+        for raw in ("sudo =x gh run watch 123",
+                    "sudo /x=y gh run watch 123"):
+            with self.subTest(raw=raw):
+                d, _ = run_hook(raw)
+                self.assertIsNone(d)
+
+    def test_an_env_operand_names_its_variable_verbatim(self):
+        # env exports a variable literally called `FOREGROUND_GUARD_OVERRIDE[0]`,
+        # which arms nothing, and the command behind it is still read (Q218).
+        state = {}
+        argv = guard.strip_head(list(guard.tokenize(
+            "env FOREGROUND_GUARD_OVERRIDE[0]=why gh run watch 123")), state)
+        self.assertNotIn("override", state)
+        self.assertEqual(argv[0], "gh")
+
     def test_an_unquoted_override_statement_still_arms(self):
         # The control for the rows above: same shape, written plain.
         d, _ = run_hook("FOREGROUND_GUARD_OVERRIDE=demo; gh run watch 123")
