@@ -267,6 +267,38 @@ class QuotedAmpersandDecisionTests(unittest.TestCase):
         self.assertNotIn("did not happen either", reason)
 
 
+class CommentTests(unittest.TestCase):
+    """Q267: a comment ends at its newline, and bash runs the next line.
+    shlex's comment handling swallowed that newline too, merging the next
+    line into the commented one, so the command written there was never
+    judged. Measured before the fix: each command below deferred, where the
+    same lines without the comment deny."""
+
+    GATE = {"slow": {"commands": {"scripts/gate\\.sh": 3600000}}}
+
+    def test_a_comment_ends_at_its_newline(self):
+        for cmd in ("echo a # c\nsleep 600", "# c\nsleep 600",
+                    "echo a # don't\nsleep 600"):
+            with self.subTest(cmd=cmd):
+                d, _ = run_hook(cmd)
+                self.assertEqual(d, "deny")
+
+    def test_a_hash_after_a_substitution_is_text(self):
+        # bash reads `$(true)#b` as one word, so nothing after it is a comment.
+        d, _ = run_hook("echo $(true)#b; sleep 600")
+        self.assertEqual(d, "deny")
+
+    def test_a_slow_command_after_a_comment(self):
+        d, _ = run_hook("# run the gate\nscripts/gate.sh", config=self.GATE)
+        self.assertEqual(d, "deny")
+
+    def test_a_commented_out_command_is_not_judged(self):
+        for cmd in ("echo a # sleep 600", "echo a # $(sleep 600)\necho b"):
+            with self.subTest(cmd=cmd):
+                d, _ = run_hook(cmd)
+                self.assertIsNone(d)
+
+
 class SleepSecondsTests(unittest.TestCase):
     def test_plain(self):
         self.assertEqual(guard.sleep_seconds(["sleep", "30"]), 30)
