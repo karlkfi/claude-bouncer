@@ -95,8 +95,10 @@ ARG_ASSIGNER_CMDS = frozenset({
 # trailing, or before e.g. `.`/`/` — is literal, so a token containing only
 # such dollars is a plain filename, not a runtime expansion. Command
 # substitution split across tokens (`$` + `(`) is re-glued by
-# glue_dollar_paren() before this is consulted.
-EXPANSION_RE = re.compile(r'\$[A-Za-z0-9_{(#?$!@*-]')
+# glue_dollar_paren() before this is consulted. A backtick is a command
+# substitution wherever it falls, and the tokenizer leaves its body split into
+# words that each still hold one, so any backtick counts (Q274).
+EXPANSION_RE = re.compile(r'\$[A-Za-z0-9_{(#?$!@*-]|`')
 
 # SPEC commands that write or mutate files. The ALLOWED_READ_PREFIXES exemption
 # (see allowed_read_prefixes()) does NOT apply to these commands, even if the
@@ -3156,7 +3158,7 @@ def build_reason(offenders, scratch_hint='', override=None, prefixable=False):
             "Runtime-expanded arg(s) bash resolves but the hook can't: "
             + ", ".join(sorted(set(buckets['expand'])))
             + ". Fix: if this lands inside the project root, write the literal "
-            "path (drop the $VAR / $(...) / leading ~), or assign the variable "
+            "path (drop the $VAR / $(...) / `...` / leading ~), or assign the variable "
             "a plain literal earlier in the same command (VAR=./path; ...) so "
             "the hook can resolve it; otherwise use the Read/Grep tools.")
     if buckets['untracked']:
