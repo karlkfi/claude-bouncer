@@ -833,6 +833,18 @@ class AnsiCQuoteTests(unittest.TestCase):
         cmd = "echo $'\\' #' ; id"
         self.assertEqual(cmd, bp.strip_comments(cmd))
 
+    def test_one_in_a_subscript_closes_where_bash_closes_it(self):
+        # bash runs `id` after `FOO[$'\']=x #'];id`: the subscript holds
+        # `']=x #`. Closed at the escaped quote, the `]=` after it read as an
+        # assignment and the `#` as a comment hiding `id`. Inside double
+        # quotes `$'` is text, so `FOO["$'"]` closes at its first `]`.
+        cmd = "FOO[$'\\']=x #'];id"
+        self.assertEqual(cmd, bp.strip_comments(cmd))
+        for word, end in (("FOO[$'a\\'];b']=x", 14), ("FOO[$'\\']=x #']", 15),
+                          ("FOO[\"$'\"]=x", 9)):
+            with self.subTest(word=word):
+                self.assertEqual(end, bp._subscript_end(word, 3))
+
     def test_a_heredoc_after_one_is_found(self):
         self.assertEqual("cat <<EOF ; echo $'\\''\nid",
                          bp.strip_heredoc_bodies("cat <<EOF ; echo $'\\''\nx\nEOF\nid"))

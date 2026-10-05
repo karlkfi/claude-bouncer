@@ -1156,11 +1156,14 @@ def _skip_quoted(text, i):
     """Step over the escape, quoted run or expansion starting at ``text[i]``.
 
     Returns the index just past it, or -1 when it never closes. A `$` that
-    opens nothing is one character, as it is to bash.
+    opens nothing is one character, as it is to bash, and so is the `$` of a
+    `$'` inside double quotes.
     """
     n, c = len(text), text[i]
     if c == '\\':
         return min(i + 2, n)
+    if text.startswith("$'", i):
+        return _ansi_c_end(text, i)
     if c == "'":
         j = text.find("'", i + 1)
         return j + 1 if j >= 0 else -1
@@ -1172,7 +1175,7 @@ def _skip_quoted(text, i):
         while i < n:
             if text[i] == '"':
                 return i + 1
-            if text[i] in '\\`$':
+            if text[i] in '\\`$' and not text.startswith("$'", i):
                 i = _skip_quoted(text, i)
                 if i < 0:
                     return -1
