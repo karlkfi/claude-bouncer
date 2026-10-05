@@ -237,8 +237,8 @@ def item_to_item(path, dest):
     """A backlog item linking another. Completing an item deletes its file while
     a sibling's link may still be in flight, so `queue.py lint` reports that as
     the advisory `dangling-link` and `make backlog-lint` keeps it advisory."""
-    return (os.path.dirname(path) == STORE and os.path.dirname(dest) == STORE
-            and bool(ITEM.match(os.path.basename(dest))))
+    return all(os.path.dirname(p) == STORE and ITEM.match(os.path.basename(p))
+               for p in (path, dest))
 
 
 class DocLinkTests(unittest.TestCase):
@@ -273,17 +273,21 @@ class DocLinkTests(unittest.TestCase):
         self.assertIn('no such heading', bad[1])
 
     def test_a_dangling_link_between_items_is_left_to_the_store_lint(self):
-        """Only item-to-item: a store item linking out, or a doc elsewhere
-        linking a completed item, still fails."""
+        """Only item-to-item: a store item linking out, the store's own
+        README linking a completed item, or a doc elsewhere doing so, still
+        fails. Nothing else reports the README case: `queue.py lint` reads
+        items only."""
         docs = {
             'docs/queue/Q1.md': ('[gone](Q2.md)\n'
                                  '[out](../../nope.md)\n'),
+            'docs/queue/README.md': '[gone](Q2.md)\n',
             'docs/other.md': '[gone](queue/Q2.md)\n',
         }
         bad = broken(sorted(docs), lambda p: p in docs, docs.__getitem__,
                      item_to_item)
-        self.assertEqual(2, len(bad), bad)
-        self.assertNotIn('-> Q2.md', ' '.join(bad))
+        self.assertEqual(3, len(bad), bad)
+        self.assertNotIn('Q1.md:1 ', ' '.join(bad))
+        self.assertIn('docs/queue/README.md:1 -> Q2.md', ' '.join(bad))
 
     def test_a_listed_page_gone_from_the_tree_is_skipped(self):
         """A completed row is deleted in its own commit, after the code, so
