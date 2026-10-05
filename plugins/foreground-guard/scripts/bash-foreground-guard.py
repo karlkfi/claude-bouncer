@@ -457,14 +457,19 @@ def strip_head(argv, state):
       * 'timeout_wrapped' — (per-segment, reset by caller) the segment is
                             wrapped in `timeout N ...`: an explicit bound,
                             which exempts it from Class A (allow-through)."""
+    reserved = True  # whether argv[0] stands where bash reads a keyword
     while argv:
         head = os.path.basename(argv[0])
         if head in LOOP_KEYWORDS:
             state['loop'] = True
             argv = argv[1:]
-        elif head in OTHER_KEYWORDS:
+            continue
+        if head in OTHER_KEYWORDS:
             argv = argv[1:]
-        elif is_assignment(argv[0]):
+            continue
+        keyword_time = reserved and argv[0] == 'time'
+        reserved = False
+        if is_assignment(argv[0]):
             # `NAME[0]=reason` sets no NAME, so it does not arm (Q214).
             name, form, _val = split_assignment(argv[0])
             if name == 'FOREGROUND_GUARD_OVERRIDE' \
@@ -519,6 +524,17 @@ def strip_head(argv, state):
             argv = argv[1:]
             while argv and argv[0].startswith('-'):
                 argv = argv[flag_arity(argv[0], value_flags):]
+            # The keyword leaves the next word in keyword position, so a
+            # second `time` is the keyword too (`time time A=1 cmd` runs).
+            reserved = keyword_time
+            if argv and not keyword_time and is_assignment(argv[0]):
+                # Unlike `env` and `sudo`, these take no assignment operands:
+                # `nohup A=1 cmd` looks for a program named `A=1` and runs
+                # nothing, so `A=1` stays the command word (Q178). Bash's
+                # `time` keyword times a whole pipeline, which may open with
+                # assignments, but only where a keyword is read; after a
+                # prefix or another wrapper it is `/usr/bin/time`.
+                break
         else:
             break
     return argv

@@ -990,6 +990,31 @@ class SlowCommandPositionTests(unittest.TestCase):
         # `-n` here is --rcfile's argument, not noexec.
         self.assert_runs("bash --rcfile -n scripts/gate.sh")
 
+    def test_assignment_after_a_plain_wrapper_runs_nothing(self):
+        # Only `env` and `sudo` take assignment operands. Every other wrapper
+        # looks for a program named `A=1` and fails, so nothing runs (Q178).
+        for prefix in ("nohup", "command", "stdbuf -oL", "exec", "builtin",
+                       "unbuffer", "/usr/bin/time", "nohup --", "B=1 time",
+                       "nohup time", "time nohup"):
+            with self.subTest(prefix=prefix):
+                self.assert_mention(prefix + " A=1 scripts/gate.sh")
+                self.assert_mention(prefix + " A=1 gh run watch 456")
+        # Bash's `time` keyword times a pipeline that may open with
+        # assignments, wherever a keyword is read.
+        for command in ("time A=1 scripts/gate.sh",
+                        "time -p A=1 scripts/gate.sh",
+                        "! time A=1 scripts/gate.sh",
+                        "true && time A=1 scripts/gate.sh",
+                        "time time A=1 scripts/gate.sh",
+                        "time -p time A=1 scripts/gate.sh",
+                        "time ! time A=1 scripts/gate.sh",
+                        "time time A=1 gh run watch 456",
+                        "while true; do time A=1 gh run watch 456; done",
+                        "env A=1 scripts/gate.sh", "sudo A=1 scripts/gate.sh",
+                        "A=1 nohup scripts/gate.sh"):
+            with self.subTest(command=command):
+                self.assert_runs(command)
+
     def test_wrapper_flag_value_is_not_the_command(self):
         # A wrapper flag taking a separate value consumes it, so the script
         # sits one word further right (Q160). Attached, bundled and long forms
