@@ -24,7 +24,8 @@ STORE = os.path.join(ROOT, 'docs', 'queue')
 # make, so a Windows runner can still exercise the gate.
 STRICT = ['--strict', 'blocked-opener',
           '--strict', 'deferred-trigger',
-          '--strict', 'empty-store']
+          '--strict', 'empty-store',
+          '--strict', 'stale-citation']
 
 PLUGINS = ['workspace-guard', 'branch-guard', 'prod-guard',
            'exit-status-guard', 'foreground-guard']
@@ -150,7 +151,7 @@ class IndentedFragmentTests(unittest.TestCase):
 
     FRAGMENT = '    rec = tip_is_recoverable(cwd, name)'
 
-    def lint_citing(self, line):
+    def lint_citing(self, line, extra=('--citation-window', '0')):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
         store = os.path.join(tmp, 'docs', 'queue')
@@ -163,8 +164,7 @@ class IndentedFragmentTests(unittest.TestCase):
         with open(os.path.join(store, 'Q1.md'), 'w', encoding='utf-8') as fh:
             fh.write(GateTests.CLEAN % (
                 'ready', '`target.py:%d:%s`' % (line, self.FRAGMENT)))
-        return lint(store, ['--strict', 'stale-citation',
-                            '--citation-window', '0'])
+        return lint(store, list(extra))
 
     def test_an_indented_fragment_cited_off_its_line_fails(self):
         for line in (9, 2):
@@ -174,6 +174,14 @@ class IndentedFragmentTests(unittest.TestCase):
 
     def test_an_indented_fragment_cited_at_its_line_passes(self):
         p = self.lint_citing(15)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+
+    def test_the_gate_fails_drift_past_its_window_and_only_that(self):
+        """`make backlog-lint`'s own flags, default window of ten."""
+        p = self.lint_citing(2, extra=())
+        self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn('now at line 15', p.stdout + p.stderr)
+        p = self.lint_citing(9, extra=())
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
 
 

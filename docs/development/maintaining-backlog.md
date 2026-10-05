@@ -83,12 +83,14 @@ reads the report, not when the copy drifts.
 `ARGS` is quoted for `backlog-claim` and not for the others, because a title is
 free text where the rest take flags. Give it one title per invocation.
 
-`make backlog-lint` promotes three of the linter's advisory classes to errors:
-`blocked-opener`, `deferred-trigger`, and `empty-store`. `dangling-link` stays
+`make backlog-lint` promotes four of the linter's advisory classes to errors:
+`blocked-opener`, `deferred-trigger`, `empty-store`, and `stale-citation`. The
+last binds at the default window of ten lines, so a code change that moves a
+cited line further than that repoints the row in its own diff. `dangling-link` stays
 advisory on purpose — a link across a live batch is legitimately in flight, and
 a gate that failed on it would redden the store for the hours after every merge.
 No CI step runs this target; what covers it there is `tests/test_backlog.py`,
-which restates those three flags in a constant of its own. Q183 is that gap.
+which restates those four flags in a constant of its own. Q183 is that gap.
 
 `make backlog-claims` passes `--strict` when `$CI` is set, so a remote it
 cannot read is a skip in an offline clone and a failure in CI. Its job in
