@@ -378,6 +378,27 @@ class ParsingTests(unittest.TestCase):
                     guard.strip_wrappers(argv + ["kubectl", "delete"], {}),
                     ["kubectl", "delete"])
 
+    def test_abbreviated_long_value_flag_skips_its_value(self):
+        # getopt_long takes any unique prefix of a long option (Q228).
+        for argv in (["timeout", "--kill", "5", "10"], ["timeout", "--k", "5", "10"],
+                     ["timeout", "--sig", "KILL", "5"], ["sudo", "--us", "root"],
+                     ["env", "--uns", "FOO"], ["env", "--ch", "/tmp"],
+                     ["stdbuf", "--out", "L"], ["/usr/bin/time", "--f", "%e"]):
+            with self.subTest(argv=argv):
+                self.assertEqual(
+                    guard.strip_wrappers(argv + ["kubectl", "delete"], {}),
+                    ["kubectl", "delete"])
+
+    def test_ambiguous_or_bare_long_prefix_stays_one_word(self):
+        # `--c` prefixes four of sudo's value flags, which sudo rejects, and
+        # `--` ends the options rather than abbreviating one.
+        self.assertFalse(guard.is_long_value_flag(
+            "--c", guard.WRAPPER_VALUE_FLAGS["sudo"]))
+        self.assertFalse(guard.is_long_value_flag("--", frozenset({"--only"})))
+        self.assertEqual(
+            guard.strip_wrappers(["timeout", "--", "5", "kubectl", "delete"], {}),
+            ["kubectl", "delete"])
+
     def test_stdbuf_and_unbuffer_strip_like_other_wrappers(self):
         # Both prefix a command the way `nohup` does (Q161). stdbuf's mode
         # flags take a value attached or separate; the long forms are GNU's.
@@ -399,6 +420,9 @@ class ParsingTests(unittest.TestCase):
                      ["env", "-Skubectl delete"],
                      ["env", "--split-string=kubectl delete"],
                      ["env", "--split-string", "kubectl delete"],
+                     # Any prefix from `--s` up is unambiguous to GNU env (Q228).
+                     ["env", "--s", "kubectl delete"],
+                     ["env", "--spl=kubectl delete"],
                      # Operands after STRING are appended to the command, not
                      # made positional parameters as `bash -c` would.
                      ["env", "-S", "kubectl", "delete"],
@@ -2512,6 +2536,16 @@ class BypassBatteryTests(unittest.TestCase):
                     prefix + " kubectl --context gke_acme_prod-us delete ns x")
                 self.assertEqual(decision, "deny")
 
+    def test_abbreviated_long_wrapper_flags(self):
+        # Measured before Q228: each deferred, its option's value read as the
+        # tool. GNU timeout 9.11, env and stdbuf run the command after each.
+        for prefix in ("timeout --kill 5 10", "timeout --sig KILL 5",
+                       "sudo --us root", "env --uns FOO", "stdbuf --out L"):
+            with self.subTest(prefix=prefix):
+                decision, _ = run_hook(
+                    prefix + " kubectl --context gke_acme_prod-us delete ns x")
+                self.assertEqual(decision, "deny")
+
     def test_sudo_wrapper(self):
         decision, _ = run_hook(
             "sudo kubectl --context gke_acme_prod-us delete ns x")
@@ -2830,6 +2864,7 @@ class SpecialCaseTests(unittest.TestCase):
                     "env -S'kubectl delete ns foo'",
                     "env --split-string='kubectl delete ns foo'",
                     "env --split-string 'kubectl delete ns foo'",
+                    "env --split 'kubectl delete ns foo'",
                     # The command is split across STRING and the operands
                     # after it -- env appends them, so both halves count.
                     "env -S 'kubectl' delete ns foo",
