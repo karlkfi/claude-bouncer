@@ -4979,6 +4979,73 @@ class SubstBodyCwdTests(unittest.TestCase):
         self._is_clean('d=sub; echo "$(cd $d && cat ../in.txt)"')
 
 
+class SubshellCdTests(unittest.TestCase):
+    """Q173: a `cd` in a subshell moves that subshell and nothing after it.
+
+    The group loop applied every `cd` it met to the rest of the string, so one
+    inside `( … )` or a bare `$( … )` moved the tracked cwd for the commands
+    after the subshell closed. Into a subdirectory, that made a `../` read
+    outside the workspace resolve back inside it and earn `allow`; out of the
+    root, it named a path the command never touches. A pipeline segment and a
+    backgrounded command run in subshells too. Every shape here was driven under
+    bash 5.3.15 to see which file it reads.
+
+    The workspace lives under $HOME so the parent directory is a plain outside
+    path that asks, rather than host temp that denies.
+    """
+
+    TARGET = "q173-fake-target"
+
+    def setUp(self):
+        home = guard.resolved_home()                      # Q43: not $HOME
+        self.assertTrue(home and os.path.isdir(home),
+                        f"no home directory to build the fixture under: {home!r}")
+        self._tmp = tempfile.TemporaryDirectory(dir=home)
+        self.workspace = os.path.join(os.path.realpath(self._tmp.name), "proj")
+        os.makedirs(os.path.join(self.workspace, "sub"))
+        with open(os.path.join(self.workspace, "in.txt"), "w") as f:
+            f.write("x\n")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _decision(self, cmd):
+        out = run_hook(cmd, self.workspace, project_dir=self.workspace)
+        return out and out["hookSpecificOutput"]["permissionDecision"]
+
+    def test_a_subshell_cd_does_not_reach_the_commands_after_it(self):
+        # Pre-fix every one of these allowed a read of `<root>/../TARGET`.
+        for cmd in ("(cd sub) && cat ../%s",
+                    "( cd sub ) && cat ../%s",
+                    "(cd sub); (cat ../%s)",
+                    "( (cd sub); cat ../%s )",
+                    "echo $(cd sub) && cat ../%s",
+                    "x=$(cd sub; pwd) && cat ../%s",
+                    "cd sub | cat ../%s",
+                    "cd sub & wait; cat ../%s"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual("ask", self._decision(cmd % self.TARGET))
+
+    def test_a_subshell_cd_does_not_place_a_later_substitution(self):
+        # The walk that places substitution bodies (Q169) had the same leak.
+        self.assertEqual("ask", self._decision(
+            '(cd sub); echo "$(cat ../%s)"' % self.TARGET))
+
+    def test_a_cd_still_moves_the_rest_of_its_own_subshell(self):
+        for cmd in ("(cd sub && cat ../in.txt)",
+                    "(cd sub; (cat ../in.txt))",
+                    "{ cd sub; } && cat ../in.txt",
+                    "cd sub && cat ../in.txt"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual("allow", self._decision(cmd))
+
+    def test_leaving_a_subshell_restores_a_cwd_it_lost(self):
+        # Pre-fix: deny, as a relative read after an untracked `cd`. The `cd`
+        # never left the subshell, so `in.txt` is the workspace's own.
+        self.assertEqual("allow", self._decision('(cd "$X") && cat in.txt'))
+        self.assertEqual("deny", self._decision('cd "$X" && cat in.txt'))
+
+
 class SubstBodyVarPropagationTests(unittest.TestCase):
     """Q66: a substitution body inherits the string's literal variables.
 
