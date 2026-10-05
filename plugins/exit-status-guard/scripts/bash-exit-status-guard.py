@@ -573,14 +573,48 @@ def reads_var(text, name, quotes=True):
     return False
 
 
-def sets_pipefail(segs):
-    """Whether any segment is `set -o pipefail`, in any of its spellings
-    (including a combined `set -euo pipefail`)."""
+def pipefail_setting(words):
+    """True or False when `set` turns pipefail on or off, else None.
+
+    An `o` anywhere in an option word takes the next word as its name, so
+    `set -euo pipefail` sets it and `set +o pipefail` clears it, while in
+    `set -e pipefail` the word is a positional parameter.
+    """
+    if not words or words[0] != 'set':
+        return None
+    state, args, i = None, words[1:], 0
+    while i < len(args):
+        w = args[i]
+        if w in ('-', '--') or not w.startswith(('-', '+')):
+            break
+        if 'o' in w[1:]:
+            i += 1
+            if args[i:i + 1] == ['pipefail']:
+                state = w[0] == '-'
+        i += 1
+    return state
+
+
+def pipefail_in_effect(segs):
+    """Per segment, whether pipefail is on when that segment runs.
+
+    Read in order, so a `set` after a pipeline does nothing for it (Q148), and
+    scoped to the subshell that ran it: `(set -o pipefail); make | tail` runs
+    the pipe without it.
+    """
+    stack = [False] * (segs[0].depth + 1 if segs else 1)
+    out = []
     for seg in segs:
-        words = head_words(seg)
-        if len(words) >= 2 and words[0] == 'set' and 'pipefail' in words[1:]:
-            return True
-    return False
+        out.append(stack[-1])
+        setting = pipefail_setting(head_words(seg))
+        if setting is not None:
+            stack[-1] = setting
+        for op in seg.post_ops:
+            if op == ')' and len(stack) > 1:
+                stack.pop()
+            elif op == '(':
+                stack.append(stack[-1])
+    return out
 
 
 def sets_errexit(segs):
@@ -648,8 +682,9 @@ def status_source(segs, idx):
 
 def piped_gate(segs, reg):
     """The head of the first gate whose status a pipe swallows, or ''."""
+    pipefail = pipefail_in_effect(segs)
     for i, seg in enumerate(segs):
-        if next_op(seg.post_ops) not in PIPE_OPS:
+        if next_op(seg.post_ops) not in PIPE_OPS or pipefail[i]:
             continue
         src = status_source(segs, i)
         if src is None:
@@ -1042,11 +1077,10 @@ def decide(cmd, background, reg, scratch='', depth=0):
     # `pipefail` propagates the failure, so it mitigates a pipeline that
     # follows it -- but not a status the last statement discarded, which is why
     # the suppression is scoped to the pipe verdict.
-    if not sets_pipefail(segs):
-        gate = piped_gate(segs, reg)
-        if gate:
-            return with_log_path(
-                '`' + truncate(gate) + '`' + PIPED_REASON, scratch)
+    gate = piped_gate(segs, reg)
+    if gate:
+        return with_log_path(
+            '`' + truncate(gate) + '`' + PIPED_REASON, scratch)
 
     gate = lost_background_status(segs, background, reg)
     if gate:
