@@ -131,8 +131,9 @@ back. It does not read `plugins/*/docs/releases/`, which record what shipped at
 that version.
 
 `make gate-parity-check` is the fourth: every prerequisite of `check:` must be
-run by a CI step that no path filter can skip, either as `make <target>` or as
-its own recipe. Adding a gate means adding it to both lists, and this fails
+run by a CI step that can fail the run, either as `make <target>` or as its
+own recipe. A step or job carrying `if:` or `continue-on-error:` does not
+count, and neither does a job that needs one. Adding a gate means adding it to both lists, and this fails
 until you do. `plugin-tests` and `backlog-lint` are reached differently, one
 job per plugin and the root suite reading the recipe's flags, and the script
 checks each of those on its own terms.

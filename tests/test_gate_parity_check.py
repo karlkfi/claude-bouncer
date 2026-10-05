@@ -126,6 +126,62 @@ class GateParityTests(unittest.TestCase):
         self.assertEqual(1, len(bad), bad)
         self.assertIn('beta-guard', bad[0])
 
+    STEP_A = '      - run: python3 scripts/a.py --strict\n'
+
+    def lint_a_rewritten(self, replacement, workflow=WORKFLOW):
+        assert self.STEP_A in workflow
+        return self.problems(workflow=workflow.replace(self.STEP_A,
+                                                       replacement))
+
+    def test_a_step_that_cannot_fail_the_job_does_not_count(self):
+        """Each rewrite leaves lint-a in the workflow while CI either skips it
+        or reads its failure as green."""
+        for rewrite in (
+                self.STEP_A + '        if: false\n',
+                '      - if: needs.changes.outputs.x == \'true\'\n'
+                '        run: python3 scripts/a.py --strict\n',
+                self.STEP_A + '        continue-on-error: true\n',
+                '      - run: python3 scripts/a.py --strict || true\n',
+                '      - run: echo python3 scripts/a.py --strict\n',
+                '      - run: cd plugins/alpha-guard && '
+                'python3 scripts/a.py --strict\n',
+                '      - run: python3 scripts/a.py.orig --strict\n',
+                '      - run: |\n          # python3 scripts/a.py --strict\n'
+                '          true\n',
+                '      - run: make -n lint-a\n',
+                '      - run: make -C plugins/alpha-guard lint-a\n',
+                '      - run: make lint-b && echo lint-a\n'):
+            bad = self.lint_a_rewritten(rewrite)
+            self.assertEqual(['lint-a'], [b.split(':')[0] for b in bad],
+                             rewrite)
+
+    def test_a_block_or_continued_command_still_counts(self):
+        for rewrite in (
+                '      - run: |-\n          python3 scripts/a.py --strict\n',
+                '      - run: |\n          python3 scripts/a.py \\\n'
+                '            --strict\n',
+                '      - run: make lint-a lint-b\n'):
+            self.assertEqual([], self.lint_a_rewritten(rewrite), rewrite)
+
+    def test_a_job_that_cannot_fail_the_run_does_not_count(self):
+        soft = WORKFLOW.replace('  root:\n    runs-on',
+                                '  root:\n    continue-on-error: true\n'
+                                '    runs-on')
+        self.assertEqual(2, len(self.problems(workflow=soft)))
+
+    def test_a_job_needing_a_path_filtered_job_does_not_count(self):
+        moved = WORKFLOW.replace(self.STEP_A, '') + (
+            '\n  late:\n    needs: [alpha-guard]\n    runs-on: ubuntu-latest\n'
+            '    steps:\n      - run: python3 scripts/a.py --strict\n')
+        bad = self.problems(workflow=moved)
+        self.assertEqual(['lint-a'], [b.split(':')[0] for b in bad])
+
+    def test_a_workflow_default_working_directory_is_read(self):
+        moved = WORKFLOW.replace('\njobs:\n', '\ndefaults:\n  run:\n'
+                                 '    working-directory: plugins/alpha-guard\n'
+                                 '\njobs:\n', 1)
+        self.assertEqual(2, len(self.problems(workflow=moved)))
+
     def test_the_repository_passes(self):
         p = subprocess.run([sys.executable, SCRIPT], capture_output=True,
                            text=True)

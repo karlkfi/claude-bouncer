@@ -8,12 +8,15 @@ and is never run where a pull request is decided, and the checks list shows
 nothing missing. That is the same go-green-by-not-running shape
 `path-filter-check.py` exists for, arriving through the other list.
 
-A prerequisite counts as reached when a step in a job that runs on every pull
-request -- no `if:`, so no path filter can skip it -- runs it from the
-repository root, by one of:
+A prerequisite counts as reached when a step that can fail the run runs it
+from the repository root. Neither the step nor its job may carry `if:` or
+`continue-on-error:`, and the job may not need one that does: a skipped
+dependency skips it. The step's line has to open with one of:
 
-  1. `make <target>`, or
-  2. the target's own one-line recipe, with `$(PYTHON)` read as `python3`.
+  1. `make <target>`, with no flags, or
+  2. the target's own one-line recipe, with `$(PYTHON)` read as `python3`,
+
+and carry no `||`, which would swallow the gate's exit status.
 
 Two gates are reached another way, and each is checked on its own terms in
 `CARRIED`: `plugin-tests` is one job per plugin, and `backlog-lint` runs inside
@@ -80,26 +83,40 @@ def read_makefile(path=MAKEFILE):
 
 
 def read_workflow(path=WORKFLOW):
-    """{job: {'guarded': bool, 'steps': [(run command, working dir)]}}.
+    """{job: {'guarded': bool, 'needs': [job], 'steps': [(command, wd)]}}.
 
     Hand-parsed for the same reason as `path-filter-check.py`: the tests run on
     the stdlib alone, and the file's own indentation fixes the shapes.
+
+    A step carrying `if:` or `continue-on-error:` is dropped: the first can
+    skip it and the second turns its failure green. A job is guarded when it
+    carries either key, or needs a guarded job, since a skipped dependency
+    skips it too.
     """
     with open(path) as f:
         lines = f.read().splitlines()
-    jobs, job, step, block, default_wd = {}, None, None, None, None
+    jobs, job, step, block = {}, None, None, None
+    default_wd, top_wd, in_jobs = None, None, False
 
     def close_step():
-        if job and step is not None and step.get('run') is not None:
+        if job and step is not None and step.get('run') is not None \
+                and not step.get('conditional'):
             jobs[job]['steps'].append(
-                (step['run'].strip(), step.get('wd') or default_wd))
+                (step['run'].strip(), step.get('wd') or default_wd or top_wd))
 
     for line in lines:
+        if line.startswith('jobs:'):
+            in_jobs = True
+            continue
+        if not in_jobs:
+            if line.startswith('    working-directory:'):
+                top_wd = line.split(':', 1)[1].strip()
+            continue
         job_match = JOB_RE.match(line)
         if job_match:
             close_step()
             job, step, block, default_wd = job_match.group(1), None, None, None
-            jobs[job] = {'guarded': False, 'steps': []}
+            jobs[job] = {'guarded': False, 'needs': [], 'steps': []}
             continue
         if not job:
             continue
@@ -108,10 +125,14 @@ def read_workflow(path=WORKFLOW):
                 step['run'] += line.strip() + '\n'
                 continue
             block = None
-        if line.startswith('    if:'):
-            jobs[job]['guarded'] = True
-        elif line.startswith('        working-directory:') and step is None:
-            default_wd = line.split(':', 1)[1].strip()
+        if step is None:
+            if line.startswith(('    if:', '    continue-on-error:')):
+                jobs[job]['guarded'] = True
+            elif line.startswith('    needs:'):
+                jobs[job]['needs'] = re.findall(r'[a-z0-9][a-z0-9-]*',
+                                                line.split(':', 1)[1])
+            elif line.startswith('        working-directory:'):
+                default_wd = line.split(':', 1)[1].strip()
         step_match = STEP_RE.match(line)
         if step_match:
             close_step()
@@ -125,13 +146,23 @@ def read_workflow(path=WORKFLOW):
         if not key:
             continue
         if key.group(1) == 'run':
-            if key.group(2) in ('|', '>'):
+            if key.group(2).startswith(('|', '>')):
                 step['run'], block = '', 8
             else:
                 step['run'] = key.group(2)
         elif key.group(1) == 'working-directory':
             step['wd'] = key.group(2)
+        elif key.group(1) in ('if', 'continue-on-error'):
+            step['conditional'] = True
     close_step()
+
+    changed = True
+    while changed:
+        changed = False
+        for spec in jobs.values():
+            if not spec['guarded'] and any(jobs.get(n, {}).get('guarded')
+                                           for n in spec['needs']):
+                spec['guarded'] = changed = True
     return jobs
 
 
@@ -145,17 +176,36 @@ def _normal(cmd):
     return ' '.join(cmd.replace('$(PYTHON)', 'python3').split())
 
 
+def _command_lines(cmd):
+    """A run block's commands, continuations joined, comments dropped."""
+    return [l for l in (_normal(l) for l in
+                        cmd.replace('\\\n', ' ').splitlines())
+            if l and not l.startswith('#')]
+
+
 def _reached(target, recipe, commands):
-    make = re.compile(r'(^|\s)make\s+(\S+\s+)*%s(\s|$)' % re.escape(target),
-                      re.M)
-    if any(make.search(cmd) for cmd in commands):
-        return True
-    if len(recipe) != 1:
-        return False
-    want = _normal(recipe[0])
-    return any(want in _normal(line) or
-               want.replace('python3 ', 'python ', 1) in _normal(line)
-               for cmd in commands for line in cmd.splitlines())
+    """Whether a line runs the gate in a way that can fail the step.
+
+    The gate has to open the line, so `echo`, a `cd` first, or a comment does
+    not count, and the line must carry no `||`, which would swallow its exit
+    status. `make` counts only when every other word is a target, so `make -n`
+    and `make -C elsewhere` do not.
+    """
+    want = _normal(recipe[0]) if len(recipe) == 1 else None
+    for cmd in commands:
+        for line in _command_lines(cmd):
+            if '||' in line:
+                continue
+            first = re.split(r'\s(?:&&|;|\|)\s', line)[0]
+            words = first.split()
+            if words[:1] == ['make'] and target in words[1:] \
+                    and not any(w.startswith('-') for w in words[1:]):
+                return True
+            for form in filter(None, (want, want and
+                                      want.replace('python3 ', 'python ', 1))):
+                if first == form or first.startswith(form + ' '):
+                    return True
+    return False
 
 
 def _plugin_jobs(variables, targets, jobs):
