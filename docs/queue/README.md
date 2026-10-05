@@ -59,6 +59,12 @@ make backlog ARGS='--label lib'
 A link out of an item is written relative to this directory, so a plugin's own
 docs are reached as `../../plugins/<name>/docs/…`.
 
+A link from one item to another may dangle: completing an item deletes its file
+while a sibling's link to it is still in flight. `make backlog-lint` notes that
+as `dangling-link` and passes, and both link tests skip it. Any other broken
+link fails `make check`, including one from an item out of this directory and
+one from elsewhere in the repo into a completed item.
+
 ## Filing, picking, completing
 
 The process is the globally installed **`session-backlog` skill** — invoke it

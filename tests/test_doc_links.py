@@ -100,8 +100,10 @@ def slugs(text):
     return out
 
 
-def broken(paths, exists, read):
-    """Every link in `paths` that does not resolve, as printable lines."""
+def broken(paths, exists, read, advisory=lambda path, dest: False):
+    """Every link in `paths` that does not resolve, as printable lines.
+
+    A missing file for which `advisory(path, dest)` holds is left out."""
     heads, bad = {}, []
     for path in paths:
         # The list comes from the index and the contents from the working
@@ -120,7 +122,8 @@ def broken(paths, exists, read):
                     bad.append(where + '   (climbs out of the repository)')
                     continue
                 if not exists(dest):
-                    bad.append(where + '   (no such file)')
+                    if not advisory(path, dest):
+                        bad.append(where + '   (no such file)')
                     continue
             # Only Markdown has headings for an anchor to aim at; a link into
             # a script, an image or a directory is resolved by its path alone.
@@ -226,9 +229,22 @@ class PluginReaderLinkTests(unittest.TestCase):
         self.assertNotIn('CLAUDE.md', ' '.join(bad))
 
 
+STORE = os.path.join('docs', 'queue')
+ITEM = re.compile(r'Q\d+\.md$')
+
+
+def item_to_item(path, dest):
+    """A backlog item linking another. Completing an item deletes its file while
+    a sibling's link may still be in flight, so `queue.py lint` reports that as
+    the advisory `dangling-link` and `make backlog-lint` keeps it advisory."""
+    return all(os.path.dirname(p) == STORE and ITEM.match(os.path.basename(p))
+               for p in (path, dest))
+
+
 class DocLinkTests(unittest.TestCase):
     def test_every_relative_link_resolves(self):
-        bad = broken(tracked_markdown(), exists_in_repo, read_in_repo)
+        bad = broken(tracked_markdown(), exists_in_repo, read_in_repo,
+                     item_to_item)
         self.assertEqual([], bad, 'broken relative links:\n  '
                          + '\n  '.join(bad))
 
@@ -255,6 +271,23 @@ class DocLinkTests(unittest.TestCase):
         self.assertEqual(2, len(bad), bad)
         self.assertIn('no such file', bad[0])
         self.assertIn('no such heading', bad[1])
+
+    def test_a_dangling_link_between_items_is_left_to_the_store_lint(self):
+        """Only item-to-item: a store item linking out, the store's own
+        README linking a completed item, or a doc elsewhere doing so, still
+        fails. Nothing else reports the README case: `queue.py lint` reads
+        items only."""
+        docs = {
+            'docs/queue/Q1.md': ('[gone](Q2.md)\n'
+                                 '[out](../../nope.md)\n'),
+            'docs/queue/README.md': '[gone](Q2.md)\n',
+            'docs/other.md': '[gone](queue/Q2.md)\n',
+        }
+        bad = broken(sorted(docs), lambda p: p in docs, docs.__getitem__,
+                     item_to_item)
+        self.assertEqual(3, len(bad), bad)
+        self.assertNotIn('Q1.md:1 ', ' '.join(bad))
+        self.assertIn('docs/queue/README.md:1 -> Q2.md', ' '.join(bad))
 
     def test_a_listed_page_gone_from_the_tree_is_skipped(self):
         """A completed row is deleted in its own commit, after the code, so

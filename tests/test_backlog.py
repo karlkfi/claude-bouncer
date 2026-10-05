@@ -1,7 +1,8 @@
 """Tests for the backlog store and the gate over it.
 
 Two different claims. `StoreTests` asserts things about the tree: every item
-names its plugin, and every link an item carries resolves — both of which the
+names its plugin, and every link an item carries out of the store resolves —
+both of which the
 consolidation could have broken silently, since `queue.py` knows nothing about
 either. `GateTests` asserts the harder one, that `make backlog-lint` REPORTS a
 defect when there is one; a linter never shown failing is not evidence that it
@@ -32,6 +33,10 @@ OWNERS = set(PLUGINS) | {'repo'}
 ITEM = re.compile(r'^Q\d+\.md$')
 LINK = re.compile(r'\]\(([^)]+)\)')
 TARGET = re.compile(r'^target: (.+)$', re.M)
+# A link from one item to another. `queue.py lint` reports one that dangles as
+# `dangling-link`, advisory by design (see the `backlog-lint` target), so it is
+# not this suite's to fail on.
+ITEM_LINK = re.compile(r'^(?:\./)?Q\d+\.md(?:#.*)?$')
 
 
 def lint(store, extra=()):
@@ -69,6 +74,8 @@ class StoreTests(unittest.TestCase):
             for dest in dests:
                 dest = dest.strip()
                 if dest.startswith(('http://', 'https://', '#')):
+                    continue
+                if ITEM_LINK.match(dest):
                     continue
                 self.assertTrue(
                     os.path.exists(os.path.join(STORE, dest)),
