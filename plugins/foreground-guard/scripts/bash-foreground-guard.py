@@ -241,8 +241,9 @@ def watch_matchers(cfg):
     extras. An extra is a regex string, or an object carrying the `label` and
     snapshot `alternative` a deny prints the way a built-in's does (Q87); the
     string form labels itself with the regex and teaches the generic
-    snapshot. A broken pattern or malformed object loses itself, not the
-    list."""
+    snapshot. A broken or missing pattern loses its entry, not the list; a
+    `label` or `alternative` that is not a non-empty string falls back to
+    the string form's, so a slip in the wording never drops the deny."""
     out = []
     for label, pat, alt in BUILTIN_WATCH:
         out.append((label, re.compile(pat), alt))
@@ -250,10 +251,13 @@ def watch_matchers(cfg):
         if isinstance(entry, str):
             entry = {'pattern': entry}
         pat = entry.get('pattern')
-        label = entry.get('label') or pat
-        alt = entry.get('alternative') or 'take one non-blocking snapshot'
-        if not all(isinstance(v, str) for v in (pat, label, alt)):
+        if not isinstance(pat, str):
             continue
+        label = entry.get('label')
+        label = label if isinstance(label, str) and label else pat
+        alt = entry.get('alternative')
+        if not (isinstance(alt, str) and alt):
+            alt = 'take one non-blocking snapshot'
         try:
             out.append((label, re.compile(pat), alt))
         except re.error:

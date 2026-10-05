@@ -813,12 +813,21 @@ class PollConfigTests(unittest.TestCase):
     def test_malformed_extra_watch_object_loses_itself(self):
         cfg = {"poll": {"extra_watch_patterns": [
             {"label": "no pattern"}, {"pattern": 7},
-            {"pattern": "^x", "alternative": ["not", "a", "string"]},
             {"pattern": "("}, r"^mytool\s+follow\b"]}}
         d, _ = run_hook("mytool follow --id 7", config=cfg)
         self.assertEqual(d, "deny")
-        d, _ = run_hook("x --watch", config=cfg)
-        self.assertIsNone(d)
+
+    def test_a_bad_wording_field_keeps_the_deny(self):
+        # The pattern can still match, so a non-string label or alternative
+        # falls back to the string form's wording rather than dropping it.
+        for extra in ({"alternative": ["not", "a", "string"]}, {"label": 7}):
+            with self.subTest(extra=extra):
+                entry = dict({"pattern": "^x"}, **extra)
+                cfg = {"poll": {"extra_watch_patterns": [entry]}}
+                d, r = run_hook("x --watch", config=cfg)
+                self.assertEqual(d, "deny")
+                self.assertIn("(^x)", r)
+                self.assertIn("take one non-blocking snapshot", r)
 
     def test_exempt_watch_pattern_silences_builtin(self):
         # A built-in watch that would normally block is quieted when its
