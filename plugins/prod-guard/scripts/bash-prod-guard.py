@@ -80,7 +80,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 from bouncer_parse import (                                    # noqa: E402
     ASSIGN_APPEND, ASSIGN_SUBSCRIPT, ASSIGNMENT_RE, PUNCT_CHARS, QuotedStr,
     QuoteTrackingLexer, command_substitutions, is_assignment, split_assignment,
-    strip_heredoc_bodies,
+    strip_comments, strip_heredoc_bodies,
 )
 from bouncer_grants import grants_path, load_grants, record_grants  # noqa: E402
 import time
@@ -387,7 +387,9 @@ def strip_quoted_heredocs(raw):
 def tokenize(raw):
     """shlex-tokenize with POSIX quoting and punctuation grouping. Newlines
     are rewritten to `;` first, because shlex treats a newline as plain
-    whitespace, which would merge `true\ncmd` into one segment.
+    whitespace, which would merge `true\ncmd` into one segment. Comments are
+    stripped before that rewrite, by bash's rule, so a comment ends at its own
+    newline: shlex's reads to the next newline, and none is left (Q224).
 
     Each command substitution bash would run -- unquoted or inside double
     quotes, `$(...)` or backticks -- is found structurally and its body is
@@ -403,14 +405,11 @@ def tokenize(raw):
     Returns None on unbalanced quotes (caller defers: fail-open on parse
     errors)."""
     expanded = []
-    raw = strip_heredoc_bodies(raw, expanded, expanded)
+    raw = _strip_comments(strip_heredoc_bodies(raw, expanded, expanded))
     spans = []
     bodies = command_substitutions(raw, spans=spans)[:_SUBST_MAX]
     sentinels = _subst_sentinels(raw)
-    masked = raw
-    for idx, (start, end) in enumerate(spans[:len(bodies)] if sentinels else ()):
-        masked = (masked[:start] + _subst_marker(sentinels, idx, end - start)
-                  + masked[end:])
+    masked = _mask_substitutions(raw, spans[:len(bodies)], sentinels)
     masked = masked.replace('`', ';').replace('\n', ';')
     try:
         tokens = _hoist_substitutions(_lex_semicolons(masked), raw, spans,
@@ -437,7 +436,9 @@ def tokenize(raw):
                     tokens.append(';')
                     tokens.extend(sub_tokens)
             try:
-                body_tokens = _lex_semicolons(body.replace('`', ';').replace('\n', ';'))
+                body_tokens = _lex_semicolons(
+                    _strip_comments(body, quotes=False)
+                    .replace('`', ';').replace('\n', ';'))
             except ValueError:
                 continue
             tokens.append(';')
@@ -472,6 +473,30 @@ def _subst_marker(sentinels, idx, length):
     return (opener + chr(_SUBST_BASE + idx) + fill * length)[:length]
 
 
+def _mask_substitutions(raw, spans, sentinels):
+    masked = raw
+    for idx, (start, end) in enumerate(spans if sentinels else ()):
+        masked = (masked[:start] + _subst_marker(sentinels, idx, end - start)
+                  + masked[end:])
+    return masked
+
+
+def _strip_comments(raw, quotes=True):
+    """`strip_comments` with every command substitution held out of it. It
+    tracks no backticks, so a `#` inside `` `true # c` `` would run past the
+    closing backtick and swallow the rest of the line. Each substitution is
+    masked, the comments outside them stripped, and the text put back."""
+    spans = []
+    command_substitutions(raw, quotes=quotes, spans=spans)
+    spans = spans[:_SUBST_MAX]
+    sentinels = _subst_sentinels(raw)
+    if not spans or not sentinels:
+        return strip_comments(raw)
+    marker = re.compile('%s(.)%s*' % sentinels)
+    return marker.sub(lambda m: raw[slice(*spans[ord(m.group(1)) - _SUBST_BASE])],
+                      strip_comments(_mask_substitutions(raw, spans, sentinels)))
+
+
 def _hoist_substitutions(tokens, raw, spans, bodies, sentinels):
     """Restore every masked word and insert each substitution body it held,
     tokenized, ahead of the simple command the word belongs to. A marker
@@ -504,6 +529,7 @@ def _hoist_substitutions(tokens, raw, spans, bodies, sentinels):
 def _lex_semicolons(raw):
     lex = QuoteTrackingLexer(raw, posix=True, punctuation_chars=';()<>|&\n')
     lex.whitespace_split = True
+    lex.commenters = ''  # stripped already, by bash's rule
     return list(lex)
 
 
