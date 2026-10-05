@@ -446,13 +446,21 @@ def coverage_note(plugin):
     A deny is absent from that stream for a different reason and is recovered
     from the tool result instead (see DENY_TEXT), which bounds it differently:
     to a block text one of the two keys can name.
+
+    A decision carries no guard version either: the recorded hook command is
+    the unexpanded `${CLAUDE_PLUGIN_ROOT}/...`, and an installed copy has no
+    tags or dated notes to bucket by (Q98). So the reader is told instead.
     """
     note = ["Emitted decisions only — a silent hook run (a defer, or an early "
             "return on a payload the guard skips before analyzing it) leaves "
             "no transcript record, so these totals are floors.",
             "A deny leaves no decision record either and is read back off the "
             "error the blocked call handed back, so it is counted only where "
-            "that error opens with the guard's name or uses its wording."]
+            "that error opens with the guard's name or uses its wording.",
+            "Decisions carry no guard version, so a window spanning releases "
+            "mixes them: a shape a later release stopped prompting on still "
+            "ranks. Narrow --since to the current release to see only what it "
+            "does."]
     if plugin == 'all':
         note.append("Guards emit on different terms, so the plugins: counts "
                     "are not a like-for-like ranking, and a sibling whose "
@@ -525,7 +533,8 @@ def print_text(r, top, stale=None, plugin=THIS_GUARD, notes=()):
         print(f"  friction by tool: {by_tool}")
     for line in textwrap.wrap(' '.join(coverage_note(plugin)), 78,
                               initial_indent='  coverage: ',
-                              subsequent_indent='    '):
+                              subsequent_indent='    ',
+                              break_on_hyphens=False):
         print(line)
     print()
 

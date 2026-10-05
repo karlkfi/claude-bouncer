@@ -301,6 +301,14 @@ class PrintTextTests(unittest.TestCase):
         self.assertIn("coverage: Emitted decisions only", out)
         self.assertIn("these totals are floors", out)
 
+    def test_header_says_a_window_mixes_releases(self):
+        # Nothing in a decision says which guard version made it, so a fixed
+        # shape keeps ranking unless the header says so (Q98).
+        for plugin in ('workspace-guard', 'all'):
+            with self.subTest(plugin=plugin):
+                out = " ".join(self._render(plugin).split())
+                self.assertIn("a window spanning releases mixes them", out)
+
     def test_all_plugins_disclaims_the_cross_guard_ranking(self):
         out = " ".join(self._render('all').split())
         self.assertIn("not a like-for-like ranking", out)
@@ -606,7 +614,7 @@ class ExitCodeTests(unittest.TestCase):
             p = self._run(tmp, "--since", "all", "--plugin", "all", "--json")
             self.assertEqual(p.returncode, 0)
             out = json.loads(p.stdout)
-            self.assertEqual(len(out['coverage']), 3)
+            self.assertEqual(len(out['coverage']), 4)
             self.assertIn("floors", out['coverage'][0])
 
 
