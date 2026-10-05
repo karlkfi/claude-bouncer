@@ -817,7 +817,10 @@ def strip_wrappers(argv, env):
                         argv = words + rest
                         continue
                     argv = argv[flag_arity(argv[0], value_flags):]
-                elif ASSIGNMENT_RE.match(argv[0]):
+                elif '=' in argv[0]:
+                    # Any operand holding `=` assigns, whatever bash would make
+                    # of the name: `env 1=x cmd` runs cmd, and GNU env runs it
+                    # behind `=x` too (Q218).
                     # `env` is a program, so its operands reach it after quote
                     # removal: `env 'A=1' cmd` really does set A (Q170). It is
                     # also not the shell -- it splits on the first `=` and takes

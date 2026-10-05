@@ -1374,6 +1374,23 @@ class OverrideTests(unittest.TestCase):
             "kubectl --context gke_acme_prod-us delete ns x")
         self.assertEqual(decision, "deny")
 
+    def test_an_env_operand_bash_would_not_assign_reaches_the_command(self):
+        # env applies its own rule, not bash's: any operand holding `=`
+        # assigns, and `env =x` runs the command on GNU env 9.11 (Q218).
+        for raw in ("env FOO[0]=x", "env 'a b=c'", "env 1=x", "env =x"):
+            with self.subTest(raw=raw):
+                decision, _ = run_hook(
+                    raw + " kubectl --context gke_acme_prod-us delete ns x")
+                self.assertEqual(decision, "deny")
+
+    def test_a_subscripted_env_override_does_not_arm(self):
+        # env exports a variable literally called `PROD_GUARD_OVERRIDE[0]`.
+        decision, reason = run_hook(
+            "env PROD_GUARD_OVERRIDE[0]=r "
+            "kubectl --context gke_acme_prod-us delete ns x")
+        self.assertEqual(decision, "deny")
+        self.assertNotIn("override acknowledged", reason)
+
     def test_a_subscripted_prefix_pins_nothing(self):
         # `AWS_PROFILE=dev AWS_PROFILE[0]=prod cmd` hands cmd `dev`.
         env, argv = guard.extract_env_prefix(
