@@ -399,6 +399,30 @@ class ParsingTests(unittest.TestCase):
             guard.strip_wrappers(["timeout", "--", "5", "kubectl", "delete"], {}),
             ["kubectl", "delete"])
 
+    def test_scheduling_wrappers_strip_to_the_command(self):
+        # Q229: util-linux 2.41 and GNU nice 9.7 run the command after each.
+        for argv in (["nice"], ["nice", "-n", "5"], ["nice", "-n5"], ["nice", "-5"],
+                     ["nice", "-n", "-5"], ["nice", "--adj", "5"],
+                     ["ionice", "-c", "3"], ["ionice", "-t", "-c3"],
+                     ["setsid"], ["setsid", "-w"],
+                     # chrt and taskset take an operand before the command.
+                     ["chrt", "-o", "0"], ["chrt", "-T", "1", "-d", "0"],
+                     ["taskset", "-c", "0"], ["taskset", "0x1"]):
+            with self.subTest(argv=argv):
+                self.assertEqual(
+                    guard.strip_wrappers(argv + ["kubectl", "delete"], {}),
+                    ["kubectl", "delete"])
+
+    def test_wrappers_chain_through_each_other(self):
+        for argv in (["sudo", "nice", "-n", "5", "timeout", "10"],
+                     ["chrt", "-o", "0", "nice", "nice"],
+                     ["taskset", "-c", "0", "sudo", "-u", "root"],
+                     ["setsid", "-f", "ionice", "-c3", "env", "A=1"]):
+            with self.subTest(argv=argv):
+                self.assertEqual(
+                    guard.strip_wrappers(argv + ["kubectl", "delete"], {}),
+                    ["kubectl", "delete"])
+
     def test_stdbuf_and_unbuffer_strip_like_other_wrappers(self):
         # Both prefix a command the way `nohup` does (Q161). stdbuf's mode
         # flags take a value attached or separate; the long forms are GNU's.
@@ -2535,6 +2559,17 @@ class BypassBatteryTests(unittest.TestCase):
                 decision, _ = run_hook(
                     prefix + " kubectl --context gke_acme_prod-us delete ns x")
                 self.assertEqual(decision, "deny")
+
+    def test_scheduling_wrappers(self):
+        # Measured before Q229: each deferred, the wrapper read as the tool.
+        for prefix in ("nice", "nice -n 5", "ionice -c 3", "setsid -f",
+                       "chrt -o 0", "taskset -c 0", "sudo nice -n 5 timeout 10"):
+            with self.subTest(prefix=prefix):
+                decision, _ = run_hook(
+                    prefix + " kubectl --context gke_acme_prod-us delete ns x")
+                self.assertEqual(decision, "deny")
+        decision, _ = run_hook("nice -n 5 kubectl --context gke_acme_prod-us get ns")
+        self.assertIsNone(decision)
 
     def test_abbreviated_long_wrapper_flags(self):
         # Measured before Q228: each deferred, its option's value read as the
