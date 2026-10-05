@@ -40,15 +40,16 @@ import sys
 # prod-guard builds every decision reason from one of five helpers in
 # bash-prod-guard.py, each carrying a stable signature substring. Three deny
 # (deny-prod, deny-ambient, deny-switch) and two ask (ask-unknown, ask-switch).
-# Matching is first-match in dict order: deny-switch must precede ask-switch,
-# whose broader signature also appears in deny-switch reasons (and in the
-# pre-2.3 ask-form switch decisions still present in old transcripts).
+# No reason matches two signatures, so dict order decides nothing. Both switch
+# reasons open with 'is shared by every session'; ask-switch keys on its own
+# tail instead, which ask_switch has carried since 1.0, so the pre-2.3 ask-form
+# switch decisions in old transcripts still land there.
 CATEGORY_PATTERNS = {
     'deny-prod':    re.compile(r'matches a production pattern'),
     'ask-unknown':  re.compile(r'matches neither a production'),
     'deny-ambient': re.compile(r'shared mutable state that a parallel session'),
     'deny-switch':  re.compile(r'Switching shared state is blocked'),
-    'ask-switch':   re.compile(r'is shared by every session'),
+    'ask-switch':   re.compile(r'Prefer per-command pinning'),
 }
 
 # One-line hint per category: what the user does to stop the prompt.
