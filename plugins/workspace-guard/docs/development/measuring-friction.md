@@ -66,8 +66,10 @@ So the scan cannot see:
   releases mixes them, and a shape a later release stopped prompting on keeps
   its rank. On 2026-08-22 a 30-day run ranked `$f` top among `expand` paths
   with 228 prompts, and every one of those shapes already allowed on the
-  installed 1.10.0. Narrow `--since` to the date the installed version shipped
-  to see only what it does now.
+  installed 1.10.0. To see only what the installed version does, narrow
+  `--since` to when this machine installed it: the guard's `lastUpdated` in
+  `~/.claude/plugins/installed_plugins.json`. `--since` takes a whole UTC day,
+  so pass the day after that date; the install day itself still mixes.
 - **A deny neither key finds.** Under `--plugin all`, a companion guard whose
   block text opens with something other than `<name>-guard: ` under-counts its
   denies — pr-sentinel leads with `pr-sentinel: `, for instance. The coverage
