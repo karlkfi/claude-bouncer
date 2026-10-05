@@ -288,8 +288,8 @@ WRAPPER_VALUE_FLAGS = {
     # Long forms are GNU's, as with `time` above; BSD stdbuf rejects them.
     # `unbuffer` needs no entry -- its only flag, `-p`, carries no value.
     'stdbuf': frozenset({'-i', '--input', '-o', '--output', '-e', '--error'}),
-    # The rest are util-linux's, and `setsid` and `taskset` take no value:
-    # `taskset -c` changes how the mask operand reads rather than taking one.
+    # nice is GNU's and the rest util-linux's. setsid and taskset take no
+    # value: `taskset -c` changes how the mask operand reads, not a value.
     'nice': frozenset({'-n', '--adjustment'}),
     'ionice': frozenset({'-c', '--class', '-n', '--classdata', '-p', '--pid',
                          '-P', '--pgid', '-u', '--uid'}),
@@ -2692,14 +2692,17 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None):
         seg_inline = {k: inline[k] for k in seg_env}
         same_shell = {**shell_env, **seg_inline}   # for this command's args
         child_env = {**exported, **seg_inline}     # for its `sh -c` body
-        if 'PROD_GUARD_OVERRIDE' in seg_inline:
-            override = True
-        if 'PROD_GUARD_SESSION_OVERRIDE' in seg_inline and session_reason is None:
-            session_reason = seg_inline['PROD_GUARD_SESSION_OVERRIDE']
         # Expanded view for classification; raw view (nested-body extraction)
         # is left unexpanded so the child re-expands it against child_env.
         argv = strip_wrappers(expand_argv(argv_raw, same_shell), seg_inline)
         argv_raw = strip_wrappers(list(argv_raw), {})
+        # Read after the walk, which merges `env NAME=v` operands into
+        # seg_inline, so `env PROD_GUARD_OVERRIDE=why cmd` arms like the bare
+        # prefix (Q176). An exported name is in neither and still does not.
+        if 'PROD_GUARD_OVERRIDE' in seg_inline:
+            override = True
+        if 'PROD_GUARD_SESSION_OVERRIDE' in seg_inline and session_reason is None:
+            session_reason = seg_inline['PROD_GUARD_SESSION_OVERRIDE']
         if not argv:
             # Assignment-only segment (`P=x`): a shell var, not exported.
             shell_env.update(seg_inline)
