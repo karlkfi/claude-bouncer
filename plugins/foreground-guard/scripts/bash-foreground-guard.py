@@ -136,7 +136,8 @@ def load_config():
     cfg = {
         'poll_enabled': True,
         'poll_action': 'deny',         # 'deny' | 'ask' (config may supervise)
-        'extra_watch_patterns': [],    # additive regexes over a segment string
+        'extra_watch_patterns': [],    # additive regexes or {pattern, label,
+                                       # alternative} objects over a segment
         'exempt_watch_patterns': [],   # additive allowlist; suppresses matches
         'sleep_floor_seconds': DEFAULT_SLEEP_FLOOR_SECONDS,
         'slow_enabled': True,
@@ -161,7 +162,7 @@ def load_config():
             pats = poll.get('extra_watch_patterns')
             if isinstance(pats, list):
                 cfg['extra_watch_patterns'] += [p for p in pats
-                                                if isinstance(p, str)]
+                                                if isinstance(p, (str, dict))]
             exempt = poll.get('exempt_watch_patterns')
             if isinstance(exempt, list):
                 cfg['exempt_watch_patterns'] += [p for p in exempt
@@ -237,14 +238,28 @@ BUILTIN_WATCH = [
 
 def watch_matchers(cfg):
     """Compiled (label, regex, alternative) list: built-ins plus config
-    extras. A broken config pattern loses itself, not the list."""
+    extras. An extra is a regex string, or an object carrying the `label` and
+    snapshot `alternative` a deny prints the way a built-in's does (Q87); the
+    string form labels itself with the regex and teaches the generic
+    snapshot. A broken or missing pattern loses its entry, not the list; a
+    `label` or `alternative` that is not a non-empty string falls back to
+    the string form's, so a slip in the wording never drops the deny."""
     out = []
     for label, pat, alt in BUILTIN_WATCH:
         out.append((label, re.compile(pat), alt))
-    for pat in cfg['extra_watch_patterns']:
+    for entry in cfg['extra_watch_patterns']:
+        if isinstance(entry, str):
+            entry = {'pattern': entry}
+        pat = entry.get('pattern')
+        if not isinstance(pat, str):
+            continue
+        label = entry.get('label')
+        label = label if isinstance(label, str) and label else pat
+        alt = entry.get('alternative')
+        if not (isinstance(alt, str) and alt):
+            alt = 'take one non-blocking snapshot'
         try:
-            out.append((pat, re.compile(pat),
-                        'take one non-blocking snapshot instead'))
+            out.append((label, re.compile(pat), alt))
         except re.error:
             continue
     return out

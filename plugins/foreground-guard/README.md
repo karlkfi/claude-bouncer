@@ -317,7 +317,11 @@ additively.
   "poll": {
     "enabled": true,
     "action": "deny",
-    "extra_watch_patterns": ["^mytool\\s+follow\\b"],
+    "extra_watch_patterns": [
+      "^mytool\\s+follow\\b",
+      {"pattern": "^flux\\b.*\\s--watch\\b", "label": "flux --watch",
+       "alternative": "run `flux get` once without `--watch`"}
+    ],
     "exempt_watch_patterns": ["^gh\\s+run\\s+watch\\b"],
     "sleep_floor_seconds": 10
   },
@@ -337,7 +341,7 @@ additively.
 | --- | --- | --- |
 | `poll.enabled` | `true` | Class A on/off (switch off as the harness subsumes it) |
 | `poll.action` | `"deny"` | `"ask"` de-escalates Class A to a prompt — the supervised posture, and it costs you one prompt per finding |
-| `poll.extra_watch_patterns` | `[]` | extra regexes matched against each wrapper-stripped command segment |
+| `poll.extra_watch_patterns` | `[]` | extra regexes matched against each wrapper-stripped command segment. An entry may be an object instead — `{"pattern": …, "label": …, "alternative": …}` — so the deny names the tool and teaches its snapshot the way a built-in does; a bare string is labelled with the regex itself and teaches only "take one non-blocking snapshot" |
 | `poll.exempt_watch_patterns` | `[]` | allowlist regexes over the same segment string; a match suppresses the watch/follow detection (exemptions win over matches) — quiet a false-positive built-in without disabling all of Class A |
 | `poll.sleep_floor_seconds` | `10` | bare `sleep N` prompts at or above this |
 | `slow.enabled` | `true` | Class B on/off |
