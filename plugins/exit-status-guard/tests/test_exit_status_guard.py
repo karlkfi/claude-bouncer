@@ -405,6 +405,33 @@ CASES = [
      False, False, ''),
     ('a plain `time` still arms',
      'time EXIT_STATUS_GUARD_OVERRIDE=why :; make check | tail -5', False, False, ''),
+    # `env` and `sudo` set the variables their operands name, so the override
+    # behind them arms (Q270). macOS env exports `X+=r` and `X[0]=r` under
+    # those literal names, and `nohup X=r` exits 127 running a program `X=r`.
+    ('override behind env', 'env EXIT_STATUS_GUARD_OVERRIDE=r make check | tail -5',
+     False, False, ''),
+    ('override behind sudo', 'sudo EXIT_STATUS_GUARD_OVERRIDE=r make check | tail -5',
+     False, False, ''),
+    ('override behind sudo with an option',
+     'sudo -u root EXIT_STATUS_GUARD_OVERRIDE=r make check | tail -5', False, False, ''),
+    ('override behind sudo env',
+     'sudo env EXIT_STATUS_GUARD_OVERRIDE=r make check | tail -5', False, False, ''),
+    ('legacy override behind env -i',
+     'env -i PIPE_GUARD_OVERRIDE=r make check | tail -5', False, False, ''),
+    ('override inside env -S',
+     "env -S 'EXIT_STATUS_GUARD_OVERRIDE=r make check' | tail -5", False, False, ''),
+    ('empty override behind env still denies',
+     'env EXIT_STATUS_GUARD_OVERRIDE= make check | tail -5', False, True, ''),
+    ('blank override behind env still denies',
+     "env 'EXIT_STATUS_GUARD_OVERRIDE=  ' make check | tail -5", False, True, ''),
+    ('subscripted override behind env does not arm',
+     'env EXIT_STATUS_GUARD_OVERRIDE[0]=r make check | tail -5', False, True, ''),
+    ('appended override behind env does not arm',
+     'env EXIT_STATUS_GUARD_OVERRIDE+=r make check | tail -5', False, True, ''),
+    ('override behind nohup does not arm',
+     'nohup EXIT_STATUS_GUARD_OVERRIDE=r make check | tail -5', False, True, ''),
+    ('override as an echoed env operand does not arm',
+     'echo env EXIT_STATUS_GUARD_OVERRIDE=r; make check | tail -5', False, True, ''),
     # The same peel, read the other way round: with the keyword quoted, `make`
     # is an ARGUMENT to a program bash cannot find, so no gate runs and there
     # is no status to lose. Denying it was a false positive on a command that

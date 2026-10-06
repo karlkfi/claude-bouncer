@@ -324,10 +324,11 @@ def wrapper_operands(wrapper, args):
     return args
 
 
-def peel_wrappers(tokens):
+def peel_wrappers(tokens, assigned=None):
     """Strip reserved words, inline assignments, and wrapper commands with
     their options, in the order bash resolves them, until the real command
-    word is first."""
+    word is first. The operands `env` and `sudo` assign from are appended to
+    ``assigned`` when one is passed."""
     while True:
         tokens = strip_env_prefix(strip_sh_keywords(tokens))
         if tokens and os.path.basename(tokens[0]) in WRAPPERS:
@@ -339,6 +340,8 @@ def peel_wrappers(tokens):
             if wrapper in ASSIGN_WRAPPERS:
                 # Operand position, not command position: see ASSIGN_WRAPPERS.
                 while tokens and assigns_operand(wrapper, tokens[0]):
+                    if assigned is not None:
+                        assigned.append(tokens[0])
                     tokens = tokens[1:]
             continue
         return tokens
@@ -781,9 +784,17 @@ def has_override(segs):
     Only the LEADING assignment run of a segment is read, which is what makes
     the name asymmetric: a real assignment sits in command position, while the
     name quoted in a commit message or echoed into a pipe is an argument and
-    disables nothing.
+    disables nothing. An operand `env` or `sudo` assigns from counts too
+    (Q270), since the wrapper sets it, and its name is read verbatim: either
+    one exports `NAME[0]=r` or `NAME+=r` under that literal name.
     """
     for seg in segs:
+        operands = []
+        peel_wrappers(seg.tokens, operands)
+        for tok in operands:
+            name, _, value = tok.partition('=')
+            if name in OVERRIDE_VARS and value.strip():
+                return True
         for tok in strip_sh_keywords(seg.tokens):
             if not is_assignment(tok):
                 break                             # past the assignment run
