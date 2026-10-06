@@ -771,6 +771,15 @@ class PollConfigTests(unittest.TestCase):
         self.assertIsNone(state.get('override'))
         self.assertEqual(argv, ['gh', 'run', 'watch'])
 
+    def test_timeout_takes_an_abbreviated_long_option_value(self):
+        # `--kill` is `--kill-after`, so its value and the DURATION both come
+        # off (Q233). Asserted on `strip_head` because the timeout bound
+        # exempts the segment either way.
+        state = {}
+        argv = guard.strip_head(
+            ['timeout', '--kill', '5', '10', 'tail', '-f', 'x'], state)
+        self.assertEqual(argv, ['tail', '-f', 'x'])
+
     def test_env_plain_assignment_still_arms(self):
         state = {}
         guard.strip_head(
@@ -1138,9 +1147,14 @@ class SlowCommandPositionTests(unittest.TestCase):
         for prefix in ("sudo -nu", "env -iu", "env --un", "stdbuf --out L cat"):
             with self.subTest(prefix=prefix):
                 self.assert_mention(prefix + " scripts/gate.sh")
+        # sudo's getopt takes these whatever the build supports (Q233).
+        for prefix in ("sudo -r role", "sudo -t type", "sudo -a auth",
+                       "sudo -c class", "sudo --role role"):
+            with self.subTest(prefix=prefix):
+                self.assert_runs(prefix + " scripts/gate.sh")
         # `--c` prefixes four of sudo's value flags, which sudo rejects.
-        self.assertEqual(guard.flag_arity(
-            "--c", guard.WRAPPER_VALUE_FLAGS['sudo']), 1)
+        self.assertEqual(guard.wrapper_option(
+            ["--c", "x"], guard.WRAPPER_VALUE_OPTS['sudo'])[0], 1)
 
     def test_plus_options_still_run(self):
         # bash takes the `+` forms at invocation, and `+o noexec` turns

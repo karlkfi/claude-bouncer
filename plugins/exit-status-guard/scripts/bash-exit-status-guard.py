@@ -50,6 +50,7 @@ from bouncer_parse import (                                    # noqa: E402
     note_discarded_writes, split_operator_runs, strip_comments,
     strip_env_prefix, strip_heredoc_bodies, strip_sh_keywords,
 )
+from bouncer_wrappers import WRAPPER_VALUE_OPTS, wrapper_option  # noqa: E402
 
 # --- Ported from claude-workspace-guard (scripts/bash-workspace-guard.py) ----
 # These carry the quote-state tracking and bracket counting. Kept structurally
@@ -91,22 +92,6 @@ def assigns_operand(wrapper, word):
     if wrapper == 'env':
         return '=' in word
     return '=' in word and word[0] not in '/='
-
-# Wrapper flags that take the next word as their value when written last in a
-# word: `sudo -u root`, `stdbuf -o L`, and the bundled `env -iu FOO`. Any other
-# option comes off one word at a time, so a value-taking flag missing here
-# leaves its value as the command word -- a missed deny, which is the direction
-# this guard already takes on parse uncertainty. sudo's `-h` spells both
-# `--help` and `--host`, so it is held out, as prod-guard holds it out (Q158).
-WRAPPER_VALUE_FLAGS = {
-    'sudo': frozenset({'-C', '--close-from', '-D', '--chdir', '-g', '--group',
-                       '-p', '--prompt', '-R', '--chroot',
-                       '-T', '--command-timeout', '-u', '--user'}),
-    'env': frozenset({'-u', '--unset', '-C', '--chdir', '-P',  # -P is BSD's
-                      '-S', '--split-string'}),
-    'exec': frozenset({'-a'}),
-    'stdbuf': frozenset({'-i', '--input', '-o', '--output', '-e', '--error'}),
-}
 
 # Options that make a wrapper run no command, so the words behind it are names
 # rather than a gate: `command -v make | head` looks make up and runs nothing.
@@ -301,7 +286,7 @@ def wrapper_operands(wrapper, args):
     """
     if wrapper in SHELL_WRAPPERS:
         return args
-    value_flags = WRAPPER_VALUE_FLAGS.get(wrapper, frozenset())
+    value_flags = WRAPPER_VALUE_OPTS.get(wrapper, frozenset())
     quiet, quiet_long = RUN_NOTHING.get(wrapper, (frozenset(), frozenset()))
     while args and args[0].startswith('-'):
         tok = args[0]
@@ -316,16 +301,13 @@ def wrapper_operands(wrapper, args):
         if tok.startswith('--'):
             if tok.split('=', 1)[0] in quiet_long:
                 return None
-            args = args[2 if tok in value_flags else 1:]
-            continue
-        step = 1
-        for pos, char in enumerate(tok[1:], start=2):
-            if char in quiet:
-                return None
-            if '-' + char in value_flags:
-                step = 2 if pos == len(tok) else 1
-                break
-        args = args[step:]
+        else:
+            for char in tok[1:]:
+                if char in quiet:
+                    return None
+                if '-' + char in value_flags:
+                    break
+        args = args[wrapper_option(args, value_flags)[0]:]
     return args
 
 

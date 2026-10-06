@@ -392,9 +392,10 @@ class ParsingTests(unittest.TestCase):
     def test_ambiguous_or_bare_long_prefix_stays_one_word(self):
         # `--c` prefixes four of sudo's value flags, which sudo rejects, and
         # `--` ends the options rather than abbreviating one.
-        self.assertFalse(guard.is_long_value_flag(
-            "--c", guard.WRAPPER_VALUE_FLAGS["sudo"]))
-        self.assertFalse(guard.is_long_value_flag("--", frozenset({"--only"})))
+        self.assertEqual(guard.wrapper_option(
+            ["--c", "x"], guard.WRAPPER_VALUE_OPTS["sudo"])[0], 1)
+        self.assertEqual(guard.wrapper_option(
+            ["--", "x"], frozenset({"--only"}))[0], 1)
         self.assertEqual(
             guard.strip_wrappers(["timeout", "--", "5", "kubectl", "delete"], {}),
             ["kubectl", "delete"])
@@ -2932,6 +2933,18 @@ class BypassBatteryTests(unittest.TestCase):
         # tool. GNU timeout 9.11, env and stdbuf run the command after each.
         for prefix in ("timeout --kill 5 10", "timeout --sig KILL 5",
                        "sudo --us root", "env --uns FOO", "stdbuf --out L"):
+            with self.subTest(prefix=prefix):
+                decision, _ = run_hook(
+                    prefix + " kubectl --context gke_acme_prod-us delete ns x")
+                self.assertEqual(decision, "deny")
+
+    def test_wrapper_options_from_the_shared_table(self):
+        # Measured before Q233: each was silent, its option's value read as
+        # the tool. sudo 1.9.17p2 reports `-r`, `-t`, `-a` and `-c` as needing
+        # an argument; GNU env 9.11 runs the command after `-a` (Q245).
+        for prefix in ("sudo -r role", "sudo -t type", "sudo -a auth",
+                       "sudo -c class", "sudo --role role", "sudo -nr role",
+                       "env -a x", "env --argv0 x", "env -ia x"):
             with self.subTest(prefix=prefix):
                 decision, _ = run_hook(
                     prefix + " kubectl --context gke_acme_prod-us delete ns x")

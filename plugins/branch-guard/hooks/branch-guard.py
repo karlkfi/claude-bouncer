@@ -116,6 +116,7 @@ from bouncer_parse import (                                   # noqa: E402
     split_assignment, split_operator_runs,
 )
 from bouncer_grants import record_grants                      # noqa: E402
+from bouncer_wrappers import WRAPPER_VALUE_OPTS as _VALUE_OPTS, wrapper_option  # noqa: E402
 
 # Branch names protected no matter what the environment says. Configuration only
 # ever ADDS to this set (see `protected_patterns`), so a typo — or an empty or
@@ -164,28 +165,12 @@ GH_VALUE_OPTS = {'-R', '--repo'}
 
 # Programs that run the command behind them, keyed to their options that take
 # a SEPARATE value (Q223). `peel_wrappers` drops them before the git/gh lookup,
-# so `timeout 60 git push origin main` is judged as the push. Both arity errors
-# hide the command: a value missed leaves it standing as the program (`sudo -u
-# root git`), a value invented swallows `git` (`env -i git`). `sudo -h` is held
-# out, as in prod-guard (Q158): it is `--help` too, and a host needs a sudoers
-# that runs remote commands, which no stock one does.
-WRAPPER_VALUE_OPTS = {
-    'env': frozenset({'-u', '--unset', '-C', '--chdir', '-P',
-                      '-S', '--split-string'}),                  # -P is BSD's
-    'sudo': frozenset({'-a', '--auth-type', '-C', '--close-from',
-                       '-c', '--login-class', '-D', '--chdir', '-g', '--group',
-                       '--host', '-p', '--prompt', '-R', '--chroot',
-                       '-r', '--role', '-T', '--command-timeout', '-t', '--type',
-                       '-U', '--other-user', '-u', '--user'}),
-    'timeout': frozenset({'-k', '--kill-after', '-s', '--signal'}),
-    'nice': frozenset({'-n', '--adjustment'}),
-    'stdbuf': frozenset({'-i', '--input', '-o', '--output', '-e', '--error'}),
-    'time': frozenset({'-o', '--output', '-f', '--format'}),     # GNU time
-    'exec': frozenset({'-a'}),
-    'command': frozenset(),
-    'nohup': frozenset(),
-    'setsid': frozenset(),
-}
+# so `timeout 60 git push origin main` is judged as the push. The option sets
+# are the shared table in `lib/bouncer_wrappers.py` (Q233); which programs this
+# guard peels is its own choice.
+WRAPPER_VALUE_OPTS = {name: _VALUE_OPTS[name] for name in (
+    'env', 'sudo', 'timeout', 'nice', 'stdbuf', 'time', 'exec', 'command',
+    'nohup', 'setsid')}
 # Options that run the command somewhere other than the directory it was typed
 # in, so the hook can no longer name the tree it acts on.
 WRAPPER_CHDIR_OPTS = {'env': {'-C', '--chdir'},
@@ -978,32 +963,6 @@ def record_worktree_grant(data):
             paths.add(path)
     record_grants(WORKTREE_NAMESPACE, data.get('session_id'), paths,
                   'approved `git worktree add`')
-
-
-def wrapper_option(argv, value_opts):
-    """(words consumed, value-taking option or None, its value) for the option
-    word at argv[0]. A short word is walked a character at a time, so a bundle
-    (`-iu NAME`) takes its value and the walk stops at the first value-taking
-    letter, whose value is the rest of the word (`-uroot`). A long word matches
-    by unique prefix, as getopt_long does: `--ch DIR` is `--chdir DIR`."""
-    tok = argv[0]
-    nxt = argv[1] if len(argv) > 1 else None
-    if tok.startswith('--'):
-        name, eq, value = tok.partition('=')
-        matches = [o for o in value_opts if o.startswith('--') and o.startswith(name)]
-        if name in value_opts:
-            matches = [name]
-        if not matches:
-            return 1, None, None
-        # An ambiguous prefix is getopt's error, so nothing runs behind it.
-        opt = matches[0] if len(matches) == 1 else None
-        return (1, opt, value) if eq else (2, opt, nxt)
-    for pos, char in enumerate(tok[1:], start=2):
-        if '-' + char in value_opts:
-            if pos == len(tok):
-                return 2, '-' + char, nxt
-            return 1, '-' + char, tok[pos:]
-    return 1, None, None
 
 
 def peel_wrappers(argv):

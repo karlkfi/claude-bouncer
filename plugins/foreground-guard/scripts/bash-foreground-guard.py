@@ -104,6 +104,7 @@ from bouncer_parse import (                                    # noqa: E402
     is_assignment, note_discarded_writes, split_assignment, strip_comments,
     split_operator_runs, strip_heredoc_bodies,
 )
+from bouncer_wrappers import WRAPPER_VALUE_OPTS, wrapper_option  # noqa: E402
 
 DEFAULT_BASH_TIMEOUT_MS = 120000
 DEFAULT_SLEEP_FLOOR_SECONDS = 10
@@ -414,47 +415,10 @@ PLAIN_WRAPPERS = frozenset({'command', 'nohup', 'builtin', 'time', 'exec',
                             'stdbuf', 'unbuffer'})
 SHELL_NAMES = frozenset({'bash', 'sh', 'zsh', 'dash', 'ksh'})
 
-# Wrapper flags that take a SEPARATE value. Dropped one word at a time, the
-# value is left standing as the command word and the segment defers (Q160,
-# Q221). The sets are the BSD and GNU union: `time` takes `-o` on both and the
-# rest on GNU only, stdbuf's long forms are GNU's, `env -P` is BSD's and
-# `env -a` GNU's. sudo's `-h` (also `--help`) and `-U` (list mode only) are
-# held out, as in prod-guard. `env -S` carries the command inside its value,
-# so skipping it would be no truer than not. `unbuffer -p` and the rest of
-# `exec`'s flags carry no value.
-WRAPPER_VALUE_FLAGS = {
-    'sudo': frozenset({'-C', '--close-from', '-D', '--chdir', '-g', '--group',
-                       '-p', '--prompt', '-R', '--chroot',
-                       '-T', '--command-timeout', '-u', '--user'}),
-    'env': frozenset({'-u', '--unset', '-C', '--chdir', '-P', '-a',
-                      '--argv0'}),
-    'exec': frozenset({'-a'}),
-    'time': frozenset({'-o', '--output', '-f', '--format'}),
-    'stdbuf': frozenset({'-i', '--input', '-o', '--output', '-e', '--error'}),
-}
-
-
-def flag_arity(tok, value_flags):
-    """How many words a wrapper's option word consumes: 2 when it ends in a
-    flag whose value is the next word, else 1. A short word is walked a
-    character at a time, so a bundle (`sudo -nu root`) takes its value too,
-    and the walk stops at the first value-taking flag because the rest of the
-    word is that flag's attached value (`stdbuf -oL`). getopt_long takes any
-    unique prefix of a long option, so `stdbuf --out L` is `--output L`
-    (Q221); a prefix of two value-taking spellings is an ambiguity the tool
-    rejects, so it stays one word, and so does `--`, which ends the options."""
-    if tok.startswith('--'):
-        if tok in value_flags:
-            return 2
-        if tok == '--':
-            return 1
-        matches = [f for f in value_flags
-                   if f.startswith('--') and f.startswith(tok)]
-        return 2 if len(matches) == 1 else 1
-    for pos, char in enumerate(tok[1:], start=2):
-        if '-' + char in value_flags:
-            return 2 if pos == len(tok) else 1
-    return 1
+# `env -S` carries the command inside its value, so skipping the pair would
+# be no truer than reading the value as one word, and the one word keeps the
+# deny a watch pattern gives it until the value is split (Q246).
+ENV_VALUE_OPTS = WRAPPER_VALUE_OPTS['env'] - {'-S', '--split-string'}
 
 
 def strip_head(argv, state):
@@ -487,10 +451,10 @@ def strip_head(argv, state):
                 state['override'] = _val
             argv = argv[1:]
         elif head == 'sudo':
-            value_flags = WRAPPER_VALUE_FLAGS['sudo']
+            value_flags = WRAPPER_VALUE_OPTS['sudo']
             argv = argv[1:]
             while argv and argv[0].startswith('-'):
-                argv = argv[flag_arity(argv[0], value_flags):]
+                argv = argv[wrapper_option(argv, value_flags)[0]:]
             while argv and '=' in argv[0] and argv[0][0] not in '/=':
                 # Sudo's operands, like `env`'s below, by sudo's own rule (its
                 # `is_envar`) rather than bash's, so `sudo 'a b=c' cmd` assigns
@@ -505,11 +469,11 @@ def strip_head(argv, state):
                     state['override'] = _val
                 argv = argv[1:]
         elif head == 'env':
-            value_flags = WRAPPER_VALUE_FLAGS['env']
+            value_flags = ENV_VALUE_OPTS
             argv = argv[1:]
             while argv:
                 if argv[0].startswith('-'):
-                    argv = argv[flag_arity(argv[0], value_flags):]
+                    argv = argv[wrapper_option(argv, value_flags)[0]:]
                 elif '=' in argv[0]:
                     # `env` is a program: any operand holding `=` assigns,
                     # whatever bash would make of the name, so `env 1=x cmd`
@@ -528,17 +492,17 @@ def strip_head(argv, state):
                     break
         elif head == 'timeout':
             argv = argv[1:]
+            value_flags = WRAPPER_VALUE_OPTS['timeout']
             while argv and argv[0].startswith('-'):
-                argv = argv[2:] if argv[0] in ('-k', '--kill-after', '-s',
-                                               '--signal') else argv[1:]
+                argv = argv[wrapper_option(argv, value_flags)[0]:]
             if argv:
                 argv = argv[1:]  # the DURATION operand
             state['timeout_wrapped'] = True
         elif head in PLAIN_WRAPPERS:
-            value_flags = WRAPPER_VALUE_FLAGS.get(head, frozenset())
+            value_flags = WRAPPER_VALUE_OPTS.get(head, frozenset())
             argv = argv[1:]
             while argv and argv[0].startswith('-'):
-                argv = argv[flag_arity(argv[0], value_flags):]
+                argv = argv[wrapper_option(argv, value_flags)[0]:]
             # The keyword leaves the next word in keyword position, so a
             # second `time` is the keyword too (`time time A=1 cmd` runs).
             reserved = keyword_time

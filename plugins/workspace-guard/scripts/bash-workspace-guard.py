@@ -21,6 +21,7 @@ from bouncer_parse import (                                    # noqa: E402
     strip_env_prefix, strip_heredoc_bodies, strip_sh_keywords,
 )
 from bouncer_grants import load_grants, record_grants  # noqa: E402
+import bouncer_wrappers  # noqa: E402
 
 # --- Literal variable propagation (issue 58) --------------------------------
 # `SP=/path; tail $SP/x` binds SP to a literal earlier in the same command
@@ -1988,50 +1989,13 @@ LOCAL_SHELL_WRAPPERS = frozenset({
 # Command wrappers peeled off the head so the command they run is judged as if
 # typed bare (Q219): `env cat /etc/hosts` reads `/etc/hosts`, and left in place
 # the wrapper takes the head and every lookup below misses. Each row is the
-# wrapper's own option grammar -- short flags taking no value, short flags
-# taking one (attached or the next word), short flags whose value is attached
-# or absent, and long options as `none`/`req`/`opt` -- because the peel has to
-# know where the command starts, and guessing an arity is how a value gets read
-# as the command. A flag outside the row is not guessed at: see `peel_wrappers`.
-# `external` marks a separate program, so a `cd` behind it moves nothing; only
-# `command` and `builtin` run the shell's own `cd`.
-_Wrapper = collections.namedtuple(
-    '_Wrapper', 'short_none short_val short_opt long external')
-_COMMON_LONG = {'help': 'none', 'version': 'none'}
-WRAPPER_GRAMMAR = {
-    'env': _Wrapper('iv0', 'uCSPa', '', dict(_COMMON_LONG, **{
-        'ignore-environment': 'none', 'null': 'none', 'unset': 'req',
-        'chdir': 'req', 'split-string': 'req', 'argv0': 'req',
-        'block-signal': 'opt', 'default-signal': 'opt', 'ignore-signal': 'opt',
-        'list-signal-handling': 'none', 'debug': 'none'}), True),
-    'nice': _Wrapper('', 'n', '', dict(_COMMON_LONG, adjustment='req'), True),
-    'nohup': _Wrapper('', '', '', _COMMON_LONG, True),
-    'timeout': _Wrapper('fpv', 'ks', '', dict(_COMMON_LONG, **{
-        'foreground': 'none', 'preserve-status': 'none', 'verbose': 'none',
-        'kill-after': 'req', 'signal': 'req'}), True),
-    'stdbuf': _Wrapper('', 'ioe', '', dict(
-        _COMMON_LONG, input='req', output='req', error='req'), True),
-    'setsid': _Wrapper('cfw', '', '', dict(
-        _COMMON_LONG, ctty='none', fork='none', wait='none'), True),
-    'ionice': _Wrapper('t', 'cnpPu', '', dict(_COMMON_LONG, **{
-        'class': 'req', 'classdata': 'req', 'pid': 'req', 'pgid': 'req',
-        'uid': 'req', 'ignore': 'none'}), True),
-    # GNU and BSD `time` together; `-o` names a file the wrapper itself writes.
-    'time': _Wrapper('aphlqvV', 'fo', '', dict(_COMMON_LONG, **{
-        'append': 'none', 'portability': 'none', 'quiet': 'none',
-        'verbose': 'none', 'format': 'req', 'output': 'req'}), True),
-    # GNU and BSD `xargs` together; `-a` names a file it reads its input from.
-    'xargs': _Wrapper('0prtxo', 'aEIdLnPsJRS', 'eil', dict(_COMMON_LONG, **{
-        'null': 'none', 'arg-file': 'req', 'delimiter': 'req', 'eof': 'opt',
-        'replace': 'opt', 'max-lines': 'opt', 'max-args': 'req',
-        'max-procs': 'req', 'max-chars': 'req', 'interactive': 'none',
-        'verbose': 'none', 'exit': 'none', 'no-run-if-empty': 'none',
-        'open-tty': 'none', 'process-slot-var': 'req',
-        'show-limits': 'none'}), True),
-    'command': _Wrapper('pvV', '', '', {}, False),
-    'builtin': _Wrapper('', '', '', {}, False),
-    'exec': _Wrapper('cl', 'a', '', {}, True),
-}
+# wrapper's closed option grammar from `lib/bouncer_wrappers.py` (Q233),
+# because the peel has to know where the command starts, and guessing an arity
+# is how a value gets read as the command. A flag outside the row is not
+# guessed at: see `peel_wrappers`.
+WRAPPER_GRAMMAR = {name: bouncer_wrappers.WRAPPER_GRAMMAR[name] for name in (
+    'env', 'nice', 'nohup', 'timeout', 'stdbuf', 'setsid', 'ionice', 'time',
+    'xargs', 'command', 'builtin', 'exec')}
 
 # Short flags spelled as their long option, so one table says what each does.
 _WRAPPER_SHORT_LONG = {
