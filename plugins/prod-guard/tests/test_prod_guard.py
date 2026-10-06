@@ -1142,6 +1142,219 @@ class KubeServerClassificationTests(unittest.TestCase):
         self.assertEqual(decision, "deny")
 
 
+class NamedKubeconfigTests(unittest.TestCase):
+    """A kubeconfig the command names -- `--kubeconfig <path>`, or a
+    `KUBECONFIG` it exports or prefixes -- is the file kubectl reads, and it
+    pins the target the way `--context` does (Q168). The ambient
+    ~/.kube/config is prod in every case, so a verdict read from the wrong
+    file shows up as a deny naming gke_acme_prod-us."""
+
+    def setUp(self):
+        self.home = make_home(kubeconfig=KUBECONFIG_PROD)
+        self.kind = self._write("kc-kind", KUBECONFIG_KIND)
+        self.prod = self._write("kc-prod", KUBECONFIG_PROD)
+        self.server = self._write("kc-server", KUBECONFIG_SERVER)
+        self.unknown = self._write(
+            "kc-unknown", "apiVersion: v1\ncurrent-context: bluefin\n")
+
+    def _write(self, name, body):
+        path = os.path.join(self.home, name)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(body)
+        return path
+
+    def run_cmd(self, command, **kw):
+        return run_hook(command, home=self.home, **kw)
+
+    def test_exported_kubeconfig_nonprod_defers(self):
+        decision, reason = self.run_cmd(
+            "export KUBECONFIG=%s; kubectl config current-context; "
+            "kubectl apply -f x.yaml" % self.kind)
+        self.assertIsNone(decision, reason)
+
+    def test_prefix_kubeconfig_nonprod_defers(self):
+        decision, reason = self.run_cmd(
+            "KUBECONFIG=%s kubectl apply -f x.yaml" % self.kind)
+        self.assertIsNone(decision, reason)
+
+    def test_kubeconfig_flag_nonprod_defers(self):
+        for cmd in ("kubectl --kubeconfig %s apply -f x.yaml",
+                    "kubectl --kubeconfig=%s apply -f x.yaml",
+                    "kubectl apply -f x.yaml --kubeconfig %s"):
+            decision, reason = self.run_cmd(cmd % self.kind)
+            self.assertIsNone(decision, (cmd, reason))
+
+    def test_kubeconfig_flag_with_context_defers(self):
+        decision, reason = self.run_cmd(
+            "kubectl --kubeconfig %s --context kind-ci apply -f x.yaml" % self.kind)
+        self.assertIsNone(decision, reason)
+
+    def test_unexported_kubeconfig_reads_ambient(self):
+        # A shell variable never exported does not reach kubectl, so the
+        # target is still the ambient file.
+        decision, reason = self.run_cmd(
+            "KUBECONFIG=%s; kubectl apply -f x.yaml" % self.kind)
+        self.assertEqual(decision, "deny")
+        self.assertIn("gke_acme_prod-us", reason)
+
+    def test_unpinned_control_still_denies(self):
+        decision, reason = self.run_cmd("kubectl apply -f x.yaml")
+        self.assertEqual(decision, "deny")
+        self.assertIn("gke_acme_prod-us", reason)
+
+    def test_named_prod_kubeconfig_denies_naming_the_file(self):
+        for cmd in ("export KUBECONFIG=%s; kubectl apply -f x.yaml",
+                    "KUBECONFIG=%s kubectl apply -f x.yaml",
+                    "kubectl --kubeconfig %s apply -f x.yaml"):
+            decision, reason = self.run_cmd(cmd % self.prod)
+            self.assertEqual(decision, "deny", cmd)
+            self.assertIn("gke_acme_prod-us", reason)
+            self.assertIn(self.prod, reason)
+
+    def test_named_kubeconfig_prod_server_denies(self):
+        # blue-2's name says nothing; its server URL in the named file is prod.
+        decision, _ = self.run_cmd(
+            "kubectl --kubeconfig %s apply -f x.yaml" % self.server)
+        self.assertEqual(decision, "deny")
+
+    def test_context_server_resolves_against_named_file(self):
+        # The ambient file has no `blue-2`; only the exported one maps it to
+        # a production server.
+        decision, _ = self.run_cmd(
+            "export KUBECONFIG=%s; kubectl --context blue-2 delete ns x"
+            % self.server)
+        self.assertEqual(decision, "deny")
+
+    def test_named_kubeconfig_unknown_context_asks(self):
+        decision, reason = self.run_cmd(
+            "kubectl --kubeconfig %s apply -f x.yaml" % self.unknown)
+        self.assertEqual(decision, "ask")
+        self.assertIn("bluefin", reason)
+
+    def test_flag_overrides_exported_kubeconfig(self):
+        # kubectl reads --kubeconfig ahead of $KUBECONFIG, in both directions.
+        decision, _ = self.run_cmd(
+            "export KUBECONFIG=%s; kubectl --kubeconfig %s apply -f x.yaml"
+            % (self.kind, self.prod))
+        self.assertEqual(decision, "deny")
+        decision, reason = self.run_cmd(
+            "export KUBECONFIG=%s; kubectl --kubeconfig %s apply -f x.yaml"
+            % (self.prod, self.kind))
+        self.assertIsNone(decision, reason)
+
+    def test_missing_named_file_denies(self):
+        decision, _ = self.run_cmd(
+            "export KUBECONFIG=/nonexistent/kc; kubectl apply -f x.yaml")
+        self.assertEqual(decision, "deny")
+        decision, _ = self.run_cmd(
+            "kubectl --kubeconfig /nonexistent/kc apply -f x.yaml")
+        self.assertEqual(decision, "deny")
+
+    def test_relative_named_file_is_not_a_pin(self):
+        # Relative to a directory the command may have changed: the guard
+        # cannot be sure which file runs, so the unpinned deny stands.
+        decision, _ = self.run_cmd("kubectl --kubeconfig kc-kind apply -f x.yaml")
+        self.assertEqual(decision, "deny")
+        decision, _ = self.run_cmd("KUBECONFIG=kc-kind kubectl apply -f x.yaml")
+        self.assertEqual(decision, "deny")
+
+    def test_unresolved_variable_path_is_not_a_pin(self):
+        decision, _ = self.run_cmd(
+            "kubectl --kubeconfig $UNSET_DIR/kc apply -f x.yaml")
+        self.assertEqual(decision, "deny")
+        # A file whose literal name matches the unexpanded text is not the
+        # one bash hands kubectl.
+        os.makedirs(os.path.join(self.home, "$UNSET_DIR"))
+        self._write(os.path.join("$UNSET_DIR", "kc"), KUBECONFIG_KIND)
+        decision, _ = self.run_cmd(
+            "kubectl --kubeconfig '%s'/$UNSET_DIR/kc apply -f x.yaml" % self.home)
+        self.assertEqual(decision, "deny")
+
+    def test_kubeconfig_flag_with_colon_is_not_a_pin(self):
+        # kubectl reads the flag as one path; split, it would name kc-kind.
+        decision, _ = self.run_cmd(
+            "kubectl --kubeconfig %s:%s apply -f x.yaml" % (self.kind, self.prod))
+        self.assertEqual(decision, "deny")
+
+    def test_shared_kubeconfig_named_is_not_a_pin(self):
+        # Naming the shared ~/.kube/config by path is still the clobber-prone
+        # file every session repoints.
+        home = make_home(kubeconfig=KUBECONFIG_KIND)
+        shared = os.path.join(home, ".kube", "config")
+        for cmd in ("kubectl --kubeconfig %s apply -f x.yaml",
+                    "export KUBECONFIG=%s; kubectl apply -f x.yaml"):
+            decision, reason = run_hook(cmd % shared, home=home)
+            self.assertEqual(decision, "deny", cmd)
+            self.assertIn("must pin", reason)
+
+    def test_hook_environment_kubeconfig_is_ambient(self):
+        # The session's own $KUBECONFIG is ambient state, not a pin the
+        # command made.
+        decision, reason = self.run_cmd(
+            "kubectl apply -f x.yaml", env_extra={"KUBECONFIG": self.kind})
+        self.assertEqual(decision, "deny")
+        self.assertIn("must pin", reason)
+
+    def test_exported_kubeconfig_reaches_sh_c_child(self):
+        decision, reason = self.run_cmd(
+            "export KUBECONFIG=%s; sh -c 'kubectl apply -f x.yaml'" % self.kind)
+        self.assertIsNone(decision, reason)
+        decision, _ = self.run_cmd(
+            "KUBECONFIG=%s; sh -c 'kubectl apply -f x.yaml'" % self.kind)
+        self.assertEqual(decision, "deny")
+
+    def test_helm_and_flux_read_the_named_file(self):
+        for cmd in ("helm --kubeconfig %s upgrade r ./chart",
+                    "export KUBECONFIG=%s; helm upgrade r ./chart",
+                    "flux --kubeconfig %s reconcile ks app"):
+            decision, reason = self.run_cmd(cmd % self.kind)
+            self.assertIsNone(decision, (cmd, reason))
+            decision, _ = self.run_cmd(cmd % self.prod)
+            self.assertEqual(decision, "deny", cmd)
+
+
+class ExportedEnvironmentTests(unittest.TestCase):
+    """Every evaluator reads the environment the command's child inherits, so
+    an `export` earlier in the command counts like an inline prefix (Q168)."""
+
+    def test_exported_prod_aws_profile_denies(self):
+        decision, reason = run_hook(
+            "export AWS_PROFILE=acme-prod; aws s3 rm s3://b/k")
+        self.assertEqual(decision, "deny")
+        self.assertIn("acme-prod", reason)
+
+    def test_exported_aws_profile_matches_prefix(self):
+        for cmd in ("export AWS_PROFILE=dev; aws s3 rm s3://b/k",
+                    "AWS_PROFILE=dev aws s3 rm s3://b/k"):
+            decision, reason = run_hook(cmd)
+            self.assertIsNone(decision, (cmd, reason))
+
+    def test_env_operand_outranks_an_export(self):
+        # `env NAME=v` sets the child's value over an earlier export; reading
+        # the export instead would defer on the kind file.
+        home = make_home()
+        kind = os.path.join(home, "kc-kind")
+        prod = os.path.join(home, "kc-prod")
+        for path, body in ((kind, KUBECONFIG_KIND), (prod, KUBECONFIG_PROD)):
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(body)
+        decision, reason = run_hook(
+            "export KUBECONFIG=%s; env KUBECONFIG=%s kubectl apply -f x.yaml"
+            % (kind, prod), home=home)
+        self.assertEqual(decision, "deny")
+        self.assertIn("gke_acme_prod-us", reason)
+        decision, reason = run_hook(
+            "export AWS_PROFILE=dev; env AWS_PROFILE=acme-prod aws s3 rm s3://b/k")
+        self.assertEqual(decision, "deny")
+        self.assertIn("acme-prod", reason)
+
+    def test_exported_override_still_does_not_arm(self):
+        decision, _ = run_hook(
+            "export PROD_GUARD_OVERRIDE=why; "
+            "kubectl --context gke_acme_prod-us delete ns x")
+        self.assertEqual(decision, "deny")
+
+
 class CompoundBypassTests(unittest.TestCase):
     def test_chained_after_echo_caught(self):
         decision, _ = run_hook(

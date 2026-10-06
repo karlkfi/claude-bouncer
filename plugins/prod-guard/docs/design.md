@@ -112,6 +112,17 @@ travels in the decision reason, so the human who does see a prompt (an unknown
 explicit target, or an overridden deny) always sees where the mutation lands,
 with no risk of an agent-authored echo that doesn't match the real flags.
 
+A kubeconfig the command itself names counts as a pin (Q168): `--kubeconfig
+<path>`, or a `KUBECONFIG` it exports or sets as a prefix. The argument above is
+against state a parallel session shares, and a file named by path in the command
+is shared with no session that does not also name it — for a private
+per-worktree kubeconfig, one worktree — so its `current-context` is as stable
+as a `--context` value. It counts only where the guard is certain which file
+runs: every path absolute and fully expanded, and neither `~/.kube/config` nor
+the session's own `$KUBECONFIG`, which are the ambient state themselves. Anything
+else falls back to the unpinned deny. The cost accepted: the named file is still
+one a tool like `kind` rewrites, and the guard now defers on what it says.
+
 The switch commands that *do the repointing* — `kubectl config use-context`
 (and its alias `kubectl config set current-context`), `kubectx`,
 `gcloud config set`/`unset` and `gcloud config configurations activate`,

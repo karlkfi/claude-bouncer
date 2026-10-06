@@ -948,7 +948,10 @@ def _kubeconfig_paths(seg_env):
     """Every kubeconfig file to consult: all `:`-separated $KUBECONFIG paths
     (kubectl merges them), else ~/.kube/config. Empty if $HOME is unset and no
     $KUBECONFIG is given."""
-    kc = seg_env.get('KUBECONFIG') or os.environ.get('KUBECONFIG')
+    if 'KUBECONFIG' in seg_env:
+        kc = seg_env['KUBECONFIG']   # set empty, kubectl reads the default
+    else:
+        kc = os.environ.get('KUBECONFIG')
     if kc:
         return [p for p in kc.split(':') if p]
     home = os.environ.get('HOME')
@@ -1773,11 +1776,46 @@ def _scan_verb(tokens, mutating_exact=frozenset(), mutating_prefixes=(),
     return 'unknown', None
 
 
-def _kube_target(argv, seg_env, context_flags):
+def kube_env(argv, seg_env):
+    """(env, named) for a kubeconfig-based tool. `env` is what its readers
+    see, with a `--kubeconfig` flag standing in for $KUBECONFIG, which it
+    overrides. `named` is the route by which the command itself named the
+    file -- '--kubeconfig' or 'KUBECONFIG' -- or None (Q168).
+
+    A named file pins the target the way `--context` does: no parallel session
+    can repoint a file it does not also name. So it counts only where the
+    guard is certain which file runs -- every path absolute and fully
+    expanded, a flag value with no `:` -- and never for the shared
+    ~/.kube/config or the session's own $KUBECONFIG, which are the ambient
+    state the pin rule exists for."""
+    flag = first_flag_value(argv, ('--kubeconfig',))
+    if flag is not None:
+        env, named = {**seg_env, 'KUBECONFIG': flag}, '--kubeconfig'
+        if ':' in flag:
+            return env, None   # one literal path to kubectl, a list to us
+    elif seg_env.get('KUBECONFIG'):
+        env, named = seg_env, 'KUBECONFIG'
+    else:
+        return seg_env, None
+    paths = _kubeconfig_paths(env)
+    shared = _kubeconfig_paths({})
+    home = os.environ.get('HOME')
+    if home:
+        shared.append(os.path.join(home, '.kube', 'config'))
+    shared = {os.path.realpath(p) for p in shared}
+    if not paths or any(not os.path.isabs(p) or '$' in p
+                        or os.path.realpath(p) in shared for p in paths):
+        return env, None
+    return env, named
+
+
+def _kube_target(argv, seg_env, context_flags, named=None):
     """(explicit_value, explicit_desc, ambient_value, ambient_desc) for a
     kubeconfig-based tool. The desc names the resolved context and, when an
     explicit `-n`/`--namespace` is present, the namespace the mutation lands in
-    — so the deny/ask prompt always displays where it goes (issue #10)."""
+    — so the deny/ask prompt always displays where it goes (issue #10).
+    `named` is kube_env's: the current-context of a file the command names is
+    explicit, not ambient."""
     ns = first_flag_value(argv, ('-n', '--namespace'))
     ns_suffix = ("; namespace '%s'" % ns) if ns else ''
     ctx = first_flag_value(argv, context_flags)
@@ -1785,6 +1823,9 @@ def _kube_target(argv, seg_env, context_flags):
         return (ctx, "kube-context '%s' (from %s%s)"
                 % (ctx, context_flags[0], ns_suffix), None, '')
     ambient = kube_current_context(seg_env)
+    if named and ambient is not None:
+        return (ambient, "kube-context '%s' (current-context of %s '%s'%s)"
+                % (ambient, named, seg_env['KUBECONFIG'], ns_suffix), None, '')
     if ambient is not None:
         desc = "the ambient kube-context (currently '%s'%s)" % (ambient, ns_suffix)
     else:
@@ -1794,6 +1835,7 @@ def _kube_target(argv, seg_env, context_flags):
 
 
 def eval_kubectl(argv, seg_env, ctx):
+    seg_env, named = kube_env(argv, seg_env)
     words = words_of(argv, KUBE_VALUE_FLAGS)
     action = action_of(argv, words)
     verb = words[0] if words else None
@@ -1831,13 +1873,14 @@ def eval_kubectl(argv, seg_env, ctx):
         if name is None:
             return []  # bare `oc project` only prints the current project
         return [ask_switch(action, 'the shared kubeconfig (current project of the context)')]
-    explicit, edesc, ambient, adesc = _kube_target(argv, seg_env, ('--context',))
+    explicit, edesc, ambient, adesc = _kube_target(argv, seg_env, ('--context',), named)
     f = policy(action, explicit, edesc, ambient, adesc, 'kubectl --context <ctx>',
                classify_fn=lambda v: classify_kube(v, seg_env))
     return [f] if f else []
 
 
 def eval_helm(argv, seg_env, ctx):
+    seg_env, named = kube_env(argv, seg_env)
     words = words_of(argv, KUBE_VALUE_FLAGS)
     action = action_of(argv, words)
     verb = words[0] if words else None
@@ -1854,19 +1897,20 @@ def eval_helm(argv, seg_env, ctx):
         return [ask_unknown(action, "registry '%s'" % (remote or '<unresolved>'))]
     if verb in HELM_LOCAL_OR_READONLY:
         return []
-    explicit, edesc, ambient, adesc = _kube_target(argv, seg_env, ('--kube-context',))
+    explicit, edesc, ambient, adesc = _kube_target(argv, seg_env, ('--kube-context',), named)
     f = policy(action, explicit, edesc, ambient, adesc, 'helm --kube-context <ctx>',
                classify_fn=lambda v: classify_kube(v, seg_env))
     return [f] if f else []
 
 
 def eval_flux(argv, seg_env, ctx):
+    seg_env, named = kube_env(argv, seg_env)
     words = words_of(argv, KUBE_VALUE_FLAGS)
     action = action_of(argv, words)
     verb = words[0] if words else None
     if verb is None or verb in FLUX_READONLY:
         return []
-    explicit, edesc, ambient, adesc = _kube_target(argv, seg_env, ('--context',))
+    explicit, edesc, ambient, adesc = _kube_target(argv, seg_env, ('--context',), named)
     f = policy(action, explicit, edesc, ambient, adesc, 'flux --context <ctx>',
                classify_fn=lambda v: classify_kube(v, seg_env))
     return [f] if f else []
@@ -2767,7 +2811,11 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None):
         if is_help_invocation(tool, argv) or (
                 len(argv) == 2 and argv[1] in VERSION_FLAGS):
             continue
-        findings += evaluator(argv, seg_inline, ctx)
+        # The env a child inherits: an `export` earlier in the command counts
+        # like the inline prefix, and a never-exported `P=x` does not (Q168).
+        # Built here rather than taken from child_env, so it carries the
+        # `env NAME=v` operands the wrapper walk merged into seg_inline.
+        findings += evaluator(argv, {**exported, **seg_inline}, ctx)
     return findings, override, session_reason
 
 
