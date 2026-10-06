@@ -198,6 +198,64 @@ class IndentedFragmentTests(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
 
 
+class CitationReachTests(unittest.TestCase):
+    """Two ways a citation went unchecked with nothing reported (Q182).
+
+    A path with no extension was never read as a citation, so a `Makefile:N`
+    pointer could rot at every window. A fragment matching several lines passed
+    wherever one of them sat in the window, which is how a fragment cut short at
+    an inline backtick went green on a prefix. The second is advisory here, so
+    the gate's own flags have to stay green on it.
+    """
+
+    TARGET = ('all: check\n' + 'x = 1\n' * 13 +
+              'check: drift launchers\n' + 'x = 1\n' * 3)
+
+    def lint_citing(self, citation, extra=('--citation-window', '0'),
+                    target=None):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        store = os.path.join(tmp, 'docs', 'queue')
+        os.makedirs(store)
+        with open(os.path.join(tmp, 'docs', 'Makefile'), 'w',
+                  encoding='utf-8') as fh:
+            fh.write(target or self.TARGET)
+        with open(os.path.join(store, 'Q1.md'), 'w', encoding='utf-8') as fh:
+            fh.write(GateTests.CLEAN % ('ready', citation))
+        return lint(store, list(extra))
+
+    def test_an_extensionless_citation_off_its_line_fails(self):
+        p = self.lint_citing('`Makefile:2:check: drift launchers`')
+        self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn('now at line 15', p.stdout + p.stderr)
+
+    def test_an_extensionless_citation_at_its_line_passes(self):
+        p = self.lint_citing('`Makefile:15:check: drift launchers`')
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertNotIn('occurs on', p.stdout + p.stderr)
+
+    def test_a_fragment_truncated_at_a_backtick_is_noted_not_failed(self):
+        # The group stops at the inline backtick and binds `x = `, which is on
+        # sixteen lines, one of them the line cited.
+        citation = '`Makefile:2:x = `1` + y`'
+        p = self.lint_citing(citation)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn('occurs on 16 lines', p.stdout + p.stderr)
+        p = self.lint_citing(citation,
+                             extra=('--strict', 'ambiguous-citation'))
+        self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
+
+    def test_a_repeated_fragment_still_fails_drift_past_the_window(self):
+        """The advisory note must not unbind drift. Gate flags, window ten."""
+        target = 'x = 1\n' * 49 + 'dup()\n' + 'x = 1\n' * 39 + 'dup()\n'
+        p = self.lint_citing('`Makefile:20:dup()`', extra=(), target=target)
+        self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn('now at line 50', p.stdout + p.stderr)
+        p = self.lint_citing('`Makefile:85:dup()`', extra=(), target=target)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn('occurs on 2 lines', p.stdout + p.stderr)
+
+
 class ClaimsTests(unittest.TestCase):
     """`make backlog-claims`, against a real repository and a real remote.
 
