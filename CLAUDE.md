@@ -10,8 +10,9 @@ below.
 
 ## Never edit a vendored library copy
 
-`lib/` holds the shared modules: `bouncer_parse.py`, the shell parser, and
-`bouncer_grants.py`, the session-grant store. Every plugin carries a copy of
+`lib/` holds the shared modules: `bouncer_parse.py`, the shell parser,
+`bouncer_grants.py`, the session-grant store, and `bouncer_wrappers.py`, each
+command wrapper's option grammar. Every plugin carries a copy of
 each at `plugins/<name>/lib/`, written by `scripts/sync-lib.py`, which syncs
 every module named in its `MODULES` tuple. Adding a module there is what makes
 it shared — a file dropped in `lib/` and not named is vendored nowhere.

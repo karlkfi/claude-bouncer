@@ -148,6 +148,11 @@ two commands, and prod-guard judges an unterminated heredoc that bash would trea
 as data. Forcing one answer onto another guard's question is how the copies
 diverged in the first place, so each guard keeps its own segmenter.
 
+Command wrappers split the same way. `lib/bouncer_wrappers.py` holds the option
+grammar of `sudo`, `env`, `timeout` and the rest, so a value-taking option is
+recorded once for all five guards. The loop that peels a wrapper stays in each
+guard, because what it does with the peeled words differs.
+
 ### Why every plugin carries its own copy of the parser
 
 Claude Code copies a plugin into
@@ -169,7 +174,7 @@ Edit `lib/bouncer_parse.py`. Never a vendored copy.
 
 ```
 .claude-plugin/marketplace.json   the five entries, sourced from ./plugins/<name>
-lib/bouncer_parse.py              the shared parser
+lib/                              the shared modules: parser, grant store, wrapper options
 scripts/sync-lib.py               vendors it, and the CI drift gate
 scripts/render-images.py          rasterizes the brand images, here and per plugin
 scripts/queue.py                  reads, orders and checks the backlog

@@ -83,6 +83,7 @@ from bouncer_parse import (                                    # noqa: E402
     strip_comments, strip_heredoc_bodies,
 )
 from bouncer_grants import grants_path, load_grants, record_grants  # noqa: E402
+from bouncer_wrappers import WRAPPER_VALUE_OPTS, wrapper_option  # noqa: E402
 import time
 from bouncer_parse import note_discarded_writes  # noqa: E402
 
@@ -273,29 +274,6 @@ PLAIN_WRAPPERS = frozenset({'command', 'nohup', 'time', 'builtin', 'exec',
 # Wrappers that take one operand between their options and the command:
 # timeout's duration, chrt's priority, taskset's CPU mask.
 OPERAND_WRAPPERS = frozenset({'timeout', 'chrt', 'taskset'})
-
-# Wrapper flags that take a SEPARATE value. Dropped one token at a time, the
-# value is left behind and reads as the tool, so the segment defers (Q152).
-WRAPPER_VALUE_FLAGS = {
-    # sudo's `-h` and `-U` are held out: Q158 and Q157.
-    'sudo': frozenset({'-C', '--close-from', '-D', '--chdir', '-g', '--group',
-                       '-p', '--prompt', '-R', '--chroot',
-                       '-T', '--command-timeout', '-u', '--user'}),
-    'env': frozenset({'-u', '--unset', '-C', '--chdir', '-P'}),  # -P is BSD's
-    'timeout': frozenset({'-k', '--kill-after', '-s', '--signal'}),
-    'exec': frozenset({'-a'}),
-    'time': frozenset({'-o', '--output', '-f', '--format'}),  # -o both, rest GNU
-    # Long forms are GNU's, as with `time` above; BSD stdbuf rejects them.
-    # `unbuffer` needs no entry -- its only flag, `-p`, carries no value.
-    'stdbuf': frozenset({'-i', '--input', '-o', '--output', '-e', '--error'}),
-    # nice is GNU's and the rest util-linux's. setsid and taskset take no
-    # value: `taskset -c` changes how the mask operand reads, not a value.
-    'nice': frozenset({'-n', '--adjustment'}),
-    'ionice': frozenset({'-c', '--class', '-n', '--classdata', '-p', '--pid',
-                         '-P', '--pgid', '-u', '--uid'}),
-    'chrt': frozenset({'-T', '--sched-runtime', '-P', '--sched-period',
-                       '-D', '--sched-deadline'}),
-}
 
 
 def heredoc_openers(line):
@@ -732,7 +710,7 @@ def is_sudo_run_nothing(operands):
     in the token is that flag's value and a username or prompt is free to
     contain a mode letter. `sudo -uKarl` is the case -- reading the `K` as
     `--remove-timestamp` would defer a command sudo really runs."""
-    value_flags = WRAPPER_VALUE_FLAGS['sudo']
+    value_flags = WRAPPER_VALUE_OPTS['sudo']
     i = 0
     while i < len(operands):
         tok = operands[i]
@@ -742,7 +720,7 @@ def is_sudo_run_nothing(operands):
             name = tok.split('=', 1)[0]
             if name in SUDO_RUN_NOTHING_LONG:
                 return True
-            i += 2 if name == tok and is_long_value_flag(tok, value_flags) else 1
+            i += wrapper_option(operands[i:], value_flags)[0]
         else:
             i += 1
             for pos, char in enumerate(tok[1:], start=2):
@@ -757,40 +735,13 @@ def is_sudo_run_nothing(operands):
     return False
 
 
-def is_long_value_flag(tok, value_flags):
-    """Whether a `--name` word with no `=` takes the next word as its value.
-    getopt_long accepts any unique prefix of a long option, so `--kill` is
-    `--kill-after` (Q228). A prefix of two value-taking spellings is an
-    ambiguity the tool rejects, so it stays one word."""
-    if tok in value_flags:
-        return True
-    if tok == '--':  # ends the options; a prefix of every long spelling
-        return False
-    return len([f for f in value_flags
-                if f.startswith('--') and f.startswith(tok)]) == 1
-
-
-def flag_arity(tok, value_flags):
-    """How many words a wrapper's option word consumes: 2 when it ends in a
-    flag whose value is the next word, else 1. A short word is walked a
-    character at a time like `is_sudo_run_nothing`, so a bundle (`-nu root`)
-    takes its value too, and the walk stops at the first value-taking flag
-    because the rest of the word is that flag's attached value (`-uroot`)."""
-    if tok.startswith('--'):
-        return 2 if is_long_value_flag(tok, value_flags) else 1
-    for pos, char in enumerate(tok[1:], start=2):
-        if '-' + char in value_flags:
-            return 2 if pos == len(tok) else 1
-    return 1
-
-
 def strip_wrappers(argv, env):
     """Remove leading launcher commands (sudo, env, timeout, xargs, ...) so
     the covered tool underneath is classified, not the wrapper. `env`
     assignments found behind `env`/`sudo` merge into the segment env."""
     while argv:
         head = os.path.basename(argv[0])
-        value_flags = WRAPPER_VALUE_FLAGS.get(head, frozenset())
+        value_flags = WRAPPER_VALUE_OPTS.get(head, frozenset())
         if head == 'sudo':
             # A run-nothing mode makes the operands behind it something other
             # than a command, so leaving `sudo` in place defers the segment --
@@ -799,7 +750,7 @@ def strip_wrappers(argv, env):
                 break
             argv = argv[1:]
             while argv and argv[0].startswith('-'):
-                argv = argv[flag_arity(argv[0], value_flags):]
+                argv = argv[wrapper_option(argv, value_flags)[0]:]
         elif head == 'env':
             argv = argv[1:]
             assigned = False
@@ -813,7 +764,7 @@ def strip_wrappers(argv, env):
                         words, rest = split
                         argv = words + rest
                         continue
-                    argv = argv[flag_arity(argv[0], value_flags):]
+                    argv = argv[wrapper_option(argv, value_flags)[0]:]
                 elif '=' in argv[0]:
                     # Any operand holding `=` assigns, whatever bash would make
                     # of the name: `env 1=x cmd` runs cmd, and GNU env runs it
@@ -833,7 +784,7 @@ def strip_wrappers(argv, env):
         elif head in OPERAND_WRAPPERS:
             argv = argv[1:]
             while argv and argv[0].startswith('-'):
-                argv = argv[flag_arity(argv[0], value_flags):]
+                argv = argv[wrapper_option(argv, value_flags)[0]:]
             if argv:
                 argv = argv[1:]
         elif head == 'xargs':
@@ -857,7 +808,7 @@ def strip_wrappers(argv, env):
                 break
             argv = argv[1:]
             while argv and argv[0].startswith('-'):
-                argv = argv[flag_arity(argv[0], value_flags):]
+                argv = argv[wrapper_option(argv, value_flags)[0]:]
         else:
             break
     return argv

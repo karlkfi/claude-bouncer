@@ -2708,6 +2708,7 @@ check "[wrap] control: push --force origin main -> ask" ask \
   "$(decision_for "$(bash_payload 'git push --force origin main')" "$WRAP")"
 for w in 'env' 'env -i' 'env -' 'env FOO=1' 'env -u FOO' 'env -uFOO' \
          'env -iu FOO' 'env --unset FOO' 'env --uns FOO' 'env FOO[0]=x' \
+         'env -a x' 'env --argv0 x' 'env -ia x' \
          "env 'a b=c'" 'env =x' 'command' 'command -p' 'nohup' 'nice' \
          'nice -n 5' 'nice -10' 'timeout 60' 'timeout -s KILL 60' \
          'timeout --kill-after=2 60' 'timeout --kill 2 60' 'timeout -- 60' \
