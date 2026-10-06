@@ -12698,5 +12698,67 @@ class ProcessSubstBodyTests(OutsideParentFixture, unittest.TestCase):
                 self.assertIsNone(self._decision(cmd))
 
 
+# --- Q266: a command already holding the marker byte -----------------------
+
+
+class MarkerByteTests(OutsideParentFixture, unittest.TestCase):
+    """Q266: a `\x1e` byte in the command, which the substitution marking uses.
+
+    A string holding one cannot be marked, so no body can be placed by
+    position. Every body used to keep the cwd the string started in, which a
+    `cd` earlier in the string had already moved: a read outside the workspace
+    went silent, and a read inside it asked. Now a `cd` anywhere makes every
+    body's cwd unknown, and with no `cd` the starting cwd is still exact.
+    """
+
+    RS = "\x1e"
+
+    def _ps(self, cmd):
+        out = run_hook(cmd, self.workspace, project_dir=self.workspace,
+                       tool_name="PowerShell")
+        return out and out["hookSpecificOutput"]["permissionDecision"]
+
+    def test_a_body_after_a_cd_is_untracked(self):
+        self.assertEqual("ask", self._decision('cd ..; echo "$(cat q266-x)"'))
+        self.assertEqual("deny", self._decision(
+            'cd ..; echo "$(cat q266-x)" "%s"' % self.RS))
+        self.assertEqual("deny", self._decision(
+            'cd sub; echo "$(cat ../in.txt)" "%s"' % self.RS))
+
+    def test_a_cd_in_a_function_body_moves_it_too(self):
+        self.assertEqual("deny", self._decision(
+            'f() { cd ..; }; f; echo "$(cat q266-x)" "%s"' % self.RS))
+
+    def test_a_marker_shaped_run_places_nothing(self):
+        self.assertEqual("deny", self._decision(
+            'cd ..; echo "$(cat q266-x)" "%s0%s"' % (self.RS, self.RS)))
+
+    def test_with_no_cd_the_starting_cwd_still_answers(self):
+        self.assertIsNone(self._decision('echo "$(cat in.txt)" "%s"' % self.RS))
+        self.assertEqual("ask", self._decision(
+            'echo "$(cat ../q266-x)" "%s"' % self.RS))
+
+    def test_the_deny_names_the_byte(self):
+        out = run_hook('cd ..; echo "$(cat q266-x)" "%s"' % self.RS,
+                       self.workspace, project_dir=self.workspace)
+        self.assertIn("0x1E",
+                      out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_a_heredoc_body_is_still_placed(self):
+        # Heredocs are counted, not marked, so the walk places them even here:
+        # the body reads `sub/../in.txt`, inside the workspace.
+        self.assertEqual("allow", self._decision(
+            'cd sub; cat <<EOF "%s"\n$(cat ../in.txt)\nEOF' % self.RS))
+
+    def test_powershell(self):
+        self.assertEqual("ask", self._ps(
+            "Set-Location ..; Write-Output $(Get-Content q266-x)"))
+        self.assertEqual("deny", self._ps(
+            'Set-Location ..; Write-Output $(Get-Content q266-x) "%s"'
+            % self.RS))
+        self.assertIsNone(self._ps(
+            'Write-Output $(Get-Content in.txt) "%s"' % self.RS))
+
+
 if __name__ == "__main__":
     unittest.main()
