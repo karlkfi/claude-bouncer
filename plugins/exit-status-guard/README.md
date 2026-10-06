@@ -69,7 +69,9 @@ fresh checkout. Where there is no scratchpad to name, the suggestion carries its
 own `mkdir -p tmp &&` instead.
 
 `set -o pipefail` earlier in the same command suppresses this, unless it was
-set inside a subshell that has already ended, or turned off again. Reading
+set inside a subshell that has already ended, or turned off again. It reaches a
+pipe inside a later `$(…)` too, since a substitution inherits the shell's
+options: `set -o pipefail; out=$(make check | tail -5)` is not denied. Reading
 `$PIPESTATUS` is denied on its own, gate or no gate — the array is a bash
 feature, so under a shell without it the read expands to empty and every test
 against it reads as success. zsh's `$pipestatus` suppresses nothing: the array

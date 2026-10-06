@@ -199,8 +199,9 @@ def tokenize(cmd):
     ``cleaned`` is the command with comments and heredoc bodies removed -- the
     string the raw-text scans should read, so a `$PIPESTATUS` or a `$(…)` quoted
     inside a heredoc body is not mistaken for one the shell would evaluate.
-    Arithmetic is masked only on the way into shlex: `cleaned` keeps it, so a
-    `$PIPESTATUS` read inside one is still seen.
+    Arithmetic and process substitutions are masked only on the way into
+    shlex: `cleaned` keeps both, so a `$PIPESTATUS` read inside one is still
+    seen and a process substitution's body can still be found.
     """
     expanded = []
     # Heredoc bodies go first so an unbalanced quote inside one cannot throw off
@@ -210,7 +211,8 @@ def tokenize(cmd):
         # `\n` is made a punctuation char so a newline command boundary surfaces
         # as a token; it is otherwise eaten as whitespace, merging the commands
         # on either side. Quoted newlines stay inside their word token.
-        lex = QuoteTrackingLexer(mask_arithmetic(cleaned), posix=True,
+        lex = QuoteTrackingLexer(mask_arithmetic(mask_processes(cleaned)),
+                                 posix=True,
                                  punctuation_chars=';()<>|&\n')
         lex.whitespace_split = True
         lex.whitespace = lex.whitespace.replace('\n', '')
@@ -612,14 +614,16 @@ def pipefail_setting(words):
     return state
 
 
-def pipefail_in_effect(segs):
-    """Per segment, whether pipefail is on when that segment runs.
+def pipefail_walk(segs, initial=False):
+    """(per segment, at the end): whether pipefail is on when each segment runs,
+    and whether it is on after the last one.
 
     Read in order, so a `set` after a pipeline does nothing for it (Q148), and
     scoped to the subshell that ran it: `(set -o pipefail); make | tail` runs
-    the pipe without it.
+    the pipe without it. ``initial`` is the state the text starts in -- a
+    substitution body inherits the shell's options at its position (Q259).
     """
-    stack = [False] * (segs[0].depth + 1 if segs else 1)
+    stack = [initial] * (segs[0].depth + 1 if segs else 1)
     out = []
     for seg in segs:
         out.append(stack[-1])
@@ -631,7 +635,24 @@ def pipefail_in_effect(segs):
                 stack.pop()
             elif op == '(':
                 stack.append(stack[-1])
-    return out
+    return out, stack[-1]
+
+
+def pipefail_before(prefix, initial):
+    """Whether pipefail is on where ``prefix`` ends, or False when unsure.
+
+    ``prefix`` is the command text up to a substitution, so it can stop inside
+    the double quotes around one (`out="$(…)"`); closing the quote is the one
+    repair tried. Anything else that will not parse keeps today's deny.
+    """
+    for text in (prefix, prefix + '"'):
+        tokens = tokenize(text)[0]
+        if tokens is not None:
+            segs = split_segments(tokens)
+            if segs is None:
+                return False
+            return pipefail_walk(segs, initial)[1] if segs else initial
+    return False
 
 
 def sets_errexit(segs):
@@ -697,9 +718,9 @@ def status_source(segs, idx):
     return None
 
 
-def piped_gate(segs, reg):
+def piped_gate(segs, reg, initial=False):
     """The head of the first gate whose status a pipe swallows, or ''."""
-    pipefail = pipefail_in_effect(segs)
+    pipefail = pipefail_walk(segs, initial)[0]
     for i, seg in enumerate(segs):
         if next_op(seg.post_ops) not in PIPE_OPS:
             continue
@@ -924,6 +945,23 @@ def sequenced_mutation(segs, reg):
     return '', '', ''
 
 
+# What stands in for a `<(…)` or `>(…)` before shlex reads the command: the
+# file name bash hands the command around it. Unmasked, `<` reads as a
+# redirect whose target is the `(`, and the body's words join the enclosing
+# command -- so a `set -o pipefail` inside it was read as `cat`'s operand.
+# The body is judged on its own, from ``process_substitutions``.
+PROCESS_WORD = '/dev/fd/63'
+
+
+def mask_processes(text):
+    """Replace each process substitution bash would run with ``PROCESS_WORD``."""
+    spans = []
+    process_substitutions(text, spans=spans)
+    for start, end in reversed(spans):
+        text = text[:start] + PROCESS_WORD + text[end:]
+    return text
+
+
 def procsub_gate(bodies, segs, reg):
     """The head of a gate run inside a `<(…)` or `>(…)`, or ''.
 
@@ -1102,11 +1140,13 @@ ERREXIT_NOTE = (
     "every line runs whatever the line before it returned.")
 
 
-def decide(cmd, background, reg, scratch='', depth=0):
+def decide(cmd, background, reg, scratch='', depth=0, pipefail=False):
     """The deny reason for a Bash command, or '' to stay silent.
 
     ``scratch`` is the session scratchpad the suggested rewrites should redirect
-    into; empty means they carry their own `mkdir` instead.
+    into; empty means they carry their own `mkdir` instead. ``pipefail`` is
+    whether the command starts with it on, as a substitution body does when
+    the text before it set it.
 
     Every failure path returns '': a hook that cannot parse a command has
     nothing to say about it.
@@ -1131,7 +1171,7 @@ def decide(cmd, background, reg, scratch='', depth=0):
     # `pipefail` propagates the failure, so it mitigates a pipeline that
     # follows it -- but not a status the last statement discarded, which is why
     # the suppression is scoped to the pipe verdict.
-    gate = piped_gate(segs, reg)
+    gate = piped_gate(segs, reg, pipefail)
     if gate:
         return with_log_path(
             '`' + truncate(gate) + '`' + PIPED_REASON, scratch)
@@ -1150,7 +1190,8 @@ def decide(cmd, background, reg, scratch='', depth=0):
         return with_log_path('`' + truncate(gate) + SEQUENCED_REASON_HEAD
                              + truncate(mutator) + reason, scratch)
 
-    processes = process_substitutions(cleaned)
+    process_spans = []
+    processes = process_substitutions(cleaned, spans=process_spans)
     gate = procsub_gate(processes, segs, reg)
     if gate:
         return with_log_path(
@@ -1160,12 +1201,28 @@ def decide(cmd, background, reg, scratch='', depth=0):
     # command (backticks are ordinary word characters to shlex), so the bodies
     # are analyzed on their own. `$(…)` bodies mostly arrive through the `(`
     # already in the stream; recursing costs little and covers the rest.
+    # Each body inherits the options in force where it sits, so pipefail set
+    # before it covers a pipe inside it (Q259). A heredoc body's position is
+    # not tracked, so it starts with pipefail off.
     if depth < MAX_SUBST_DEPTH:
-        bodies = command_substitutions(cleaned) + processes
+        # A `$(…)` inside a `<(…)` is reached by recursing into that body,
+        # where the text before it is read correctly; from out here it is not.
+        spans, bodies = [], []
+        found_spans = []
+        for body, span in zip(command_substitutions(cleaned, spans=found_spans),
+                              found_spans):
+            if not any(s < span[0] < e for s, e in process_spans):
+                bodies.append(body)
+                spans.append(span)
+        bodies += processes
+        states = [pipefail_before(cleaned[:start], pipefail)
+                  for start, _ in spans + process_spans]
         for body in heredocs:
-            bodies.extend(command_substitutions(body, quotes=False))
-        for body in bodies:
-            reason = decide(body, False, reg, scratch, depth + 1)
+            found = command_substitutions(body, quotes=False)
+            bodies.extend(found)
+            states.extend([False] * len(found))
+        for body, state in zip(bodies, states):
+            reason = decide(body, False, reg, scratch, depth + 1, state)
             if reason:
                 return reason
 
