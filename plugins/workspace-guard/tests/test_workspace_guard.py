@@ -5236,6 +5236,46 @@ class PipedCompoundCdTests(OutsideParentFixture, unittest.TestCase):
                 self.assertEqual("allow", self._decision(cmd))
 
 
+class CasePatternCdTests(OutsideParentFixture, unittest.TestCase):
+    """Q273: a `case` pattern's `)` closes no subshell.
+
+    `split_groups` read every `)` as closing the innermost `(`. The `)` ending
+    an unparenthesised pattern (`x)`) closes nothing, so inside a subshell it
+    ended the subshell's scope early, and a `cd` later in that subshell moved
+    the cwd for the rest of the string. Every shape here was driven under bash
+    5.3.15 to see which file it reads.
+    """
+
+    def test_a_cd_after_a_case_stays_in_its_subshell(self):
+        # Pre-fix the unparenthesised patterns allowed a read of
+        # `<root>/../TARGET`; the `(x)` spelling already balanced.
+        for cmd in ("(case x in x) ;; esac; cd sub); cat ../%s",
+                    "(case x in (x) ;; esac; cd sub); cat ../%s",
+                    "(case x in x|y) ;; esac; cd sub); cat ../%s",
+                    "(case x in x) :;& y) :;;& *) ;; esac; cd sub); cat ../%s",
+                    "(case x in\n x) echo a\n ;;\nesac; cd sub); cat ../%s",
+                    "(case x in $(echo x)) ;; esac; cd sub); cat ../%s",
+                    "(case x in x) case y in y) ;; esac; cd sub;; esac);"
+                    " cat ../%s"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual("ask", self._decision(cmd % self.TARGET))
+
+    def test_a_clause_is_still_read_as_commands(self):
+        # A pattern is dropped; the clause after it, and whatever follows
+        # `esac`, still has its paths checked.
+        for cmd, want in (("case x in x) cat ../%s;; esac", "ask"),
+                          ("case x in x) :;; y) :;; esac; cat ../%s", "ask"),
+                          ("case x in x) echo hi; esac; cat ../%s", "ask")):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(want, self._decision(cmd % self.TARGET))
+
+    def test_a_cd_in_a_clause_still_moves_the_cwd(self):
+        for cmd in ("case x in x) cd sub;; esac; cat ../in.txt",
+                    "(case x in x) cd sub; cat ../in.txt;; esac)"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual("allow", self._decision(cmd))
+
+
 class SubstBodyVarPropagationTests(unittest.TestCase):
     """Q66: a substitution body inherits the string's literal variables.
 

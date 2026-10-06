@@ -954,9 +954,8 @@ through the same boundary rules and produce the same reasons. Symlink staging
    `shopt -s lastpipe` may be on, bash runs a pipeline's last stage in the
    current shell, so the cwd after any last stage is unknown and later
    relative paths deny; a `shopt -u lastpipe` written unconditionally at the
-   top level turns that off again. One shape
-   still leaks: a `cd` after an unparenthesised `case` pattern (`x)`) inside a
-   subshell, an open bug. A
+   top level turns that off again. A `case` pattern's `)` closes no subshell,
+   so `(case x in x) ;; esac; cd sub); cat ../x` still asks. A
    `cd`/`pushd` target that is a propagated literal variable (step 4)
    re-roots the same way (`d=sub; cd $d && cat x.txt`). Two pure,
    deterministic command substitutions are also recognised as `cd`/`pushd`
