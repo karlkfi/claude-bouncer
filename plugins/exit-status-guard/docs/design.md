@@ -190,6 +190,12 @@ consumes `go test`'s status is the `|`, two tokens later. Segments therefore
 carry the whole operator run on each side, and `next_op()` skips `(` and `)` to
 find the one that decides.
 
+**A process substitution carries nothing.** `<(…)` and `>(…)` run beside the
+command that names them, and bash reports their status to no operator at all, so
+a gate there is lost whatever surrounds it. That makes it the one place a gate
+is denied without reading an operator: `procsub_gate()` only asks whether the
+body holds one.
+
 **`&&` lets either side carry; `||` and `|` carry only the right.** A statement
 is evaluated left to right, matching bash's association: in `a && b || c` the
 `||` sees `(a && b)` as its left side. `mkdir -p tmp && make check > log` keeps

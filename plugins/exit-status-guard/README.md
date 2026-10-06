@@ -45,7 +45,7 @@ rewrite rather than in a permission prompt you have to answer.
 
 ## What it does
 
-Three ways a status disappears, all of which turn a failure into a false green.
+Four ways a status disappears, all of which turn a failure into a false green.
 
 ### 1. Piped into a filter
 
@@ -105,7 +105,9 @@ git add .; git commit -m wip    # denied — a failed add commits nothing new
 ```
 
 Here the status is read correctly and then ignored. `&&` is the fix, and is
-never denied.
+never denied. A subshell is a statement like any other, so `(make check); git
+push` and `make check; (git push)` deny the same way; `(make check; git push)`
+is the subshell's own sequence and is left alone.
 
 A newline between the two sequences the same way, and the deny names it rather
 than a `;` the command does not hold. The shape that leaves one is a heredoc,
@@ -151,6 +153,18 @@ and ignores it, `[ "$rc" -eq 0 ] && echo ok || git push` publishes on the
 failure, and `if [ "$rc" -eq 0 ]; then git push; fi` is not recognised; all
 three still deny.
 
+### 4. Inside a process substitution
+
+```bash
+tail <(make check)                      # denied — tail reads a file name
+while read -r l; do …; done < <(go test ./...)   # denied
+```
+
+The command around a `<(…)` or `>(…)` reads a stream, and the shell reports the
+body's status nowhere: under bash 5, `tail <(false); echo $?` prints 0. Run the
+gate on its own, redirected, and read the log. A body that prints `$?` into the
+stream, or a `wait $!` that collects the status (bash 5.1+), is not denied.
+
 ## What it does not deny
 
 The registry is deliberately not "every command". A guard that denies every
@@ -168,6 +182,8 @@ git stash list | head                   # a read verb, so this is a read
 git tag --sort=-v:refname | head -5     # a listing flag, so this is a read
 make check; git tag -l                  # a read, so there is nothing to gate
 make check; kubectl rollout status web
+diff <(sort a) <(sort b)                # no gate in either body
+make check > >(tee <scratchpad>/c.log)  # the gate runs outside it
 ```
 
 The last two matter most. Gate patterns are matched against the **head of a
@@ -447,7 +463,7 @@ A project extends them with its own `.claude/exit-status-guard.json`:
 
 | Key | What it does |
 |---|---|
-| `gates` | Commands whose exit status **is** the answer. Drives all three rules. |
+| `gates` | Commands whose exit status **is** the answer. Drives every rule. |
 | `exempt` | Wins over **both** `gates` and `mutators`. For informational targets whose output, not status, is the point (`make print-config`). Read forms need no row when a read verb names them. |
 | `mutators` | State-changing commands. Drives rule 3 only — the `;`-before-a-state-change case. |
 | `restores` | The subset of `mutators` that reverts local state rather than publishing. Lets the capture-and-restore rewrite through; read only after `mutators` has matched, so an entry naming anything else is dead. |
