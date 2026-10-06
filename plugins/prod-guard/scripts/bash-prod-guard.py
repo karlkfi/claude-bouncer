@@ -493,11 +493,11 @@ def _mask_substitutions(raw, spans, sentinels):
 
 
 def _strip_comments(raw, quotes=True):
-    """`strip_comments` with every command substitution held out of it. It
-    reads a `"` inside a `$(...)` that sits in double quotes as closing the
-    outer string, so a `#` after it would start a comment and swallow the rest
-    of the line. Each substitution is masked, the comments outside them
-    stripped, and the text put back."""
+    """`strip_comments` with every command substitution held out of it. Each
+    substitution is masked, the comments outside them stripped, and the text
+    put back. It predates `strip_comments` holding a backtick span and a
+    double-quoted `$(...)` whole itself (Q254, Q257), and no test here
+    changes outcome without it (Q288)."""
     spans = []
     command_substitutions(raw, quotes=quotes, spans=spans)
     spans = spans[:_SUBST_MAX]

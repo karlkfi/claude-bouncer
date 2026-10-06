@@ -80,7 +80,9 @@ class StripCommentsTests(unittest.TestCase):
                     'echo "`echo "a # c"`" ; id', 'echo ${x:- #} ; id',
                     'echo ${x:-${y:- #}} ; id', 'echo ${x:-$(echo }) #} ; id',
                     'echo ${x:-`echo } #`} ; id', 'echo "${x:-" #"}" ; id',
-                    "echo ${x:-$'\\'} #'} ; id"):
+                    "echo ${x:-$'\\'} #'} ; id",
+                    # A `"` in a `$(...)` in double quotes ends nothing (Q257).
+                    'echo "$(echo "a # c")" ; id'):
             with self.subTest(cmd=cmd):
                 self.assertEqual(cmd, bp.strip_comments(cmd))
         self.assertEqual('echo ${x:-a #} ; id',
@@ -187,6 +189,28 @@ class LexTests(unittest.TestCase):
         self.assertEqual(['cat', 'a`b', 'c'], self.lex("cat 'a`b' c"))
         self.assertEqual(['echo', '`', 'a'], self.lex('echo \\` a'))
         self.assertEqual(['echo', '`a', 'b'], self.lex('echo `a b'))
+
+    def test_a_quote_in_a_substitution_in_double_quotes_closes_nothing(self):
+        # bash 5.3.15 parses each body on its own and runs `id` after it, so
+        # the inner `"` does not close the outer string (Q257). Read as
+        # closing it, the real closing `"` was unbalanced and lex raised.
+        for cmd, word in (('echo "$(echo \'"\')" ; id', '$(echo \'"\')'),
+                          ('echo "$(echo $\'"\')" ; id', '$(echo $\'"\')'),
+                          ('echo "`echo \'"\'`" ; id', '`echo \'"\'`'),
+                          ('echo "$(printf \'%s"\' x)" ; id', '$(printf \'%s"\' x)'),
+                          ('echo "$(case x in x) echo \'"\';; esac)" ; id',
+                           '$(case x in x) echo \'"\';; esac)')):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(['echo', word, ';', 'id'], self.lex(cmd))
+        # Where POSIX quoting reads the line anyway, it is read as before. A
+        # nested body's command then spills into the outer words, which is
+        # what judges one nested past MAX_SUBST_DEPTH.
+        self.assertEqual(['echo', '$(echo ")', ';', 'id'],
+                         self.lex('echo "$(echo \\")" ; id'))
+        self.assertIn('cat', self.lex('echo "$(echo "$(cat f)")"'))
+        self.assertEqual(['echo', 'a$x', 'b'], self.lex('echo "a$x" b'))
+        with self.assertRaises(ValueError):
+            bp.lex('echo "$(echo a) b')
 
     def lex(self, cmd):
         return bp.glue_dollar_paren(bp.split_operator_runs(bp.lex(cmd)))

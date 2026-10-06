@@ -225,7 +225,54 @@ def requote(text, commenters=''):
     span is already one word, inside single quotes everything is. A character
     in ``commenters`` at a word start skips to the newline, the way the
     caller's lexer will.
+
+    Inside double quotes bash parses a `$(…)`, backtick or `${…}` on its own,
+    so a `"` inside one does not close the outer string. POSIX quoting closes
+    it there, and on `"$(echo '"')"` the real closing `"` is then unbalanced
+    and the lexer raises (Q257). Only then is each one copied with its `"` and
+    `\\` escaped. Where the flat reading lexes, it is kept: it spills a nested
+    body's commands into the outer words, which is what judges a body nested
+    past ``MAX_SUBST_DEPTH``.
     """
+    flat = _requote(text, commenters, False)
+    if _shlex_balanced(flat, commenters):
+        return flat
+    return _requote(text, commenters, True)
+
+
+def _shlex_balanced(text, commenters):
+    """Whether posix shlex reads ``text`` without `No closing quotation` or
+    `No escaped character`. A commenter outside quotes ends the line for
+    shlex, mid-word too."""
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == '\\':
+            if i + 1 >= n:
+                return False
+            i += 2
+        elif c == "'":
+            i = text.find("'", i + 1)
+            if i < 0:
+                return False
+            i += 1
+        elif c == '"':
+            i += 1
+            while i < n and text[i] != '"':
+                i += 2 if text[i] == '\\' else 1
+            if i >= n:
+                return False
+            i += 1
+        elif c in commenters:
+            i = text.find('\n', i)
+            if i < 0:
+                return True
+        else:
+            i += 1
+    return True
+
+
+def _requote(text, commenters, hold):
     out, i, n = [], 0, len(text)
     in_double = False
     while i < n:
@@ -234,6 +281,11 @@ def requote(text, commenters=''):
             out.append(text[i:i + 2]); i += 2
             continue
         if in_double:
+            end = _dq_expansion_end(text, i) if hold else -1
+            if end > 0:                           # escaped to read as text (Q257)
+                out.append(text[i:end].replace('\\', '\\\\').replace('"', '\\"'))
+                i = end
+                continue
             out.append(c); i += 1
             in_double = c != '"'
             continue
@@ -328,8 +380,10 @@ def strip_comments(cmd):
     A backtick substitution and a `${…}` expansion are copied whole, in or out
     of double quotes, since no comment starts inside either for the outer
     line: bash ends a comment in `` `true # c` `` at the closing backtick and
-    reads the `#` in `${x:- #}` as text (Q254). The backtick body's own
-    comments are the caller's, when it recurses into the body.
+    reads the `#` in `${x:- #}` as text (Q254). So is a `$(…)` in double
+    quotes, where a `"` inside it does not end the outer string (Q257). A
+    substitution body's own comments are the caller's, when it recurses into
+    the body.
     """
     out = []
     in_single = in_double = False
@@ -357,7 +411,9 @@ def strip_comments(cmd):
                 continue
             out.append(c); out.append(cmd[i+1]); i += 2
             continue
-        if c == '`':
+        if in_double:
+            end = _dq_expansion_end(cmd, i)
+        elif c == '`':
             end = _scan_backticks(cmd, i + 1)[1]
         elif cmd.startswith('${', i):
             end = _brace_end(cmd, i)
@@ -911,6 +967,25 @@ def _brace_end(text, i):
         if end < 0:
             return -1
         i = end
+    return -1
+
+def _dq_expansion_end(text, i):
+    """The index just past the ``$(…)``, backtick span or ``${…}`` opening at
+    ``text[i]`` inside double quotes, or -1 when none opens or closes there.
+
+    bash parses each on its own, so a ``"`` inside one does not close the
+    outer string: ``"$(echo '"')"`` is one word. ``$((…))`` is left to the
+    caller."""
+    if text.startswith('$((', i):
+        return -1
+    if text.startswith('$(', i):
+        end = _scan_dollar_paren(text, i + 2)[1]
+        return end if end > i + 2 else -1
+    if text.startswith('${', i):
+        return _brace_end(text, i)
+    if text.startswith('`', i):
+        end = _scan_backticks(text, i + 1)[1]
+        return end if end > i + 1 else -1
     return -1
 
 def _unescape_backticks(body, in_double):

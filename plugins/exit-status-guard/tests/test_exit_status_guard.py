@@ -104,6 +104,12 @@ CASES = [
      False, True, ''),
     ('after a # in a brace expansion', 'echo ${x:- #} ; make check | tail -5',
      False, True, ''),
+    # Q257: a `"` inside a substitution in double quotes does not close the
+    # outer string, so the line still lexes and the gate after it is seen.
+    ('after a quote in a substitution in double quotes',
+     'echo "$(echo \'"\')" ; make check | tail -5', False, True, ''),
+    ('after a quote in backticks in double quotes',
+     'echo "`echo \'"\'`" ; make check | tail -5', False, True, ''),
     ('subshell group piped', '(cd sub && go test ./...) | tail -5',
      False, True, ''),
     ('brace group piped', '{ cd sub && go test ./...; } | tail -5',
