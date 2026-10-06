@@ -105,7 +105,8 @@ from bouncer_parse import (                                    # noqa: E402
     is_assignment, note_discarded_writes, split_assignment, strip_comments,
     split_operator_runs, strip_heredoc_bodies,
 )
-from bouncer_wrappers import WRAPPER_VALUE_OPTS, wrapper_option  # noqa: E402
+from bouncer_wrappers import (                                 # noqa: E402
+    WRAPPER_GRAMMAR, WRAPPER_VALUE_OPTS, wrapper_option)
 
 DEFAULT_BASH_TIMEOUT_MS = 120000
 DEFAULT_SLEEP_FLOOR_SECONDS = 10
@@ -477,6 +478,33 @@ PLAIN_WRAPPERS = frozenset({'command', 'nohup', 'builtin', 'time', 'exec',
                             'stdbuf', 'unbuffer'})
 SHELL_NAMES = frozenset({'bash', 'sh', 'zsh', 'dash', 'ksh'})
 
+# sudo modes that run no command, so whatever follows is never judged (Q286).
+# `-l` checks a command without running it, `-U` is valid only beside it, `-v`
+# refreshes the timestamp, `-e` edits files, and `-K` and `-V` are usage errors
+# when given a command. Lowercase `-k` runs the command, so it is absent.
+SUDO_RUN_NOTHING = frozenset('lveKUV')
+SUDO_RUN_NOTHING_LONG = frozenset({'list', 'other-user', 'validate', 'edit',
+                                   'remove-timestamp', 'version'})
+
+
+def sudo_runs_nothing(tok):
+    """Whether sudo option word `tok` puts it in a run-nothing mode. A short
+    word is walked to its first value-taking letter, since the rest is that
+    value (`-uKarl` names a user), and a long word resolves by unique prefix,
+    as getopt_long reads it (`--li` is `--list`)."""
+    if tok.startswith('--'):
+        name = tok[2:].partition('=')[0]
+        longs = WRAPPER_GRAMMAR['sudo'].long
+        matches = [name] if name in longs else \
+            [k for k in longs if k.startswith(name)]
+        return len(matches) == 1 and matches[0] in SUDO_RUN_NOTHING_LONG
+    for char in tok[1:]:
+        if char in SUDO_RUN_NOTHING:
+            return True
+        if '-' + char in WRAPPER_VALUE_OPTS['sudo']:
+            return False
+    return False
+
 
 def strip_head(argv, state):
     """Peel shell keywords, env-var prefixes, and launcher wrappers off a
@@ -511,6 +539,11 @@ def strip_head(argv, state):
             value_flags = WRAPPER_VALUE_OPTS['sudo']
             argv = argv[1:]
             while argv and argv[0].startswith('-'):
+                if argv[0] == '--':
+                    argv = argv[1:]
+                    break
+                if sudo_runs_nothing(argv[0]):
+                    return []
                 argv = argv[wrapper_option(argv, value_flags)[0]:]
             while argv and '=' in argv[0] and argv[0][0] not in '/=':
                 # Sudo's operands, like `env`'s below, by sudo's own rule (its

@@ -1360,6 +1360,40 @@ class EnvSplitStringTests(unittest.TestCase):
                 self.assertIsNone(d)
 
 
+class SudoRunNothingTests(unittest.TestCase):
+    # sudo's list, validate, edit, remove-timestamp and version modes run no
+    # command, so the one after them is not judged (Q286). sudo 1.9.17p2 with
+    # `-n` prints its usage for `-v`, `-K` and `-V` given a command.
+    def test_a_run_nothing_mode_is_not_judged(self):
+        for command in ("sudo -l tail -f log.txt",
+                        "sudo --list tail -f log.txt",
+                        "sudo --li tail -f log.txt",
+                        "sudo -v tail -f log.txt",
+                        "sudo --validate tail -f log.txt",
+                        "sudo -U bob -l tail -f log.txt",
+                        "sudo -lU bob tail -f log.txt",
+                        "sudo -kl tail -f log.txt",
+                        "sudo -e tail -f log.txt",
+                        "sudo -K tail -f log.txt",
+                        "sudo -- -l tail -f log.txt",
+                        "sudo -l sleep 300"):
+            with self.subTest(command=command):
+                d, _ = run_hook(command)
+                self.assertIsNone(d)
+        d, _ = run_hook("sudo -l scripts/gate.sh", config=GATE_CFG)
+        self.assertIsNone(d)
+
+    def test_a_mode_letter_in_a_value_is_not_a_mode(self):
+        # `-k` runs the command it is given, and a letter after a value flag
+        # is that flag's value: `-uKarl` and `-u lv` name users.
+        for command in ("sudo tail -f log.txt", "sudo -k tail -f log.txt",
+                        "sudo -uKarl tail -f log.txt",
+                        "sudo -u lv tail -f log.txt"):
+            with self.subTest(command=command):
+                d, _ = run_hook(command)
+                self.assertEqual(d, "deny")
+
+
 SLOW_ASK_CFG = {"slow": {"action": "ask",
                          "commands": {r"make test-race\b": 600000}}}
 
