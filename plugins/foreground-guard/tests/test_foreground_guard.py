@@ -1329,6 +1329,32 @@ SLOW_ASK_CFG = {"slow": {"action": "ask",
                          "commands": {r"make test-race\b": 600000}}}
 
 
+class SlowBackgroundedTests(unittest.TestCase):
+    """Q247: Class B judged every segment alike, so a registered command the
+    shell already backgrounded with `&` was denied as running in the
+    foreground. Measured before the fix: each deferring command below
+    denied."""
+
+    GATE = {"slow": {"commands": {"scripts/gate\\.sh": 3600000}}}
+
+    def test_a_backgrounded_slow_command_passes(self):
+        for cmd in ("scripts/gate.sh &", "scripts/gate.sh & ls",
+                    'echo "$(scripts/gate.sh)" & ls',
+                    "scripts/gate.sh && ls &",
+                    "while true; do scripts/gate.sh; done &"):
+            with self.subTest(cmd=cmd):
+                d, _ = run_hook(cmd, config=self.GATE)
+                self.assertIsNone(d)
+
+    def test_a_foreground_segment_beside_it_is_still_judged(self):
+        for cmd in ("ls & scripts/gate.sh", "scripts/gate.sh; ls &",
+                    "scripts/gate.sh\nls &\n", "scripts/gate.sh && ls",
+                    'echo "$(scripts/gate.sh)"'):
+            with self.subTest(cmd=cmd):
+                d, _ = run_hook(cmd, config=self.GATE)
+                self.assertEqual(d, "deny")
+
+
 class SlowConfigTests(unittest.TestCase):
     def test_default_action_denies(self):
         d, r = run_hook("make test-race", config=SLOW_CFG)

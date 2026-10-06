@@ -127,6 +127,7 @@ Decision cell.
 | `make test-race` (configured min 600000 ms, default timeout) | **deny** (names the minimum) <!-- check: {"command": "make test-race", "config": {"slow": {"commands": {"make": {"test-race": 600000}}}}} --> |
 | `make test-race` with `timeout: 600000` | defer <!-- check: {"command": "make test-race", "timeout_ms": 600000, "config": {"slow": {"commands": {"make": {"test-race": 600000}}}}} --> |
 | `make test-race` with `run_in_background: true` | defer <!-- check: {"command": "make test-race", "run_in_background": true, "config": {"slow": {"commands": {"make": {"test-race": 600000}}}}} --> |
+| `make test-race & ls` | defer (the shell does not wait for it) <!-- check: {"command": "make test-race & ls", "config": {"slow": {"commands": {"make": {"test-race": 600000}}}}} --> |
 
 ## Install
 

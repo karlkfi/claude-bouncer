@@ -916,7 +916,8 @@ def shell_noexec(opts):
 
 
 def simple_commands(raw, depth=0):
-    """Every simple command in `raw` as an argv, starting at its command word:
+    """Every simple command in `raw` the shell waits for, as an argv starting
+    at its command word -- an `&`-detached one is skipped (Q247):
     heredoc bodies stripped, env prefixes and launcher wrappers peeled, `bash
     -c '...'` / `eval ...` bodies recursed into (bounded), a plain `bash
     script.sh` reduced to the script, and a parse-only `bash -n ...` dropped.
@@ -939,7 +940,11 @@ def simple_commands(raw, depth=0):
             return None
         out += sub
     state = {'loop': False, 'override': None}
-    for group, _term in split_segments(tokens):
+    bg_flags = []
+    segments = split_segments(tokens, bg_flags)
+    for (group, _term), bg in zip(segments, bg_flags):
+        if bg:
+            continue  # the shell waits for neither it nor its substitutions
         for body in substitutions_in(group, bodies, marker_re):
             sub = simple_commands(body, depth + 1)
             if sub is None:
