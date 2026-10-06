@@ -1325,6 +1325,41 @@ class SlowTargetTests(unittest.TestCase):
         self.assertEqual(d, "deny")
 
 
+class EnvSplitStringTests(unittest.TestCase):
+    # `env -S STRING` splits STRING and reads the words as its own arguments,
+    # ahead of the rest, so the command is inside the string (Q246). Measured
+    # with macOS /usr/bin/env under bash 5.3.15: `-S '-i sleep 2'` and
+    # `-S '' sleep 2` both wait, and `-S 'echo a' b` prints `a b`.
+    def test_the_split_words_are_judged(self):
+        for command in ("env -S 'sleep 300'",
+                        "env -S 'nohup gh run watch 456'",
+                        "env -S 'FOO=1 gh run watch 456'",
+                        "env -S'gh run watch 456'",
+                        "env -iS 'gh run watch 456'",
+                        "env --split-string='gh run watch 456'",
+                        "env --sp='gh run watch 456'",
+                        "env -S '-i sleep 300'",
+                        "env -S 'bash -c \"sleep 300\"'",
+                        "env -S '' sleep 300"):
+            with self.subTest(command=command):
+                d, _ = run_hook(command)
+                self.assertEqual(d, "deny")
+
+    def test_a_split_slow_command_is_judged(self):
+        d, _ = run_hook("env -S 'FOO=1 scripts/gate.sh'", config=GATE_CFG)
+        self.assertEqual(d, "deny")
+
+    def test_what_the_split_string_runs_decides(self):
+        # The override arms from inside the string, as `env NAME=v` does, and
+        # a string that will not split is env's error: it runs nothing.
+        for command in ("env -S 'FOREGROUND_GUARD_OVERRIDE=why sleep 300'",
+                        "env -S 'sleep 1'", "env -S 'echo hi'",
+                        "env -S \"unterminated sleep 300"):
+            with self.subTest(command=command):
+                d, _ = run_hook(command)
+                self.assertIsNone(d)
+
+
 SLOW_ASK_CFG = {"slow": {"action": "ask",
                          "commands": {r"make test-race\b": 600000}}}
 
