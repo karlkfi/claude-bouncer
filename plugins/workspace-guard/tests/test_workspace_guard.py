@@ -5568,6 +5568,14 @@ class Issue60EndToEndTests(unittest.TestCase):
         # scan never closed, so the read inside `"$(…)"` was never judged.
         self._decision("# don't\necho \"$(cat /etc/q60-fake)\"", "ask")
 
+    def test_guarded_after_hash_in_extglob_or_test_ask(self):
+        # Q258: a `(` or `|` starts no word in an extglob group or in
+        # `[[ … ]]`, so the `#` after one is text and the read still runs.
+        for cmd in ("[[ x == @(a|#b) ]]; echo $(cat /etc/q60-fake)",
+                    "echo @(a|#b)$(cat /etc/q60-fake)"):
+            with self.subTest(cmd=cmd):
+                self._decision(cmd, "ask")
+
     def test_substitution_in_a_comment_is_not_judged(self):
         # Q258: bash reads a `#` straight after a subshell or an arithmetic
         # command as a comment, so nothing here reads the file.

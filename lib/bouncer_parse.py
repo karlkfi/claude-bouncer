@@ -112,6 +112,7 @@ _CMD_POS_KEYWORDS = frozenset({
 })
 
 _WORD_RE = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
+_DBRACKET_END_RE = re.compile(r'[ \t\n]\]\](?=[ \t\n;&|)]|$)')
 
 # The same, for the lexer deciding whether an assignment word can follow.
 _ASSIGN_POS_KEYWORDS = _CMD_POS_KEYWORDS | {'!', '{'}
@@ -1108,9 +1109,9 @@ def command_substitutions(text, quotes=True, spans=None):
                 continue
             quiet = max(quiet, _comment_free_end(text, i, brk))
             if c == '(':
-                parens.append(text[i-1:i] in ('<', '>'))
+                parens.append(i > 0 and text[i-1] in '<>?*+@!')
             elif c == ')':
-                brk = not (parens and parens.pop())    # `<(a)#b` is one word
+                brk = not (parens and parens.pop())    # `<(a)#b`, `@(a)#b` too
                 i += 1
                 continue
             elif text.startswith('<<', i) and i >= quiet:
@@ -1142,7 +1143,10 @@ def _comment_free_end(text, i, brk):
 
     bash reads a `#` as text inside a `${…}` expansion, a `$[…]` or `((…))`
     arithmetic, and an assignment's subscript (`FOO[a #b]=x`, Q217), so
-    :func:`command_substitutions` opens no comment there (Q258). The scan
+    :func:`command_substitutions` opens no comment there (Q258). Nor does it
+    inside an extglob group or a `[[ … ]]`, where a `(` or `|` starts no word:
+    bash parses extglob syntax in `[[ … ]]` always and elsewhere once
+    `shopt -s extglob` has run, which a raw string cannot tell. The scan
     still walks the span, since a `$(…)` inside one runs. Unterminated, the
     span runs to the end, which is the reading before comments were known.
     Returns ``i`` when no such construct starts at ``i``.
@@ -1155,6 +1159,11 @@ def _comment_free_end(text, i, brk):
         return len(text) if end < 0 else end
     if text.startswith('((', i) and text[i-1:i] != '$':
         return _skip_balanced_parens(text, i)
+    if text.startswith('(', i) and i > 0 and text[i-1] in '?*+@!':
+        return _skip_balanced_parens(text, i)      # an extglob group
+    if brk and text.startswith('[[', i) and text[i+2:i+3] in (' ', '\t', '\n'):
+        m = _DBRACKET_END_RE.search(text, i + 2)
+        return m.end() if m else len(text)
     m = _WORD_RE.match(text, i) if brk else None
     if m and text.startswith('[', m.end()):
         end = _subscript_end(text, m.end())
