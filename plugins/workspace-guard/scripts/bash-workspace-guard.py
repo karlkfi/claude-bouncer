@@ -3802,7 +3802,7 @@ def mark_substitutions(text):
 
 
 def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
-                        inherited=None, funcs=()):
+                        inherited=None, funcs=(), lastpipe=False):
     """Every command a substitution in ``cmd`` runs, with the cwd bash runs it in.
 
     Returns ``(body, cwd, cwd_unknown)`` triples. A body whose position the scan
@@ -3833,7 +3833,8 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
     and are usable from the start.
 
     ``funcs`` names the functions an enclosing string defined whose call moves
-    the cwd (Q265); a call to one here leaves the cwd unknown.
+    the cwd (Q265); a call to one here leaves the cwd unknown. ``lastpipe``
+    says an enclosing string may have turned `lastpipe` on (Q272).
     """
     heredocs = []
     own = strip_heredoc_bodies(cmd, own_level_only=True, bodies=heredocs)
@@ -3849,10 +3850,14 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
         cwd, unknown, hd_i = base_cwd, base_cwd_unknown, 0
         usable = set(inherited or ())
         scopes, saved_shells, hs = [], [], []
-        groups = split_groups(tokens, scopes, hs)
+        groups = split_groups(tokens, scopes, hs, lastpipe)
         funcs = cd_functions(groups, scopes, funcs)
+        left_unknown = False
         for (g, g_redir, _persists, _pipe, nhd), (shells, own), g_hs in zip(
                 groups, scopes, hs):
+            # A `lastpipe` stage before this one left the cwd unknown.
+            unknown = unknown or left_unknown
+            left_unknown = own is None
             cwd, unknown = enter_shell(saved_shells, shells, cwd, unknown)
             # Read the positions before applying this group's own `cd`: a
             # substitution is expanded to build the command line the `cd` then
@@ -3950,7 +3955,11 @@ def cd_functions(groups, scopes, known=()):
         grew = False
         for (g, *_), (shells, own) in zip(groups, scopes):
             name = function_scope(shells)
-            if name is None or name in funcs or not own:
+            if name is None or name in funcs or own is False:
+                continue
+            if own is None:                       # a `lastpipe` stage (Q272)
+                funcs.add(name)
+                grew = True
                 continue
             wrap = peel_wrappers(strip_env_prefix(strip_sh_keywords(g)))
             if wrap.external or not wrap.argv:
@@ -3968,7 +3977,34 @@ def calls_cd_function(wrap, funcs):
         and wrap.argv[0] in funcs
 
 
-def split_groups(tokens, scopes=None, herestrings=None):
+def lastpipe_setting(words):
+    """True or False for a `shopt` that sets or unsets `lastpipe`, else None."""
+    w = strip_sh_keywords(words)
+    if not w or w[0] != 'shopt' or 'lastpipe' not in w[1:]:
+        return None
+    flags = ''.join(x[1:] for x in w[1:] if x.startswith('-'))
+    if 's' in flags:
+        return True
+    return False if 'u' in flags else None
+
+
+def stage_own(lead, sep, last_close, lastpipe):
+    """The ``own`` `split_groups` reports for a group (Q173, Q272).
+
+    True when a `cd` in the group moves the shell it is written in. False for
+    a pipeline stage or a backgrounded command, which bash runs in a subshell.
+    None for a pipeline's last stage while `lastpipe` may be on: bash then runs
+    that stage in the current shell, so where it leaves the cwd is unknown.
+    ``last_close`` says the group closes a compound that is a later stage.
+    """
+    if sep in PIPE_OPS + ('&',):
+        return False
+    if lead in PIPE_OPS or last_close:
+        return None if lastpipe else lead not in PIPE_OPS
+    return True
+
+
+def split_groups(tokens, scopes=None, herestrings=None, lastpipe=False):
     """Split a token list into `(cmd_tokens, redir_targets, persists, pipe,
     heredocs)` groups.
 
@@ -3992,6 +4028,20 @@ def split_groups(tokens, scopes=None, herestrings=None):
     ``own`` is False for a pipeline segment or a backgrounded command, which
     bash runs in a subshell of its own.
 
+    A `{ … }` group, loop, `if` or `case` piped or backgrounded as a whole is a
+    subshell too, so its groups get a scope numbered like a `(` (Q272). Where it
+    is a later pipeline stage the opener says so, and its first group is no
+    stage of its own; where it is an earlier stage or backgrounded, only the
+    separator after its closer says so, and the scope is added to its groups
+    then.
+
+    `shopt -s lastpipe` runs a pipeline's last stage in the current shell, so
+    while it may be on -- from ``lastpipe``, which an enclosing string passes
+    down, or from a `shopt` earlier in this one -- that stage's ``own`` is None
+    rather than False, and the caller leaves the cwd unknown after it (Q272).
+    A `shopt -u lastpipe` turns it off only where it runs unconditionally: at
+    the top level, outside any compound, and not behind `&&` or `||`.
+
     A function body is a scope too, numbered by an ``(n, name)`` pair rather
     than an int (Q265). Defining a function runs none of its body, so a `cd` in
     it must not move what follows the definition; it does move the rest of the
@@ -4010,10 +4060,15 @@ def split_groups(tokens, scopes=None, herestrings=None):
     groups, cur, cur_redir, i = [], [], [], 0
     paren, prev_sep, pipe, nhd = 0, '', 0, 0
     shells, opened, cur_hs = [], 0, []
-    # One `[closer, fn_scope]` per compound command still open, where the
-    # closer of a `( … )` body is the shell number of its paren. `fn` names a
+    # One `[closer, scope, first_group, depth]` per compound command still
+    # open, where the closer of a `( … )` body is the shell number of its paren
+    # and `scope` is the shell the compound opened, if any. `fn` names a
     # function whose header has been read and whose body has not opened yet.
-    frames, fn, cmd_pos = [], None, True
+    # `lead` is the separator `own` judges the group by, which a compound
+    # opening the group takes over (Q272); `closed` holds the compounds closed
+    # in this group, whose subshell the next separator decides.
+    frames, fn, cmd_pos, lead, closed = [], None, True, '', []
+    last_close = False
     while i < len(tokens):
         t = tokens[i]
         if (t == '(' and tokens[i + 1:i + 2] == [')'] and len(cur) == 1
@@ -4027,16 +4082,31 @@ def split_groups(tokens, scopes=None, herestrings=None):
                             and t in (';', '\n', '&&', '||'))
                 groups.append((cur, cur_redir, persists, pipe, nhd))
                 if scopes is not None:
-                    scopes.append((tuple(shells), prev_sep not in PIPE_OPS
-                                   and t not in PIPE_OPS + ('&',)))
+                    scopes.append((tuple(shells),
+                                   stage_own(lead, t, last_close, lastpipe)))
                 if herestrings is not None:
                     herestrings.append(cur_hs)
+                setting = lastpipe_setting(cur)
+                if setting or setting is False and not (frames or shells) \
+                        and prev_sep not in ('&&', '||') \
+                        and t not in ('&&', '||', '&') + PIPE_OPS:
+                    lastpipe = setting
                 cur, cur_redir, nhd, cur_hs = [], [], 0, []
+            last_close = False
+            if closed and scopes is not None and t in PIPE_OPS + ('&',):
+                # A compound piped or backgrounded as a whole runs in a
+                # subshell, which only the separator after its closer says.
+                for first, depth in closed:
+                    opened += 1
+                    for k in range(first, len(scopes)):
+                        sh, ow = scopes[k]
+                        scopes[k] = (sh[:depth] + (opened,) + sh[depth:], ow)
+            closed = []
             if t == '(':
                 if fn is not None:                # `f () ( … )`
                     opened += 1
                     shells.append((opened, fn))
-                    frames.append([opened + 1, shells[-1]])
+                    frames.append([opened + 1, shells[-1], None, None])
                     fn = None
                 paren += 1
                 opened += 1
@@ -4050,7 +4120,7 @@ def split_groups(tokens, scopes=None, herestrings=None):
                     shells.pop()
             if t != '|':
                 pipe += 1
-            prev_sep, cmd_pos = t, True
+            prev_sep, lead, cmd_pos = t, t, True
             i += 1; continue
         if cmd_pos and (is_reserved_word(t) or t in ('for', 'select')
                         and getattr(t, 'quoted_from', None) is None):
@@ -4059,15 +4129,26 @@ def split_groups(tokens, scopes=None, herestrings=None):
                 i += 4 if tokens[i + 2:i + 4] == ['(', ')'] else 2
                 continue
             if t in COMPOUND_CLOSERS:
-                frames.append([COMPOUND_CLOSERS[t], None])
+                frames.append([COMPOUND_CLOSERS[t], None, len(groups),
+                               len(shells)])
                 if fn is not None:
                     opened += 1
                     shells.append((opened, fn))
                     frames[-1][1] = shells[-1]
+                elif lead in PIPE_OPS:
+                    # A later pipeline stage: the compound is the subshell,
+                    # and the group it opens is no stage of its own.
+                    opened += 1
+                    shells.append(opened)
+                    frames[-1][1] = opened
+                lead = ''
             elif frames and frames[-1][0] == t:
-                scope = frames.pop()[1]
+                _, scope, first, depth = frames.pop()
                 if scope in shells:
                     del shells[shells.index(scope):]
+                    last_close = last_close or isinstance(scope, int)
+                elif scope is None:
+                    closed.append((first, depth))
             fn = None
             cmd_pos = t in LEADING_WORDS
         elif not is_operator(t, REDIR) and not is_operator(t, DUP):
@@ -4107,7 +4188,8 @@ def split_groups(tokens, scopes=None, herestrings=None):
     if cur or cur_redir or cur_hs:
         groups.append((cur, cur_redir, paren == 0 and prev_sep != '|', pipe, nhd))
         if scopes is not None:
-            scopes.append((tuple(shells), prev_sep not in PIPE_OPS))
+            scopes.append((tuple(shells),
+                           stage_own(lead, None, last_close, lastpipe)))
         if herestrings is not None:
             herestrings.append(cur_hs)
     return groups
@@ -4175,7 +4257,8 @@ def analyze_command(cmd, ctx, base_cwd, depth=0, suppressed=None):
 
 
 def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None,
-                     seed_loops=None, base_cwd_unknown=False, seed_funcs=()):
+                     seed_loops=None, base_cwd_unknown=False, seed_funcs=(),
+                     seed_lastpipe=False):
     """Analyze one command string; returns ``(offenders, guarded, KillFacts)``.
 
     Command-substitution bodies (``"$(…)"`` and backtick ``` `…` ```, plus the
@@ -4214,7 +4297,9 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
     written outside a substitution (Q169).
 
     ``seed_funcs`` names the functions whose call moves the cwd, which a
-    substitution inherits from the string that defined them (Q265).
+    substitution inherits from the string that defined them (Q265), and
+    ``seed_lastpipe`` says the enclosing string may have turned `lastpipe` on,
+    which a substitution inherits too (Q272).
     """
     proj, cwd = ctx.proj, base_cwd
     # Alias for readability at the two use sites far below; the group loop's own
@@ -4228,8 +4313,11 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
         return [], False, KillFacts(None, None, [])   # unbalanced quotes -> defer
 
     scopes = []
-    groups = split_groups(tokens, scopes)
+    groups = split_groups(tokens, scopes, lastpipe=seed_lastpipe)
     cd_funcs = cd_functions(groups, scopes, seed_funcs)
+    # Whether `lastpipe` may be on anywhere in the string, for the bodies it
+    # runs; a superset, since a body's position is not tracked here.
+    lastpipe = seed_lastpipe or any(lastpipe_setting(g) for g, *_ in groups)
 
     def is_outside(rp):
         return path_is_outside(rp, proj)
@@ -4448,8 +4536,11 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
     # `(body, cwd)` for every shell `-c` body this string runs locally, recursed
     # into after the loop so each resolves against the cwd of its own group.
     shell_bodies = []
-    saved_shells = []
+    saved_shells, left_unknown = [], False
     for (g, g_redir, persists, pipe, _nhd), (shells, own) in zip(groups, scopes):
+        # A `lastpipe` stage before this one left the cwd unknown (Q272).
+        group_cwd_unknown = group_cwd_unknown or left_unknown
+        left_unknown = own is None
         group_cwd, group_cwd_unknown = enter_shell(
             saved_shells, shells, group_cwd, group_cwd_unknown)
         track_stable()
@@ -4788,13 +4879,14 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
     if subst_depth < MAX_SUBST_DEPTH:
         for body, body_cwd, body_cwd_unknown in substitution_bodies(
                 cmd, base_cwd, base_cwd_unknown, stable_vars,
-                inherited=seed_vars, funcs=cd_funcs):
+                inherited=seed_vars, funcs=cd_funcs, lastpipe=lastpipe):
             sub_off, _, sub_kf = _analyze_command(body, ctx, body_cwd,
                                                   subst_depth + 1, in_subst=True,
                                                   seed_vars=stable_vars,
                                                   seed_loops=stable_loops,
                                                   base_cwd_unknown=body_cwd_unknown,
-                                                  seed_funcs=cd_funcs)
+                                                  seed_funcs=cd_funcs,
+                                                  seed_lastpipe=lastpipe)
             outside.extend(sub_off)
             signal = merge_nested_signal(signal, sub_kf.signal)
             launder = launder or sub_kf.launder

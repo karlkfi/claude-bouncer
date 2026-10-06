@@ -178,6 +178,7 @@ old one. A different project's scratch still asks entirely.
 | `cd /etc && cat passwd`              | **ask**  |
 | `(cd sub) && cat ../x` · `echo $(cd sub) && cat ../x` (the `cd` stays in the subshell) | **ask** |
 | `f() { cd sub; }; cat ../x` (defining `f` runs none of its body) | **ask** |
+| `{ cd sub; } \| cat; cat ../x` (the piped group is a subshell) | **ask** |
 | `echo "$(cat /etc/passwd)"` (quoted subst read) | **ask** |
 | `cat > doc.md <<EOF` … `$(cat /etc/x)` … `EOF` (expanded body) | **ask** |
 | `cat > doc.md <<EOF` … `don't` … `$(cat /etc/x)` … `EOF` (apostrophe first) | **ask** |
@@ -947,9 +948,15 @@ through the same boundary rules and produce the same reasons. Symlink staging
    A `cd` in a function body moves only the rest of that body, because
    defining a function runs none of it; a later call to that function leaves
    the cwd unknown, so a relative path after `f() { cd sub; }; f` gets the
-   untracked-`cd` `deny` below. Two shapes still leak: a `cd` inside a `{ … }` group, loop or `if` that is
-   piped or backgrounded as a whole, and a `cd` after an unparenthesised
-   `case` pattern (`x)`) inside a subshell. Both are open bugs. A
+   untracked-`cd` `deny` below. A `{ … }` group, loop or `if` that is piped
+   or backgrounded as a whole runs in a subshell as well, so a `cd` inside it
+   moves only the rest of it (`{ cd sub; } | cat; cat ../x` asks). Once
+   `shopt -s lastpipe` may be on, bash runs a pipeline's last stage in the
+   current shell, so the cwd after any last stage is unknown and later
+   relative paths deny; a `shopt -u lastpipe` written unconditionally at the
+   top level turns that off again. One shape
+   still leaks: a `cd` after an unparenthesised `case` pattern (`x)`) inside a
+   subshell, an open bug. A
    `cd`/`pushd` target that is a propagated literal variable (step 4)
    re-roots the same way (`d=sub; cd $d && cat x.txt`). Two pure,
    deterministic command substitutions are also recognised as `cd`/`pushd`

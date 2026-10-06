@@ -5159,6 +5159,83 @@ class FunctionCdTests(OutsideParentFixture, unittest.TestCase):
             "f() { cd sub; cat ../in.txt; }"))
 
 
+class PipedCompoundCdTests(OutsideParentFixture, unittest.TestCase):
+    """Q272: a compound command piped or backgrounded as a whole is a subshell.
+
+    Q173 kept a `cd` that is itself a pipeline stage from moving anything, but
+    judged that from the separators around each simple command. A `cd` inside
+    a `{ … }` group, loop or `if` sits between `;`s, so when the compound was
+    piped or backgrounded its `cd` still moved the cwd for everything after,
+    and a `../` read outside the workspace earned `allow`. Every shape here was
+    driven under bash 5.3.15 to see which file it reads.
+    """
+
+    def test_a_piped_or_backgrounded_compound_keeps_its_cd(self):
+        # Pre-fix every one of these allowed a read of `<root>/../TARGET`.
+        for cmd in ("{ cd sub; } | cat; cat ../%s",
+                    "{ cd sub; } & wait; cat ../%s",
+                    "{ cd sub; } |& cat; cat ../%s",
+                    "{ cd sub; } > /dev/null | cat; cat ../%s",
+                    "for i in 1; do cd sub; done | cat; cat ../%s",
+                    "for i in 1; do cd sub; done & wait; cat ../%s",
+                    "while true; do cd sub; break; done | cat; cat ../%s",
+                    "while true; do cd sub; break; done & wait; cat ../%s",
+                    "until false; do cd sub; break; done | cat; cat ../%s",
+                    "if true; then cd sub; fi | cat; cat ../%s",
+                    "if true; then cd sub; fi & wait; cat ../%s",
+                    "( { cd sub; } | cat; cat ../%s )"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual("ask", self._decision(cmd % self.TARGET))
+
+    def test_a_later_stage_compound_keeps_its_cd(self):
+        for cmd in ("echo | { cd sub; }; cat ../%s",
+                    "echo x | while read l; do cd sub; done; cat ../%s"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual("ask", self._decision(cmd % self.TARGET))
+
+    def test_a_cd_still_moves_the_rest_of_its_compound(self):
+        # Pre-fix the later-stage shapes asked: the `cd` was read as a stage
+        # of its own and moved nothing, so `../in.txt` named the parent's.
+        for cmd in ("{ cd sub; cat ../in.txt; } | cat",
+                    "echo | { cd sub; cat ../in.txt; }",
+                    "echo | if cd sub; then cat ../in.txt; fi"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual("allow", self._decision(cmd))
+
+    def test_a_lastpipe_last_stage_leaves_the_cwd_unknown(self):
+        # `shopt -s lastpipe` runs the last stage in the current shell, so its
+        # `cd` is real; bash reads the parent's `in.txt` in every one. Pre-fix
+        # all five allowed, the `while` one only after this PR's first cut.
+        for cmd in ("shopt -s lastpipe; echo x | while read x; do cd ..; done;"
+                    " cat in.txt",
+                    "shopt -s lastpipe; echo x | cd ..; cat in.txt",
+                    "shopt -s lastpipe; echo x | { cd ..; }; cat in.txt",
+                    "shopt -s lastpipe; x=$(echo | cd ..; cat in.txt)",
+                    "shopt -s lastpipe; f() { echo | cd ..; }; f; cat in.txt",
+                    "shopt -s lastpipe; false && shopt -u lastpipe;"
+                    " echo x | cd ..; cat in.txt"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual("deny", self._decision(cmd))
+
+    def test_lastpipe_off_again_or_backgrounded_keeps_the_subshell(self):
+        for cmd, want in (
+                ("shopt -s lastpipe; shopt -u lastpipe; echo x | while read x;"
+                 " do cd sub; done; cat ../%s" % self.TARGET, "ask"),
+                ("shopt -s lastpipe; echo x | cd .. & wait; cat in.txt",
+                 "allow"),
+                ("shopt -s lastpipe; (echo x | cd ..); cat in.txt", "allow")):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(want, self._decision(cmd))
+
+    def test_an_unpiped_compound_still_moves_the_cwd(self):
+        for cmd in ("{ cd sub; }; cat ../in.txt",
+                    "{ cd sub; } && cat ../in.txt",
+                    "if true; then cd sub; fi; cat ../in.txt",
+                    "for i in 1; do cd sub; done; cat ../in.txt"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual("allow", self._decision(cmd))
+
+
 class SubstBodyVarPropagationTests(unittest.TestCase):
     """Q66: a substitution body inherits the string's literal variables.
 
