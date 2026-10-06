@@ -3167,7 +3167,9 @@ def build_reason(offenders, scratch_hint='', override=None, prefixable=False):
             + ", ".join(sorted(set(buckets['untracked'])))
             + ". Fix: give cd a literal target — bare cd, cd -, cd $HOME, and "
             "unrecognized $(...) targets drop tracking; pass an absolute path "
-            "or use the Read/Grep tools.")
+            "or use the Read/Grep tools. A record-separator byte (0x1E) "
+            "anywhere in the command drops it for every substitution after a "
+            "cd, so remove one if the command carries it.")
     return " ".join(hints)
 
 
@@ -3732,9 +3734,9 @@ def tokenize_command(cmd, heredocs=True):
 # (`ps_subexpressions`), with an anonymous `$`; numbering the mask is the whole
 # of what carrying a position adds.
 #
-# `\x1e` is the sentinel because it cannot appear in a command Claude Code
-# sends. A string that holds one anyway is left unmarked, which is the pre-Q169
-# behaviour rather than a wrong answer.
+# `\x1e` is the sentinel because a command rarely holds one. A string that does
+# is left unmarked, and its bodies are placed only as far as the walk can say
+# without positions (Q266, in `substitution_bodies`).
 SUBST_MARK = '\x1e'
 MARK_RE = re.compile(SUBST_MARK + r'(\d+)' + SUBST_MARK)
 
@@ -3783,8 +3785,8 @@ def mark_substitutions(text):
     if SUBST_MARK in text:
         # The string already carries the sentinel, so a marker inserted here
         # could not be told from the caller's own byte. Mark nothing, and say so
-        # with a ``texts`` of None: every body is still analysed, at the entry
-        # cwd, which is what the recursion did before Q169. Returning no bodies
+        # with a ``texts`` of None: every body is still analysed, with the cwd
+        # `substitution_bodies` can give it unplaced (Q266). Returning no bodies
         # would switch substitution scanning off outright -- an out-of-root read
         # or write silent from one stray byte, which is looser than main rather
         # than equal to it.
@@ -3807,8 +3809,10 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
 
     Returns ``(body, cwd, cwd_unknown)`` triples. A body whose position the scan
     could not place keeps ``base_cwd``, which is what the recursion used before
-    Q169 — a marker lost inside a comment, or a string already carrying the
-    sentinel, is answered no worse than it was.
+    Q169 — a marker lost inside a comment is answered no worse than it was. A
+    string already carrying the sentinel is walked unmarked: where no `cd`
+    moves the cwd, ``base_cwd`` is every body's cwd, and where one does, every
+    body's cwd is unknown, since none can be placed (Q266).
 
     Heredoc bodies are read at their own level only. A `` <<'EOF' `` body is
     literal to bash, so a `$(…)` written in one never runs (Q35); an expanded
@@ -3844,8 +3848,10 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
     hd_cwd = [fallback] * len(heredocs)
 
     # ``texts`` None means nothing was marked, so there are no positions to
-    # read and every body keeps the fallback cwd.
-    tokens = None if texts is None else tokenize_command(marked, heredocs=False)
+    # read. The walk still runs, for the heredocs and to learn whether the cwd
+    # moved at all.
+    tokens = tokenize_command(marked, heredocs=False)
+    moved = False
     if tokens is not None:
         cwd, unknown, hd_i = base_cwd, base_cwd_unknown, 0
         usable = set(inherited or ())
@@ -3863,7 +3869,7 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
             # substitution is expanded to build the command line the `cd` then
             # runs on, so `cd $(dirname x)` resolves `x` where the string
             # started, not where it lands.
-            for tok in g + g_redir + g_hs:
+            for tok in (g + g_redir + g_hs) if texts is not None else ():
                 for m in MARK_RE.finditer(tok):
                     idx = int(m.group(1))
                     if idx < len(sub_cwd):
@@ -3872,7 +3878,7 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
                 if hd_i < len(hd_cwd):
                     hd_cwd[hd_i] = (cwd, unknown)
                 hd_i += 1
-            restored = [MARK_RE.sub(
+            restored = [t if texts is None else MARK_RE.sub(
                 lambda m: texts[int(m.group(1))]
                 if int(m.group(1)) < len(texts) else m.group(0), t) for t in g]
             if stable_vars and usable:
@@ -3898,6 +3904,7 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
                 cwd, unknown = apply_cd(kind, arg, cwd, unknown)
             elif own and calls_cd_function(wrap, funcs):
                 unknown = True
+            moved = moved or (cwd, unknown) != fallback
             # Recorded after this group's own `cd`, so a `cd $d` cannot read an
             # assignment standing beside it. Still filtered through
             # `stable_vars`, so a name reassigned or poisoned anywhere in the
@@ -3911,6 +3918,8 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
                 if is_assignment(tok):
                     usable.add(split_assignment(tok)[0])
 
+    if texts is None and moved:
+        sub_cwd = [(base_cwd, True)] * len(bodies)
     out = [(b,) + sub_cwd[i] for i, b in enumerate(bodies)]
     for i, (body, quoted) in enumerate(heredocs):
         if quoted:
@@ -6216,7 +6225,8 @@ def ps_subexpression_marks(expandable_text, toks):
     mask numbered, strips its here-strings keeping the numbers, and tokenizes
     that. The numbers are trusted only when the result, with them taken out, is
     `toks` token for token; any disagreement returns None and every body is
-    analysed where the string started, which is what happened before Q172.
+    analysed where the string started, or with the cwd unknown once a
+    `Set-Location` has moved it (Q266).
     """
     if SUBST_MARK in expandable_text:
         return None
@@ -6249,9 +6259,10 @@ def _ps_analyze_command(cmd, ctx, base_cwd, depth=0, base_cwd_unknown=False):
     # A relative path inside a subexpression resolves where the subexpression
     # sits, which a `Set-Location` earlier in the string has already moved --
     # the bash side's Q169, on this frontend. A body the marks cannot place
-    # keeps the cwd the string started in.
+    # keeps the cwd the string started in, unless the walk below moves it.
     marks = ps_subexpression_marks(expandable_text, toks)
     sub_cwd = [(base_cwd, base_cwd_unknown)] * len(bodies)
+    moved = False
 
     offenders, guarded, signal = [], False, None
     cwd, cwd_unknown, seg, stmt = base_cwd, base_cwd_unknown, [], []
@@ -6267,6 +6278,8 @@ def _ps_analyze_command(cmd, ctx, base_cwd, depth=0, base_cwd_unknown=False):
                         sub_cwd[b] = (cwd, cwd_unknown)
                 off, g, sig, cwd, cwd_unknown = ps_analyze_segment(
                     seg, ctx, cwd, cwd_unknown)
+                moved = moved or (cwd, cwd_unknown) != (base_cwd,
+                                                        base_cwd_unknown)
                 offenders.extend(off)
                 guarded = guarded or g
                 signal = signal or sig
@@ -6290,6 +6303,12 @@ def _ps_analyze_command(cmd, ctx, base_cwd, depth=0, base_cwd_unknown=False):
     # outer text entirely: in `Get-Content .\in.txt; $(Stop-Process -Id 1234)`
     # the two halves sit on opposite sides of this recursion, and neither is an
     # offender on its own.
+    #
+    # Marks that could not be placed leave every body at the cwd the string
+    # started in, which is wrong once a `Set-Location` has moved it, so then no
+    # body's cwd is known (Q266).
+    if marks is None and moved:
+        sub_cwd = [(base_cwd, True)] * len(bodies)
     if depth < MAX_SUBST_DEPTH:
         for body, (b_cwd, b_unknown) in zip(bodies, sub_cwd):
             sub_off, _, sub_sig = _ps_analyze_command(body, ctx, b_cwd,
