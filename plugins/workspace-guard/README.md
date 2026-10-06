@@ -950,7 +950,11 @@ through the same boundary rules and produce the same reasons. Symlink staging
    the cwd unknown, so a relative path after `f() { cd sub; }; f` gets the
    untracked-`cd` `deny` below. A `{ … }` group, loop or `if` that is piped
    or backgrounded as a whole runs in a subshell as well, so a `cd` inside it
-   moves only the rest of it (`{ cd sub; } | cat; cat ../x` asks). One shape
+   moves only the rest of it (`{ cd sub; } | cat; cat ../x` asks). Once
+   `shopt -s lastpipe` may be on, bash runs a pipeline's last stage in the
+   current shell, so the cwd after any last stage is unknown and later
+   relative paths deny; a `shopt -u lastpipe` written unconditionally at the
+   top level turns that off again. One shape
    still leaks: a `cd` after an unparenthesised `case` pattern (`x)`) inside a
    subshell, an open bug. A
    `cd`/`pushd` target that is a propagated literal variable (step 4)

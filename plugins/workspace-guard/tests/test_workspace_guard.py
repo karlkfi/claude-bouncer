@@ -5202,6 +5202,31 @@ class PipedCompoundCdTests(OutsideParentFixture, unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertEqual("allow", self._decision(cmd))
 
+    def test_a_lastpipe_last_stage_leaves_the_cwd_unknown(self):
+        # `shopt -s lastpipe` runs the last stage in the current shell, so its
+        # `cd` is real; bash reads the parent's `in.txt` in every one. Pre-fix
+        # all five allowed, the `while` one only after this PR's first cut.
+        for cmd in ("shopt -s lastpipe; echo x | while read x; do cd ..; done;"
+                    " cat in.txt",
+                    "shopt -s lastpipe; echo x | cd ..; cat in.txt",
+                    "shopt -s lastpipe; echo x | { cd ..; }; cat in.txt",
+                    "shopt -s lastpipe; x=$(echo | cd ..; cat in.txt)",
+                    "shopt -s lastpipe; f() { echo | cd ..; }; f; cat in.txt",
+                    "shopt -s lastpipe; false && shopt -u lastpipe;"
+                    " echo x | cd ..; cat in.txt"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual("deny", self._decision(cmd))
+
+    def test_lastpipe_off_again_or_backgrounded_keeps_the_subshell(self):
+        for cmd, want in (
+                ("shopt -s lastpipe; shopt -u lastpipe; echo x | while read x;"
+                 " do cd sub; done; cat ../%s" % self.TARGET, "ask"),
+                ("shopt -s lastpipe; echo x | cd .. & wait; cat in.txt",
+                 "allow"),
+                ("shopt -s lastpipe; (echo x | cd ..); cat in.txt", "allow")):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(want, self._decision(cmd))
+
     def test_an_unpiped_compound_still_moves_the_cwd(self):
         for cmd in ("{ cd sub; }; cat ../in.txt",
                     "{ cd sub; } && cat ../in.txt",
