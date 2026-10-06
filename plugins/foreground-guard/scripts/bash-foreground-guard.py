@@ -102,7 +102,7 @@ from bouncer_parse import (                                    # noqa: E402
     ASSIGN_SUBSCRIPT, COMMENT_PRECEDERS, QuoteTrackingLexer,
     _consume_heredoc_body, _skip_balanced_parens, command_substitutions,
     is_assignment, note_discarded_writes, split_assignment, strip_comments,
-    strip_heredoc_bodies,
+    split_operator_runs, strip_heredoc_bodies,
 )
 
 DEFAULT_BASH_TIMEOUT_MS = 120000
@@ -295,15 +295,22 @@ def tokenize(raw):
     still splits off that way, the fail-safe direction. Returns None on
     unbalanced quotes (caller defers: fail-open on parse errors). Comments
     go by bash's rule: shlex's own handling swallows the newline that ends
-    one, merging the next line into it unjudged (Q267)."""
+    one, merging the next line into it unjudged (Q267). A glued operator
+    run is split back into its operators, so `&` before a rewritten newline
+    or a `)` is still the `&` that backgrounds (Q239), and the `;` a trailing
+    newline leaves is dropped so a trailing `&` stays the last token."""
     raw = strip_comments(raw).replace('`', ';').replace('\n', ';')
     lex = QuoteTrackingLexer(raw, posix=True, punctuation_chars=';()<>|&')
     lex.commenters = ''
     lex.whitespace_split = True
     try:
-        return list(lex)
+        tokens = split_operator_runs(list(lex))
     except ValueError:
         return None
+    while tokens and tokens[-1] == ';' \
+            and getattr(tokens[-1], 'quoted_from', None) is None:
+        tokens.pop()
+    return tokens
 
 
 def mask_substitutions(raw):
