@@ -199,8 +199,9 @@ def tokenize(cmd):
     ``cleaned`` is the command with comments and heredoc bodies removed -- the
     string the raw-text scans should read, so a `$PIPESTATUS` or a `$(…)` quoted
     inside a heredoc body is not mistaken for one the shell would evaluate.
-    Arithmetic is masked only on the way into shlex: `cleaned` keeps it, so a
-    `$PIPESTATUS` read inside one is still seen.
+    Arithmetic and process substitutions are masked only on the way into
+    shlex: `cleaned` keeps both, so a `$PIPESTATUS` read inside one is still
+    seen and a process substitution's body can still be found.
     """
     expanded = []
     # Heredoc bodies go first so an unbalanced quote inside one cannot throw off
@@ -210,7 +211,8 @@ def tokenize(cmd):
         # `\n` is made a punctuation char so a newline command boundary surfaces
         # as a token; it is otherwise eaten as whitespace, merging the commands
         # on either side. Quoted newlines stay inside their word token.
-        lex = QuoteTrackingLexer(mask_arithmetic(cleaned), posix=True,
+        lex = QuoteTrackingLexer(mask_arithmetic(mask_processes(cleaned)),
+                                 posix=True,
                                  punctuation_chars=';()<>|&\n')
         lex.whitespace_split = True
         lex.whitespace = lex.whitespace.replace('\n', '')
@@ -943,6 +945,23 @@ def sequenced_mutation(segs, reg):
     return '', '', ''
 
 
+# What stands in for a `<(…)` or `>(…)` before shlex reads the command: the
+# file name bash hands the command around it. Unmasked, `<` reads as a
+# redirect whose target is the `(`, and the body's words join the enclosing
+# command -- so a `set -o pipefail` inside it was read as `cat`'s operand.
+# The body is judged on its own, from ``process_substitutions``.
+PROCESS_WORD = '/dev/fd/63'
+
+
+def mask_processes(text):
+    """Replace each process substitution bash would run with ``PROCESS_WORD``."""
+    spans = []
+    process_substitutions(text, spans=spans)
+    for start, end in reversed(spans):
+        text = text[:start] + PROCESS_WORD + text[end:]
+    return text
+
+
 def procsub_gate(bodies, segs, reg):
     """The head of a gate run inside a `<(…)` or `>(…)`, or ''.
 
@@ -1186,8 +1205,16 @@ def decide(cmd, background, reg, scratch='', depth=0, pipefail=False):
     # before it covers a pipe inside it (Q259). A heredoc body's position is
     # not tracked, so it starts with pipefail off.
     if depth < MAX_SUBST_DEPTH:
-        spans = []
-        bodies = command_substitutions(cleaned, spans=spans) + processes
+        # A `$(…)` inside a `<(…)` is reached by recursing into that body,
+        # where the text before it is read correctly; from out here it is not.
+        spans, bodies = [], []
+        found_spans = []
+        for body, span in zip(command_substitutions(cleaned, spans=found_spans),
+                              found_spans):
+            if not any(s < span[0] < e for s, e in process_spans):
+                bodies.append(body)
+                spans.append(span)
+        bodies += processes
         states = [pipefail_before(cleaned[:start], pipefail)
                   for start, _ in spans + process_spans]
         for body in heredocs:
