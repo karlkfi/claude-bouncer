@@ -607,13 +607,14 @@ def pipefail_walk(segs, initial=False):
 
     bash also forks without parens (Q263): a pipeline stage and a backgrounded
     list run apart, so `set -o pipefail | true` and `set -o pipefail &` set
-    nothing here, and a `{ …; }` piped or backgrounded is scoped like `( … )`.
+    nothing here, and a `{ …; }`, `if`, loop or `case` piped or backgrounded is
+    scoped like `( … )`.
     A function body is scoped too, and what it sets applies where the function
     is called.
     """
-    opens, closes = brace_groups(segs)
+    opens, closes = compound_groups(segs)
     stack = [initial] * (segs[0].depth + 1 if segs else 1)
-    frames, funcs, out = [], {}, []
+    frames, parens, funcs, out = [], [], {}, []
     for i, seg in enumerate(segs):
         out.append(stack[-1])
         for scoped, fname in opens.get(i, ()):
@@ -641,10 +642,16 @@ def pipefail_walk(segs, initial=False):
                 if fname and touched:
                     funcs[fname] = value
         for op in seg.post_ops:
-            if op == ')' and len(stack) > 1:
-                stack.pop()
-            elif op == '(':
+            if op == '(':
+                parens.append(len(stack))
                 stack.append(stack[-1])
+            elif op == ')' and len(stack) > 1:
+                # A `case` pattern's `)` opened nothing, so it closes nothing.
+                if frames and (not parens or parens[-1] < frames[-1][2]):
+                    continue
+                if parens:
+                    parens.pop()
+                stack.pop()
     return out, stack[-1]
 
 
@@ -666,13 +673,20 @@ def runs_apart(segs, i):
     return next_op(segs[j].post_ops) == '&'
 
 
-def brace_groups(segs):
+# The reserved words that open and close a compound command. Piped or
+# backgrounded, any of them runs apart from the shell the way `{ …; }` does.
+COMPOUND_OPENERS = frozenset({'{', 'if', 'while', 'until', 'for', 'select', 'case'})
+COMPOUND_CLOSERS = frozenset({'}', 'fi', 'done', 'esac'})
+
+
+def compound_groups(segs):
     """({open index: [(scoped, function name)]}, {close index: count}).
 
-    A group is scoped when bash runs it apart from the shell -- piped, or
-    backgrounded -- or when it is a function body, which runs only when called.
-    `{` and `}` are reserved words, so each opens a segment's leading word run
-    or is a segment of its own.
+    A compound command is scoped when bash runs it apart from the shell --
+    piped, or backgrounded -- or when it is a function body, which runs only
+    when called. Its opener is a reserved word in a segment's leading run and
+    its closer a segment of closers alone, so `if …; fi | true` is read the
+    same way as `{ …; } | true`.
     """
     opens, closes, stack = {}, {}, []
     for i, seg in enumerate(segs):
@@ -684,12 +698,13 @@ def brace_groups(segs):
               and len(segs[i - 1].tokens) == 1):
             fname = segs[i - 1].tokens[0]
         k = 0
-        while k < len(toks) and toks[k] in SH_KEYWORDS and toks[k] != '}':
-            if toks[k] == '{':
+        while (k < len(toks) and toks[k] not in COMPOUND_CLOSERS
+               and (toks[k] in SH_KEYWORDS or toks[k] in COMPOUND_OPENERS)):
+            if toks[k] in COMPOUND_OPENERS:
                 stack.append((i, fname))
                 fname = None
             k += 1
-        if toks and all(t == '}' for t in toks):
+        if toks and all(t in COMPOUND_CLOSERS for t in toks):
             for _ in toks:
                 if not stack:
                     break

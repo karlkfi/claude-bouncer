@@ -74,7 +74,7 @@ pipe inside a later `$(…)` too, since a substitution inherits the shell's
 options: `set -o pipefail; out=$(make check | tail -5)` is not denied. A `set`
 that bash runs in a process of its own does not count: a pipeline stage
 (`set -o pipefail | true`), a backgrounded list (`set -o pipefail &`), a piped
-or backgrounded `{ …; }`, or a function nobody called. Reading
+or backgrounded `{ …; }`, `if`, `case` or loop, or a function nobody called. Reading
 `$PIPESTATUS` is denied on its own, gate or no gate — the array is a bash
 feature, so under a shell without it the read expands to empty and every test
 against it reads as success. zsh's `$pipestatus` suppresses nothing: the array
