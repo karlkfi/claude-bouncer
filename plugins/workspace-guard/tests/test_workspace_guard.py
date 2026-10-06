@@ -8784,6 +8784,159 @@ class WrappedCommandTests(unittest.TestCase):
         self.assertIn("`kill` whose targets it cannot see", reason)
 
 
+class FindPartsTests(unittest.TestCase):
+    """`find_parts` splits a `find` into what it touches (Q237)."""
+
+    def test_starts_commands_and_terminators(self):
+        fp = guard.find_parts(["find", "a", "b", "-name", "x", "-exec", "cat",
+                               "{}", ";", "-execdir", "grep", "p", "{}", "+"])
+        self.assertEqual(fp.starts, ["a", "b"])
+        self.assertEqual(fp.commands, [(["cat", "{}"], False, False),
+                                       (["grep", "p", "{}"], True, True)])
+
+    def test_a_plus_ends_the_command_only_after_a_brace_pair(self):
+        # Both finds read `+` elsewhere as an argument, measured on BSD find
+        # (macOS) and GNU findutils 4.10.0.
+        fp = guard.find_parts(["find", ".", "-exec", "echo", "+", "{}", "+"])
+        self.assertEqual(fp.commands, [(["echo", "+", "{}"], False, True)])
+
+    def test_no_start_point_is_the_cwd(self):
+        self.assertEqual(guard.find_parts(["find", "-name", "x"]).starts, ["."])
+
+    def test_options_ahead_of_the_starts(self):
+        self.assertEqual(guard.find_parts(["find", "-L", "-D", "tree", "-O2",
+                                           "a", "-print"]).starts, ["a"])
+        # BSD's `-f PATH`, separate or attached, is a start.
+        self.assertEqual(guard.find_parts(["find", "-f", "a", "-fb"]).starts,
+                         ["a", "b"])
+        self.assertEqual(guard.find_parts(["find", "-follow"]).starts, ["."])
+
+    def test_files_find_opens_itself(self):
+        fp = guard.find_parts(["find", "a", "-delete", "-fprint", "o",
+                               "-fprintf", "p", "%p"])
+        self.assertTrue(fp.deletes)
+        self.assertEqual(fp.writes, ["o", "p"])
+        fp = guard.find_parts(["find", "-files0-from", "list"])
+        self.assertTrue(fp.opaque)
+        self.assertEqual((fp.starts, fp.reads), ([], ["list"]))
+
+
+class FindExecTests(unittest.TestCase):
+    """A command `find` runs is judged, and `{}` stands for its start points
+    (Q237).
+
+    Measured at 26962b0, every `ask` and `deny` row below came back `defer`:
+    `find` is not in `SPEC`, so neither its start points nor the command its
+    `-exec` runs were looked at. `{}` is substituted at runtime, so it is
+    never resolved as a literal; it is replaced by each start point, since
+    each match is one or sits under one. Targets are synthetic (repo rule);
+    nothing here is executed.
+    """
+
+    TARGET = "/q237-fake-target"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = os.path.realpath(self._tmp.name)
+        os.mkdir(os.path.join(self.workspace, "sub"))
+        with open(os.path.join(self.workspace, "in.txt"), "w") as f:
+            f.write("hello\n")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _decision(self, cmd, expected, permission_mode=None):
+        out = run_hook(cmd, self.workspace, project_dir=self.workspace,
+                       permission_mode=permission_mode)
+        if expected == "defer":
+            self.assertIsNone(out, f"expected defer for {cmd!r}, got {out!r}")
+            return None
+        self.assertIsNotNone(out, f"expected a decision, got defer for: {cmd!r}")
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"],
+                         expected, f"expected {expected!r} for {cmd!r}")
+        return out["hookSpecificOutput"]["permissionDecisionReason"]
+
+    def test_an_outside_operand_in_the_command_asks(self):
+        for primary in ("-exec", "-execdir", "-ok", "-okdir"):
+            for end in ("\\;", "{} +"):
+                cmd = f"find . {primary} cat {self.TARGET} {end}"
+                self.assertIn(self.TARGET, self._decision(cmd, "ask"), cmd)
+
+    def test_braces_under_an_outside_start_ask(self):
+        for primary in ("-exec", "-execdir", "-ok", "-okdir"):
+            for end in ("\\;", "+"):
+                cmd = f"find {self.TARGET} -name f {primary} cat {{}} {end}"
+                self.assertIn(self.TARGET, self._decision(cmd, "ask"), cmd)
+
+    def test_braces_inside_a_word_are_substituted(self):
+        # `X{}Y` became `Xa/b/fY` on both finds.
+        self._decision(f"find {self.TARGET} -exec cat {{}}/x \\;", "ask")
+        self._decision("find . -exec cat X{}Y \\;", "defer")
+
+    def test_braces_under_an_unreadable_start_deny(self):
+        self._decision('find "$D" -exec cat {} \\;', "deny")
+
+    def test_every_start_is_a_candidate(self):
+        self._decision(f"find sub {self.TARGET} -exec cat {{}} \\;", "ask")
+        self._decision(f"find sub {self.TARGET} -exec cat {{}} +", "ask")
+
+    def test_in_workspace_runs_stay_as_they_were(self):
+        # The command is read at one remove, as a `sh -c` body is, so a clean
+        # one adds no `allow` of its own and takes none away from a neighbour.
+        for cmd in ("find . -name '*.txt' -exec grep hello {} +",
+                    "find sub -execdir cat {} \\;", "find . -delete",
+                    "find . -execdir cat in.txt \\;"):
+            self._decision(cmd, "defer")
+        self._decision("cat in.txt; find . -exec cat {} \\;", "allow")
+
+    def test_execdir_resolves_from_the_start_points_parent(self):
+        # GNU findutils runs `-execdir` on a start point from the directory
+        # part of its spelling, so a start that IS the workspace reads beside
+        # it. That parent is host temp here, which denies rather than asks.
+        out = run_hook(f"find {sh(self.workspace)} -execdir cat foo \\;",
+                       self.workspace, project_dir=self.workspace)
+        self.assertIn(os.path.join(os.path.dirname(self.workspace), "foo"),
+                      out["hookSpecificOutput"]["permissionDecisionReason"])
+        # BSD find runs it from find's own cwd instead, the only candidate
+        # outside the workspace here.
+        sub = sh(os.path.join(self.workspace, "sub"))
+        reason = self._decision(f"cd /q237 && find {sub} -execdir cat foo \\;",
+                                "ask")
+        self.assertIn(os.path.join("q237", "foo"), reason)
+        self._decision(f"find {sub} -execdir cat foo \\;", "defer")
+        out = run_hook("find sub -execdir cat ../../x \\;", self.workspace,
+                       project_dir=self.workspace)
+        self.assertIn(out["hookSpecificOutput"]["permissionDecision"],
+                      ("ask", "deny"))
+
+    def test_files_find_writes(self):
+        self._decision(f"find {self.TARGET} -delete", "ask")
+        self._decision(f"find . -fprint {self.TARGET}", "ask")
+        self._decision(f"find . -fls {self.TARGET}", "ask")
+
+    def test_hidden_start_points_withhold_allow(self):
+        self._decision(f"find -files0-from {self.TARGET} -exec cat {{}} \\;",
+                       "ask")
+        self._decision("cat in.txt; find -files0-from list -exec cat {} \\;",
+                       "defer")
+        reason = self._decision("cat in.txt; find -files0-from list -delete",
+                                "ask", permission_mode="auto")
+        self.assertIn("a wrapper flag", reason)
+
+    def test_the_command_is_judged_whole(self):
+        self._decision(f"find . -exec env cat {self.TARGET} \\;", "ask")
+        self._decision(f"find . -exec sh -c 'cat {self.TARGET}' \\;", "ask")
+        self._decision("find . -exec pkill node \\;", "deny")
+        self._decision(f"timeout 5 find {self.TARGET} -exec cat {{}} \\;", "ask")
+        # A lost wrapper grammar resumes at the `find`, not the `cat` in it.
+        self._decision(f"timeout --bogus 5 find {self.TARGET} -exec cat {{}} \\;",
+                       "ask")
+
+    def test_bsd_start_flag_and_untracked_cwd(self):
+        self._decision(f"find -f {self.TARGET} -exec cat {{}} \\;", "ask")
+        self._decision("cd - && find . -exec cat {} \\;", "deny")
+
+
 class SiblingSessionScratchE2ETests(unittest.TestCase):
     """#61 end-to-end: read-only guarded commands on a SAME-project sibling
     session's Claude scratch are allowed (the dispatcher-tails-worker case);

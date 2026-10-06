@@ -28,11 +28,11 @@ On a case-insensitive filesystem (default on macOS and Windows), a workspace at 
 
 **Why not backlogged:** could not reproduce. On macOS APFS, `realpath` on existing intermediate components canonicalizes the casing, so the bypass requires the target path to be *fully* non-existent, which makes the read fail anyway. A real exploit would need a casing-mismatched workspace path *and* a partially-existing target outside it. If a reproducer surfaces, the fix is straightforward: compare with `os.path.normcase` on platforms where the filesystem is case-insensitive.
 
-## Wrapper commands (`xargs`, `find -exec`, `bash -c`, `eval`)
+## Wrapper commands (`eval`, and what the others still hide)
 
-A command of the form `xargs cat`, `find / -name passwd -exec cat {} +`, `bash -c 'cat /etc/passwd'`, or `eval 'cat /etc/passwd'` runs `cat` against arbitrary paths, but the *leading* command (`xargs`, `find`, `bash`, `eval`) is not in `SPEC`. Some of these embed `cat` as a non-leading token; the parser's `files_in_command` only consults the first token, so it never inspects the inner command.
+`eval 'cat /etc/passwd'` runs `cat` against an arbitrary path, but `eval` is not in `SPEC` and its argument is never re-analyzed, so the inner command is not inspected. The other wrappers this section used to list are now read through: `xargs cat` is peeled to the `cat` behind it (Q219), a `bash -c` body is re-analyzed when this host runs it (Q61), and `find / -name passwd -exec cat {} +` judges the `cat` with `{}` standing for each start point (Q237). What they still hide is what they read at runtime: the input `xargs` appends, and the matches `find` walks to below its start points.
 
-**Why not backlogged:** this is the documented threat model, not a regression. The hook guards specific commands by name; it doesn't try to model every shell that can spawn a subshell. Plain permission rules (`Bash(bash:*)`, `Bash(eval:*)`, `Bash(xargs:*)`, `Bash(find:*)`) are the right layer for these — the hook intentionally defers and lets them apply. If a future change tries to extend coverage to wrappers, that's a substantial scope change and should land as a plan doc, not a one-row Queue item.
+**Why not backlogged:** this is the documented threat model, not a regression. The hook guards specific commands by name; it doesn't try to model every shell that can spawn a subshell, nor walk the tree a `find` would. Plain permission rules (`Bash(eval:*)`, `Bash(xargs:*)`, `Bash(find:*)`) are the right layer for what stays hidden — the hook defers there and lets them apply.
 
 ## Hook input trust
 
