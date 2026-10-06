@@ -938,6 +938,55 @@ class VariableExpansionDecisionTests(unittest.TestCase):
         self.assertEqual(decision, "deny")
         self.assertIn("gke_acme_prod-us", reason)
 
+    # --- Q165: what an `eval` body assigns reaches the segments after it ------
+    # Verified against bash 5.3.15: `eval 'C=x'; echo $C` prints `x`, and
+    # `eval 'export C=x'` exports it. In a subshell, a pipeline stage or a
+    # substitution the assignment dies, and a prefix on `eval` itself does not
+    # persist even when the body reassigns that name.
+
+    def test_eval_assignment_reaches_a_later_segment(self):
+        for cmd, want in (
+                ("eval 'C=gke_acme_prod-us'; kubectl --context $C delete ns x", "deny"),
+                ("eval 'C=kind-ci'; kubectl --context $C delete ns x", None),
+                ("eval 'C=kind-ci' && kubectl --context $C delete ns x", None),
+                ("eval \"eval 'C=gke_acme_prod-us'\"; kubectl --context $C delete ns x",
+                 "deny")):
+            with self.subTest(cmd=cmd):
+                decision, reason = run_hook(cmd)
+                self.assertEqual(decision, want, reason)
+
+    def test_eval_export_reaches_the_tool_env(self):
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        kind = os.path.join(home, "kc-kind")
+        with open(kind, "w", encoding="utf-8") as f:
+            f.write(KUBECONFIG_KIND)
+        decision, reason = run_hook(
+            "eval 'export KUBECONFIG=%s'; kubectl apply -f x.yaml" % kind, home=home)
+        self.assertIsNone(decision, reason)
+
+    def test_eval_outside_the_invoking_shell_assigns_nothing(self):
+        # Each of these leaves `$C` unset in bash, so the unresolved target asks.
+        for cmd in ("( eval 'C=kind-ci' ); kubectl --context $C delete ns x",
+                    "eval 'C=kind-ci' | true; kubectl --context $C delete ns x",
+                    "x=$(eval 'C=kind-ci'); kubectl --context $C delete ns x",
+                    "x=`eval C=kind-ci`; kubectl --context $C delete ns x",
+                    "eval 'x=$(C=kind-ci)'; kubectl --context $C delete ns x",
+                    "eval 'C=kind-ci' & kubectl --context $C delete ns x"):
+            with self.subTest(cmd=cmd):
+                decision, _ = run_hook(cmd)
+                self.assertEqual(decision, "ask")
+
+    def test_eval_prefix_does_not_persist(self):
+        decision, _ = run_hook(
+            "C=x eval 'C=kind-ci'; kubectl --context $C delete ns x")
+        self.assertEqual(decision, "ask")
+
+    def test_unparseable_eval_body_leaves_the_shell_alone(self):
+        # The body fails open, and what was already assigned stays assigned.
+        decision, reason = run_hook(
+            "C=kind-ci; eval \"'\"; kubectl --context $C delete ns x")
+        self.assertIsNone(decision, reason)
+
 
 class KubectlDecisionTests(unittest.TestCase):
     def test_prod_mutating_denied(self):

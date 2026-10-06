@@ -2689,7 +2689,21 @@ def is_help_invocation(tool, argv):
     return args[0] == 'help'
 
 
-def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None):
+def _runs_in_one_shell(raw):
+    """True when nothing in `raw` can run outside the invoking shell: no
+    parenthesis, backtick or `<`, and no `|` or `&` that is not half of `||`
+    or `&&`. Those start a subshell, a pipeline stage, a background job, a
+    substitution or a heredoc, whose assignments die with it -- and `tokenize`
+    hoists substitution and heredoc bodies into plain segments, so the segment
+    stream alone cannot say which ones did. Coarse by design: a redirect such
+    as `2>&1` reads as not-one-shell too, which only leaves a variable
+    unresolved."""
+    rest = raw.replace('&&', '').replace('||', '')
+    return not any(c in rest for c in '()`<|&')
+
+
+def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
+                            out=None):
     """Findings for a full command string: tokenize, split into simple
     commands, evaluate each. Recurses (bounded) into `sh -c '...'` and
     `eval ...` bodies so a quoted nested command can't ride past the guard.
@@ -2698,7 +2712,9 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None):
     shell's vars, exported or not (Q151). Returns (findings, override_seen,
     session_reason) — session_reason is the value of the first inline
     PROD_GUARD_SESSION_OVERRIDE assignment, or None when the prefix is
-    absent."""
+    absent. A dict passed as `out` gets the shell and exported env the string
+    leaves behind, under 'shell' and 'exported', and only once every segment
+    has been read -- an unparseable or too-deep string leaves it empty."""
     findings = []
     override = False
     session_reason = None
@@ -2793,11 +2809,21 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None):
             # No child, so the body expands in this shell under either quoting:
             # single quotes stop only the PARENT, and `eval` expands the same
             # text itself. `child_env` rides on for a real child inside (Q151).
+            left = {}
             sub_f, sub_o, sub_s = evaluate_command_string(
-                ' '.join(argv_raw[1:]), ctx, depth + 1, child_env, same_shell)
+                ' '.join(argv_raw[1:]), ctx, depth + 1, child_env, same_shell,
+                left)
             findings += sub_f
             override = override or sub_o
             session_reason = session_reason if session_reason is not None else sub_s
+            # And what the body assigns stays assigned (Q165), where it
+            # certainly ran here. A prefix on `eval` itself does not persist,
+            # even when the body reassigns that name.
+            if left and _runs_in_one_shell(raw):
+                for scope, start, end in ((shell_env, same_shell, left['shell']),
+                                          (exported, child_env, left['exported'])):
+                    scope.update({k: v for k, v in end.items()
+                                  if k not in seg_inline and start.get(k) != v})
             continue
         evaluator = EVALUATORS.get(tool)
         if evaluator is None:
@@ -2812,6 +2838,8 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None):
         # Built here rather than taken from child_env, so it carries the
         # `env NAME=v` operands the wrapper walk merged into seg_inline.
         findings += evaluator(argv, {**exported, **seg_inline}, ctx)
+    if out is not None:
+        out.update(shell=shell_env, exported=exported)
     return findings, override, session_reason
 
 
