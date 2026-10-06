@@ -787,9 +787,9 @@ class ExpandVarsTests(unittest.TestCase):
                      "$1", "$@", "$$", "$?"):
             self.assertEqual(guard.expand_vars(form, env), form, form)
 
-    def test_resolve_assignments_left_to_right(self):
-        env = guard.resolve_assignments(
-            [("P", "acme_prod"), ("Z", "us-east1"), ("CTX", "gke_${P}_${Z}")], {})
+    def test_prefix_resolves_left_to_right(self):
+        env, _ = guard.extract_env_prefix(
+            ["P=acme_prod", "Z=us-east1", "CTX=gke_${P}_${Z}", "kubectl"], {})
         self.assertEqual(env["CTX"], "gke_acme_prod_us-east1")
 
 
@@ -1619,6 +1619,33 @@ class OverrideTests(unittest.TestCase):
         env, _ = guard.extract_env_prefix(
             ['AWS_PROFILE=prod', 'AWS_PROFILE+=-ro', 'aws', 's3', 'ls'], {})
         self.assertEqual(env, {'AWS_PROFILE': 'prod-ro'})
+
+    def test_append_expands_the_prior_before_joining(self):
+        # bash expands `$P` and then appends, so a suffix that starts with a
+        # name character cannot extend the name to `$Px` (Q180).
+        for base in ({'P': 'prod'}, {'P': 'prod', 'Px': 'dev'}):
+            env, _ = guard.extract_env_prefix(
+                ['AWS_PROFILE=$P', 'AWS_PROFILE+=x', 'aws', 's3', 'ls'], base)
+            self.assertEqual(env, {'AWS_PROFILE': 'prodx'}, base)
+
+    def test_a_resolved_value_is_not_expanded_again(self):
+        # A `$` already in a value is text: bash prints `$Qy` here, whatever
+        # `Qy` holds (Q180).
+        env, _ = guard.extract_env_prefix(
+            ['A+=y', 'aws'], {'A': '$Q', 'Qy': 'dev'})
+        self.assertEqual(env, {'A': '$Qy'})
+        env, _ = guard.extract_env_prefix(
+            ['A=$L', 'A+=y', 'aws'], {'L': '$Q', 'Ly': 'dev'})
+        self.assertEqual(env, {'A': '$Qy'})
+
+    def test_append_onto_a_variable_cannot_read_another_name(self):
+        # `$P_prod_eu` is a different, set, nonprod variable; bash runs
+        # `acme_prod_eu`.
+        decision, reason = run_hook(
+            "P=acme; P_prod_eu=dev; "
+            "AWS_PROFILE=$P AWS_PROFILE+=_prod_eu aws s3 rm s3://b/k")
+        self.assertEqual(decision, "deny")
+        self.assertIn("acme_prod_eu", reason)
 
     def test_env_wrapper_keeps_the_plus_in_the_name(self):
         # env(1) is not the shell -- it splits on the first `=` and takes the
