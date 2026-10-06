@@ -604,20 +604,103 @@ def pipefail_walk(segs, initial=False):
     scoped to the subshell that ran it: `(set -o pipefail); make | tail` runs
     the pipe without it. ``initial`` is the state the text starts in -- a
     substitution body inherits the shell's options at its position (Q259).
+
+    bash also forks without parens (Q263): a pipeline stage and a backgrounded
+    list run apart, so `set -o pipefail | true` and `set -o pipefail &` set
+    nothing here, and a `{ …; }` piped or backgrounded is scoped like `( … )`.
+    A function body is scoped too, and what it sets applies where the function
+    is called.
     """
+    opens, closes = brace_groups(segs)
     stack = [initial] * (segs[0].depth + 1 if segs else 1)
-    out = []
-    for seg in segs:
+    frames, funcs, out = [], {}, []
+    for i, seg in enumerate(segs):
         out.append(stack[-1])
-        setting = pipefail_setting(head_words(seg))
-        if setting is not None:
+        for scoped, fname in opens.get(i, ()):
+            frames.append([scoped, fname, len(stack), False])
+            if scoped:
+                stack.append(stack[-1])
+        # `function f { set …` carries the body's first command in its words.
+        words = head_words(seg._replace(tokens=seg.tokens[2:])
+                           if seg.tokens[:1] == ['function'] else seg)
+        setting = pipefail_setting(words)
+        if setting is None and words and words[0] in funcs:
+            setting = funcs[words[0]]
+        if setting is not None and not runs_apart(segs, i):
             stack[-1] = setting
+            if frames:
+                frames[-1][3] = True
+        for _ in range(closes.get(i, 0)):
+            if not frames:
+                break
+            scoped, fname, height, touched = frames.pop()
+            if touched and frames:
+                frames[-1][3] = True
+            if scoped and len(stack) == height + 1:
+                value = stack.pop()
+                if fname and touched:
+                    funcs[fname] = value
         for op in seg.post_ops:
             if op == ')' and len(stack) > 1:
                 stack.pop()
             elif op == '(':
                 stack.append(stack[-1])
     return out, stack[-1]
+
+
+def runs_apart(segs, i):
+    """Whether ``segs[i]`` runs in a process bash forks for a pipeline stage or
+    a backgrounded list, so nothing it sets reaches the commands after it.
+
+    `&` backgrounds the whole `&&`/`||` list before it, so the walk follows the
+    list to its end; a pipe binds tighter, so only this segment's own operator
+    and the one before it make it a stage.
+    """
+    if i > 0 and next_op(segs[i - 1].post_ops) in PIPE_OPS:
+        return True
+    if next_op(segs[i].post_ops) in PIPE_OPS:
+        return True
+    j = i
+    while next_op(segs[j].post_ops) in ('&&', '||') and j + 1 < len(segs):
+        j += 1
+    return next_op(segs[j].post_ops) == '&'
+
+
+def brace_groups(segs):
+    """({open index: [(scoped, function name)]}, {close index: count}).
+
+    A group is scoped when bash runs it apart from the shell -- piped, or
+    backgrounded -- or when it is a function body, which runs only when called.
+    `{` and `}` are reserved words, so each opens a segment's leading word run
+    or is a segment of its own.
+    """
+    opens, closes, stack = {}, {}, []
+    for i, seg in enumerate(segs):
+        toks = list(seg.tokens)
+        fname = None
+        if toks[:1] == ['function'] and len(toks) > 1:
+            fname, toks = toks[1], toks[2:]
+        elif (i > 0 and segs[i - 1].post_ops[:2] == ('(', ')')
+              and len(segs[i - 1].tokens) == 1):
+            fname = segs[i - 1].tokens[0]
+        k = 0
+        while k < len(toks) and toks[k] in SH_KEYWORDS and toks[k] != '}':
+            if toks[k] == '{':
+                stack.append((i, fname))
+                fname = None
+            k += 1
+        if toks and all(t == '}' for t in toks):
+            for _ in toks:
+                if not stack:
+                    break
+                start, name = stack.pop()
+                scoped = bool(name) or runs_apart(segs, i) or (
+                    start > 0 and next_op(segs[start - 1].post_ops) in PIPE_OPS)
+                opens.setdefault(start, []).append((scoped, name))
+                closes[i] = closes.get(i, 0) + 1
+    for start in opens:
+        opens[start].reverse()
+    return opens, closes
 
 
 def pipefail_before(prefix, initial):
