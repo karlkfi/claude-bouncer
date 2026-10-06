@@ -35,7 +35,7 @@ bash-workspace-guard.py rather than written fresh. Hand-rolling a shell-grammar
 scanner is the documented way this class of tool fails: silently, in both
 directions.
 """
-import sys, os, json, re, collections
+import sys, os, json, re, shlex, collections
 
 # The parsing primitives every claude-bouncer guard shares. The copy under this
 # plugin's `lib/` is vendored from the repository root; see scripts/sync-lib.py.
@@ -307,7 +307,20 @@ def wrapper_operands(wrapper, args):
                     return None
                 if '-' + char in value_flags:
                     break
-        args = args[wrapper_option(args, value_flags)[0]:]
+        used, opt, value = wrapper_option(args, value_flags)
+        args = args[used:]
+        if (wrapper == 'env' and opt in ('-S', '--split-string')
+                and value is not None and not set('$`') & set(value)):
+            # `env -S STRING` runs the words STRING splits into, options and
+            # assignments included, ahead of the operands after it (Q235).
+            # A string that will not split is env's error, and stays a value.
+            # One holding `$` or a backtick is only known at run time, and env
+            # expands `${NAME}` in it itself: `env -S "$X" make check` runs
+            # make when X is empty or `-i`, so it stays a value too.
+            try:
+                args = shlex.split(value) + args
+            except ValueError:
+                pass
     return args
 
 
