@@ -1541,6 +1541,34 @@ def readme_decision_rows():
     return rows, stray
 
 
+class AndOrListBackgroundTests(unittest.TestCase):
+    """Q280: bash's `&` detaches the and-or list it ends and nothing before
+    the `;` or newline ahead of it. A trailing `&` read as covering the
+    whole command let a foreground sleep through, and an `&` read as
+    covering only its own segment denied a sleep the shell backgrounded.
+    Each was measured against bash 5.3 by timing the command."""
+
+    def test_what_runs_before_the_list_is_still_judged(self):
+        # Measured before the fix: each deferred.
+        for cmd in ("sleep 600; ls &", "sleep 600; ls &\n",
+                    "sleep 600\nls &\n", "sleep 600; { ls; } &",
+                    "sleep 600; if true; then ls; fi &",
+                    "for i in 1 2; do sleep 600; done; ls &"):
+            with self.subTest(cmd=cmd):
+                d, _ = run_hook(cmd)
+                self.assertEqual(d, "deny")
+
+    def test_the_whole_list_is_detached(self):
+        # The first denied before the fix, the rest deferred and still do.
+        for cmd in ("sleep 300 && ls & make build", "sleep 600 && ls &",
+                    "sleep 600 | cat &", "while true; do sleep 5; done &",
+                    "if true; then sleep 600; fi &", "{ sleep 600; ls; } &",
+                    "case x in a) sleep 600 &;; esac", "(sleep 300) &"):
+            with self.subTest(cmd=cmd):
+                d, _ = run_hook(cmd)
+                self.assertIsNone(d)
+
+
 class DecisionTableTests(unittest.TestCase):
     def test_every_row_matches_the_hook(self):
         rows, stray = readme_decision_rows()

@@ -364,11 +364,12 @@ def heredoc_substitutions(expanded):
 REDIR = frozenset({'>', '>>', '<', '<<', '<<<', '>&', '<&', '>|', '&>', '&>>'})
 
 
-def split_segments(tokens):
+def split_segments(tokens, bg=None):
     """Split a token stream into (argv, terminator) pairs on every separator
     token (`;`, `&`, `&&`, `|`, `||`, parens, and mixed runs). The
-    terminator is the token that ended the segment ('' at end of input); a
-    terminator of exactly `&` marks the segment as backgrounded. Redirect
+    terminator is the token that ended the segment ('' at end of input).
+    Whether a segment is backgrounded is the `bg` flag below, not an `&`
+    terminator: the `&` detaches more than its own segment. Redirect
     operators do NOT split: the operator and its target word are dropped
     from the segment (the target is never a command). Crude splitting only
     ever creates extra segments to inspect, never hides a watch/sleep
@@ -383,26 +384,86 @@ def split_segments(tokens):
     far; a quoted `;` or `|` already left a segment this guard judged.
 
     The `;` tokens the pre-lex backtick and newline rewrite produces are
-    unquoted, so substitutions and multi-line commands still split."""
+    unquoted, so substitutions and multi-line commands still split.
+
+    Given a list as `bg`, appends one flag per segment: whether an `&` runs
+    it in the background, read off `backgrounded` rather than off its own
+    terminator (Q280)."""
+    covered = backgrounded(tokens) if bg is not None else None
     segs, cur = [], []
+    first = 0
     skip_next_word = False
-    for t in tokens:
-        if t and getattr(t, 'quoted_from', None) is None \
-                and all(c in PUNCT_CHARS for c in t):
+    for i, t in enumerate(tokens):
+        if is_operator(t):
             if t in REDIR:
                 skip_next_word = True
                 continue
             if cur:
                 segs.append((cur, t))
+                if covered is not None:
+                    bg.append(covered[first])
             cur = []
             skip_next_word = False
         elif skip_next_word:
             skip_next_word = False
         else:
+            if not cur:
+                first = i
             cur.append(t)
     if cur:
         segs.append((cur, ''))
+        if covered is not None:
+            bg.append(covered[first])
     return segs
+
+
+def is_operator(t):
+    """An unquoted token made only of operator characters. A quoted one has
+    the text of an operator and is a word (Q203)."""
+    return bool(t) and getattr(t, 'quoted_from', None) is None \
+        and all(c in PUNCT_CHARS for c in t)
+
+
+# Reserved words that open and close a compound command. A compound is one
+# element of the list around it, so an `&` after `done` detaches the loop.
+COMPOUND_OPEN = frozenset({'while', 'until', 'for', 'if', 'case', 'select',
+                           '{'})
+COMPOUND_CLOSE = frozenset({'done', 'fi', 'esac', '}'})
+
+
+def backgrounded(tokens):
+    """Per token, whether an `&` runs it in the background.
+
+    bash's `&` detaches the and-or list it ends: back to the last `;`,
+    newline or `&` at its own nesting level, and no further. So
+    `sleep 600 && ls &` returns at once, and `sleep 600; ls &` waits for the
+    sleep -- reading a trailing `&` as covering the whole command let that
+    sleep through (Q280). A case pattern's unpaired `)` can only close a
+    level early, which makes a later `;` cut coverage short: the direction
+    that judges more, not less."""
+    out = [False] * len(tokens)
+    starts = [0]
+    command_word = True
+    for i, t in enumerate(tokens):
+        if is_operator(t):
+            if t == '(':
+                starts.append(i + 1)
+            elif t == ')':
+                if len(starts) > 1:
+                    starts.pop()
+            elif t == ';':
+                starts[-1] = i + 1
+            elif t == '&':
+                out[starts[-1]:i] = [True] * (i - starts[-1])
+                starts[-1] = i + 1
+            command_word = t not in REDIR
+            continue
+        if command_word and t in COMPOUND_OPEN:
+            starts.append(i + 1)
+        elif command_word and t in COMPOUND_CLOSE and len(starts) > 1:
+            starts.pop()
+        command_word = t in COMPOUND_OPEN or t in OTHER_KEYWORDS
+    return out
 
 
 LOOP_KEYWORDS = frozenset({'while', 'until', 'for'})
@@ -692,16 +753,6 @@ def analyze_class_a(raw, cfg, depth=0):
     if tokens is None:
         return findings, None  # unparseable: fail-open, defer
 
-    # A trailing `&` detaches the whole command (including a backgrounded
-    # subshell or loop): nothing here blocks the main thread. Asked of the
-    # last TOKEN rather than the last character, because `sleep 300 \&`
-    # ends in `&` and runs in the foreground (Q203). The token form settles
-    # `&&` and `|&` on its own -- neither is the `&` token -- so the
-    # endswith pair this replaced is not needed.
-    if tokens and tokens[-1] == '&' \
-            and getattr(tokens[-1], 'quoted_from', None) is None:
-        return findings, None
-
     def recurse(body):
         # A nested command string: its findings are this command's, and an
         # override prefix inside it stands the whole call down.
@@ -719,8 +770,9 @@ def analyze_class_a(raw, cfg, depth=0):
     loop_sleep = False   # a foreground `sleep` seen anywhere (any duration)
     sleep_findings = []
     any_bg = False
-    for group, term in split_segments(tokens):
-        bg = (term == '&')
+    bg_flags = []
+    segments = split_segments(tokens, bg_flags)
+    for (group, _term), bg in zip(segments, bg_flags):
         any_bg = any_bg or bg
         # A substitution runs where the segment holding it runs: in the
         # background job under `&`, and in the foreground under a `timeout`

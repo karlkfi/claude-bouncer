@@ -116,6 +116,8 @@ Decision cell.
 | `sleep 2 && curl localhost:8080/health` | defer (below floor) |
 | `./server > log 2>&1 & sleep 2; curl localhost` | defer (server detached, grace sleep short) |
 | `sleep 30 & make build` | defer (sleep backgrounded) |
+| `sleep 30 && make build &` | defer (the `&` detaches the whole `&&` list) |
+| `sleep 300; ls &` | **deny** (the `&` detaches only `ls`) |
 | `bash -c 'while true; do sleep 5; done'` | **deny** (recursed) |
 | `bash poll-forever.sh` | defer (script files stay opaque) |
 | `cat <<EOF` … `tail -f x` … `EOF` | defer (heredoc body is data) <!-- check: {"command": "cat <<EOF\ntail -f x\nEOF"} --> |
@@ -288,9 +290,11 @@ These pass untouched, by design:
   worded for a detached wait; the fixes they teach are the same either way,
   and `run_in_background` is not one of them. A repo that wants a specific
   watch form quiet in every mode can list it in `poll.exempt_watch_patterns`.
-- **A trailing `&`** that detaches the blocking command (including a
-  backgrounded subshell or loop). A mid-command `& ` exempts just that
-  segment: `sleep 30 & make build` passes.
+- **An `&`** that detaches the blocking command (including a
+  backgrounded subshell or loop). It exempts what bash detaches: the
+  and-or list it ends, back to the `;` or newline before it. So
+  `sleep 30 & make build` and `sleep 30 && ls &` pass, and
+  `sleep 300; ls &` does not.
 - **A `timeout N ...` wrap** exempts the wrapped command from Class A —
   a silent defer, not a downgraded block. Rationale: an explicit bound is
   precisely the fix the guard teaches, and the Bash tool's own timeout still
