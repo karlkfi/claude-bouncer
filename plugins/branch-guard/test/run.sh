@@ -277,6 +277,22 @@ check "[glued] (git status)&& git log -> allow" allow \
 check "[glued] git status <>f -> none" none \
   "$(decision_for "$(bash_payload 'git status <>f')" "$WORK")"
 
+# 3d3. `|&` is a pipe that also carries stderr, and bash runs the command on
+#      its right; it was missing from SEPARATORS, so that command was never
+#      classified (Q278). bash 5.3.15 runs the commit spaced, glued, and after
+#      a `)`. The allow side moves with it, to match `git status | cat`.
+for c in 'echo a |& git commit -m x' 'echo a|&git commit -m x' \
+         '(true)|& git commit -m x'; do
+  check "[|&] $c on main -> ask" ask \
+    "$(decision_for "$(bash_payload "$c")" "$WORK")"
+done
+check "[|&] git status |& cat -> allow" allow \
+  "$(decision_for "$(bash_payload 'git status |& cat')" "$WORK")"
+check "[|&] git status|&git log -> allow" allow \
+  "$(decision_for "$(bash_payload 'git status|&git log')" "$WORK")"
+check "[|&] git log |& head -> allow" allow \
+  "$(decision_for "$(bash_payload 'git log |& head')" "$WORK")"
+
 # 3e. env-prefixed / global-flag commit still detected on main -> ask
 #     The path is single-quoted because that is how a real command names a
 #     native Windows path: the hook lexes with shlex, which eats an unquoted
@@ -1042,7 +1058,7 @@ done
 #     the test shell doesn't expand the substitutions itself.
 check "backtick cmd-subst -> none (defer)" none \
   "$(decision_for "$(bash_cmd 'git status `touch PWNED`')" "$WORK")"
-check "|& operator run -> none (defer)" none \
+check "|& into a non-git segment -> none (defer)" none \
   "$(decision_for "$(bash_cmd 'git status |& touch PWNED')" "$WORK")"
 check "process-subst <( ) -> none (defer)" none \
   "$(decision_for "$(bash_cmd 'git status <(touch PWNED)')" "$WORK")"
