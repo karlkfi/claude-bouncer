@@ -94,7 +94,7 @@ the default `strict` [push policy](#push-guard).
 | `git push` *(on `release/1.2` — a release branch is diverged from the base on purpose)* | allow |
 | `gh pr view 123` / `gh pr list` / `gh repo view` / `gh run watch` / `gh search prs` | allow |
 | `gh api repos/o/r` / `gh api -X GET …` *(a read — default or explicit GET)* | allow |
-| `git log \| head` / `gh pr checks 123 \| head -20` / `git diff --stat \| tail -n 5` *(piped to a read-only filter)* | allow |
+| `git log \| head` / `git log \|& head` / `gh pr checks 123 \| head -20` / `git diff --stat \| tail -n 5` *(piped to a read-only filter)* | allow |
 | `git log --oneline ; echo "---" ; git status` *(label/no-op between git reads)* | allow |
 | `gh pr view "$(git branch --show-current)"` / `git -C "$(git rev-parse --show-toplevel)" status` / `git log "$(pwd)"` *(pure read-only substitution)* | allow |
 | `git commit -F- <<'EOF' … EOF` *(feature branch; heredoc body is opaque data)* | allow |
@@ -826,11 +826,11 @@ update step and restart.
    the shell would expand (a command substitution in it runs) is kept so the
    substitution guard still defers; an unterminated one is left unchanged.
 1. **Tokenize** the command with Python's `shlex` (POSIX mode, punctuation
-   grouping) so quotes are respected and shell operators (`|`, `&&`, `>`, `;`,
-   newlines) become their own tokens. shlex glues adjacent operators into one
+   grouping) so quotes are respected and shell operators (`|`, `|&`, `&&`, `>`,
+   `;`, newlines) become their own tokens. shlex glues adjacent operators into one
    token, so a run made only of separators (`);`, `)&&`, `))`) is split back
-   into them. A run holding a redirect or an unknown operator (`<>`, `|&`)
-   stays whole, and step 5 defers on it.
+   into them. A run holding a redirect or an unknown operator (`<>`) stays
+   whole, and step 5 defers on it.
 2. **Split** into simple-command segments on those operators and drop redirect
    targets aside, including fd-redirect forms (`git push … 2>&1`,
    `git log 2>/dev/null`) — the leading fd digit and the operator's target are
@@ -874,7 +874,7 @@ update step and restart.
    without ever weakening a protective `ask`: an inline-config escape hatch
    (`git -c core.pager='!sh …' log`), and a hidden command/process substitution
    in the raw token stream (`` `…` ``, `$(…)`, `<(…)`/`>(…)`, or an unrecognized
-   operator run like `|&`) — checked over the raw tokens, before redirect targets
+   operator run like `<>`) — checked over the raw tokens, before redirect targets
    are dropped, so `` git diff > `evil` `` is caught too. A small registry of
    provably pure substitutions (`$(git rev-parse --show-toplevel)`,
    `$(git branch --show-current)`, `$(pwd)`) is exempt from that second downgrade

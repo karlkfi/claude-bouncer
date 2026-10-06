@@ -133,7 +133,7 @@ DEFAULT_PROTECTED_BRANCHES = ('main', 'master')
 PROTECTED_BRANCHES_ENV = 'BRANCH_GUARD_PROTECTED_BRANCHES'
 
 # Operator-run tokens that separate one simple command from the next.
-SEPARATORS = {'|', '||', '&&', '&', ';', '\n', '(', ')'}
+SEPARATORS = {'|', '|&', '||', '&&', '&', ';', '\n', '(', ')'}
 # Redirect operators; the following token is a target, not part of a command.
 # Includes the fd-duplication forms (`>&`/`<&`, as in `2>&1`); shlex's
 # punctuation grouping lexes `2>&1` as the three tokens `2`, `>&`, `1`.
@@ -597,7 +597,7 @@ def split_separator_runs(tokens):
     boundary as `;\\n` or `|\\n`. None of those match SEPARATORS, so the next
     command merged into the previous segment and was never classified: the
     `git commit` in `x=$(true); git commit` lost its ask (Q268). A run with a
-    redirect or an unknown operator in it (`<>`, `|&`, `;>`) stays whole, so
+    redirect or an unknown operator in it (`<>`, `;>`) stays whole, so
     `has_shell_substitution` still flags it. A quoted run is a word and is
     left intact.
     """
@@ -754,7 +754,7 @@ def strip_heredocs(cmd):
 
 def tokenize(cmd):
     """Lex a shell command into a flat token list (POSIX mode, punctuation
-    grouping) with newline separators peeled out of operator runs. Quotes are
+    grouping) with every separator run split into its operators. Quotes are
     respected and shell operators (`|`, `&&`, `>`, `;`, …) become their own
     tokens. Raises ValueError on unbalanced quotes."""
     return split_separator_runs(lex(cmd))
@@ -816,12 +816,13 @@ def has_shell_substitution(tokens):
     """True if any raw token hides a command the classifier never inspects:
     command substitution (`` `…` `` or `$(…)`, including inside a quoted arg),
     process substitution (`<(…)`/`>(…)`), or an unrecognized operator run
-    (`|&`, `<>`) that would otherwise merge a trailing command into a git
-    segment's args. A run of separators alone (`);`, `;;`) never reaches here
-    whole: `split_separator_runs` has already split it. Must run over the RAW token stream (before redirect
-    targets are stripped) so a substitution in a redirect target
-    (`git diff > `evil``) is caught too. Like GIT_ESCAPE_HATCHES, this only
-    downgrades a would-be `allow` to defer — it never suppresses an `ask`.
+    (`<>`) that would otherwise merge a trailing command into a git segment's
+    args. A run of separators alone (`);`, `;;`) never reaches here whole:
+    `split_separator_runs` has already split it. Must run over the RAW token
+    stream (before redirect targets are stripped) so a substitution in a
+    redirect target (`git diff > `evil``) is caught too. Like
+    GIT_ESCAPE_HATCHES, this only downgrades a would-be `allow` to defer — it
+    never suppresses an `ask`.
 
     A command substitution is the one exception that does NOT block: when every
     substitution in a token is a recognized pure/read-only one
