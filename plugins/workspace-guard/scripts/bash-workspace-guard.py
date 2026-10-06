@@ -3992,6 +3992,13 @@ def split_groups(tokens, scopes=None, herestrings=None):
     ``own`` is False for a pipeline segment or a backgrounded command, which
     bash runs in a subshell of its own.
 
+    A `{ … }` group, loop, `if` or `case` piped or backgrounded as a whole is a
+    subshell too, so its groups get a scope numbered like a `(` (Q272). Where it
+    is a later pipeline stage the opener says so, and its first group is no
+    stage of its own; where it is an earlier stage or backgrounded, only the
+    separator after its closer says so, and the scope is added to its groups
+    then.
+
     A function body is a scope too, numbered by an ``(n, name)`` pair rather
     than an int (Q265). Defining a function runs none of its body, so a `cd` in
     it must not move what follows the definition; it does move the rest of the
@@ -4010,10 +4017,14 @@ def split_groups(tokens, scopes=None, herestrings=None):
     groups, cur, cur_redir, i = [], [], [], 0
     paren, prev_sep, pipe, nhd = 0, '', 0, 0
     shells, opened, cur_hs = [], 0, []
-    # One `[closer, fn_scope]` per compound command still open, where the
-    # closer of a `( … )` body is the shell number of its paren. `fn` names a
+    # One `[closer, scope, first_group, depth]` per compound command still
+    # open, where the closer of a `( … )` body is the shell number of its paren
+    # and `scope` is the shell the compound opened, if any. `fn` names a
     # function whose header has been read and whose body has not opened yet.
-    frames, fn, cmd_pos = [], None, True
+    # `lead` is the separator `own` judges the group by, which a compound
+    # opening the group takes over (Q272); `closed` holds the compounds closed
+    # in this group, whose subshell the next separator decides.
+    frames, fn, cmd_pos, lead, closed = [], None, True, '', []
     while i < len(tokens):
         t = tokens[i]
         if (t == '(' and tokens[i + 1:i + 2] == [')'] and len(cur) == 1
@@ -4027,16 +4038,25 @@ def split_groups(tokens, scopes=None, herestrings=None):
                             and t in (';', '\n', '&&', '||'))
                 groups.append((cur, cur_redir, persists, pipe, nhd))
                 if scopes is not None:
-                    scopes.append((tuple(shells), prev_sep not in PIPE_OPS
+                    scopes.append((tuple(shells), lead not in PIPE_OPS
                                    and t not in PIPE_OPS + ('&',)))
                 if herestrings is not None:
                     herestrings.append(cur_hs)
                 cur, cur_redir, nhd, cur_hs = [], [], 0, []
+            if closed and scopes is not None and t in PIPE_OPS + ('&',):
+                # A compound piped or backgrounded as a whole runs in a
+                # subshell, which only the separator after its closer says.
+                for first, depth in closed:
+                    opened += 1
+                    for k in range(first, len(scopes)):
+                        sh, ow = scopes[k]
+                        scopes[k] = (sh[:depth] + (opened,) + sh[depth:], ow)
+            closed = []
             if t == '(':
                 if fn is not None:                # `f () ( … )`
                     opened += 1
                     shells.append((opened, fn))
-                    frames.append([opened + 1, shells[-1]])
+                    frames.append([opened + 1, shells[-1], None, None])
                     fn = None
                 paren += 1
                 opened += 1
@@ -4050,7 +4070,7 @@ def split_groups(tokens, scopes=None, herestrings=None):
                     shells.pop()
             if t != '|':
                 pipe += 1
-            prev_sep, cmd_pos = t, True
+            prev_sep, lead, cmd_pos = t, t, True
             i += 1; continue
         if cmd_pos and (is_reserved_word(t) or t in ('for', 'select')
                         and getattr(t, 'quoted_from', None) is None):
@@ -4059,15 +4079,25 @@ def split_groups(tokens, scopes=None, herestrings=None):
                 i += 4 if tokens[i + 2:i + 4] == ['(', ')'] else 2
                 continue
             if t in COMPOUND_CLOSERS:
-                frames.append([COMPOUND_CLOSERS[t], None])
+                frames.append([COMPOUND_CLOSERS[t], None, len(groups),
+                               len(shells)])
                 if fn is not None:
                     opened += 1
                     shells.append((opened, fn))
                     frames[-1][1] = shells[-1]
+                elif lead in PIPE_OPS:
+                    # A later pipeline stage: the compound is the subshell,
+                    # and the group it opens is no stage of its own.
+                    opened += 1
+                    shells.append(opened)
+                    frames[-1][1] = opened
+                lead = ''
             elif frames and frames[-1][0] == t:
-                scope = frames.pop()[1]
+                _, scope, first, depth = frames.pop()
                 if scope in shells:
                     del shells[shells.index(scope):]
+                elif scope is None:
+                    closed.append((first, depth))
             fn = None
             cmd_pos = t in LEADING_WORDS
         elif not is_operator(t, REDIR) and not is_operator(t, DUP):
@@ -4107,7 +4137,7 @@ def split_groups(tokens, scopes=None, herestrings=None):
     if cur or cur_redir or cur_hs:
         groups.append((cur, cur_redir, paren == 0 and prev_sep != '|', pipe, nhd))
         if scopes is not None:
-            scopes.append((tuple(shells), prev_sep not in PIPE_OPS))
+            scopes.append((tuple(shells), lead not in PIPE_OPS))
         if herestrings is not None:
             herestrings.append(cur_hs)
     return groups
