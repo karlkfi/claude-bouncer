@@ -1027,6 +1027,14 @@ def command_substitutions(text, quotes=True, spans=None):
     escapes the next character, matching the body's own rule that a backslash
     quotes a following `$`, backtick, backslash, or newline.
 
+    With ``quotes`` on, an unquoted `#` at a word start begins a comment to the
+    newline, and no substitution or quote opens inside one (Q258). Without it, a
+    `$(` in a comment ran to a `)` lines later, hiding the lines between, and
+    an apostrophe opened a quote that hid everything after it. The word rule is
+    `strip_comments`'s: a `#` glued to a quote, an escape, or the close of a
+    substitution or `<(…)` is text. So is one in a `${…}`, `$[…]`, `((…))` or
+    assignment subscript, and in a heredoc body whose terminator is present.
+
     Pass a list as ``spans`` to also collect, in order, the ``(start, end)``
     half-open span each returned body's WHOLE substitution occupies in ``text``
     -- the `$` or opening backtick through the closing `)` or backtick. A caller
@@ -1040,6 +1048,10 @@ def command_substitutions(text, quotes=True, spans=None):
     bodies = []
     i, n = 0, len(text)
     in_single = in_double = False
+    brk = True            # a `#` here would start a word, so a comment (Q258)
+    quiet = 0             # no comment starts before this index
+    parens = []           # one per open `(`: True for a `<(` or `>(`
+    pending = []          # heredoc delimiters armed, awaiting their bodies
     while i < n:
         c = text[i]
         if in_single:
@@ -1048,21 +1060,26 @@ def command_substitutions(text, quotes=True, spans=None):
             i += 1
             continue
         if c == '\\':                              # escapes next char (not in '')
+            brk = brk and text[i+1:i+2] == '\n'    # a continuation joins words
             i += 2
             continue
         end = _ansi_c_end(text, i) if quotes and not in_double else -1
         if end > 0:
+            brk = False
             i = end
             continue
         if quotes and c == "'" and not in_double:
             in_single = True
+            brk = False
             i += 1
             continue
         if quotes and c == '"':
             in_double = not in_double
+            brk = False
             i += 1
             continue
         if c == '$' and i + 1 < n and text[i + 1] == '(':
+            brk = False                            # `$(a)#b` is one word
             if i + 2 < n and text[i + 2] == '(':
                 i = _skip_balanced_parens(text, i + 1)   # $((…)) arithmetic
                 continue
@@ -1081,10 +1098,69 @@ def command_substitutions(text, quotes=True, spans=None):
             bodies.append(_unescape_backticks(body, in_double))
             if spans is not None:
                 spans.append((i, end))
+            brk = False
             i = end
             continue
+        if quotes and not in_double:
+            if c == '#' and brk and i >= quiet:
+                while i < n and text[i] != '\n':   # keep the newline itself
+                    i += 1
+                continue
+            quiet = max(quiet, _comment_free_end(text, i, brk))
+            if c == '(':
+                parens.append(text[i-1:i] in ('<', '>'))
+            elif c == ')':
+                brk = not (parens and parens.pop())    # `<(a)#b` is one word
+                i += 1
+                continue
+            elif text.startswith('<<', i) and i >= quiet:
+                if text.startswith('<<<', i):      # here-string, not heredoc
+                    i += 3
+                    brk = True
+                    continue
+                delim, strip_tabs, _, i = _scan_heredoc_delim(text, i + 2)
+                if delim:
+                    pending.append((delim, strip_tabs))
+                brk = False
+                continue
+            elif c == '\n' and pending:            # a body is data, not syntax
+                j = i + 1
+                for delim, strip_tabs in pending:
+                    j, closed = _consume_heredoc_body_ex(
+                        text, j, delim, strip_tabs)
+                    if not closed:
+                        break
+                    quiet = max(quiet, j)
+                pending = []
+        brk = c in COMMENT_PRECEDERS
         i += 1
     return bodies
+
+
+def _comment_free_end(text, i, brk):
+    """The index before which no comment can start, for a construct at ``i``.
+
+    bash reads a `#` as text inside a `${…}` expansion, a `$[…]` or `((…))`
+    arithmetic, and an assignment's subscript (`FOO[a #b]=x`, Q217), so
+    :func:`command_substitutions` opens no comment there (Q258). The scan
+    still walks the span, since a `$(…)` inside one runs. Unterminated, the
+    span runs to the end, which is the reading before comments were known.
+    Returns ``i`` when no such construct starts at ``i``.
+    """
+    if text.startswith('${', i):
+        end = _brace_end(text, i)
+        return len(text) if end < 0 else end
+    if text.startswith('$[', i):
+        end = _subscript_end(text, i + 1)
+        return len(text) if end < 0 else end
+    if text.startswith('((', i) and text[i-1:i] != '$':
+        return _skip_balanced_parens(text, i)
+    m = _WORD_RE.match(text, i) if brk else None
+    if m and text.startswith('[', m.end()):
+        end = _subscript_end(text, m.end())
+        if end > 0 and text.startswith(('=', '+='), end):
+            return end
+    return i
 
 
 def process_substitutions(text, spans=None):

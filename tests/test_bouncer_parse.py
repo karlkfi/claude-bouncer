@@ -511,6 +511,50 @@ class CommentInSubstitutionTests(unittest.TestCase):
                     'echo "$(%s)" T' % body))
 
 
+class CommentOutsideSubstitutionTests(unittest.TestCase):
+    """A top-level comment opens no substitution and no quote (Q258).
+
+    The companion to Q230's comment inside a `$(…)`. Driven under `env -i
+    /opt/homebrew/bin/bash --norc --noprofile -c` (5.3.15) with `echo RAN` as
+    P: bash runs P as a command of its own in the first loop, inside a
+    substitution in the second, and not at all for the two `#` that end a
+    subshell or an arithmetic command.
+    """
+    P = 'rm /etc/probe-target'
+
+    def test_a_dollar_paren_backtick_or_apostrophe_in_a_comment_is_text(self):
+        for cmd, found in (
+                ('echo hi # $(\nP\n# )', []),
+                ('echo hi # $(\nP\necho )', []),
+                ('echo hi # `\nP\n# `', []),
+                ('true # `\nP\necho `', []),
+                ('echo "a" #$(\nP\n#)', []),
+                ('echo a&#$(\nP\n#)', []),
+                ('echo a;#`\nP\n#`', []),
+                ('echo x;#$(echo y)\nP', []),
+                ('(true)#$(P)', []),
+                ('((1))#$(P)', []),
+                ('cat <<EOF\nx\nEOF\n# $(\nP\n# )', []),
+                ("# don't\necho \"$(P)\"", ['P']),
+                ("# don't\necho $(P)", ['P'])):
+            cmd = cmd.replace('P', self.P)
+            with self.subTest(cmd=cmd):
+                self.assertEqual([b.replace('P', self.P) for b in found],
+                                 bp.command_substitutions(cmd))
+
+    def test_a_hash_bash_reads_as_text_opens_no_comment(self):
+        for cmd in ('echo a#$(P)', 'echo $(true)#$(P)', 'echo `true`#$(P)',
+                    'echo $((1))#$(P)', 'echo ${x}#$(P)', 'echo a\\\n#$(P)',
+                    'echo a\\#$(P)', "echo $'x'#$(P)", 'echo "x"#$(P)',
+                    "echo 'x'#$(P)", 'echo \\"#$(P)', 'echo $#$(P)',
+                    'cat <(true)#$(P)', 'echo {a,#$(P)}', 'echo ${x:- #$(P)}',
+                    'X[a #$(P)]=1', 'X[a #b]=$(P)', '(( 1 #$(P)\n))',
+                    'echo $[1 #$(P)\n]', 'cat <<EOF\n# $(P)\nEOF'):
+            cmd = cmd.replace('P', self.P)
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.P, bp.command_substitutions(cmd)[-1])
+
+
 class OwnLevelHeredocStripTests(unittest.TestCase):
     """`own_level_only` drops the top level's bodies and copies the rest (Q119).
 

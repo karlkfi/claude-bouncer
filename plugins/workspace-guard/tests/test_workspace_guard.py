@@ -5563,6 +5563,20 @@ class Issue60EndToEndTests(unittest.TestCase):
             with self.subTest(head=head):
                 self._decision(head + " ; cat /etc/q60-fake", "ask")
 
+    def test_guarded_in_substitution_after_apostrophe_comment_ask(self):
+        # Q258: the apostrophe in a comment opened a quote the substitution
+        # scan never closed, so the read inside `"$(…)"` was never judged.
+        self._decision("# don't\necho \"$(cat /etc/q60-fake)\"", "ask")
+
+    def test_substitution_in_a_comment_is_not_judged(self):
+        # Q258: bash reads a `#` straight after a subshell or an arithmetic
+        # command as a comment, so nothing here reads the file.
+        for cmd in ("(true)#$(cat /etc/q60-fake)",
+                    "((1))#$(cat /etc/q60-fake)"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(
+                    run_hook(cmd, self.workspace, project_dir=self.workspace))
+
     def test_heredoc_line_redirect_outside_ask(self):
         # The heredoc body is skipped, but a redirect on the command line to
         # an outside path is still checked.

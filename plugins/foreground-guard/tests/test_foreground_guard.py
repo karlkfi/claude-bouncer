@@ -301,6 +301,15 @@ class CommentTests(unittest.TestCase):
                 d, _ = run_hook(cmd)
                 self.assertEqual(d, "deny")
 
+    def test_a_substitution_opener_in_a_comment_hides_nothing(self):
+        # Q258: a `$(` or backtick in a comment opened a substitution running
+        # to the next close, and the lines between read as its text.
+        for cmd in ("echo hi # $(\nsleep 600\necho )",
+                    "echo hi # `\nsleep 600\n# `", "echo a;#`\nsleep 600\n#`"):
+            with self.subTest(cmd=cmd):
+                d, _ = run_hook(cmd)
+                self.assertEqual(d, "deny")
+
     def test_a_hash_after_a_substitution_is_text(self):
         # bash reads `$(true)#b` as one word, so nothing after it is a comment.
         d, _ = run_hook("echo $(true)#b; sleep 600")

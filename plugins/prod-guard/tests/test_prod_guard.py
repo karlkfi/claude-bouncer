@@ -1462,6 +1462,17 @@ class CompoundBypassTests(unittest.TestCase):
                 decision, _ = run_hook(prefix + cmd + suffix)
                 self.assertEqual(decision, "deny")
 
+    def test_substitution_opener_in_a_comment_hides_nothing(self):
+        # Q258: a `$(` or backtick in a comment opened a substitution running
+        # to the next close, so the line between read as its text.
+        cmd = "kubectl --context acme-production delete ns x"
+        for prefix, suffix in (("echo hi # $(\n", "\necho )"),
+                               ("echo hi # `\n", "\n# `"),
+                               ("true # `\n", "\necho `")):
+            with self.subTest(prefix=prefix):
+                decision, _ = run_hook(prefix + cmd + suffix)
+                self.assertEqual(decision, "deny")
+
     def test_hash_that_starts_no_comment_hides_nothing(self):
         # shlex started a comment mid-word, as bash does not.
         for head in ("echo file#1", "echo ${#x} $#", 'echo "a # b"', "echo '#'",
