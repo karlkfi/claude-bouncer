@@ -4042,6 +4042,11 @@ def split_groups(tokens, scopes=None, herestrings=None, lastpipe=False):
     A `shopt -u lastpipe` turns it off only where it runs unconditionally: at
     the top level, outside any compound, and not behind `&&` or `||`.
 
+    A `case` pattern is no command and its parens are no subshell (Q273): the
+    `)` ending `x)` has no `(` of its own, and read as one it closed the
+    subshell around the `case`, so a later `cd` in that subshell escaped it.
+    Pattern words are dropped, and a pattern's `(` and `|` are skipped.
+
     A function body is a scope too, numbered by an ``(n, name)`` pair rather
     than an int (Q265). Defining a function runs none of its body, so a `cd` in
     it must not move what follows the definition; it does move the rest of the
@@ -4060,17 +4065,46 @@ def split_groups(tokens, scopes=None, herestrings=None, lastpipe=False):
     groups, cur, cur_redir, i = [], [], [], 0
     paren, prev_sep, pipe, nhd = 0, '', 0, 0
     shells, opened, cur_hs = [], 0, []
-    # One `[closer, scope, first_group, depth]` per compound command still
-    # open, where the closer of a `( … )` body is the shell number of its paren
-    # and `scope` is the shell the compound opened, if any. `fn` names a
+    # One `[closer, scope, first_group, depth, part]` per compound command
+    # still open, where the closer of a `( … )` body is the shell number of its
+    # paren and `scope` is the shell the compound opened, if any. `part` is
+    # where a `case` stands: 0 before its word, 1 before `in`, 2 in a pattern
+    # and 3 in a clause (Q273); `pdepth` counts the parens a pattern opened
+    # itself, and `pstarted` whether one has a word yet. `fn` names a
     # function whose header has been read and whose body has not opened yet.
     # `lead` is the separator `own` judges the group by, which a compound
     # opening the group takes over (Q272); `closed` holds the compounds closed
     # in this group, whose subshell the next separator decides.
     frames, fn, cmd_pos, lead, closed = [], None, True, '', []
     last_close = False
+    pdepth, pstarted = 0, False
     while i < len(tokens):
         t = tokens[i]
+        top = frames[-1] if frames and frames[-1][0] == 'esac' else None
+        if top is not None and top[4] == 2:
+            # A `case` pattern runs nothing, and its parens and `|` are pattern
+            # syntax: the `)` with no `(` of its own ends it, not a subshell.
+            if is_operator(t, {')'}) and not pdepth:
+                top[4], t = 3, '\n'               # ends the group as a newline
+            elif is_operator(t, {'('}):
+                pdepth += pstarted
+                pstarted = True
+                i += 1; continue
+            elif is_operator(t, {')'}):
+                pdepth -= 1
+                i += 1; continue
+            elif is_operator(t, {'|', '\n'}):
+                i += 1; continue
+            elif t == 'esac' and not pstarted and is_reserved_word(t):
+                cmd_pos = True
+            else:
+                pstarted = True
+                i += 1; continue
+        elif top is not None and top[4] < 2 \
+                and not is_operator(t, SEPARATORS | REDIR | DUP):
+            if top[4] == 0 or (t == 'in' and is_reserved_word(t)):
+                top[4] += 1
+            pdepth, pstarted = 0, False
         if (t == '(' and tokens[i + 1:i + 2] == [')'] and len(cur) == 1
                 and not (cur_redir or cur_hs) and not is_reserved_word(cur[0])
                 and not re.search(r'[=$`(]', cur[0])):
@@ -4106,7 +4140,7 @@ def split_groups(tokens, scopes=None, herestrings=None, lastpipe=False):
                 if fn is not None:                # `f () ( … )`
                     opened += 1
                     shells.append((opened, fn))
-                    frames.append([opened + 1, shells[-1], None, None])
+                    frames.append([opened + 1, shells[-1], None, None, None])
                     fn = None
                 paren += 1
                 opened += 1
@@ -4121,6 +4155,14 @@ def split_groups(tokens, scopes=None, herestrings=None, lastpipe=False):
             if t != '|':
                 pipe += 1
             prev_sep, lead, cmd_pos = t, t, True
+            if top is not None and top[4] == 3 and t == ';' \
+                    and tokens[i + 1:i + 2] in ([';'], ['&']):
+                # `;;`, `;&` or `;;&` ends a clause; a pattern comes next.
+                i += 1
+                while i + 1 < len(tokens) and tokens[i + 1] in (';', '&') \
+                        and is_operator(tokens[i + 1], SEPARATORS):
+                    i += 1
+                top[4], pdepth, pstarted = 2, 0, False
             i += 1; continue
         if cmd_pos and (is_reserved_word(t) or t in ('for', 'select')
                         and getattr(t, 'quoted_from', None) is None):
@@ -4130,7 +4172,7 @@ def split_groups(tokens, scopes=None, herestrings=None, lastpipe=False):
                 continue
             if t in COMPOUND_CLOSERS:
                 frames.append([COMPOUND_CLOSERS[t], None, len(groups),
-                               len(shells)])
+                               len(shells), 0])
                 if fn is not None:
                     opened += 1
                     shells.append((opened, fn))
@@ -4143,7 +4185,7 @@ def split_groups(tokens, scopes=None, herestrings=None, lastpipe=False):
                     frames[-1][1] = opened
                 lead = ''
             elif frames and frames[-1][0] == t:
-                _, scope, first, depth = frames.pop()
+                _, scope, first, depth, _ = frames.pop()
                 if scope in shells:
                     del shells[shells.index(scope):]
                     last_close = last_close or isinstance(scope, int)
