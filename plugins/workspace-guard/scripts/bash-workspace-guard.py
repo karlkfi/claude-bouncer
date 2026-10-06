@@ -3789,7 +3789,7 @@ def mark_substitutions(text):
 
 
 def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
-                        inherited=None):
+                        inherited=None, funcs=()):
     """Every command a substitution in ``cmd`` runs, with the cwd bash runs it in.
 
     Returns ``(body, cwd, cwd_unknown)`` triples. A body whose position the scan
@@ -3818,6 +3818,9 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
     goes silent where the same read spelled plainly denies. ``inherited`` names
     come from an enclosing string, so they were assigned before this one ran
     and are usable from the start.
+
+    ``funcs`` names the functions an enclosing string defined whose call moves
+    the cwd (Q265); a call to one here leaves the cwd unknown.
     """
     heredocs = []
     own = strip_heredoc_bodies(cmd, own_level_only=True, bodies=heredocs)
@@ -3834,6 +3837,7 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
         usable = set(inherited or ())
         scopes, saved_shells, hs = [], [], []
         groups = split_groups(tokens, scopes, hs)
+        funcs = cd_functions(groups, scopes, funcs)
         for (g, g_redir, _persists, _pipe, nhd), (shells, own), g_hs in zip(
                 groups, scopes, hs):
             cwd, unknown = enter_shell(saved_shells, shells, cwd, unknown)
@@ -3874,6 +3878,8 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
                 else classify_cd(wrap.argv)
             if kind is not None:
                 cwd, unknown = apply_cd(kind, arg, cwd, unknown)
+            elif own and calls_cd_function(wrap, funcs):
+                unknown = True
             # Recorded after this group's own `cd`, so a `cd $d` cannot read an
             # assignment standing beside it. Still filtered through
             # `stable_vars`, so a name reassigned or poisoned anywhere in the
@@ -3901,6 +3907,53 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
 
 PIPE_OPS = ('|', '|&')
 
+# The reserved word that opens each compound command, mapped to its closer.
+# `for` and `select` are too, though `SH_KEYWORDS` leaves them out.
+COMPOUND_CLOSERS = {'{': '}', 'if': 'fi', 'case': 'esac', 'for': 'done',
+                    'select': 'done', 'while': 'done', 'until': 'done'}
+# Reserved words after which the next word is still in command position. A
+# closer is one too: `{ { a; } }` and `then { a; } fi` are both valid bash.
+LEADING_WORDS = frozenset({'if', 'then', 'else', 'elif', 'do', 'while', 'until',
+                           '!', 'time', '{'}) | frozenset(COMPOUND_CLOSERS.values())
+
+
+def function_scope(shells):
+    """The function whose body a group sits directly in, or None (Q265)."""
+    if shells and isinstance(shells[-1], tuple):
+        return shells[-1][1]
+    return None
+
+
+def cd_functions(groups, scopes, known=()):
+    """Names of the functions a call to which moves the caller's cwd (Q265).
+
+    A body runs in the shell that calls it, so a `cd` written at the body's own
+    level moves the caller at every call and moves nothing at the definition.
+    A body calling one of these moves its caller too. ``known`` names the ones
+    an enclosing string defined, which a substitution inherits.
+    """
+    funcs, grew = set(known), True
+    while grew:
+        grew = False
+        for (g, *_), (shells, own) in zip(groups, scopes):
+            name = function_scope(shells)
+            if name is None or name in funcs or not own:
+                continue
+            wrap = peel_wrappers(strip_env_prefix(strip_sh_keywords(g)))
+            if wrap.external or not wrap.argv:
+                continue
+            if (classify_cd(wrap.argv)[0] is not None
+                    or wrap.argv[0] in funcs):
+                funcs.add(name)
+                grew = True
+    return funcs
+
+
+def calls_cd_function(wrap, funcs):
+    """Whether a peeled group runs a function from `cd_functions` (Q265)."""
+    return bool(funcs) and not wrap.external and bool(wrap.argv) \
+        and wrap.argv[0] in funcs
+
 
 def split_groups(tokens, scopes=None, herestrings=None):
     """Split a token list into `(cmd_tokens, redir_targets, persists, pipe,
@@ -3926,6 +3979,14 @@ def split_groups(tokens, scopes=None, herestrings=None):
     ``own`` is False for a pipeline segment or a backgrounded command, which
     bash runs in a subshell of its own.
 
+    A function body is a scope too, numbered by an ``(n, name)`` pair rather
+    than an int (Q265). Defining a function runs none of its body, so a `cd` in
+    it must not move what follows the definition; it does move the rest of the
+    body, which is what the body's own scope gives. The header -- `f ()` or
+    `function f` -- is consumed rather than kept as a group, since it runs
+    nothing either. `cd_functions` reads these scopes to find the calls that
+    move the cwd.
+
     ``herestrings``, when given, receives one list per group of the `<<<`
     operands written in it (Q177). An operand is string content, not a path, so
     it joins neither list above -- but a substitution inside one runs with the
@@ -3936,8 +3997,17 @@ def split_groups(tokens, scopes=None, herestrings=None):
     groups, cur, cur_redir, i = [], [], [], 0
     paren, prev_sep, pipe, nhd = 0, '', 0, 0
     shells, opened, cur_hs = [], 0, []
+    # One `[closer, fn_scope]` per compound command still open, where the
+    # closer of a `( … )` body is the shell number of its paren. `fn` names a
+    # function whose header has been read and whose body has not opened yet.
+    frames, fn, cmd_pos = [], None, True
     while i < len(tokens):
         t = tokens[i]
+        if (t == '(' and tokens[i + 1:i + 2] == [')'] and len(cur) == 1
+                and not (cur_redir or cur_hs) and not is_reserved_word(cur[0])
+                and not re.search(r'[=$`(]', cur[0])):
+            fn = cur.pop()                        # `f ()` heads a definition
+            i += 2; cmd_pos = True; continue
         if is_operator(t, SEPARATORS):
             if cur or cur_redir or cur_hs:
                 persists = (paren == 0 and prev_sep != '|'
@@ -3950,17 +4020,45 @@ def split_groups(tokens, scopes=None, herestrings=None):
                     herestrings.append(cur_hs)
                 cur, cur_redir, nhd, cur_hs = [], [], 0, []
             if t == '(':
+                if fn is not None:                # `f () ( … )`
+                    opened += 1
+                    shells.append((opened, fn))
+                    frames.append([opened + 1, shells[-1]])
+                    fn = None
                 paren += 1
                 opened += 1
                 shells.append(opened)
             elif t == ')':
                 paren = max(0, paren - 1)
                 if shells:
+                    if frames and frames[-1][0] == shells[-1]:
+                        shells.pop()
+                        frames.pop()
                     shells.pop()
             if t != '|':
                 pipe += 1
-            prev_sep = t
+            prev_sep, cmd_pos = t, True
             i += 1; continue
+        if cmd_pos and (is_reserved_word(t) or t in ('for', 'select')
+                        and getattr(t, 'quoted_from', None) is None):
+            if t == 'function' and i + 1 < len(tokens):
+                fn = tokens[i + 1]                # `function f [()]`
+                i += 4 if tokens[i + 2:i + 4] == ['(', ')'] else 2
+                continue
+            if t in COMPOUND_CLOSERS:
+                frames.append([COMPOUND_CLOSERS[t], None])
+                if fn is not None:
+                    opened += 1
+                    shells.append((opened, fn))
+                    frames[-1][1] = shells[-1]
+            elif frames and frames[-1][0] == t:
+                scope = frames.pop()[1]
+                if scope in shells:
+                    del shells[shells.index(scope):]
+            fn = None
+            cmd_pos = t in LEADING_WORDS
+        elif not is_operator(t, REDIR) and not is_operator(t, DUP):
+            fn, cmd_pos = None, False
         if is_operator(t, REDIR) or is_operator(t, DUP):
             # An fd number written immediately before a redirect/dup operator
             # (`2>file`, `2>&1`) tokenizes as a bare digit token glued to the
@@ -4064,7 +4162,7 @@ def analyze_command(cmd, ctx, base_cwd, depth=0, suppressed=None):
 
 
 def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None,
-                     seed_loops=None, base_cwd_unknown=False):
+                     seed_loops=None, base_cwd_unknown=False, seed_funcs=()):
     """Analyze one command string; returns ``(offenders, guarded, KillFacts)``.
 
     Command-substitution bodies (``"$(…)"`` and backtick ``` `…` ```, plus the
@@ -4101,6 +4199,9 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
     substitution this body came from. Every relative operand then resolves as
     ``untracked`` — the same answer the enclosing string already gives one
     written outside a substitution (Q169).
+
+    ``seed_funcs`` names the functions whose call moves the cwd, which a
+    substitution inherits from the string that defined them (Q265).
     """
     proj, cwd = ctx.proj, base_cwd
     # Alias for readability at the two use sites far below; the group loop's own
@@ -4115,6 +4216,7 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
 
     scopes = []
     groups = split_groups(tokens, scopes)
+    cd_funcs = cd_functions(groups, scopes, seed_funcs)
 
     def is_outside(rp):
         return path_is_outside(rp, proj)
@@ -4511,7 +4613,10 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
                 p, ctx.kill_anchor, cmd_cwd, cmd_cwd_unknown)))
         # A `cd` behind a separate program (`env cd`) moves that program only,
         # and one in a pipeline segment or backgrounded moves its own subshell
-        # only (Q173).
+        # only (Q173). A call to a function whose body runs a `cd` moves the
+        # cwd somewhere the definition does not say (Q265).
+        if own and calls_cd_function(wrap, cd_funcs):
+            group_cwd_unknown = True
         kind, arg = (None, None) if wrap.external else classify_cd(g)
         if kind is not None:
             if own:
@@ -4670,12 +4775,13 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
     if subst_depth < MAX_SUBST_DEPTH:
         for body, body_cwd, body_cwd_unknown in substitution_bodies(
                 cmd, base_cwd, base_cwd_unknown, stable_vars,
-                inherited=seed_vars):
+                inherited=seed_vars, funcs=cd_funcs):
             sub_off, _, sub_kf = _analyze_command(body, ctx, body_cwd,
                                                   subst_depth + 1, in_subst=True,
                                                   seed_vars=stable_vars,
                                                   seed_loops=stable_loops,
-                                                  base_cwd_unknown=body_cwd_unknown)
+                                                  base_cwd_unknown=body_cwd_unknown,
+                                                  seed_funcs=cd_funcs)
             outside.extend(sub_off)
             signal = merge_nested_signal(signal, sub_kf.signal)
             launder = launder or sub_kf.launder
