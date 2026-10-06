@@ -1872,9 +1872,10 @@ final output.
   edges degrade to *defer* (never a silent allow): a body that itself contains
   a quoted operator character (`echo "$(grep ")" f)"`) can mis-tokenize on
   re-parse and defer; and backtick nesting via
-  `` \` `` or a no-space `$((…))`-shaped subshell isn't decoded. Process substitution
-  `<(…)`/`>(…)` is only ever unquoted and is already caught by the subshell
-  split.
+  `` \` `` or a no-space `$((…))`-shaped subshell isn't decoded. A process
+  substitution's body is recursed into the same way, so
+  `true >(rm -rf ../x)` asks as `rm -rf ../x` does even though `true` is
+  unguarded (Q276).
 - The sibling-checkout `deny` classifies *write-context* file arguments — the
   same set the read-prefix exemption treats as writes: redirect targets, `dd`
   operands, every operand of `cp`/`mv`/`tee`/`rm`/`unlink`/`ln`, every operand

@@ -17,7 +17,7 @@ from bouncer_parse import (                                    # noqa: E402
     _OPERATORS, is_assignment, is_operator, is_reserved_word, split_assignment,
     _consume_heredoc_body, _scan_backticks, _scan_dollar_paren,
     _skip_balanced_parens, command_substitutions, glue_dollar_paren,
-    note_discarded_writes, split_operator_runs, strip_comments,
+    note_discarded_writes, process_substitutions, split_operator_runs, strip_comments,
     strip_env_prefix, strip_heredoc_bodies, strip_sh_keywords,
 )
 from bouncer_grants import load_grants, record_grants  # noqa: E402
@@ -3757,8 +3757,21 @@ def apply_cd(kind, arg, cwd, unknown):
     return cwd, True
 
 
+def all_substitutions(text):
+    """Each outermost command or process substitution in ``text``, in order, as
+    ``(body, span)``. bash runs a `<(…)` body as surely as a `$(…)` one (Q276).
+    A `$(…)` inside a `<(…)` belongs to that body, and is dropped here so the
+    two spans never overlap; the recursion finds it there."""
+    ps, cs = [], []
+    procs = list(zip(process_substitutions(text, spans=ps), ps))
+    cmds = [(b, (s, e)) for b, (s, e) in
+            zip(command_substitutions(text, spans=cs), cs)
+            if not any(ps_ <= s < pe for _, (ps_, pe) in procs)]
+    return sorted(procs + cmds, key=lambda pair: pair[1][0])
+
+
 def mark_substitutions(text):
-    """Replace every outermost command substitution in ``text`` with a marker.
+    """Replace every outermost command or process substitution with a marker.
 
     Returns ``(marked, bodies, texts)``: the marked string, each substitution's
     inner command, and the original source slice it was cut from. The marker is
@@ -3775,9 +3788,9 @@ def mark_substitutions(text):
         # would switch substitution scanning off outright -- an out-of-root read
         # or write silent from one stray byte, which is looser than main rather
         # than equal to it.
-        return text, command_substitutions(text), None
-    spans = []
-    bodies = command_substitutions(text, spans=spans)
+        return text, [b for b, _ in all_substitutions(text)], None
+    pairs = all_substitutions(text)
+    bodies, spans = [b for b, _ in pairs], [span for _, span in pairs]
     out, texts, last = [], [], 0
     for i, (start, end) in enumerate(spans):
         out.append(text[last:start])
