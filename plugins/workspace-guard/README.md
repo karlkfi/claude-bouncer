@@ -83,8 +83,9 @@ like `sort -o`), `uniq`, `xxd` (whose optional second positional is an
 On the write side: `cp`, `mv`, `tee`, `rm`, `unlink`, `ln` (both its source and
 the link it creates), `dd`, and `mktemp` (whose default
 location is host temp — see below). These are the file-reading and file-writing
-commands Claude reaches for most often; tools like `ls`, `find`, and `xargs`
-aren't covered yet (see the [shared backlog](https://github.com/karlkfi/claude-bouncer/blob/main/docs/queue/README.md)). A **redirect**
+commands Claude reaches for most often. `ls` isn't covered yet, and `find` and
+`xargs` are judged by the commands they run rather than as commands of their
+own (see the [shared backlog](https://github.com/karlkfi/claude-bouncer/blob/main/docs/queue/README.md)). A **redirect**
 target (`> file`) is checked on *any* command, guarded or not — it's a write the
 shell performs regardless of the command word.
 
@@ -257,6 +258,9 @@ old one. A different project's scratch still asks entirely.
 | `command cd /etc && cat hosts` (the shell's own `cd`, behind `command`) | **ask** |
 | `nohup cat in.txt` · `env -C sub cat in.txt` | allow |
 | `git ls-files \| xargs grep foo` (xargs appends its input; escalates in `auto`) | defer |
+| `find /etc -name hosts -exec cat {} \;` · `find . -exec cat /etc/hosts \;` | **ask** |
+| `find . -name '*.py' -exec grep foo {} +` (a `find` command, read at one remove) | defer |
+| `find /etc/x -delete` · `find . -fprint /etc/x` | **ask** |
 | `cat in.txt; sh -c 'cat in.txt'` (clean body, still no vouch) | defer |
 | `ps aux \| grep ginkgo` (no kill in the string) | allow |
 | `cat in.txt; bash --version` (shell, no `-c` body) | allow |
@@ -1186,7 +1190,7 @@ through the same boundary rules and produce the same reasons. Symlink staging
    stays a runtime-expanded `deny`, so a value from later in the string can never
    stand in for the one the body actually sees.
 15. **Recurse into shell `-c` bodies.** A body is an ordinary command string that
-   happened to arrive inside one token, so it runs back through steps 1–15 and
+   happened to arrive inside one token, so it runs back through steps 1–16 and
    its offenders fold in — but only when this host is what executes it. The
    group's command word has to be a shell or a local wrapper (`timeout`, `env`,
    `xargs`, `find`, `nohup`, `nice`, `ionice`, `stdbuf`, `setsid`, `time`);
@@ -1201,6 +1205,20 @@ through the same boundary rules and produce the same reasons. Symlink staging
    Like step 14 this only *adds* friction: the body's own `guarded` is dropped,
    so a body reading nothing but workspace files still leaves the string
    deferring. The 25-level nesting bound covers these too.
+16. **Recurse into the commands `find` runs.** Each `-exec`, `-execdir`, `-ok`
+   and `-okdir` command, up to its `;` or the `+` after a `{}`, is rebuilt as a
+   command string and goes back through steps 1–16 like a `-c` body: offenders
+   fold in, `guarded` is dropped. `{}` is filled in by find at runtime, so it is
+   replaced by each start point rather than read as a file name — every match
+   is a start or sits under one. A `-execdir` command runs in its match's
+   directory, so its relative operands are resolved from the start, from the
+   directory part of the start's spelling (where GNU findutils runs the start
+   entry), and from find's own cwd (where BSD find does). `-delete` makes the
+   start points writes, and `-fprint`, `-fprint0`, `-fprintf` and `-fls` name a
+   file find writes itself. Start points read from `-files0-from`, or appended
+   by an `xargs`, are ones the hook cannot see, so `{}` or `-delete` behind them
+   withholds `allow`. A bare `find /etc -name x` lists names the way `ls -R`
+   does, and is no more judged than `ls`.
 
 ## Agent guidance: avoiding prompts
 
@@ -1959,6 +1977,13 @@ final output.
   `sh -c` bodies and kills together. Wrappers outside
   that list — `sudo`, `doas`, `caffeinate`, `chrt`, `taskset`, `flock` — are not
   peeled, so a guarded command behind one defers; nor is bash's `time -p`.
+- **A `find` command is judged against its start points, not the files find
+  matches.** The hook does not walk the tree, so a match that is a symlink out
+  of the workspace — or one `find -L` follows — reaches past what `{}` stood
+  for, the way `cat ./*` would through the same link. Where a `-execdir` start
+  is a `$VAR` the hook cannot read, a relative operand in its command is
+  reported as after an untracked `cd`, which names the right operand under the
+  wrong cause.
 - **The PowerShell tool is guarded for a known set of cmdlets, and only those.**
   Claude Code ships two shell tools. Which one a Windows session gets depends on
   whether Git for Windows is installed — without it there is no Bash tool and

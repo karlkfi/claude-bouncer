@@ -2153,7 +2153,7 @@ def _scan_for_command(tokens):
     can only start the command too early, which reads more words as operands."""
     heads = (SPEC.keys() | ALIASES.keys() | SIGNAL_CMDS | SHELL_C_CMDS
              | INTERP_CMDS | WRAPPER_GRAMMAR.keys()
-             | {'ln', 'dd', 'mktemp', 'ps', 'pgrep'})
+             | {'ln', 'dd', 'mktemp', 'ps', 'pgrep', 'find'})
     for i, t in enumerate(tokens):
         if not _unreadable_word(t) and native_cmd_name(t) in heads:
             return tokens[i:]
@@ -2195,6 +2195,142 @@ def peel_wrappers(tokens):
         argv = rest
     return WrapperPeel(argv, lost or appends, appends, external, chdirs,
                        files)
+
+# `find` runs a command from inside its own expression (Q237), after the start
+# points and up to a `;`, or a `+` straight after a `{}`, so neither the lookup
+# nor the wrapper peel reaches it. The value says whether the command runs in
+# the directory of the match rather than find's own.
+FIND_EXEC_PRIMARIES = {'-exec': False, '-ok': False,
+                       '-execdir': True, '-okdir': True}
+
+# Primaries writing the file they name. `-fprintf` takes a format after it,
+# which the scan steps over as an ordinary word.
+FIND_WRITE_PRIMARIES = frozenset({'-fprint', '-fprint0', '-fprintf', '-fls'})
+
+# Options ahead of the start points, GNU and BSD together. BSD's `-f PATH`
+# names a start, attached or not, and GNU's `-D LIST` takes a value; a GNU
+# primary spelled `-f…` is not BSD's attached form.
+_FIND_FLAG_RE = re.compile(r'^-(?:[HLPEXdsx]+|O\d*)$')
+_FIND_F_PRIMARIES = frozenset({'-false', '-fls', '-follow', '-fprint',
+                               '-fprint0', '-fprintf', '-fstype',
+                               '-files0-from'})
+
+FindParts = collections.namedtuple(
+    'FindParts', 'starts opaque commands deletes writes reads')
+
+
+def find_parts(argv):
+    """What a `find` invocation ``argv`` touches, as :data:`FindParts`.
+
+    ``starts`` are the start points, `.` when none is written (GNU's default;
+    BSD refuses to run). ``opaque`` is True when start points come from a file
+    the string does not show, which is GNU's `-files0-from`. ``commands`` are
+    ``(argv, in_match_dir, plus)`` per `-exec`-family primary, ``deletes`` is
+    True under `-delete`, and ``writes``/``reads`` are files find opens itself.
+
+    A primary's value is not told apart from a primary, so `-name -delete`
+    reads as a delete. That direction only ever finds more to check.
+    """
+    starts, opaque, cmds, deletes, writes, reads = [], False, [], False, [], []
+    n, i = len(argv), 1
+    while i < n:
+        t = argv[i]
+        if t == '--':
+            i += 1
+            break
+        if t in ('-f', '-D') and i + 1 < n:
+            if t == '-f':
+                starts.append(argv[i+1])
+            i += 2
+        elif t.startswith('-f') and t not in _FIND_F_PRIMARIES:
+            starts.append(t[2:])
+            i += 1
+        elif _FIND_FLAG_RE.match(t):
+            i += 1
+        else:
+            break
+    while i < n and not (argv[i].startswith('-') and argv[i] != '-') \
+            and argv[i] not in ('(', ')', '!', ','):
+        starts.append(argv[i])
+        i += 1
+    while i < n:
+        t = argv[i]
+        if t in FIND_EXEC_PRIMARIES:
+            j = i + 1
+            while j < n and argv[j] != ';' and not (
+                    argv[j] == '+' and j > i + 1 and argv[j-1] == '{}'):
+                j += 1
+            cmds.append((argv[i+1:j], FIND_EXEC_PRIMARIES[t],
+                         j < n and argv[j] == '+'))
+            i = j + 1
+            continue
+        if t == '-delete':
+            deletes = True
+        elif t in FIND_WRITE_PRIMARIES and i + 1 < n:
+            writes.append(argv[i+1])
+            i += 1
+        elif t == '-files0-from' and i + 1 < n:
+            opaque = True
+            reads.append(argv[i+1])
+            i += 1
+        i += 1
+    if not starts and not opaque:
+        starts = ['.']
+    return FindParts(starts, opaque, cmds, deletes, writes, reads)
+
+
+def find_bodies(fp, cwd, cwd_unknown):
+    """``(body, cwd, cwd_unknown)`` for each command a :data:`FindParts` runs.
+
+    Every `{}` becomes a start point, since each match is one or sits under
+    one, and both finds substitute it inside a larger word too (`X{}Y`). Under
+    `+` only the `{}` before it is replaced -- BSD leaves any other literal and
+    GNU refuses the command -- and it stands for every start at once.
+
+    `-execdir` runs each command in its match's directory, which for every
+    match but the start sits at or under the start. The start itself runs in
+    the directory part of its own spelling under GNU findutils (`/w` from `/`,
+    `b/..` from `b`) and in find's own cwd under BSD find, so each of those
+    three gets a body of its own, with `{}` the start made absolute. The start
+    is the shallowest directory under it, which is the one a relative operand
+    climbs furthest from.
+    """
+    def fill(argv, plus, vals):
+        if plus:
+            return argv[:-1] + vals
+        return [t.replace('{}', vals[0]) for t in argv]
+
+    def body(words):
+        return ' '.join(shlex.quote(t) for t in words)
+
+    out = []
+    for argv, in_dir, plus in fp.commands:
+        if not argv:
+            continue
+        starts = fp.starts or ['{}']
+        if in_dir:
+            for s in starts:
+                a = expand_tilde(s)
+                if cwd_unknown or s == '{}' or a.startswith('~') \
+                        or _unreadable_word(a):
+                    out.append((body(fill(argv, plus, [s])), cwd, True))
+                    continue
+                dirs = [os.path.normpath(os.path.join(cwd, p)) for p in
+                        (a, os.path.dirname(a) or '.', '.')]
+                # An absolute start keeps its spelling, which is what the
+                # hook reads a leading-slash path from on Windows.
+                if not (os.path.isabs(a) or a.startswith('/')):
+                    a = dirs[0]
+                b = body(fill(argv, plus, [a]))
+                out.extend((b, d, False) for d in dict.fromkeys(dirs))
+        elif plus:
+            out.append((body(fill(argv, plus, starts)), cwd, cwd_unknown))
+        elif any('{}' in t for t in argv):
+            out.extend((body(fill(argv, plus, [s])), cwd, cwd_unknown)
+                       for s in starts)
+        else:
+            out.append((body(argv), cwd, cwd_unknown))
+    return out
 
 # Stand-in for a grep-family pattern the hook cannot read — `grep -f patterns.txt`
 # takes its patterns from a file, and an invocation may carry no pattern operand
@@ -4551,6 +4687,8 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
     # `(body, cwd)` for every shell `-c` body this string runs locally, recursed
     # into after the loop so each resolves against the cwd of its own group.
     shell_bodies = []
+    # The same for the commands a `find` runs, each with its own cwd state.
+    find_runs = []
     saved_shells, left_unknown = [], False
     for (g, g_redir, persists, pipe, _nhd), (shells, own) in zip(groups, scopes):
         # A `lastpipe` stage before this one left the cwd unknown (Q272).
@@ -4647,6 +4785,25 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
             o = check_file(f, *dirs[at], is_read=f_is_read)
             if o is not None:
                 outside.append(o)
+        if g and native_cmd_name(g[0]) == 'find':
+            # The commands `find` runs are judged by recursion below, and the
+            # files it opens itself here (Q237). Like `wrap.files`, none of it
+            # sets `guarded`. Start points it reads elsewhere, or that `xargs`
+            # appends, hide what `{}` and `-delete` reach.
+            fp = find_parts(g)
+            for f in fp.reads:
+                o = check_file(f, cmd_cwd, cmd_cwd_unknown, is_read=True)
+                if o is not None:
+                    outside.append(o)
+            for f in fp.writes + (fp.starts if fp.deletes else []):
+                o = check_file(f, cmd_cwd, cmd_cwd_unknown)
+                if o is not None:
+                    outside.append(o)
+            if (fp.opaque or wrap.appends) and (fp.deletes or any(
+                    '{}' in t for c in fp.commands for t in c[0])):
+                signal = merge_nested_signal(signal, WRAPPER_SIGNAL)
+            find_runs.extend(find_bodies(fp, cmd_cwd, cmd_cwd_unknown))
+            continue
         if wrap.opaque and g and native_cmd_name(g[0]) in WRAPPED_OPERAND_HEADS:
             signal = merge_nested_signal(signal, WRAPPER_SIGNAL)
         # Signalling and pid-source classification runs before every `continue`
@@ -4925,6 +5082,21 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
             signal = merge_nested_signal(signal, b_kf.signal)
             launder = launder or b_kf.launder
             patterns.extend(b_kf.patterns)
+
+    # A command `find` runs (Q237) is a command string rebuilt from its words,
+    # treated as a shell `-c` body is. Past the cap it goes unread, so the
+    # string does not get the `allow` that would speak for it.
+    for body, body_cwd, body_cwd_unknown in find_runs:
+        if subst_depth >= MAX_SUBST_DEPTH:
+            signal = merge_nested_signal(signal, WRAPPER_SIGNAL)
+            break
+        f_off, _, f_kf = _analyze_command(body, ctx, body_cwd, subst_depth + 1,
+                                          in_subst,
+                                          base_cwd_unknown=body_cwd_unknown)
+        outside.extend(f_off)
+        signal = merge_nested_signal(signal, f_kf.signal)
+        launder = launder or f_kf.launder
+        patterns.extend(f_kf.patterns)
     return outside, guarded, KillFacts(signal, launder, patterns)
 
 
