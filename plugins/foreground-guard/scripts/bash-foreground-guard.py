@@ -91,6 +91,7 @@ import fnmatch
 import json
 import os
 import re
+import shlex
 import sys
 
 # The parsing primitives every claude-bouncer guard shares. This guard keeps its
@@ -476,11 +477,6 @@ PLAIN_WRAPPERS = frozenset({'command', 'nohup', 'builtin', 'time', 'exec',
                             'stdbuf', 'unbuffer'})
 SHELL_NAMES = frozenset({'bash', 'sh', 'zsh', 'dash', 'ksh'})
 
-# `env -S` carries the command inside its value, so skipping the pair would
-# be no truer than reading the value as one word, and the one word keeps the
-# deny a watch pattern gives it until the value is split (Q246).
-ENV_VALUE_OPTS = WRAPPER_VALUE_OPTS['env'] - {'-S', '--split-string'}
-
 
 def strip_head(argv, state):
     """Peel shell keywords, env-var prefixes, and launcher wrappers off a
@@ -530,11 +526,21 @@ def strip_head(argv, state):
                     state['override'] = _val
                 argv = argv[1:]
         elif head == 'env':
-            value_flags = ENV_VALUE_OPTS
+            value_flags = WRAPPER_VALUE_OPTS['env']
             argv = argv[1:]
             while argv:
                 if argv[0].startswith('-'):
-                    argv = argv[wrapper_option(argv, value_flags)[0]:]
+                    used, opt, value = wrapper_option(argv, value_flags)
+                    argv = argv[used:]
+                    if opt in ('-S', '--split-string') and value is not None:
+                        # `env -S STRING` splits STRING into words and reads
+                        # them as its own arguments, ahead of the rest, so
+                        # options and assignments inside it peel here too
+                        # (Q246). A value that will not split stays one word.
+                        try:
+                            argv = shlex.split(value) + argv
+                        except ValueError:
+                            argv = [value] + argv
                 elif '=' in argv[0]:
                     # `env` is a program: any operand holding `=` assigns,
                     # whatever bash would make of the name, so `env 1=x cmd`
