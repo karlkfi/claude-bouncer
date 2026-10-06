@@ -5438,6 +5438,14 @@ class Issue60EndToEndTests(unittest.TestCase):
             with self.subTest(head=head):
                 self._decision(head + " ; cat /etc/q60-fake", "ask")
 
+    def test_guarded_after_quote_in_double_quoted_substitution_ask(self):
+        # Q257: a `"` inside a substitution in double quotes does not close
+        # the outer string, so the read after it is still judged.
+        for head in ('echo "$(echo \'"\')"', 'echo "`echo \'"\'`"',
+                     'echo "$(printf \'%s"\' x)"', 'echo "$(echo "a # c")"'):
+            with self.subTest(head=head):
+                self._decision(head + " ; cat /etc/q60-fake", "ask")
+
     def test_heredoc_line_redirect_outside_ask(self):
         # The heredoc body is skipped, but a redirect on the command line to
         # an outside path is still checked.
