@@ -590,10 +590,13 @@ def extract_env_prefix(argv, base_env=None):
     pin a target (AWS_PROFILE=dev, TF_WORKSPACE=prod) and they can carry the
     PROD_GUARD_OVERRIDE escape hatch.
 
-    `base_env` is the env this segment inherits, used to resolve a `NAME+=v`
-    append. Passing it is what keeps an append from narrowing a target to its
-    suffix: `AWS_PROFILE+=-ro` against an ambient `prod` has to read
-    `prod-ro`, not `-ro`."""
+    Values come back expanded, left to right against `base_env` -- the env
+    this segment inherits -- and the assignments before them, as the shell
+    does, so `CTX=gke_${P}_${Z}` reads earlier ones. Passing `base_env` is
+    also what keeps an append from narrowing a target to its suffix:
+    `AWS_PROFILE+=-ro` against an ambient `prod` has to read `prod-ro`, not
+    `-ro`."""
+    base_env = base_env or {}
     env = {}
     i = 0
     while i < len(argv) and is_assignment(argv[i]):
@@ -611,11 +614,15 @@ def extract_env_prefix(argv, base_env=None):
             # gives just `v`, which is how `PROD_GUARD_OVERRIDE+=why` arms
             # (Q174); a set one keeps the prefix, so a target cannot be
             # narrowed to the suffix alone.
+            # The prior is joined already expanded, as bash does, so a suffix
+            # opening with a name character cannot extend `$P` into `$Px`
+            # (Q180).
             prior = env.get(name)
             if prior is None:
-                prior = (base_env or {}).get(name, '')
-            value = prior + value
-        env[name] = value
+                prior = base_env.get(name, '')
+            env[name] = prior + expand_vars(value, {**base_env, **env})
+        else:
+            env[name] = expand_vars(value, {**base_env, **env})
         i += 1
     return env, argv[i:]
 
@@ -637,22 +644,11 @@ def expand_vars(value, env):
     stays `$CTX`) rather than blanked, so an unresolvable target stays UNKNOWN
     and still prompts — expansion only ever makes classification *more*
     specific, never silently allows. `env` values are assumed already resolved
-    (the caller folds them left-to-right), so one pass suffices."""
+    (extract_env_prefix folds them left-to-right), so one pass suffices."""
     def repl(m):
         name = m.group(1) or m.group(2)
         return env[name] if name in env else m.group(0)
     return VAR_REF_RE.sub(repl, value)
-
-
-def resolve_assignments(pairs, base_env):
-    """Fold an ordered iterable of (name, raw_value) onto a copy of `base_env`,
-    expanding each value against the env accumulated so far — left-to-right, as
-    the shell does, so `CTX=gke_${P}_${Z}` resolves against earlier
-    assignments. Returns the new env dict."""
-    env = dict(base_env)
-    for name, value in pairs:
-        env[name] = expand_vars(value, env)
-    return env
 
 
 # Builtins that carry persisting `NAME=val` operands (`export FOO=bar`).
@@ -2733,11 +2729,10 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None):
     exported = dict(exported)
     for group in split_simple_commands(tokens):
         seg_env, argv_raw = extract_env_prefix(group, shell_env)
-        # This segment's inline `A=x cmd` assignments, resolved left-to-right
-        # against the current shell env. They export to this command's own
-        # children but do not persist to the chain.
-        inline = resolve_assignments(seg_env.items(), shell_env)
-        seg_inline = {k: inline[k] for k in seg_env}
+        # This segment's inline `A=x cmd` assignments, already resolved. They
+        # export to this command's own children but do not persist to the
+        # chain.
+        seg_inline = dict(seg_env)
         same_shell = {**shell_env, **seg_inline}   # for this command's args
         child_env = {**exported, **seg_inline}     # for its `sh -c` body
         # Expanded view for classification; raw view (nested-body extraction)
