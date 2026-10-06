@@ -73,6 +73,29 @@ class StripCommentsTests(unittest.TestCase):
         self.assertEqual('(true)', bp.strip_comments('(true)#b; id'))
         self.assertEqual('echo $(true) ', bp.strip_comments('echo $(true) #b; id'))
 
+    def test_a_backtick_or_brace_expansion_holds_no_comment(self):
+        # bash 5.3.15 runs `id` after each: a comment in backticks ends at the
+        # closing backtick, and a `#` in `${...}` is text (Q254).
+        for cmd in ('echo `true # c` ; id', 'echo `true # c`#x ; id',
+                    'echo "`echo "a # c"`" ; id', 'echo ${x:- #} ; id',
+                    'echo ${x:-${y:- #}} ; id', 'echo ${x:-$(echo }) #} ; id',
+                    'echo ${x:-`echo } #`} ; id', 'echo "${x:-" #"}" ; id',
+                    "echo ${x:-$'\\'} #'} ; id"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(cmd, bp.strip_comments(cmd))
+        self.assertEqual('echo ${x:-a #} ; id',
+                         bp.strip_comments('echo ${x:-a\\\n #} ; id'))
+        # A quoted `}` does not close one, and a bare `{` does not nest, so the
+        # comment after the real close still goes.
+        for cmd in ('echo ${x:-"}"} #c', "echo ${x:-'}'} #c", 'echo ${x:-\\}} #c',
+                    'echo ${x:-{a} #c}', 'echo ${#x} #c', 'echo $# #c',
+                    'echo `echo a`#x #c'):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(cmd[:cmd.rindex(' #c') + 1], bp.strip_comments(cmd))
+        # Unterminated, each is read as before.
+        self.assertEqual('echo ${x:- ', bp.strip_comments('echo ${x:- # c'))
+        self.assertEqual('echo `true ', bp.strip_comments('echo `true # c'))
+
 
 class StripHeredocBodiesTests(unittest.TestCase):
     def test_body_and_terminator_go(self):

@@ -98,6 +98,12 @@ CASES = [
      False, True, ''),
     ('inside a backtick substitution', 'out=`make check | tail -1`',
      False, True, ''),
+    # Q254: a comment in backticks ends at the closing backtick, and a `#` in
+    # `${...}` is text, so neither hides the gate after it.
+    ('after a comment in backticks', 'echo `true # c` ; make check | tail -5',
+     False, True, ''),
+    ('after a # in a brace expansion', 'echo ${x:- #} ; make check | tail -5',
+     False, True, ''),
     ('subshell group piped', '(cd sub && go test ./...) | tail -5',
      False, True, ''),
     ('brace group piped', '{ cd sub && go test ./...; } | tail -5',

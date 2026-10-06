@@ -5431,6 +5431,13 @@ class Issue60EndToEndTests(unittest.TestCase):
         # Comment line must not hide a following guarded outside read.
         self._decision("echo note # x\ncat /etc/q60-fake", "ask")
 
+    def test_guarded_after_hash_in_backticks_or_brace_ask(self):
+        # Q254: a comment in backticks ends at the closing backtick, and a `#`
+        # in `${...}` is text, so neither hides the read after it.
+        for head in ("echo `true # c`", 'echo "`echo "a # c"`"', "echo ${x:- #}"):
+            with self.subTest(head=head):
+                self._decision(head + " ; cat /etc/q60-fake", "ask")
+
     def test_heredoc_line_redirect_outside_ask(self):
         # The heredoc body is skipped, but a redirect on the command line to
         # an outside path is still checked.

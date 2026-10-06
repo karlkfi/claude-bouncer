@@ -97,6 +97,9 @@ _OPERATORS = tuple(sorted(SEPARATORS | REDIR | DUP, key=len, reverse=True))
 # begins a word. Mid-word (`file#1`) it is ordinary text.
 COMMENT_PRECEDERS = frozenset(' \t\n;|&()<>')
 
+# One escape pair, so a `\`-newline continuation is told from an escaped `\`.
+_CONTINUATION_RE = re.compile(r'\\(.)', re.S)
+
 # Backstop on substitution recursion. A command nested deeper than this is not
 # analysed rather than risking unbounded work on a pathological input.
 MAX_SUBST_DEPTH = 25
@@ -325,6 +328,12 @@ def strip_comments(cmd):
     a `#` straight after one is text: bash reads `$(a)#b` as one word, where
     `(a)#b` ends a subshell (Q264). Each opener's close is found with the
     substitution scanner and only a close found that way joins the word.
+
+    A backtick substitution and a `${…}` expansion are copied whole, in or out
+    of double quotes, since no comment starts inside either for the outer
+    line: bash ends a comment in `` `true # c` `` at the closing backtick and
+    reads the `#` in `${x:- #}` as text (Q254). The backtick body's own
+    comments are the caller's, when it recurses into the body.
     """
     out = []
     in_single = in_double = False
@@ -351,6 +360,17 @@ def strip_comments(cmd):
                 i += 2
                 continue
             out.append(c); out.append(cmd[i+1]); i += 2
+            continue
+        if c == '`':
+            end = _scan_backticks(cmd, i + 1)[1]
+        elif cmd.startswith('${', i):
+            end = _brace_end(cmd, i)
+        else:
+            end = -1
+        if end > i + 1:                            # copied whole (Q254)
+            out.append(_CONTINUATION_RE.sub(
+                lambda m: '' if m.group(1) == '\n' else m.group(0), cmd[i:end]))
+            i = end
             continue
         if c == '"':
             in_double = not in_double
@@ -851,6 +871,51 @@ def _scan_backticks(text, start):
             return (text[start:i], i + 1)
         i += 1
     return (None, start)
+
+def _brace_end(text, i):
+    """The index just past the ``}`` closing the ``${`` at ``text[i]``, or -1
+    when it never closes.
+
+    Driven on bash 5.3.15: quotes inside one quote a ``}``, outer double quotes
+    or not (``"${x:-'}'}"`` prints ``'}'``), and a nested ``${``, ``$(`` or
+    backtick holds its own. A bare ``{`` does not nest -- ``${x:-{a}`` ends at
+    the first ``}``.
+    """
+    i, n = i + 2, len(text)
+    in_double = False
+    while i < n:
+        c = text[i]
+        if c == '\\':
+            i += 2
+            continue
+        if c == '"':
+            in_double = not in_double
+            i += 1
+            continue
+        end = -1 if in_double else _ansi_c_end(text, i)
+        if end > 0:
+            pass
+        elif c == "'" and not in_double:
+            end = text.find("'", i + 1) + 1 or -1
+        elif text.startswith('$((', i):
+            end = _skip_balanced_parens(text, i + 1)
+        elif text.startswith('$(', i):
+            end = _scan_dollar_paren(text, i + 2)[1]
+            end = -1 if end == i + 2 else end
+        elif text.startswith('${', i):
+            end = _brace_end(text, i)
+        elif c == '`':
+            end = _scan_backticks(text, i + 1)[1]
+            end = -1 if end == i + 1 else end
+        elif c == '}' and not in_double:
+            return i + 1
+        else:
+            i += 1
+            continue
+        if end < 0:
+            return -1
+        i = end
+    return -1
 
 def _unescape_backticks(body, in_double):
     """The command bash runs for a backtick body: a backslash before a
