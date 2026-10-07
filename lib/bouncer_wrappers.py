@@ -26,7 +26,8 @@ import collections
 # nothing; only `command` and `builtin` run the shell's own `cd`.
 #
 # The rows are the BSD and GNU union, read from each tool's usage: sudo
-# 1.9.17p2, macOS env/nice/stdbuf/time, GNU coreutils 9.11, util-linux 2.41.5.
+# 1.9.17p2, macOS env/nice/stdbuf/time/caffeinate, GNU coreutils 9.11,
+# util-linux 2.41.5 (flock from its 2.41.2 source), OpenBSD doas.
 # util-linux's short `-h` and `-V` are off its rows, so a closed-list reader
 # loses the grammar there rather than judging a command that never runs. Which
 # letters put a wrapper in a mode that runs nothing is each guard's own map.
@@ -77,6 +78,17 @@ WRAPPER_GRAMMAR = {
     # `taskset -c` changes how the mask operand reads; it takes no value.
     'taskset': Wrapper('acp', '', '', dict(_COMMON_LONG, **{
         'all-tasks': 'none', 'cpu-list': 'none', 'pid': 'none'}), True),
+    # OpenBSD's doas(1), which opendoas follows; it has no long options.
+    'doas': Wrapper('Lns', 'Cau', '', {}, True),
+    # macOS caffeinate(8); `-h` prints usage and is off the row.
+    'caffeinate': Wrapper('dimsu', 'tw', '', {}, True),
+    # util-linux flock(1). Its `-c` is not an option: it is read as a word
+    # after the lock file, so it is off the row.
+    'flock': Wrapper('sexnoFu', 'wE', '', dict(_COMMON_LONG, **{
+        'shared': 'none', 'exclusive': 'none', 'unlock': 'none',
+        'nonblocking': 'none', 'nb': 'none', 'timeout': 'req', 'wait': 'req',
+        'conflict-exit-code': 'req', 'close': 'none', 'no-fork': 'none',
+        'verbose': 'none', 'fcntl': 'none'}), True),
     # expect's `unbuffer`, from its man page rather than a binary.
     'unbuffer': Wrapper('p', '', '', {}, True),
     # GNU and BSD `time` together; `-o` names a file the wrapper itself writes.

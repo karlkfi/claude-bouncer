@@ -1995,21 +1995,36 @@ LOCAL_SHELL_WRAPPERS = frozenset({
 # guessed at: see `peel_wrappers`.
 WRAPPER_GRAMMAR = {name: bouncer_wrappers.WRAPPER_GRAMMAR[name] for name in (
     'env', 'nice', 'nohup', 'timeout', 'stdbuf', 'setsid', 'ionice', 'time',
-    'xargs', 'command', 'builtin', 'exec')}
+    'xargs', 'command', 'builtin', 'exec', 'sudo', 'doas', 'caffeinate',
+    'chrt', 'taskset', 'flock')}
 
 # Short flags spelled as their long option, so one table says what each does.
+# `doas` has no long options, so its letters are named for what they do here.
 _WRAPPER_SHORT_LONG = {
     'env': {'C': 'chdir', 'S': 'split-string'},
     'time': {'o': 'output', 'V': 'version'},
     'xargs': {'a': 'arg-file'},
     'ionice': {'p': 'pid', 'P': 'pgid', 'u': 'uid'},
     'command': {'v': 'lookup', 'V': 'lookup'},
+    'sudo': {'D': 'chdir', 'R': 'chroot', 'i': 'login', 'e': 'edit',
+             'l': 'list', 'U': 'other-user', 'v': 'validate',
+             'K': 'remove-timestamp', 'V': 'version'},
+    'doas': {'C': 'config', 'L': 'remove-timestamp', 's': 'shell-alone'},
+    'chrt': {'p': 'pid', 'm': 'max'},
+    'taskset': {'p': 'pid'},
 }
 
 # Options after which the wrapper runs no command: the operands are names to
 # look up (`command -v`) or process ids (`ionice -p`), or it prints and exits.
+# `sudo -l` checks a command without running it, and `-U` is valid only beside
+# it; `-v` and `-K` refresh or drop the timestamp. `doas -s` runs a shell and
+# refuses a command beside it. Lowercase `sudo -k` runs the command.
 _WRAPPER_RUNS_NOTHING = frozenset({'help', 'version', 'lookup', 'pid', 'pgid',
-                                   'uid'})
+                                   'uid', 'list', 'other-user', 'validate',
+                                   'remove-timestamp', 'shell-alone', 'max'})
+
+# A scheduling priority, which `chrt` takes before the command.
+_PRIORITY_RE = re.compile(r'^[+-]?\d+$')
 
 # `nice -5` and `nice --5` are the obsolete adjustment spelling, still taken by
 # both GNU and BSD `nice`.
@@ -2053,7 +2068,7 @@ def _peel_one(name, w, args, chdirs, files):
     in ``chdirs`` is a directory the hook cannot know.
     """
     canon = _WRAPPER_SHORT_LONG.get(name, {})
-    i, n = 0, len(args)
+    i, n, edit = 0, len(args), False
 
     def lost(words=()):
         if name == 'env':
@@ -2093,8 +2108,12 @@ def _peel_one(name, w, args, chdirs, files):
             opt = val = None
             for j, ch in enumerate(t[1:], 1):
                 if ch in w.short_none:
-                    if canon.get(ch) in _WRAPPER_RUNS_NOTHING:
+                    flag = canon.get(ch)
+                    if flag in _WRAPPER_RUNS_NOTHING:
                         return None, True
+                    if flag == 'login':
+                        chdirs.append(None)       # the target user's home
+                    edit = edit or flag == 'edit'
                     continue
                 if ch in w.short_opt:
                     break
@@ -2113,7 +2132,18 @@ def _peel_one(name, w, args, chdirs, files):
         if val is not None and _unreadable_word(val):
             # An `env -S` value is the command itself, so scan its words.
             return lost(val.split() if opt == 'split-string' else ())
-        if opt == 'chdir':
+        if opt == 'config':
+            files.append((val, True, len(chdirs)))
+            return None, True                     # `doas -C` checks, then exits
+        if opt == 'chroot':
+            # No path behind `sudo -R` means what it says on this disk,
+            # absolute or relative, so no path can earn the command `allow`.
+            return lost()
+        if opt == 'login':
+            chdirs.append(None)
+        elif opt == 'edit':
+            edit = True
+        elif opt == 'chdir':
             chdirs.append(val)
         elif opt == 'output':
             files.append((val, False, len(chdirs)))
@@ -2131,19 +2161,38 @@ def _peel_one(name, w, args, chdirs, files):
                 return lost(val.split())
             args = words + args[i:]
             i, n = 0, len(args)
-    if name == 'env':
+    if edit:
+        # `sudo -e` runs no command: it edits each operand as a file.
+        files.extend((f, False, len(chdirs)) for f in args[i:])
+        return None, True
+    if name in ('env', 'sudo'):
         # env(1) is not the shell: any operand holding `=` is an assignment,
-        # whatever bash would make of its name (Q218).
-        while i < n and '=' in args[i]:
+        # whatever bash would make of its name (Q218). sudo's `is_envar` is
+        # the same rule, except that a word starting with `/` or `=` is the
+        # command.
+        while i < n and '=' in args[i] and not (
+                name == 'sudo' and args[i][0] in '/='):
             if _unreadable_word(args[i]):
                 return args[i:], False
             i += 1
-    elif name == 'timeout':
+    elif name in ('timeout', 'taskset', 'chrt', 'flock'):
+        # The DURATION, the CPU mask, the priority, or the lock file.
         if i >= n:
             return None, True
         if _unreadable_word(args[i]):
             return args[i:], False
-        i += 1                                    # the DURATION
+        if name == 'chrt' and not _PRIORITY_RE.match(args[i]):
+            return args[i:], True                 # no priority to skip
+        if name == 'flock':
+            if i + 1 >= n:
+                return None, True                 # `flock FD` locks, runs nothing
+            # flock creates the lock file it is handed (`O_CREAT`).
+            files.append((args[i], False, len(chdirs)))
+            if args[i + 1] in ('-c', '--command'):
+                if n != i + 3:
+                    return None, True             # usage error
+                return ['sh', '-c', args[i + 2]], True
+        i += 1
     return (args[i:] or None), True
 
 
