@@ -3508,6 +3508,67 @@ class SpecialCaseTests(unittest.TestCase):
                 self.assertEqual(decision, "deny")
                 self.assertIn("kubectl delete", reason)
 
+    # --- Q300: a reserved word in front does not hide the command ---------
+
+    def test_command_behind_a_reserved_word_is_judged(self):
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        cmd = "kubectl --context gke_acme_prod-us delete pod x"
+        for shape in ("{ %s; }", "{ %s; } 2>&1", "true && { %s; }",
+                      "if %s; then echo ok; fi", "if true; then %s; fi",
+                      "if false; then :; else %s; fi", "! %s",
+                      "while true; do %s; done", "until false; do %s; done",
+                      "for i in 1; do %s; done", "select x in a; do %s; done",
+                      "case x in x) %s;; esac", "! time -p %s",
+                      "{ bash -c '%s'; }", "if true; then eval '%s'; fi",
+                      "f() { %s; }", "f() { %s; }; f", "function f { %s; }",
+                      "function f() { %s; }; f"):
+            with self.subTest(shape=shape):
+                self.assertEqual(run_hook(shape % cmd, home=home)[0], "deny")
+        # The words are reserved only unquoted, and a non-production target
+        # behind one still defers.
+        for c in ("'if' " + cmd, "{ kubectl get pods; }",
+                  "if true; then kubectl --context kind-ci delete pod x; fi"):
+            with self.subTest(cmd=c):
+                self.assertIsNone(run_hook(c, home=home)[0])
+
+    def test_an_assignment_bash_may_not_run_leaves_its_name_unknown(self):
+        # A conditional or loop body may run never, and a function body runs
+        # only where it is called, so the target prompts rather than taking
+        # either value. A plain brace group always runs, so it assigns.
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        use = "; kubectl --context $C delete pod x"
+        for prefix in ("C=gke_acme_prod-us; if false; then C=kind-ci; fi",
+                       "C=gke_acme_prod-us; if false; then D=1; C=kind-ci; fi",
+                       "C=gke_acme_prod-us; if false; then export C=kind-ci; fi",
+                       "export C=gke_acme_prod-us; if false; then C=kind-ci; fi",
+                       "C=gke_acme_prod-us; while false; do C=kind-ci; done",
+                       "C=gke_acme_prod-us; case x in y) C=kind-ci;; esac",
+                       "C=gke_acme_prod-us; f() { C=kind-ci; }; f",
+                       "C=gke_acme_prod-us; if true; then { C=kind-ci; }; fi"):
+            with self.subTest(prefix=prefix):
+                self.assertEqual(run_hook(prefix + use, home=home)[0], "ask")
+        for prefix in ("C=kind-ci; { C=gke_acme_prod-us; }",
+                       "C=gke_acme_prod-us; f() { C=kind-ci; }",
+                       "C=gke_acme_prod-us; function f { C=kind-ci; }"):
+            with self.subTest(prefix=prefix):
+                self.assertEqual(run_hook(prefix + use, home=home)[0], "deny")
+        for prefix in ("C=gke_acme_prod-us; { C=kind-ci; }",
+                       "C=gke_acme_prod-us; { { C=kind-ci; }; }",
+                       "C=gke_acme_prod-us; if true; then :; fi; C=kind-ci"):
+            with self.subTest(prefix=prefix):
+                self.assertIsNone(run_hook(prefix + use, home=home)[0])
+
+    def test_strip_keywords_hands_time_to_the_wrapper_walk(self):
+        for group, words, rest in (
+                (["{", "kubectl"], ["{"], ["kubectl"]),
+                (["!", "time", "-p", "kubectl"], ["!"],
+                 ["time", "-p", "kubectl"]),
+                (["function", "f", "{", "kubectl"], ["function", "f", "{"],
+                 ["kubectl"]),
+                (["then", "C=x"], ["then"], ["C=x"])):
+            with self.subTest(group=group):
+                self.assertEqual(guard.strip_keywords(group), (words, rest))
+
     # --- Q181: a wrapper's own --help or --version runs nothing ----------
 
     def test_wrapper_help_or_version_runs_nothing(self):

@@ -276,7 +276,12 @@ network call, never touches a cluster.
 Compound commands are split and each segment evaluated: `&&`, `||`, `|`,
 `;`, `&`, newlines, subshells, `$(...)`, backticks, plus `bash|sh|zsh -c
 '...'` bodies, `eval`, and wrappers (`sudo`, `env`, `timeout`, `xargs`,
-`nohup`, `time`, `nice`, `ionice`, `setsid`, `chrt`, `taskset`). A guard
+`nohup`, `time`, `nice`, `ionice`, `setsid`, `chrt`, `taskset`). So are
+the bodies of `{ …; }`, `if`/`then`/`else`, `while`/`until`/`for`/`select`
+loops, `case` arms, a command behind `!`, and a function body, which is
+judged where it is written. An assignment in a body bash may not run (a
+conditional, a loop, a function until it is called) leaves the name's value
+unknown, so a target that reads it prompts. A guard
 that only inspected the first token would be trivially bypassed by
 `echo hi && kubectl --context prod delete ns x`. A substitution is split out
 inside double quotes and unquoted heredoc bodies too, where bash still runs

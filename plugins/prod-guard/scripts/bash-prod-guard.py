@@ -79,8 +79,8 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 from bouncer_parse import (                                    # noqa: E402
     ASSIGN_APPEND, ASSIGN_SUBSCRIPT, ASSIGNMENT_RE, PUNCT_CHARS, QuotedStr,
-    QuoteTrackingLexer, command_substitutions, is_assignment, split_assignment,
-    strip_comments, strip_heredoc_bodies,
+    QuoteTrackingLexer, command_substitutions, is_assignment, is_reserved_word,
+    split_assignment, strip_comments, strip_heredoc_bodies, strip_sh_keywords,
 )
 from bouncer_grants import grants_path, load_grants, record_grants  # noqa: E402
 from bouncer_wrappers import (                                 # noqa: E402
@@ -561,6 +561,69 @@ def split_simple_commands(tokens):
     if cur:
         groups.append(cur)
     return groups
+
+
+# Reserved words that open a body bash may run any number of times, including
+# none, and the words that close one. `for` and `select` are not in the shared
+# keyword set, so they stand at the head of their own segment.
+BLOCK_OPENERS = frozenset({'if', 'while', 'until', 'case'})
+BLOCK_HEADS = frozenset({'for', 'select'})
+BLOCK_CLOSERS = frozenset({'fi', 'done', 'esac'})
+
+
+def _assign(values, defining, maybe, functions, *scopes, unknown=()):
+    """Make assignments persist the way bash would. Inside a function body they
+    wait for a call, so they are only recorded; inside a body that may not run
+    the names become unknown, in `unknown` too; elsewhere they take their
+    values."""
+    if defining is not None:
+        functions[defining].update(values)
+    elif maybe:
+        _forget(values, *scopes, *unknown)
+    else:
+        for scope in scopes:
+            scope.update(values)
+
+
+def _forget(names, *scopes):
+    """Drop `names` from every scope: assigned where bash may not have run the
+    assignment, the value is unknown, so the target prompts rather than
+    resolving to a value the command may never see."""
+    for scope in scopes:
+        for name in names:
+            scope.pop(name, None)
+
+
+def strip_keywords(group):
+    """(reserved words, the simple command behind them) for one segment.
+
+    `{`, `if`, `then`, `!`, `do` and the rest stand in command position ahead
+    of the command bash runs, and left in place one becomes the head that no
+    evaluator covers, so the segment defers (Q300). `function NAME` drops the
+    name too. A `time` goes back to the wrapper walk, which reads its `-p` and
+    `--` where the shared strip does not (Q241)."""
+    body = strip_sh_keywords(group)
+    if len(body) < len(group) and group[len(group) - len(body) - 1] == 'function' \
+            and body:
+        body = strip_sh_keywords(body[1:])
+    cut = len(group) - len(body)
+    if cut and group[cut - 1] == 'time' and is_reserved_word(group[cut - 1]):
+        cut -= 1
+    return group[:cut], group[cut:]
+
+
+def function_defined(tokens, group, words):
+    """The name a segment's `{` opens the body of, or None. `NAME()` reaches
+    here as the segment before, with `()` as one operator token between, and
+    `function NAME` as reserved words of this one."""
+    if 'function' in words:
+        rest = group[len(words) - words[::-1].index('function'):]
+        return str(rest[0]) if rest else None
+    at = next((i for i, t in enumerate(tokens) if t is group[0]), None)
+    if at is not None and at >= 2 and tokens[at - 1] == '()' \
+            and _is_operator_token(tokens[at - 1]):
+        return str(tokens[at - 2])
+    return None
 
 
 def extract_env_prefix(argv, base_env=None):
@@ -2803,7 +2866,36 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
         exported = dict(os.environ)
     shell_env = dict(exported if shell is None else shell)
     exported = dict(exported)
-    for group in split_simple_commands(tokens):
+    # Open compound commands, innermost last. A plain `{ …; }` always runs, so
+    # what it assigns stays assigned. A conditional or a loop may not run, so a
+    # name assigned in one is unknown after it. A function body runs where the
+    # function is called, so what it assigns is recorded against the name and
+    # forgotten at each call. Its commands are judged where they are written,
+    # against the values in scope there.
+    blocks, functions = [], {}
+    for whole in split_simple_commands(tokens):
+        words, group = strip_keywords(whole)
+        for w in words:
+            if w in BLOCK_CLOSERS or w == '}':
+                if blocks:
+                    blocks.pop()
+            elif w in BLOCK_OPENERS:
+                blocks.append('maybe')
+            elif w == '{':
+                name = function_defined(tokens, whole, words)
+                if name is None:
+                    blocks.append('runs')
+                else:
+                    blocks.append(('fn', name))
+                    functions.setdefault(name, set())
+        if group and group[0] in BLOCK_HEADS \
+                and getattr(group[0], 'quoted_from', None) is None:
+            blocks.append('maybe')
+        defining = next((b[1] for b in reversed(blocks)
+                         if isinstance(b, tuple)), None)
+        maybe = 'maybe' in blocks
+        if not group:
+            continue
         seg_env, argv_raw = extract_env_prefix(group, shell_env)
         # This segment's inline `A=x cmd` assignments, already resolved. They
         # export to this command's own children but do not persist to the
@@ -2844,8 +2936,10 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
         if 'PROD_GUARD_SESSION_OVERRIDE' in seg_inline and session_reason is None:
             session_reason = seg_inline['PROD_GUARD_SESSION_OVERRIDE']
         if not argv:
-            # Assignment-only segment (`P=x`): a shell var, not exported.
-            shell_env.update(seg_inline)
+            # Assignment-only segment (`P=x`): a shell var, not exported. In
+            # a body that may not run, the name's value is no longer known.
+            _assign(seg_inline, defining, maybe, functions, shell_env,
+                    unknown=(exported,))
             continue
         tool = os.path.basename(argv[0])
         if tool in ASSIGN_BUILTINS:
@@ -2860,8 +2954,8 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
                     # gives just `v` (Q174).
                     if form == ASSIGN_APPEND:
                         value = shell_env.get(name, '') + value
-                    shell_env[name] = value
-                    exported[name] = value
+                    _assign({name: value}, defining, maybe, functions,
+                            shell_env, exported)
             continue
         if tool in SHELL_NAMES:
             # bash -c 'kubectl ...': evaluate the -c body as its own command,
@@ -2915,9 +3009,13 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
             if left and _runs_in_one_shell(raw):
                 for scope, start, end in ((shell_env, same_shell, left['shell']),
                                           (exported, child_env, left['exported'])):
-                    scope.update({k: v for k, v in end.items()
-                                  if k not in seg_inline and start.get(k) != v})
+                    changed = {k: v for k, v in end.items()
+                               if k not in seg_inline and start.get(k) != v}
+                    _assign(changed, defining, maybe, functions, scope)
             continue
+        if tool in functions and defining is None:
+            # A call runs the body, so what it assigns is no longer known.
+            _forget(functions[tool], shell_env, exported)
         evaluator = EVALUATORS.get(tool)
         if evaluator is None:
             continue  # uncovered tool: defer
