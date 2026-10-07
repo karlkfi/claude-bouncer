@@ -172,9 +172,11 @@ WRAPPER_VALUE_OPTS = {name: _VALUE_OPTS[name] for name in (
     'env', 'sudo', 'timeout', 'nice', 'stdbuf', 'time', 'exec', 'command',
     'nohup', 'setsid')}
 # Options that run the command somewhere other than the directory it was typed
-# in, so the hook can no longer name the tree it acts on.
+# in. A literal directory is followed the way a `git -C` is (Q251); a chroot
+# names a new root rather than a directory under this one, so it never is.
 WRAPPER_CHDIR_OPTS = {'env': {'-C', '--chdir'},
                       'sudo': {'-D', '--chdir', '-R', '--chroot'}}
+WRAPPER_CHROOT_OPTS = {'-R', '--chroot'}
 # `env -S STRING` splits STRING into the command words (it is not a shell).
 ENV_SPLIT_OPTS = {'-S', '--split-string'}
 
@@ -966,10 +968,11 @@ def record_worktree_grant(data):
 
 
 def peel_wrappers(argv):
-    """(argv, chdir): `argv` with its leading command wrappers removed, and
-    whether one of them moved the command to another directory first. argv is
+    """(argv, chdir): `argv` with its leading command wrappers removed, and the
+    directories they moved the command to first, in order — None for a hop
+    that names no directory under this one (a chroot, a missing value). argv is
     None when a wrapper runs nothing (`command -v git`)."""
-    chdir = False
+    chdir = []
     while argv:
         head = argv[0].rsplit('/', 1)[-1]
         if head not in WRAPPER_VALUE_OPTS:
@@ -985,7 +988,7 @@ def peel_wrappers(argv):
                 return None, chdir                  # a lookup: runs nothing
             used, opt, value = wrapper_option(argv, value_opts)
             if opt in WRAPPER_CHDIR_OPTS.get(head, ()):
-                chdir = True
+                chdir.append(None if opt in WRAPPER_CHROOT_OPTS else value)
             if head == 'env' and opt in ENV_SPLIT_OPTS and value is not None:
                 try:
                     argv = shlex.split(value) + argv[used:]
@@ -1009,7 +1012,7 @@ def parse_invocation(tokens):
     Strips leading env assignments, command wrappers (`peel_wrappers`) and
     program global options so `FOO=bar git -C path -c k=v commit -m x` ->
     {'prog': 'git', 'sub': 'commit', 'args': ['-m','x'],
-     'globals': ['-C','path','-c','k=v'], 'wrapped': False, 'chdir': False}."""
+     'globals': ['-C','path','-c','k=v'], 'wrapped': False, 'chdir': []}."""
     i = 0
     while i < len(tokens) and is_assignment(tokens[i]):
         i += 1
@@ -2086,6 +2089,19 @@ def git_cwd(cwd, globals_):
     return cwd
 
 
+def invocation_cwd(cwd, inv):
+    """The directory an invocation runs in: `cwd` walked through each
+    wrapper's chdir (`env -C`, `sudo -D`), then through git's own `-C` — the
+    order the shell and git apply them in — or None when the hook can't follow
+    one. A non-literal directory and a chroot give up outright, as `git_cwd`
+    does on a `-C` only the shell can compute."""
+    for hop in inv['chdir']:
+        if hop is None or not is_literal_path(hop):
+            return None
+        cwd = resolve_path(cwd, hop)
+    return git_cwd(cwd, inv['globals'])
+
+
 def override_reason(segments):
     """The reason from a `BRANCH_GUARD_OVERRIDE=<reason>` command prefix, or
     None when it is absent or empty.
@@ -2659,7 +2675,7 @@ def main():
                 if is_cd:
                     seg_cwd = dest
             else:
-                inv_cwd = None if inv['chdir'] else git_cwd(seg_cwd, inv['globals'])
+                inv_cwd = invocation_cwd(seg_cwd, inv)
                 seg_branch = branch_in(inv_cwd or cwd, branches)
                 seen.add(seg_branch)
                 verdict, reason = classify_segment(
