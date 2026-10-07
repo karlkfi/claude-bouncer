@@ -3366,6 +3366,63 @@ class SpecialCaseTests(unittest.TestCase):
             "env -S \"$X\" PROD_GUARD_OVERRIDE=why kubectl delete ns foo",
             home=home)[0], "ask")
 
+    # --- Q269: what `env` hands the child reaches its `sh -c` body ----------
+
+    def test_env_operands_reach_a_single_quoted_body(self):
+        # The child inherits `env`'s operands, and a single-quoted body is
+        # expanded by the child, so `$C` there is the operand's value.
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        body = " -c 'kubectl --context \"$C\" delete ns x'"
+        for prefix in ("env C=gke_acme_prod-us bash",
+                       "env -i C=gke_acme_prod-us bash",
+                       "sudo C=gke_acme_prod-us bash",
+                       "env C=kind-ci env C=gke_acme_prod-us sh"):
+            with self.subTest(prefix=prefix):
+                self.assertEqual(run_hook(prefix + body, home=home)[0], "deny")
+        for prefix in ("env C=kind-ci bash",
+                       "env -i C=kind-ci bash",
+                       "sudo C=kind-ci bash",
+                       "env C=kind-ci env D=1 sh",
+                       "export C=gke_acme_prod-us; env -u C C=kind-ci bash"):
+            with self.subTest(prefix=prefix):
+                self.assertIsNone(run_hook(prefix + body, home=home)[0])
+
+    def test_env_removals_reach_a_single_quoted_body(self):
+        # `-i` and `-u C` take C away from the child, so a non-production
+        # value exported earlier no longer pins the body's target.
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        body = " bash -c 'kubectl --context \"$C\" delete ns x'"
+        for env in ("env -u C", "env -uC", "env --unset=C", "env -i",
+                    "env -", "env --ignore-environment", "env -iu X",
+                    "sudo env -u C"):
+            with self.subTest(env=env):
+                self.assertEqual(run_hook(
+                    "export C=kind-ci; " + env + body, home=home)[0], "ask")
+        self.assertEqual(run_hook(
+            "export C=kind-ci; env -S '-u C bash -c \"kubectl --context "
+            "\\$C delete ns x\"'", home=home)[0], "ask")
+        # `-ui` unsets a name `i`, and `--ig` is ambiguous with
+        # `--ignore-signal`, so neither empties the environment.
+        for env in ("env -ui", "env --ig"):
+            with self.subTest(env=env):
+                self.assertIsNone(run_hook(
+                    "export C=kind-ci; " + env + body, home=home)[0])
+
+    def test_env_operands_never_reach_what_the_parent_expands(self):
+        # Outside single quotes the parent expands `$C` before env runs, so
+        # the operand's value is not what the body reads.
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        for cmd in ('env C=kind-ci bash -c "kubectl --context $C delete ns x"',
+                    "env C=kind-ci bash -c 'kubectl --context '$C' delete ns x'",
+                    "env C=kind-ci bash -c 'kubectl --context '\"$C\"' "
+                    "delete ns x'",
+                    "env C=kind-ci kubectl --context \"$C\" delete ns x"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(run_hook(cmd, home=home)[0], "ask")
+        self.assertIsNone(run_hook(
+            "env C=kind-ci bash -c 'kubectl --context $C'' delete ns x'",
+            home=home)[0])
+
     def test_env_split_string_is_not_a_shell(self):
         # env splits STRING into words and runs one command; it honours no
         # operators. `foo;` is an argument to kubectl, and `rm` never runs --
