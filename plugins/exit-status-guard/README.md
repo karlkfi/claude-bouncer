@@ -441,7 +441,9 @@ own environment. This mirrors `WORKSPACE_GUARD_OVERRIDE` and
 The reason is required — a bare `EXIT_STATUS_GUARD_OVERRIDE=` is the
 switch-it-off form and is ignored. The name only counts in command position:
 quoted in a commit message or echoed into a pipe it is an argument, and
-disables nothing.
+disables nothing. Behind `env` or `sudo` it counts too
+(`env EXIT_STATUS_GUARD_OVERRIDE=<reason> <command>`), because those programs
+set the variables their operands name.
 
 **A rule that needs an override routinely is a defect to fix in the registry,
 not to override.** Please
