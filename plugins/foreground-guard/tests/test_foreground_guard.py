@@ -872,6 +872,39 @@ class PollConfigTests(unittest.TestCase):
                 d, _ = run_hook(raw)
                 self.assertIsNone(d)
 
+    def test_a_sudo_option_after_an_operand_does_not_hide_the_command(self):
+        # sudo goes back to its options after each operand (Q275): sudo
+        # 1.9.17p2 rejects `sudo -n A=1 --no-such-option true` as an
+        # unrecognized option.
+        for raw in ("sudo A=1 -u root tail -f log.txt",
+                    "sudo A=1 -n tail -f log.txt",
+                    "sudo 1=x -E tail -f log.txt",
+                    "sudo A=1 -u root B=2 -E tail -f log.txt",
+                    "sudo A=1 -uroot tail -f log.txt",
+                    "sudo A=1 -- tail -f log.txt"):
+            with self.subTest(raw=raw):
+                d, _ = run_hook(raw)
+                self.assertEqual("deny", d)
+
+    def test_sudo_runs_an_operand_after_double_dash(self):
+        # After `--` sudo assigns nothing, so the `=` word is the program it
+        # runs and nothing behind it is watched; a run-nothing mode after an
+        # operand still runs nothing.
+        for raw in ("sudo -- A=1 tail -f log.txt",
+                    "sudo A=1 -- B=2 tail -f log.txt",
+                    "sudo A=1 -l tail -f log.txt"):
+            with self.subTest(raw=raw):
+                d, _ = run_hook(raw)
+                self.assertIsNone(d)
+
+    def test_an_override_after_a_sudo_option_still_arms(self):
+        state = {}
+        argv = guard.strip_head(list(guard.tokenize(
+            "sudo A=1 -u root FOREGROUND_GUARD_OVERRIDE=why tail -f log.txt")),
+            state)
+        self.assertEqual(state.get("override"), "why")
+        self.assertEqual(argv[0], "tail")
+
     def test_an_env_operand_names_its_variable_verbatim(self):
         # env exports a variable literally called `FOREGROUND_GUARD_OVERRIDE[0]`,
         # which arms nothing, and the command behind it is still read (Q218).

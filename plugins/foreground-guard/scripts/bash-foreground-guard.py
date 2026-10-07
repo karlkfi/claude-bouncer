@@ -538,14 +538,22 @@ def strip_head(argv, state):
         elif head == 'sudo':
             value_flags = WRAPPER_VALUE_OPTS['sudo']
             argv = argv[1:]
-            while argv and argv[0].startswith('-'):
+            # sudo goes back to its options after each assignment operand, so
+            # the two interleave (`sudo A=1 -u root cmd`), and after `--` it
+            # assigns nothing: `sudo -- A=1 cmd` runs a program `A=1` (Q275).
+            while argv:
                 if argv[0] == '--':
                     argv = argv[1:]
+                    if argv and '=' in argv[0]:
+                        return argv
                     break
-                if sudo_runs_nothing(argv[0]):
-                    return []
-                argv = argv[wrapper_option(argv, value_flags)[0]:]
-            while argv and '=' in argv[0] and argv[0][0] not in '/=':
+                if argv[0].startswith('-'):
+                    if sudo_runs_nothing(argv[0]):
+                        return []
+                    argv = argv[wrapper_option(argv, value_flags)[0]:]
+                    continue
+                if '=' not in argv[0] or argv[0][0] in '/=':
+                    break
                 # Sudo's operands, like `env`'s below, by sudo's own rule (its
                 # `is_envar`) rather than bash's, so `sudo 'a b=c' cmd` assigns
                 # and runs cmd (Q218). The shell removes the quotes before sudo
