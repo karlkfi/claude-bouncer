@@ -113,7 +113,7 @@ import sys, os, json, re, shlex, subprocess, fnmatch
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 from bouncer_parse import (                                   # noqa: E402
     ASSIGN_SUBSCRIPT, PUNCT_CHARS, is_assignment, lex, note_discarded_writes,
-    split_assignment, split_operator_runs,
+    split_assignment, split_operator_runs, strip_sh_keywords,
 )
 from bouncer_grants import record_grants                      # noqa: E402
 from bouncer_wrappers import WRAPPER_VALUE_OPTS as _VALUE_OPTS, wrapper_option  # noqa: E402
@@ -858,13 +858,35 @@ def command_segments(tokens):
     (`2>&1`, `>&2`) and input redirects (`< f`) leave it False. A bare redirect
     with no command (`> f`) is kept as an empty writing segment so it still
     blocks auto-approval rather than vanishing.
+
+    Leading reserved words are stripped, so `{ git push …; }`, `if …; then git
+    commit`, `! git …` and a loop body are judged by the command bash runs
+    rather than deferring on a keyword (Q302). Each pair carries a third item,
+    `marks`: the parens and reserved words consumed since the previous segment,
+    in source order, which `group_cwd` reads to scope a `cd`. `function NAME`
+    drops the name too. A `time` stays, for `peel_wrappers` to read its `-p`.
     """
-    segments, cur, writes, i = [], [], False, 0
+    segments, cur, writes, marks, i = [], [], False, [], 0
+
+    def close():
+        body = strip_sh_keywords(cur)
+        marks.extend(cur[:len(cur) - len(body)])
+        if marks and marks[-1] == 'function' and body:
+            rest = strip_sh_keywords(body[1:])
+            marks.extend(body[1:len(body) - len(rest)])
+            body = rest
+        if marks and marks[-1] == 'time':
+            body = [marks.pop()] + body
+        if body or writes:
+            segments.append((body, writes, marks[:]))
+            del marks[:]
+
     while i < len(tokens):
         t = tokens[i]
         if t in SEPARATORS:
-            if cur or writes:
-                segments.append((cur, writes))
+            close()
+            if t in ('(', ')'):
+                marks.append(t)
             cur, writes = [], False
             i += 1
             continue
@@ -885,8 +907,7 @@ def command_segments(tokens):
             continue
         cur.append(t)
         i += 1
-    if cur or writes:
-        segments.append((cur, writes))
+    close()
     return segments
 
 
@@ -951,7 +972,7 @@ def record_worktree_grant(data):
         return
     cwd = data.get('cwd') or os.getcwd()
     paths = set()
-    for seg, _writes in command_segments(tokens):
+    for seg, _writes, _marks in command_segments(tokens):
         inv = parse_invocation(seg)
         if not inv or inv.get('prog') != 'git' or inv.get('sub') != 'worktree':
             continue
@@ -1146,6 +1167,42 @@ def cd_destination(tokens, cwd):
             return (True, None)
         return (True, resolve_path(cwd, t))
     return (True, None)
+
+
+GROUP_CLOSERS = {'(': ')', '{': '}', 'if': 'fi', 'while': 'done',
+                 'until': 'done', 'for': 'done', 'select': 'done',
+                 'case': 'esac'}
+
+
+def group_cwd(frames, marks, seg, cwd):
+    """The cwd a segment starts in, once the parens and reserved words in its
+    `marks` have opened and closed the compound commands around it (Q302).
+
+    `frames` is the stack of open groups, `[opener, cwd at entry, conditional]`,
+    carried across a command's segments. Bash runs `{ }`, `if` and loop bodies
+    in the current shell, so a `cd` in one moves every later segment, and runs
+    `( )` in a subshell, so leaving one restores the cwd it was entered with. A
+    body that may run zero times — a conditional, a loop, a function body,
+    which runs only where it is called — leaves the cwd unknown if it moved:
+    None, which stands the probes down as a `cd $VAR` does."""
+    for k, m in enumerate(marks):
+        if m in GROUP_CLOSERS:
+            fn = m == '{' and (marks[k - 1:k] == ['function']
+                               or marks[k - 2:k] == ['(', ')'])
+            frames.append([m, cwd, fn or m not in ('(', '{')])
+        elif frames and GROUP_CLOSERS[frames[-1][0]] == m:
+            opener, entry, conditional = frames.pop()
+            if opener == '(':
+                cwd = entry
+            elif conditional and cwd != entry:
+                cwd = None
+        elif m in ('else', 'elif') and frames and frames[-1][0] == 'if' \
+                and cwd != frames[-1][1]:
+            cwd = None
+    if seg and seg[0] in ('for', 'select') \
+            and getattr(seg[0], 'quoted_from', None) is None:
+        frames.append([str(seg[0]), cwd, True])
+    return cwd
 
 
 def ref_to_branch(ref, current):
@@ -2111,7 +2168,7 @@ def override_reason(segments):
     prefix sits in command position, while the name inside a commit message,
     a grep pattern, or an `echo` argument is a positional and matches nothing
     here."""
-    for seg, _ in segments:
+    for seg, _, _ in segments:
         for tok in seg:
             if not is_assignment(tok):
                 break
@@ -2626,7 +2683,7 @@ def main():
         except ValueError:
             return                                 # unbalanced quotes -> defer
         segments = command_segments(tokens)
-        invs = [parse_invocation(seg) for seg, _ in segments]
+        invs = [parse_invocation(seg) for seg, _, _ in segments]
         if not any(invs):
             return                                 # no git/gh command -> defer
 
@@ -2640,8 +2697,9 @@ def main():
         # `git -C` push that really did overlap. Where the target is one the
         # hook can't resolve, `probe` goes false and the probes stand down.
         seg_cwd = cwd
-        branches, roots, seen, verdicts = {}, {}, set(), []
-        for (seg, writes), inv in zip(segments, invs):
+        branches, roots, seen, verdicts, frames = {}, {}, set(), [], []
+        for (seg, writes, marks), inv in zip(segments, invs):
+            seg_cwd = group_cwd(frames, marks, seg, seg_cwd)
             if inv is None:
                 is_cd, dest = cd_destination(seg, seg_cwd)
                 # A non-git segment rides along only if it's a pure read-only
@@ -2672,8 +2730,11 @@ def main():
                     verdicts.append(('benign', None, False))
                 else:
                     verdicts.append(('nongit', None, False))
+                # A `case` arm ends at a `;;` no mark records, so the next
+                # arm would inherit a `cd` bash never ran there.
                 if is_cd:
-                    seg_cwd = dest
+                    seg_cwd = (None if any(f[0] == 'case' for f in frames)
+                               else dest)
             else:
                 inv_cwd = invocation_cwd(seg_cwd, inv)
                 seg_branch = branch_in(inv_cwd or cwd, branches)
