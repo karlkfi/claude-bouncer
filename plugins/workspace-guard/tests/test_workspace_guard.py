@@ -8681,6 +8681,81 @@ class PeelWrappersTests(unittest.TestCase):
         # Past the options, an assignment cannot move the cwd.
         self.assertEqual(self.peel('env A="$X" cat f').chdirs, [])
 
+    def test_privilege_and_scheduling_wrappers(self):
+        # Q236. A value-taking option swallows the next word, so a wrong arity
+        # reads the value as the command; each operand-taking wrapper skips
+        # exactly its operand. Grammars from sudo 1.9.17p2's usage, macOS
+        # caffeinate(8), util-linux 2.41.2 source, and OpenBSD doas(1).
+        cat = ["cat", "f"]
+        for cmd in ("sudo cat f", "sudo -u root cat f", "sudo -uroot cat f",
+                    "sudo --user root cat f", "sudo --us=root cat f",
+                    "sudo -nu root cat f", "sudo -g wheel -C 5 -T 9 cat f",
+                    "sudo -p pw -E -k cat f", "sudo -u root -- cat f",
+                    "sudo A=1 'a b=c' cat f", "sudo -s cat f",
+                    "doas cat f", "doas -u root cat f", "doas -nuroot cat f",
+                    "doas -a style cat f", "doas -- cat f",
+                    "caffeinate cat f", "caffeinate -t 5 cat f",
+                    "caffeinate -it5 cat f", "caffeinate -w 123 -dim cat f",
+                    "chrt 1 cat f", "chrt -r 5 cat f", "chrt -o 0 cat f",
+                    "chrt --rr 5 cat f", "chrt -T 100 -d 0 cat f",
+                    "chrt -R -- 5 cat f", "taskset 1 cat f",
+                    "taskset -c 0-3 cat f", "taskset --cpu-list 0 cat f",
+                    "taskset 0x3 cat f", "flock l cat f", "flock -w 5 l cat f",
+                    "flock -w5 l cat f", "flock -xn -E 3 l cat f",
+                    "flock --timeout 5 l cat f", "flock --wait=5 l cat f",
+                    "flock -- l cat f"):
+            self.assertRuns(cmd, cat)
+
+    def test_sudo_takes_no_assignment_that_starts_a_path(self):
+        # sudo's `is_envar`: a word starting with `/` is the command.
+        self.assertRuns("sudo /bin/a=b f", ["/bin/a=b", "f"])
+
+    def test_privilege_and_scheduling_modes_that_run_nothing(self):
+        for cmd in ("sudo -l cat f", "sudo -lU bob cat f", "sudo -U bob cat f",
+                    "sudo -v cat f", "sudo -K cat f", "sudo -V cat f",
+                    "sudo --list cat f", "sudo -u root -l cat f", "sudo",
+                    "doas -L cat f", "doas -s cat f", "caffeinate",
+                    "chrt -p 5 123", "chrt -m cat f", "chrt --pid 5 123",
+                    "taskset -p 1 123", "taskset -pc 0 123", "taskset 1",
+                    "flock 9", "flock -u 9", "flock l -c", "flock l -c a b"):
+            self.assertRuns(cmd, [])
+
+    def test_sudo_moves_or_hides_the_cwd(self):
+        p = self.peel("sudo -D d --chdir=e cat f")
+        self.assertEqual((p.argv, p.chdirs), (["cat", "f"], ["d", "e"]))
+        # `-i` runs a login shell, which starts in the target user's home.
+        self.assertEqual(self.peel("sudo -i cat f").chdirs, [None])
+        self.assertEqual(self.peel("sudo --login cat f").chdirs, [None])
+        # Under `-R` no path means what it says, so nothing is vouched for.
+        self.assertRuns("sudo -R /r cat f", ["cat", "f"], opaque=True)
+
+    def test_files_the_privilege_wrappers_open(self):
+        # `sudo -e` edits its operands; `flock` creates its lock file;
+        # `doas -C` reads a config file and then exits.
+        p = self.peel("sudo -u root -e a b")
+        self.assertEqual((p.argv, p.files), ([], [("a", False, 0),
+                                                  ("b", False, 0)]))
+        self.assertEqual(self.peel("flock -w 5 l cat f").files,
+                         [("l", False, 0)])
+        p = self.peel("doas -C conf cat f")
+        self.assertEqual((p.argv, p.files), ([], [("conf", True, 0)]))
+
+    def test_flock_c_runs_a_shell_string(self):
+        for cmd in ("flock l -c 'cat f'", "flock -n l --command 'cat f'"):
+            self.assertRuns(cmd, ["sh", "-c", "cat f"])
+
+    def test_chrt_skips_only_a_numeric_priority(self):
+        # A word that is no priority is not skipped, so the command it starts
+        # is judged rather than read as chrt's operand.
+        self.assertRuns("chrt -o cat f", ["cat", "f"])
+
+    def test_a_lost_privilege_wrapper_is_never_guessed_past(self):
+        for cmd in ("sudo -h cat f", "sudo -h host cat f", "sudo -Z cat f",
+                    "sudo -u $U cat f", "sudo $OPT cat f", "sudo A=$X cat f",
+                    "doas -Z cat f", "caffeinate -h cat f", "chrt $P cat f",
+                    "taskset $M cat f", "flock $L cat f", "flock -h l cat f"):
+            self.assertRuns(cmd, ["cat", "f"], opaque=True)
+
 
 class WrappedCommandTests(unittest.TestCase):
     """A guarded command behind a wrapper gets its bare decision (Q219).
@@ -8753,6 +8828,32 @@ class WrappedCommandTests(unittest.TestCase):
         # The path, not the keyword: bash's `time` takes no `-o`.
         self._decision("/usr/bin/time -o /q219-fake-target make", "ask")
         self._decision("xargs -a /q219-fake-target cat", "ask")
+
+    def test_privilege_and_scheduling_wrappers_are_read_through(self):
+        # Q236: every one of these deferred at b76477a, outside path or not.
+        for cmd in ("sudo -u root cat /q219-fake-target",
+                    "doas -u root cat /q219-fake-target",
+                    "caffeinate -t 5 cat /q219-fake-target",
+                    "chrt -r 5 cat /q219-fake-target",
+                    "taskset -c 0 cat /q219-fake-target",
+                    "flock -w 5 l cat /q219-fake-target",
+                    "flock l -c 'cat /q219-fake-target'",
+                    "sudo sh -c 'cat /q219-fake-target'",
+                    "sudo -D / cat q219-fake-target",
+                    "sudo -e /q219-fake-target",
+                    "flock /q219-fake-target true",
+                    "doas -C /q219-fake-target true"):
+            self.assertIn("q219-fake-target", self._decision(cmd, "ask"), cmd)
+        for cmd in ("sudo -u root cat in.txt", "doas cat in.txt",
+                    "caffeinate -i cat in.txt", "chrt -f 10 cat in.txt",
+                    "taskset 0x3 cat in.txt", "flock -n l cat in.txt",
+                    "sudo -D sub cat in.txt"):
+            self._decision(cmd, "allow")
+        # A home the hook cannot know, a chroot, and a mode running nothing.
+        self._decision("sudo -i cat in.txt", "deny")
+        for cmd in ("sudo -R /r cat in.txt", "sudo -l cat /q219-fake-target",
+                    "chrt -p 5 123", "taskset -p 1 123"):
+            self._decision(cmd, "defer")
 
     def test_a_wrapped_kill_is_judged(self):
         self._decision("timeout 5 pkill node", "deny")

@@ -631,8 +631,9 @@ cat in.txt; bash --version              # allow    (no -c body at all)
 ```
 
 The unchecked list is everything that isn't a local wrapper: container runtimes
-(`docker`, `podman`, `kubectl exec`, …), `ssh`, `sudo`, and anything else the
-hook doesn't recognize. Naming the local wrappers rather than the remote ones is
+(`docker`, `podman`, `kubectl exec`, …), `ssh`, and anything else the hook
+doesn't recognize. `sudo` is read through like the other wrappers below, so
+`sudo sh -c '…'` is checked, and `sudo docker exec c sh -c '…'` is not. Naming the local wrappers rather than the remote ones is
 deliberate — a runtime nobody has heard of yet reads as remote, and its body is
 left alone rather than judged against paths it never touches. See
 [Limitations](#limitations).
@@ -1952,7 +1953,7 @@ final output.
   wrappers (`timeout 5 bash -c …`, `xargs -I{} sh -c …`,
   `find … -exec sh -c … \;`) — is read back through the same rules, so a kill, an
   outside read or a redirect inside one is caught. Under anything else it is not:
-  a container runtime, `ssh`, `sudo`, or a wrapper the hook doesn't recognize
+  a container runtime, `ssh`, or a wrapper the hook doesn't recognize
   leaves the body unparsed, because the paths in `docker exec … sh -c 'cat
   /var/lib/…'` are the container's rather than this disk's, and guessing wrong
   there means blocking a path that was never touched. The body is also skipped
@@ -1962,7 +1963,8 @@ final output.
   analyzed or not.
 - **A command wrapper is read through when the hook knows its grammar.** `env`,
   `nice`, `nohup`, `timeout`, `stdbuf`, `setsid`, `ionice`, `time`, `xargs`,
-  `exec`, `command` and `builtin` are peeled off by their own option tables, so
+  `exec`, `command`, `builtin`, `sudo`, `doas`, `caffeinate`, `chrt`, `taskset`
+  and `flock` are peeled off by their own option tables, so
   the command behind them gets the decision it would get typed bare, and a `cd`
   behind `command` or `builtin` moves the tracked cwd while one behind `env`
   does not. A flag outside a wrapper's table, or an option word the shell
@@ -1974,9 +1976,15 @@ final output.
   `sh -c` body does, but only when the command behind the wrapper is one the
   hook judges, so `ls | xargs echo` stays silent. Replaying 195,692 corpus
   commands (2026-10-04), they fired on 132 (0.067%), against 71 (0.036%) for
-  `sh -c` bodies and kills together. Wrappers outside
-  that list — `sudo`, `doas`, `caffeinate`, `chrt`, `taskset`, `flock` — are not
-  peeled, so a guarded command behind one defers; nor is bash's `time -p`.
+  `sh -c` bodies and kills together; that count predates the last six wrappers
+  above. Their modes that run no command — `sudo -l`, `-v`, `-K`, `doas -L`,
+  `chrt -p`, `taskset -p`, a lone `flock FD` — defer. Files the wrapper opens
+  itself are checked: `sudo -e` writes its operands, `flock` creates its lock
+  file, `doas -C` reads its config. `sudo -D DIR` moves the command's cwd, and
+  `sudo -i` moves it to a home the hook cannot know, so a relative path behind
+  it denies the way one after an untracked `cd` does. Under `sudo -R` no path
+  means what it says, so nothing behind it earns `allow`. Bash's `time -p` is
+  not peeled.
 - **A `find` command is judged against its start points, not the files find
   matches.** The hook does not walk the tree, so a match that is a symlink out
   of the workspace — or one `find -L` follows — reaches past what `{}` stood
