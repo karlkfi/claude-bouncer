@@ -741,10 +741,13 @@ def peel_sudo(operands):
     return operands[i:], assigned
 
 
-def strip_wrappers(argv, env):
+def strip_wrappers(argv, env, alternates=None):
     """Remove leading launcher commands (sudo, env, timeout, xargs, ...) so
     the covered tool underneath is classified, not the wrapper. `env`
-    assignments found behind `env`/`sudo` merge into the segment env."""
+    assignments found behind `env`/`sudo` merge into the segment env.
+
+    A list passed as `alternates` gets each second reading the walk could not
+    rule out, as `(argv, env)`: the caller judges those too."""
     while argv:
         head = os.path.basename(argv[0])
         value_flags = WRAPPER_VALUE_OPTS.get(head, frozenset())
@@ -768,6 +771,13 @@ def strip_wrappers(argv, env):
                     split = env_split_string(argv)
                     if split is not None:
                         words, rest = split
+                        # A string holding `$` or a backtick is known only at
+                        # run time, and env expands `${NAME}` in it itself: it
+                        # may split into nothing or a bare option, and env then
+                        # runs the operands after it. Both readings are judged.
+                        if (alternates is not None and rest
+                                and any(set('$`') & set(w) for w in words)):
+                            alternates.append((['env'] + rest, dict(env)))
                         argv = words + rest
                         continue
                     argv = argv[wrapper_option(argv, value_flags)[0]:]
@@ -2710,8 +2720,18 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
         child_env = {**exported, **seg_inline}     # for its `sh -c` body
         # Expanded view for classification; raw view (nested-body extraction)
         # is left unexpanded so the child re-expands it against child_env.
-        argv = strip_wrappers(expand_argv(argv_raw, same_shell), seg_inline)
+        alternates = []
+        argv = strip_wrappers(expand_argv(argv_raw, same_shell), seg_inline,
+                              alternates)
         argv_raw = strip_wrappers(list(argv_raw), {})
+        for alt, alt_env in alternates:
+            # Already expanded, so the child's env is all it needs (Q287).
+            sub_f, sub_o, sub_s = evaluate_command_string(
+                shlex.join(alt), ctx, depth + 1, {**exported, **alt_env},
+                same_shell)
+            findings += sub_f
+            override = override or sub_o
+            session_reason = session_reason if session_reason is not None else sub_s
         # Read after the walk, which merges `env NAME=v` operands into
         # seg_inline, so `env PROD_GUARD_OVERRIDE=why cmd` arms like the bare
         # prefix (Q176). An exported name is in neither and still does not.

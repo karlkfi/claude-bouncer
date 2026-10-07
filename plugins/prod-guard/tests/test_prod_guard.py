@@ -3322,6 +3322,26 @@ class SpecialCaseTests(unittest.TestCase):
                 self.assertEqual(decision, "deny")
                 self.assertIn("kubectl delete", reason)
 
+    def test_env_split_string_known_only_at_run_time_is_read_both_ways(self):
+        # `"$X"` may split into the command or into nothing, and env then
+        # runs the operands after it, so the guard judges both (Q287).
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        for cmd in ("env -S \"$X\" kubectl delete ns foo",
+                    "env -iS \"$X\" kubectl delete ns foo",
+                    "env -iS '${X}' kubectl delete ns foo",
+                    "env -iS \"$(printf %s -i)\" kubectl delete ns foo",
+                    "env --split-string=\"$X\" kubectl delete ns foo",
+                    "env -S 'kubectl get pods ${X}' kubectl delete ns foo",
+                    "env -S 'kubectl delete ns ${NS}' extra"):
+            with self.subTest(cmd=cmd):
+                decision, reason = run_hook(cmd, home=home)
+                self.assertEqual(decision, "deny")
+                self.assertIn("kubectl delete", reason)
+        for cmd in ("env -S \"$X\" kubectl get pods",
+                    "env -S \"$X\" --namespace y"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(run_hook(cmd, home=home)[0])
+
     def test_env_split_string_is_not_a_shell(self):
         # env splits STRING into words and runs one command; it honours no
         # operators. `foo;` is an argument to kubectl, and `rm` never runs --
