@@ -661,26 +661,17 @@ def env_split_string(argv):
     positional parameters. That is why the caller splices instead of recursing
     into evaluate_command_string, which would do both differently (Q159).
 
-    Reads `-S STRING`, `-SSTRING`, `--split-string=STRING` and
-    `--split-string STRING`, the long form abbreviated to any prefix from
-    `--s` up, which no other GNU env option shares (Q228). A value that will
-    not tokenize is env's error to report, not ours to guess at, so it returns
-    None and the flag is left alone."""
-    tok = argv[0]
-    name, eq, attached = tok.partition('=')
-    long_form = len(name) > 2 and '--split-string'.startswith(name)
-    if tok == '-S' or (long_form and not eq):
-        if len(argv) < 2:
-            return None
-        value, rest = argv[1], argv[2:]
-    elif long_form:
-        value, rest = attached, argv[1:]
-    elif tok.startswith('-S') and len(tok) > 2:
-        value, rest = tok[2:], argv[1:]
-    else:
+    The option is read through the shared `wrapper_option` walk, so every
+    spelling env takes is covered: `-S STRING` and `-SSTRING`, a bundle
+    ending in `S` (`-iS STRING`, Q287), and `--split-string` attached,
+    detached or abbreviated to any prefix from `--s` up (Q228). A value that
+    will not tokenize is env's error to report, not ours to guess at, so it
+    returns None and the flag is left alone."""
+    used, opt, value = wrapper_option(argv, WRAPPER_VALUE_OPTS['env'])
+    if opt not in ('-S', '--split-string') or value is None:
         return None
     try:
-        return shlex.split(value), rest
+        return shlex.split(value), argv[used:]
     except ValueError:
         return None
 

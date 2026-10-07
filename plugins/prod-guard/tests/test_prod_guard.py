@@ -453,7 +453,13 @@ class ParsingTests(unittest.TestCase):
                      ["env", "-S", "kubectl", "delete"],
                      # STRING may carry env's own options, and another wrapper.
                      ["env", "-S", "-u FOO kubectl delete"],
-                     ["env", "-S", "sudo kubectl delete"]):
+                     ["env", "-S", "sudo kubectl delete"],
+                     # A bundle ending in `S` takes the string too (Q287).
+                     ["env", "-iS", "kubectl delete"],
+                     ["env", "-vS", "kubectl delete"],
+                     ["env", "-i0S", "kubectl delete"],
+                     ["env", "-iSkubectl delete"],
+                     ["env", "-uX", "-iS", "kubectl delete"]):
             with self.subTest(argv=argv):
                 self.assertEqual(guard.strip_wrappers(argv, {}),
                                  ["kubectl", "delete"])
@@ -475,6 +481,9 @@ class ParsingTests(unittest.TestCase):
         self.assertIsNone(guard.env_split_string(["-S", 'kubectl "x']))
         self.assertIsNone(guard.env_split_string(["-S"]))
         self.assertIsNone(guard.env_split_string(["-u", "FOO"]))
+        self.assertIsNone(guard.env_split_string(["-iS", 'kubectl "x']))
+        # `-u` takes the `S` as its value, so no string is split.
+        self.assertIsNone(guard.env_split_string(["-uS", "kubectl"]))
 
     def test_command_wrapper_strips_only_an_invocation(self):
         # `command kubectl delete` runs kubectl, so the wrapper comes off.
@@ -3302,7 +3311,12 @@ class SpecialCaseTests(unittest.TestCase):
                     "env -i -S 'kubectl delete ns foo'",
                     "env -S '-u FOO kubectl delete ns foo'",
                     "env -S 'sudo kubectl delete ns foo'",
-                    "env -S 'stdbuf -oL kubectl delete ns foo'"):
+                    "env -S 'stdbuf -oL kubectl delete ns foo'",
+                    # A bundle ending in `S` (Q287).
+                    "env -iS 'kubectl delete ns foo'",
+                    "env -vS 'kubectl delete ns foo'",
+                    "env -iS'kubectl delete ns foo'",
+                    "sudo env -iS 'kubectl delete ns foo'"):
             with self.subTest(cmd=cmd):
                 decision, reason = run_hook(cmd, home=home)
                 self.assertEqual(decision, "deny")
@@ -3329,7 +3343,9 @@ class SpecialCaseTests(unittest.TestCase):
                     "env -S 'kubectl get pods'",
                     "env -S 'kubectl delete --help'",
                     "env -S ''",
-                    "env -S"):
+                    "env -S",
+                    "env -iS 'kubectl get pods'",
+                    "env -iS"):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(run_hook(cmd, home=home)[0])
 
