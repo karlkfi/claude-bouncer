@@ -3558,6 +3558,32 @@ class SpecialCaseTests(unittest.TestCase):
             with self.subTest(prefix=prefix):
                 self.assertIsNone(run_hook(prefix + use, home=home)[0])
 
+    def test_an_assignment_that_runs_apart_reaches_nothing_after_it(self):
+        # A pipeline stage, a backgrounded list and a subshell each fork, so
+        # what they assign dies with them -- a `{ …; }` group among them, and
+        # a function called as one (Q300 review). A group with only a
+        # redirect, or a pipe inside it, still runs in the shell.
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        pre, use = "C=gke_acme_prod-us; ", " kubectl --context $C delete pod x"
+        for mid in ("{ C=kind-ci; } | true;", "{ C=kind-ci; } &",
+                    "{ C=kind-ci; } 2>&1 | cat;", "( { C=kind-ci; } );",
+                    "true | { C=kind-ci; };", "{ { C=kind-ci; }; } | cat;",
+                    "{ C=kind-ci; } && true &",
+                    "if true; then C=kind-ci; fi | cat;",
+                    "while false; do C=kind-ci; done &",
+                    "(C=kind-ci);", "(export C=kind-ci);", "C=kind-ci | true;",
+                    "C=kind-ci &", "f() ( C=kind-ci; ); f;",
+                    "f() { C=kind-ci; }; f | cat;",
+                    "f() { C=kind-ci; }; true | f;"):
+            with self.subTest(mid=mid):
+                self.assertEqual(
+                    run_hook(pre + mid + use, home=home)[0], "deny")
+        for mid in ("{ C=kind-ci; } > /dev/null;", "{ C=kind-ci; } <<< x;",
+                    "{ C=kind-ci; true | true; };", "! { C=kind-ci; };",
+                    "true && { C=kind-ci; };", "{ C=kind-ci; }\n"):
+            with self.subTest(mid=mid):
+                self.assertIsNone(run_hook(pre + mid + use, home=home)[0])
+
     def test_strip_keywords_hands_time_to_the_wrapper_walk(self):
         for group, words, rest in (
                 (["{", "kubectl"], ["{"], ["kubectl"]),
