@@ -843,8 +843,11 @@ update step and restart.
    arguments. Combined short flags (`git clean -fd`) are decomposed. A wrapped
    command gets every `ask` and `deny` the bare one would, but is never
    auto-approved and never lifted by the break-glass: the wrapper can change
-   the user, the environment or the directory, none of which the classifier
-   reads.
+   the user or the environment, neither of which the classifier reads. A
+   literal directory (`env -C dir`, `sudo -D dir`) is followed the way
+   `git -C dir` is, so the branch judged is the one checked out there; a
+   directory only the shell can compute (`env -C "$DIR"`), and a `sudo -R`
+   chroot, leave the command judged against the session's own checkout.
 4. **Classify** each segment as `allow` / `ask` / `deny` / `defer` / non-git:
    read-only git and gh and harmless mutations (`add`, `restore --staged`,
    `switch -c`, `worktree add`, branch/tag create) allow on any branch;

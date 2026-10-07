@@ -2769,10 +2769,43 @@ check_text "[wrap][dontAsk] wrapped deny does not name the prefix" lacks \
   "$(reason_for "$(bash_mode 'timeout 5 git reset --hard' dontAsk)" "$WRAP")"
 git -C "$WRAP" checkout -q -- file.txt
 
-#     29e. A wrapper that changes directory leaves the hook unable to name the
-#     tree, so the ref probes stand down to the unprobed ask. A tip nothing else
-#     reaches denies when probed; the plain wrapper keeps the probe, which is
-#     what separates "followed the chdir" from "gave up on every wrapper".
+#     29e. A wrapper that changes to a literal directory is followed the way
+#     `git -C` is (Q251), so the branch judged is the one checked out there. From
+#     the feature branch, a commit into a sibling checkout on `main` asks in
+#     every spelling; from `main`, one into the feature checkout lands on a
+#     branch where a wrapped allow defers. `git -C` is the control on each side.
+WRAP_MAIN="$WRAP.main"
+git -C "$WRAP" worktree add -q "$WRAP_MAIN" main
+SIB="../$(basename "$WRAP_MAIN")"
+check "[wrap] control: git -C <main sibling> commit -> ask" ask \
+  "$(decision_for "$(bash_payload "git -C $SIB commit -m x")" "$WRAP")"
+for w in "env -C $SIB" "env -C$SIB" "env --chdir=$SIB" "env --chdir $SIB" \
+         "env --ch $SIB" "env -C '$(nat "$WRAP_MAIN")'" "sudo -D $SIB" \
+         "sudo --chdir=$SIB" "env -u X sudo -D $SIB"; do
+  check "[wrap] $w git commit -> ask" ask \
+    "$(decision_for "$(bash_payload "$w git commit -m x")" "$WRAP")"
+done
+check "[wrap] env -C .. git -C <main sibling> commit -> ask" ask \
+  "$(decision_for "$(bash_payload "env -C .. git -C $(basename "$WRAP_MAIN") commit -m x")" "$WRAP")"
+#     A directory only the shell can compute, and a chroot, name no tree here:
+#     the commit is judged against the session's own checkout, as before Q251.
+#     From the feature branch that is the wrapped defer, from `main` the ask.
+for w in 'env -C "$X"' 'env -C $(echo ..)' 'env -C ~/x' "sudo -R $SIB"; do
+  check "[wrap] $w git commit from the feature branch -> none" none \
+    "$(decision_for "$(bash_payload "$w git commit -m x")" "$WRAP")"
+  check "[wrap] $w git commit from main -> ask" ask \
+    "$(decision_for "$(bash_payload "$w git commit -m x")" "$WRAP_MAIN")"
+done
+WRAP_FEAT="../$(basename "$WRAP")"
+check "[wrap] control: from main, env git commit -> ask" ask \
+  "$(decision_for "$(bash_payload 'env git commit -m x')" "$WRAP_MAIN")"
+check "[wrap] control: from main, git -C <feature> commit -> allow" allow \
+  "$(decision_for "$(bash_payload "git -C $WRAP_FEAT commit -m x")" "$WRAP_MAIN")"
+check "[wrap] from main, env -C <feature> git commit -> none" none \
+  "$(decision_for "$(bash_payload "env -C $WRAP_FEAT git commit -m x")" "$WRAP_MAIN")"
+
+#     The ref probes run in the followed tree, and stand down to the unprobed ask
+#     where the hook can't name one. A tip nothing else reaches denies when probed.
 git -C "$WRAP" checkout -q -b wrap-orphan
 git -C "$WRAP" commit -q --allow-empty -m "unreachable from anything"
 check "[wrap] control: reset --hard on an irrecoverable tip -> deny" deny \
@@ -2780,6 +2813,10 @@ check "[wrap] control: reset --hard on an irrecoverable tip -> deny" deny \
 check "[wrap] timeout 5 reset --hard on an irrecoverable tip -> deny" deny \
   "$(decision_for "$(bash_payload 'timeout 5 git reset --hard HEAD~1')" "$WRAP")"
 for w in 'env -C .' 'env --chdir=.' 'sudo -D .'; do
+  check "[wrap] $w reset --hard on an irrecoverable tip -> deny" deny \
+    "$(decision_for "$(bash_payload "$w git reset --hard HEAD~1")" "$WRAP")"
+done
+for w in 'env -C "$X"' 'sudo -R .'; do
   check "[wrap] $w reset --hard on an irrecoverable tip -> ask" ask \
     "$(decision_for "$(bash_payload "$w git reset --hard HEAD~1")" "$WRAP")"
 done
@@ -2796,7 +2833,7 @@ decision_for "$(post_payload 'env -C .. git worktree add wt-wrapped' "$(nat "$WR
   "$WRAP" HOME="$WRAP_HOME" BRANCH_GUARD_WORKTREE_GRANTS=1 >/dev/null
 check "[wrap][grants] a wrapped worktree add records nothing" absent \
   "$(grant_dir_state "$WRAP_HOME")"
-rm -rf "$WRAP" "$WRAP_HOME"
+rm -rf "$WRAP" "$WRAP_MAIN" "$WRAP_HOME"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 
