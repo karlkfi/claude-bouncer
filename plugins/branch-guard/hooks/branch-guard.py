@@ -847,7 +847,7 @@ def redirect_writes_file(op, target):
     return False
 
 
-def command_segments(tokens):
+def command_segments(tokens, tail=None):
     """Split a flat token list (from `tokenize`) into simple-command segments.
 
     Returns a list of `(tokens, writes_file)` pairs, one per command separated
@@ -862,9 +862,11 @@ def command_segments(tokens):
     Leading reserved words are stripped, so `{ git push …; }`, `if …; then git
     commit`, `! git …` and a loop body are judged by the command bash runs
     rather than deferring on a keyword (Q302). Each pair carries a third item,
-    `marks`: the parens and reserved words consumed since the previous segment,
-    in source order, which `group_cwd` reads to scope a `cd`. `function NAME`
-    drops the name too. A `time` stays, for `peel_wrappers` to read its `-p`.
+    `marks`: the separators and reserved words consumed since the previous
+    segment, in source order, which `compound_layout` reads to scope a `cd`; a
+    `tail` list, where given, takes the marks after the last segment. `function
+    NAME` drops the name too. A `time` stays, for `peel_wrappers` to read its
+    `-p`.
     """
     segments, cur, writes, marks, i = [], [], False, [], 0
 
@@ -885,8 +887,7 @@ def command_segments(tokens):
         t = tokens[i]
         if t in SEPARATORS:
             close()
-            if t in ('(', ')'):
-                marks.append(t)
+            marks.append(t)
             cur, writes = [], False
             i += 1
             continue
@@ -908,6 +909,8 @@ def command_segments(tokens):
         cur.append(t)
         i += 1
     close()
+    if tail is not None:
+        tail.extend(marks)
     return segments
 
 
@@ -1174,34 +1177,88 @@ GROUP_CLOSERS = {'(': ')', '{': '}', 'if': 'fi', 'while': 'done',
                  'case': 'esac'}
 
 
-def group_cwd(frames, marks, seg, cwd):
-    """The cwd a segment starts in, once the parens and reserved words in its
-    `marks` have opened and closed the compound commands around it (Q302).
+def loop_head(seg):
+    """True for a `for`/`select` segment, which opens a body that `done`
+    closes; neither word is in the shared keyword set, so it stays in `seg`."""
+    return bool(seg) and seg[0] in ('for', 'select') \
+        and getattr(seg[0], 'quoted_from', None) is None
 
-    `frames` is the stack of open groups, `[opener, cwd at entry, conditional]`,
-    carried across a command's segments. Bash runs `{ }`, `if` and loop bodies
-    in the current shell, so a `cd` in one moves every later segment, and runs
-    `( )` in a subshell, so leaving one restores the cwd it was entered with. A
-    body that may run zero times — a conditional, a loop, a function body,
-    which runs only where it is called — leaves the cwd unknown if it moved:
-    None, which stands the probes down as a `cd $VAR` does."""
-    for k, m in enumerate(marks):
-        if m in GROUP_CLOSERS:
-            fn = m == '{' and (marks[k - 1:k] == ['function']
-                               or marks[k - 2:k] == ['(', ')'])
-            frames.append([m, cwd, fn or m not in ('(', '{')])
-        elif frames and GROUP_CLOSERS[frames[-1][0]] == m:
-            opener, entry, conditional = frames.pop()
-            if opener == '(':
-                cwd = entry
-            elif conditional and cwd != entry:
-                cwd = None
-        elif m in ('else', 'elif') and frames and frames[-1][0] == 'if' \
-                and cwd != frames[-1][1]:
+
+def compound_layout(segments, tail):
+    """The command in source order, each segment's index between the marks
+    `command_segments` recorded, with every opener's closer and the positions
+    that run apart from the shell (Q302).
+
+    Bash forks a pipeline stage and a backgrounded list, so a `cd` in one, or
+    in a group that is one, moves nothing after it, the same as inside `( … )`.
+    An `&&`/`||` list ending in `&` is backgrounded whole."""
+    flat = []
+    for i, (_, _, marks) in enumerate(segments):
+        flat += marks + [i]
+    flat += tail
+    match, stack = {}, []
+    for p, m in enumerate(flat):
+        if isinstance(m, int):
+            if loop_head(segments[m][0]):
+                stack.append((p, 'for'))
+        elif m in GROUP_CLOSERS:
+            stack.append((p, m))
+        elif stack and GROUP_CLOSERS[stack[-1][1]] == m:
+            match[stack.pop()[0]] = p
+
+    def runs_apart(first, last):
+        j = first - 1
+        while j >= 0 and flat[j] == '\n':
+            j -= 1
+        if j >= 0 and flat[j] in ('|', '|&'):
+            return True
+        j = last + 1
+        if j < len(flat) and flat[j] in ('|', '|&'):
+            return True
+        while j < len(flat):
+            if j in match:
+                j = match[j] + 1
+            elif flat[j] == '&':
+                return True
+            elif isinstance(flat[j], int) \
+                    or flat[j] in ('&&', '||', '|', '|&', '!'):
+                j += 1
+            else:
+                return False
+        return False
+
+    return flat, {p for p, m in enumerate(flat)
+                  if (runs_apart(p, match[p]) if p in match
+                      else isinstance(m, int) and runs_apart(p, p))}
+
+
+def group_cwd(frames, flat, apart, pos, cwd):
+    """The cwd after the mark at `flat[pos]` opens or closes a compound
+    command (Q302).
+
+    `frames` is the stack of open groups, `[opener, cwd at entry, conditional,
+    forked]`, carried across a command's marks. Bash runs `{ }`, `if` and loop
+    bodies in the current shell, so a `cd` in one moves every later segment,
+    and runs `( )` and anything `compound_layout` found apart in a fork, so
+    leaving one restores the cwd it was entered with. A body that may run
+    zero times — a conditional, a loop, a function body, which runs only where
+    it is called — leaves the cwd unknown if it moved: None, which stands the
+    probes down as a `cd $VAR` does."""
+    m = flat[pos]
+    if isinstance(m, int) or m in GROUP_CLOSERS:
+        fn = m == '{' and (flat[pos - 1:pos] == ['function']
+                           or flat[pos - 2:pos] == ['(', ')'])
+        frames.append(['for' if isinstance(m, int) else m, cwd,
+                       fn or m not in ('(', '{'), pos in apart])
+    elif frames and GROUP_CLOSERS[frames[-1][0]] == m:
+        opener, entry, conditional, forked = frames.pop()
+        if opener == '(' or forked:
+            cwd = entry
+        elif conditional and cwd != entry:
             cwd = None
-    if seg and seg[0] in ('for', 'select') \
-            and getattr(seg[0], 'quoted_from', None) is None:
-        frames.append([str(seg[0]), cwd, True])
+    elif m in ('else', 'elif') and frames and frames[-1][0] == 'if' \
+            and cwd != frames[-1][1]:
+        cwd = None
     return cwd
 
 
@@ -2682,7 +2739,8 @@ def main():
             tokens = tokenize(cmd)
         except ValueError:
             return                                 # unbalanced quotes -> defer
-        segments = command_segments(tokens)
+        tail = []
+        segments = command_segments(tokens, tail)
         invs = [parse_invocation(seg) for seg, _, _ in segments]
         if not any(invs):
             return                                 # no git/gh command -> defer
@@ -2698,8 +2756,14 @@ def main():
         # hook can't resolve, `probe` goes false and the probes stand down.
         seg_cwd = cwd
         branches, roots, seen, verdicts, frames = {}, {}, set(), [], []
-        for (seg, writes, marks), inv in zip(segments, invs):
-            seg_cwd = group_cwd(frames, marks, seg, seg_cwd)
+        flat, apart = compound_layout(segments, tail)
+        for pos, at in enumerate(flat):
+            if not isinstance(at, int):
+                seg_cwd = group_cwd(frames, flat, apart, pos, seg_cwd)
+                continue
+            (seg, writes, _), inv = segments[at], invs[at]
+            if loop_head(seg):
+                seg_cwd = group_cwd(frames, flat, apart, pos, seg_cwd)
             if inv is None:
                 is_cd, dest = cd_destination(seg, seg_cwd)
                 # A non-git segment rides along only if it's a pure read-only
@@ -2732,7 +2796,7 @@ def main():
                     verdicts.append(('nongit', None, False))
                 # A `case` arm ends at a `;;` no mark records, so the next
                 # arm would inherit a `cd` bash never ran there.
-                if is_cd:
+                if is_cd and pos not in apart:
                     seg_cwd = (None if any(f[0] == 'case' for f in frames)
                                else dest)
             else:

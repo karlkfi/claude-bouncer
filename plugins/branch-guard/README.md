@@ -839,8 +839,9 @@ update step and restart.
    `{ git push --force origin main; } 2>&1`, a conditional, a loop body and a
    function body are each judged by the command inside them. They also scope
    the working directory: a `cd` inside `{ … }`, an `if` or a loop moves what
-   follows, as bash runs those in the current shell, while one inside `( … )`
-   is undone when the subshell ends. A `cd` in a body that may not run — a
+   follows, as bash runs those in the current shell, while one inside `( … )`,
+   in a pipeline stage, or in a backgrounded list — bare or inside a group — is
+   undone when that fork ends. A `cd` in a body that may not run — a
    conditional, a loop, a `case` arm, a function — leaves the directory after
    it unknown, and the command is judged against the session's own checkout.
 3. **Parse** each segment with `parse_invocation`: strip leading
@@ -1097,11 +1098,9 @@ protected branch (main/master) or destructive git commands. To keep work flowing
   lexical check, not a sandbox — the filesystem boundary is workspace-guard's
   job, and a hard guarantee belongs in a git `pre-push` hook or server-side
   branch protection.
-- A `cd` is followed in source order and scoped by `( )`, `{ }`, conditionals
-  and loops, but not by `&&`, `||`, a pipe or a trailing `&`. So
-  `false && cd ../other; git commit` is judged in `../other`, where bash
-  commits in the current tree, and `cd` in a pipeline stage is followed though
-  bash runs it in a subshell.
+- A `cd` is scoped by `( )`, `{ }`, conditionals, loops, pipes and `&`, but
+  not by `&&` or `||`. So `false && cd ../other; git commit` is judged in
+  `../other`, where bash commits in the current tree.
 - Command wrappers are read from a fixed list. One outside it (`xargs`, whose
   arguments arrive on stdin, or a site-specific launcher) hides the `git`
   behind it, and the command defers to the normal permission flow.

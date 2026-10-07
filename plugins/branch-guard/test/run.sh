@@ -2884,6 +2884,25 @@ check "[group] from main, ( cd <feat> ); git commit -> ask" ask \
   "$(decision_for "$(bash_payload "( cd $GRP_FEAT ); git commit -m x")" "$GRP")"
 check "[group] from feat, if true; then cd <main>; git commit; fi -> ask" ask \
   "$(decision_for "$(bash_payload "if true; then cd $GRP_MAIN; git commit -m x; fi")" "$GRP.feat")"
+#     A pipeline stage and a backgrounded list run in a fork, so a `cd` there,
+#     bare or inside a group, is undone when it ends, as in `( )`. Each of
+#     these commits on the branch the command started on.
+for w in '{ cd %s; } | true; ' '{ cd %s; } |& true; ' '{ cd %s; } & ' \
+         'true | { cd %s; }; ' '{ cd %s; } && true & ' 'cd %s | true; ' \
+         'cd %s & '; do
+  # shellcheck disable=SC2059
+  cmd="$(printf "${w}git commit -m x" "$GRP_FEAT")"
+  check "[group] from main, $cmd -> ask" ask \
+    "$(decision_for "$(bash_payload "$cmd")" "$GRP")"
+  # shellcheck disable=SC2059
+  cmd="$(printf "${w}git commit -m x" "$GRP_MAIN")"
+  check "[group] from feat, $cmd -> none" none \
+    "$(decision_for "$(bash_payload "$cmd")" "$GRP.feat")"
+done
+#     The control: the same group run in the shell keeps its `cd`.
+check "[group] from main, { cd <feat>; } && git commit -> none" none \
+  "$(decision_for "$(bash_payload "{ cd $GRP_FEAT; } && git commit -m x")" "$GRP")"
+
 #     A body that may not run leaves the cwd unknown after it, so the commit is
 #     judged against the session's own checkout, as after a `cd \$VAR`. Each of
 #     these lands on `main` whenever the body did not run.
