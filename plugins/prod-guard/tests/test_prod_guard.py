@@ -504,14 +504,18 @@ class ParsingTests(unittest.TestCase):
         for flags in (["-l"], ["-v"], ["-e"], ["-K"], ["-U", "bob", "-l"],
                       ["--list"], ["--validate"], ["--edit"],
                       ["--remove-timestamp"], ["--other-user=bob", "-l"],
-                      ["-kl"], ["-lk"]):
+                      ["-kl"], ["-lk"],
+                      # And the version and help sudo shares with every
+                      # wrapper, by unique prefix too (Q181).
+                      ["-V"], ["-nV"], ["--version"], ["--help"], ["--vers"],
+                      ["--he"], ["--li"]):
             with self.subTest(flags=flags):
                 self.assertIsNone(guard.peel_sudo(flags + ["kubectl"]))
         # `-k` runs the command when given one -- the opposite answer to `-K`,
         # differing only in case. `-h` before a plain word names a host
-        # (Q158); `-V` is left to Q181.
+        # (Q158), and `--h` is a prefix of both `--help` and `--host`.
         for flags in (["-k"], ["-u", "root"], ["-i"], ["-s"], ["-b"],
-                      ["-h"], ["-V"], ["--"], ["-p", "prompt"],
+                      ["-h"], ["--h"], ["-uV"], ["--"], ["-p", "prompt"],
                       # A value that looks like a mode is a value, not a mode.
                       ["-p", "-l"], ["-u", "-e"]):
             with self.subTest(flags=flags):
@@ -3504,14 +3508,41 @@ class SpecialCaseTests(unittest.TestCase):
                 self.assertEqual(decision, "deny")
                 self.assertIn("kubectl delete", reason)
 
-    def test_sudo_version_is_left_to_its_own_row(self):
-        # --help/--version are the class every wrapper shares (Q181). Still
-        # deny, unchanged by Q157 and Q158.
+    # --- Q181: a wrapper's own --help or --version runs nothing ----------
+
+    def test_wrapper_help_or_version_runs_nothing(self):
+        # Each prints usage or its version, or rejects the word, and none
+        # runs the operands behind it, so they are not a command to judge.
         home = make_home(kubeconfig=KUBECONFIG_PROD)
-        for cmd in ("sudo -V kubectl delete ns foo",
-                    "sudo --version kubectl delete ns foo"):
-            with self.subTest(cmd=cmd):
-                self.assertEqual(run_hook(cmd, home=home)[0], "deny")
+        for prefix in ("env --help", "env --version", "env --he", "env -i --help",
+                       "env --help=x", "env -S '--help'",
+                       "sudo --help", "sudo --version", "sudo -V", "sudo -nV",
+                       "sudo --he", "sudo --li",
+                       "timeout --help 5", "timeout -s KILL --version 5",
+                       "nohup --help", "nohup --he", "command --help",
+                       "command -p --help", "exec --help", "builtin --help",
+                       "stdbuf -oL --version", "nice -n 5 --help",
+                       "time -p --help", "ionice -c 3 --version",
+                       "setsid --help", "unbuffer --help", "chrt --help 5",
+                       "taskset --version 1", "xargs --help",
+                       "xargs -0 --version", "sudo env --help",
+                       "timeout 5 env --help", "sudo -u bob timeout --help 5"):
+            with self.subTest(prefix=prefix):
+                self.assertIsNone(run_hook(
+                    prefix + " kubectl delete ns foo", home=home)[0])
+
+    def test_wrapper_help_word_that_is_not_an_option_still_denies(self):
+        # The value of an option is not help, even spelled `--help` or `V`.
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        for prefix in ("env -u --help", "sudo -u --help", "sudo -uV",
+                       "timeout -s --help 5", "exec -a --help",
+                       "nice -n --help", "stdbuf -o --help",
+                       "xargs -I --help", "env", "sudo", "nohup", "sudo -k"):
+            with self.subTest(prefix=prefix):
+                self.assertEqual(run_hook(
+                    prefix + " kubectl delete ns foo", home=home)[0], "deny")
+        self.assertEqual(run_hook(
+            "env --help; kubectl delete ns foo", home=home)[0], "deny")
 
     # --- Q158: `sudo -h` is a host before a plain word, help otherwise ----
 
