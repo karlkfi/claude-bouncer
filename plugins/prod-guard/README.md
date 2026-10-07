@@ -284,7 +284,10 @@ classification, so the common `CTX=<ctx> kubectl --context $CTX …` /
 context's *value*, not the literal `$CTX`. Expansion resolves inline
 (`A=x cmd`) and `export`/bare (`P=x; …`) assignments left-to-right, following
 shell scope (a bare, unexported var does not expand inside a nested
-`bash -c` body). It is deliberately conservative: an **undefined** variable is
+`bash -c` body). A body written wholly in single quotes also sees what `env`
+or `sudo` hands the child: `env C=<ctx> bash -c '… "$C" …'` reads `<ctx>`, and
+after `env -i` or `env -u C` it reads `C` as empty. A body the parent expands
+does not, since the parent reads its own `C` before `env` runs. It is deliberately conservative: an **undefined** variable is
 left literal (so the target stays unknown and still prompts, never silently
 allowed), and non-trivial `$` forms — command substitution `$(…)`, arithmetic,
 and every `${…}` operator (`${V:-default}`, `${#V}`, …) — are not expanded, so

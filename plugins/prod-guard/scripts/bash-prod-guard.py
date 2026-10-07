@@ -83,7 +83,8 @@ from bouncer_parse import (                                    # noqa: E402
     strip_comments, strip_heredoc_bodies,
 )
 from bouncer_grants import grants_path, load_grants, record_grants  # noqa: E402
-from bouncer_wrappers import WRAPPER_VALUE_OPTS, wrapper_option  # noqa: E402
+from bouncer_wrappers import (                                 # noqa: E402
+    WRAPPER_GRAMMAR, WRAPPER_VALUE_OPTS, wrapper_option)
 import time
 from bouncer_parse import note_discarded_writes  # noqa: E402
 
@@ -652,6 +653,32 @@ def is_command_lookup(operands):
     return False
 
 
+def env_reshape_child(argv, child):
+    """Apply what the `env` option word at argv[0] does to the environment the
+    command inherits: `-i`, `-` and `--ignore-environment` empty it, and
+    `-u NAME` drops NAME. Both GNU and BSD env clear before they unset and
+    assign after either, so applying each word in turn gives the same env.
+
+    A name known to be gone is kept as set empty, which is how the child
+    expands it: `env -u C bash -c '... "$C"'` reads `""`, where a name left out
+    would stay `$C`, unknown. One the hook never saw stays unknown."""
+    tok = argv[0]
+    used, opt, value = wrapper_option(argv, WRAPPER_VALUE_OPTS['env'])
+    if tok.startswith('--'):
+        name = tok.partition('=')[0]
+        longs = ['--' + o for o in WRAPPER_GRAMMAR['env'].long]
+        matches = [o for o in longs if o == name] or [
+            o for o in longs if o.startswith(name)]
+        clears = matches == ['--ignore-environment']
+    else:
+        letters = tok[1:] if opt is None else tok[1:tok.index(opt[1], 1)]
+        clears = tok == '-' or 'i' in letters
+    if clears:
+        child.update(dict.fromkeys(child, ''))
+    if opt in ('-u', '--unset') and value is not None:
+        child[value] = ''
+
+
 def env_split_string(argv):
     """(words, rest) for an `env` split-string flag at argv[0], else None.
 
@@ -749,13 +776,19 @@ def peel_sudo(operands):
     return operands[i:], assigned
 
 
-def strip_wrappers(argv, env, alternates=None):
+def strip_wrappers(argv, env, alternates=None, child=None):
     """Remove leading launcher commands (sudo, env, timeout, xargs, ...) so
     the covered tool underneath is classified, not the wrapper. `env`
     assignments found behind `env`/`sudo` merge into the segment env.
 
+    A dict passed as `child` starts as the environment the segment hands its
+    command and ends as the one the command behind the wrappers inherits:
+    their assignments added, and what `env -i`/`-u` removes gone (Q269).
+
     A list passed as `alternates` gets each second reading the walk could not
-    rule out, as `(argv, env)`: the caller judges those too."""
+    rule out, as `(argv, child env)`: the caller judges those too."""
+    if child is None:
+        child = {}
     while argv:
         head = os.path.basename(argv[0])
         value_flags = WRAPPER_VALUE_OPTS.get(head, frozenset())
@@ -768,6 +801,7 @@ def strip_wrappers(argv, env, alternates=None):
                 break
             argv, assigned = peeled
             env.update(assigned)
+            child.update(assigned)
         elif head == 'env':
             argv = argv[1:]
             assigned = False
@@ -776,6 +810,7 @@ def strip_wrappers(argv, env, alternates=None):
                 # runs a program called `-S` and fails, so there is nothing
                 # behind it to classify.
                 if argv[0].startswith('-') and not assigned:
+                    env_reshape_child(argv, child)
                     split = env_split_string(argv)
                     if split is not None:
                         words, rest = split
@@ -785,7 +820,7 @@ def strip_wrappers(argv, env, alternates=None):
                         # runs the operands after it. Both readings are judged.
                         if (alternates is not None and rest
                                 and any(set('$`') & set(w) for w in words)):
-                            alternates.append((['env'] + rest, dict(env)))
+                            alternates.append((['env'] + rest, dict(child)))
                         argv = words + rest
                         continue
                     argv = argv[wrapper_option(argv, value_flags)[0]:]
@@ -801,6 +836,7 @@ def strip_wrappers(argv, env, alternates=None):
                     name, _, value = split_assignment(
                         argv[0], append_is_operator=False)
                     env[name] = value
+                    child[name] = value
                     assigned = True
                     argv = argv[1:]
                 else:
@@ -2725,12 +2761,16 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
         # chain.
         seg_inline = dict(seg_env)
         same_shell = {**shell_env, **seg_inline}   # for this command's args
-        child_env = {**exported, **seg_inline}     # for its `sh -c` body
+        child_env = {**exported, **seg_inline}     # for its `eval` body
+        # What the command behind the wrappers inherits: child_env as `env`
+        # and `sudo` reshape it. Not merged into same_shell, which the parent
+        # expands the arguments against before `env` runs (Q269).
+        child = dict(child_env)
         # Expanded view for classification; raw view (nested-body extraction)
-        # is left unexpanded so the child re-expands it against child_env.
+        # is left unexpanded so the child re-expands it against `child`.
         alternates = []
         argv = strip_wrappers(expand_argv(argv_raw, same_shell), seg_inline,
-                              alternates)
+                              alternates, child)
         argv_raw = strip_wrappers(list(argv_raw), {})
         for alt, alt_env in alternates:
             # Already expanded, so the child's env is all it needs (Q287). An
@@ -2738,7 +2778,7 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
             # in the other one env passes it to the command as an argument.
             # So it downgrades this reading's denies and reaches nothing else.
             sub_f, sub_o, sub_s = evaluate_command_string(
-                shlex.join(alt), ctx, depth + 1, {**exported, **alt_env},
+                shlex.join(alt), ctx, depth + 1, alt_env,
                 same_shell)
             if sub_o or sub_s is not None:
                 sub_f = [(ASK if sev == DENY else sev,
@@ -2790,9 +2830,21 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
                 # plain str rather than a token (`-c=…`, which flag_values
                 # splits): unknown quoting reads as single, so it expands in
                 # the child and nothing new resolves.
-                if "'" not in getattr(body, 'quotes', "'"):
+                quotes = getattr(body, 'quotes', frozenset("'"))
+                if "'" not in quotes:
                     body = expand_vars(body, same_shell)
-                sub_f, sub_o, sub_s = evaluate_command_string(body, ctx, depth + 1, child_env)
+                # What `env`/`sudo` add reaches the body only where the child
+                # does the expanding: a body written wholly in single quotes.
+                # Anywhere else a `$C` left over is the parent's, unknown here,
+                # and reading the operand's value for it would defer on a
+                # guess, so those names stay out and it prompts (Q269).
+                body_env = child
+                if not (quotes == {"'"} and getattr(body, 'quoted_chars', 0)
+                        == len(body)):
+                    body_env = {k: v for k, v in child.items()
+                                if child_env.get(k) == v}
+                sub_f, sub_o, sub_s = evaluate_command_string(
+                    body, ctx, depth + 1, body_env)
                 findings += sub_f
                 override = override or sub_o
                 session_reason = session_reason if session_reason is not None else sub_s
@@ -2827,9 +2879,10 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
             continue
         # The env a child inherits: an `export` earlier in the command counts
         # like the inline prefix, and a never-exported `P=x` does not (Q168).
-        # Built here rather than taken from child_env, so it carries the
-        # `env NAME=v` operands the wrapper walk merged into seg_inline.
-        findings += evaluator(argv, {**exported, **seg_inline}, ctx)
+        # The walk's `child`, so it carries the `env NAME=v` operands and
+        # drops what `env -i`/`-u` removed; a reader falls back to the hook's
+        # own environment for a name it lacks.
+        findings += evaluator(argv, child, ctx)
     if out is not None:
         out.update(shell=shell_env, exported=exported)
     return findings, override, session_reason

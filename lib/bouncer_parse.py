@@ -1259,6 +1259,11 @@ class QuotedStr(str):
     is what :func:`is_assignment` needs and `quotes` cannot answer, quoting on
     the value side of an assignment being ordinary (`SP="/x"` assigns).
 
+    `quoted_chars` counts the stripped characters read inside quotes, so a
+    word with `quotes == {"'"}` and `quoted_chars == len(word)` was written
+    wholly in single quotes, which `'a'$C` and `'a$C'` alone cannot tell
+    apart. A character escaped inside double quotes counts as unquoted.
+
     `glued` is whether an operator character followed with no whitespace
     between, which is the only thing separating bash's `2>f`, a redirect of
     fd 2, from `2 > f`, an argument `2` and a redirect of stdout. None means
@@ -1266,6 +1271,7 @@ class QuotedStr(str):
     """
     quotes = frozenset()
     quoted_from = None
+    quoted_chars = 0
     glued = False
 
 
@@ -1282,6 +1288,8 @@ class QuoteTrackingLexer(shlex.shlex):
     def __init__(self, *args, **kwargs):
         self._seen_quotes = set()
         self._quoted_from = None
+        self._quoted_chars = 0
+        self._quote_start = None
         self._cmd_pos = True      # an assignment word may stand here
         self._redir_target = False
         self._frames = []         # open `(` and `case` constructs
@@ -1301,6 +1309,14 @@ class QuoteTrackingLexer(shlex.shlex):
                                + getattr(self, 'escape', '')):
             if self._quoted_from is None:
                 self._quoted_from = len(getattr(self, 'token', ''))
+        quotes = getattr(self, 'quotes', '')
+        inside = bool(value) and value in quotes
+        if inside and self._quote_start is None:
+            self._quote_start = len(getattr(self, 'token', ''))
+        elif not inside and self._quote_start is not None:
+            self._quoted_chars += (len(getattr(self, 'token', ''))
+                                   - self._quote_start)
+            self._quote_start = None
         self._state = value
 
     state = property(_get_state, _set_state)
@@ -1315,6 +1331,8 @@ class QuoteTrackingLexer(shlex.shlex):
         prefix = self._read_subscript() if self._cmd_pos else ''
         self._seen_quotes = set()
         self._quoted_from = None
+        self._quoted_chars = 0
+        self._quote_start = None
         if prefix and not self._word_continues():
             token = ''
         else:
@@ -1327,6 +1345,7 @@ class QuoteTrackingLexer(shlex.shlex):
         out.quotes = frozenset(self._seen_quotes)
         if self._quoted_from is not None:
             out.quoted_from = len(prefix) + self._quoted_from
+        out.quoted_chars = self._quoted_chars
         # shlex parks the punctuation character that ended a word here. It is
         # private, so a release without it leaves `glued` unknown rather than
         # breaking `lex`; LexTests pins the attribute.

@@ -852,6 +852,15 @@ class AssignmentTests(unittest.TestCase):
         self.assertEqual(2, bp.lex('SP"="/x')[0].quoted_from)
         self.assertIsNone(bp.lex('SP=/x')[0].quoted_from)
 
+    def test_quoted_chars_tells_a_wholly_quoted_word_apart(self):
+        """prod-guard reads it to tell `'a$C'` from `'a'$C` (Q269)."""
+        for word, count in (("'k $C'", 4), ("'k '$C", 2), ("'a'$C'b'", 2),
+                            ("'a''b'", 2), ('"k $C"', 4), ('k$C', 0),
+                            ("''", 0)):
+            with self.subTest(word=word):
+                self.assertEqual(count, bp.lex(word)[0].quoted_chars)
+        self.assertEqual(0, bp.QuotedStr('x').quoted_chars)
+
     def test_the_quote_characters_are_still_recorded(self):
         """prod-guard reads `.quotes` to tell a `-c` body's expander apart."""
         self.assertEqual(frozenset("'"), bp.lex("'a b'")[0].quotes)
