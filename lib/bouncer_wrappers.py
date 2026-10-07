@@ -40,12 +40,16 @@ WRAPPER_GRAMMAR = {
         'chdir': 'req', 'split-string': 'req', 'argv0': 'req',
         'block-signal': 'opt', 'default-signal': 'opt', 'ignore-signal': 'opt',
         'list-signal-handling': 'none', 'debug': 'none'}), True),
-    # `-h` is off the row: it is `--help` alone and `--host` with a value
-    # after it, and which one it is decides whether anything runs (Q158).
+    # `-h` is `h::` to getopt, so only an attached value is its own; sudo's
+    # parse then takes the next word as the host when the token is exactly
+    # `-h` and the word is neither an option nor a NAME=value, and reads any
+    # other `-h` as `--help`. sudo 1.8.8 through 1.9.17 ran the command under a
+    # host (CVE-2025-32462), so the row reads `-h` as taking a value, and a
+    # guard that minds the help form checks the word after it (Q158).
     # sudo's getopt takes `-a`, `-c`, `-r` and `-t` in every build, and a
     # build without BSD auth, login classes or SELinux rejects them after
     # reading their value, so they are value-taking whatever the usage lists.
-    'sudo': Wrapper('AbBEeHiKklnNPSsVv', 'acCDgprRtTuU', '', dict(
+    'sudo': Wrapper('AbBEeHiKklnNPSsVv', 'acCDghprRtTuU', '', dict(
         _COMMON_LONG, **{
             'askpass': 'none', 'auth-type': 'req', 'background': 'none',
             'bell': 'none', 'close-from': 'req', 'chdir': 'req',

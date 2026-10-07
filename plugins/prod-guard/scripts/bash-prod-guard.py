@@ -685,16 +685,22 @@ def env_split_string(argv):
 #
 # `-k` is deliberately absent. Lowercase RUNS the command when given one,
 # which is the opposite answer to `-K` and differs from it only in case.
-# `-h` is left alone: it spells both `--help` and `--host` (Q158).
+# `-h` spells both `--help` and `--host`. sudo reads it as the host when the
+# value is attached (`-hmyhost`) or a plain word follows, and as help when
+# nothing or an option does, which runs nothing (Q158). Sudo's own parse takes
+# a bundled `-nh WORD` and `-h NAME=value` as help too; reading those as a host
+# denies where sudo prints usage, which costs a rewrite where the other error
+# lets a command reach the cluster on a sudo before 1.9.17p1.
 # `--help` and `--version` are the class every wrapper shares (Q181).
 SUDO_RUN_NOTHING = frozenset('lveKU')
 SUDO_RUN_NOTHING_LONG = frozenset({
     '--list', '--validate', '--edit', '--remove-timestamp', '--other-user'})
 
 
-def sudo_option_runs_nothing(tok):
-    """Whether sudo option word `tok` puts it in a mode that runs no command
-    (Q157). The sudo-side twin of `is_command_lookup`.
+def sudo_option_runs_nothing(tok, nxt=None):
+    """Whether sudo option word `tok`, with `nxt` the word after it, puts sudo
+    in a mode that runs no command (Q157). The sudo-side twin of
+    `is_command_lookup`.
 
     Flags bundle, so a short word is walked one character at a time rather
     than tested whole: a value-taking flag ends the walk, because what follows
@@ -703,11 +709,12 @@ def sudo_option_runs_nothing(tok):
     `--remove-timestamp` would defer a command sudo really runs."""
     if tok.startswith('--'):
         return tok.split('=', 1)[0] in SUDO_RUN_NOTHING_LONG
-    for char in tok[1:]:
+    for pos, char in enumerate(tok[1:], start=2):
         if char in SUDO_RUN_NOTHING:
             return True
         if '-' + char in WRAPPER_VALUE_OPTS['sudo']:
-            return False
+            return (char == 'h' and pos == len(tok)
+                    and (nxt is None or nxt.startswith('-')))
     return False
 
 
@@ -729,7 +736,8 @@ def peel_sudo(operands):
         if tok == '--':
             return operands[i + 1:], assigned
         if tok.startswith('-'):
-            if sudo_option_runs_nothing(tok):
+            if sudo_option_runs_nothing(
+                    tok, operands[i + 1] if i + 1 < len(operands) else None):
                 return None
             i += wrapper_option(operands[i:], value_flags)[0]
         elif '=' in tok and tok[0] not in '/=':
