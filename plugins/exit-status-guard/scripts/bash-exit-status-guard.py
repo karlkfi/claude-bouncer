@@ -276,9 +276,10 @@ def split_segments(tokens):
     return segs
 
 
-def wrapper_operands(wrapper, args):
+def wrapper_operands(wrapper, args, ended=None):
     """``args`` past the wrapper's own options, or None when one of them puts
-    the wrapper in a mode that runs nothing.
+    the wrapper in a mode that runs nothing. A `--` that ends the options is
+    appended to ``ended`` when one is passed.
 
     A short word is walked a character at a time, and the walk stops at the
     first value-taking flag, because the rest of the word is its value:
@@ -291,6 +292,8 @@ def wrapper_operands(wrapper, args):
     while args and args[0].startswith('-'):
         tok = args[0]
         if tok == '--':
+            if ended is not None:
+                ended.append(tok)
             return args[1:]
         if tok == '-':
             # A lone `-` is `env -i`; to any other wrapper it is an operand.
@@ -333,16 +336,26 @@ def peel_wrappers(tokens, assigned=None):
         tokens = strip_env_prefix(strip_sh_keywords(tokens))
         if tokens and os.path.basename(tokens[0]) in WRAPPERS:
             wrapper = os.path.basename(tokens[0])
-            rest = wrapper_operands(wrapper, tokens[1:])
+            whole, ended = tokens, []
+            rest = wrapper_operands(wrapper, tokens[1:], ended)
             if rest is None:
                 return tokens
             tokens = rest
             if wrapper in ASSIGN_WRAPPERS:
                 # Operand position, not command position: see ASSIGN_WRAPPERS.
+                # sudo goes back to its options after each operand, so the two
+                # interleave (`sudo A=1 -u root cmd`), and after `--` it
+                # assigns nothing: `sudo -- A=1 cmd` runs a program `A=1` (Q275).
                 while tokens and assigns_operand(wrapper, tokens[0]):
+                    if wrapper == 'sudo' and ended:
+                        return tokens
                     if assigned is not None:
                         assigned.append(tokens[0])
                     tokens = tokens[1:]
+                    if wrapper == 'sudo' and tokens[:1] and tokens[0].startswith('-'):
+                        tokens = wrapper_operands(wrapper, tokens, ended)
+                        if tokens is None:
+                            return whole
             continue
         return tokens
 

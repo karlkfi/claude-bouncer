@@ -486,6 +486,28 @@ CASES = [
      'sudo =x make check | tail -5', False, False, ''),
     ('a sudo operand starting with / is the command',
      'sudo /x=y make check | tail -5', False, False, ''),
+    # sudo goes back to its options after each operand (Q275): sudo 1.9.17p2
+    # rejects `sudo -n A=1 --no-such-option true` as an unrecognized option.
+    # After `--` it assigns nothing, so the `=` word is the program it runs.
+    ('a sudo option after an operand still reaches the gate',
+     'sudo A=1 -u root make check | tail -5', False, True, ''),
+    ('a sudo flag after an operand still reaches the gate',
+     'sudo A=1 -n make check | tail -5', False, True, ''),
+    ('a sudo flag after a non-identifier operand still reaches the gate',
+     'sudo 1=x -E make check | tail -5', False, True, ''),
+    ('sudo options and operands interleaved still reach the gate',
+     'sudo A=1 -u root B=2 -E make check | tail -5', False, True, ''),
+    ('a sudo -- after an operand still reaches the gate',
+     'sudo A=1 -- make check | tail -5', False, True, ''),
+    ('a sudo run-nothing mode after an operand runs no gate',
+     'sudo A=1 -l make check | tail -5', False, False, ''),
+    ('after sudo --, an = word is the command',
+     'sudo -- A=1 make check | tail -5', False, False, ''),
+    ('after a later sudo --, an = word is the command',
+     'sudo A=1 -- B=2 make check | tail -5', False, False, ''),
+    ('env stops taking options at its first operand',
+     'env A=1 -i make check | tail -5', False, False, ''),
+    ('env still assigns after --', 'env -- A=1 make check | tail -5', False, True, ''),
     # A wrapper's own options come off with it, or the first one becomes the
     # command word and the gate behind it goes unread (Q222).
     ('a flag after sudo still reaches the gate',
