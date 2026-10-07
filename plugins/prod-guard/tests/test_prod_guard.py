@@ -490,14 +490,14 @@ class ParsingTests(unittest.TestCase):
             guard.strip_wrappers(["command", "-v", "kubectl", "kubeconform"], {}),
             ["command", "-v", "kubectl", "kubeconform"])
 
-    def test_is_sudo_run_nothing(self):
+    def test_peel_sudo_run_nothing(self):
         # The five modes that run no command (Q157).
         for flags in (["-l"], ["-v"], ["-e"], ["-K"], ["-U", "bob", "-l"],
                       ["--list"], ["--validate"], ["--edit"],
                       ["--remove-timestamp"], ["--other-user=bob", "-l"],
                       ["-kl"], ["-lk"]):
             with self.subTest(flags=flags):
-                self.assertTrue(guard.is_sudo_run_nothing(flags + ["kubectl"]))
+                self.assertIsNone(guard.peel_sudo(flags + ["kubectl"]))
         # `-k` runs the command when given one -- the opposite answer to `-K`,
         # differing only in case. `-h` is left to Q158, `-V` to Q181.
         for flags in (["-k"], ["-u", "root"], ["-i"], ["-s"], ["-b"],
@@ -505,7 +505,7 @@ class ParsingTests(unittest.TestCase):
                       # A value that looks like a mode is a value, not a mode.
                       ["-p", "-l"], ["-u", "-e"]):
             with self.subTest(flags=flags):
-                self.assertFalse(guard.is_sudo_run_nothing(flags + ["kubectl"]))
+                self.assertIsNotNone(guard.peel_sudo(flags + ["kubectl"]))
 
     def test_attached_flag_value_is_not_scanned_for_modes(self):
         # A short flag's value can be attached to it, and a username or a
@@ -515,12 +515,12 @@ class ParsingTests(unittest.TestCase):
         for flags in (["-uKarl"], ["-pplease"], ["-pEnter"], ["-gwheel"],
                       ["-Ttimeout"], ["-pl"], ["-Tl"]):
             with self.subTest(flags=flags):
-                self.assertFalse(guard.is_sudo_run_nothing(flags + ["kubectl"]))
+                self.assertIsNotNone(guard.peel_sudo(flags + ["kubectl"]))
         # The walk stops at the value and not before it, so a mode letter
         # bundled ahead of a value-taking flag still counts.
         for flags in (["-lp"], ["-lu"], ["-vp"]):
             with self.subTest(flags=flags):
-                self.assertTrue(guard.is_sudo_run_nothing(flags + ["kubectl"]))
+                self.assertIsNone(guard.peel_sudo(flags + ["kubectl"]))
 
     def test_sudo_wrapper_strips_only_an_invocation(self):
         # A real invocation still has sudo peeled off.
@@ -534,6 +534,32 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(
             guard.strip_wrappers(["sudo", "-l", "kubectl", "delete"], {}),
             ["sudo", "-l", "kubectl", "delete"])
+
+    def test_sudo_assignment_operands_peel_into_the_env(self):
+        # sudo's `NAME=value` operands, by its own `is_envar`, interleaved
+        # with its options; `--` ends both (Q240).
+        for argv, rest, assigned in (
+                (["FOO=1", "kubectl"], ["kubectl"], {"FOO": "1"}),
+                (["-u", "root", "FOO=1", "kubectl"], ["kubectl"], {"FOO": "1"}),
+                (["FOO=1", "-u", "root", "kubectl"], ["kubectl"], {"FOO": "1"}),
+                (["A=1", "-n", "B=2", "kubectl"], ["kubectl"],
+                 {"A": "1", "B": "2"}),
+                (["a b=c", "kubectl"], ["kubectl"], {"a b": "c"}),
+                (["A=1", "--", "kubectl"], ["kubectl"], {"A": "1"}),
+                # After `--`, and for a word starting `/` or `=`, sudo runs
+                # the word as the command.
+                (["--", "A=1", "kubectl"], ["A=1", "kubectl"], {}),
+                (["/x=1", "kubectl"], ["/x=1", "kubectl"], {}),
+                (["=x", "kubectl"], ["=x", "kubectl"], {})):
+            with self.subTest(argv=argv):
+                self.assertEqual(guard.peel_sudo(argv), (rest, assigned))
+        # A run-nothing mode after an assignment is still that mode.
+        self.assertIsNone(guard.peel_sudo(["A=1", "-l", "kubectl"]))
+        env = {}
+        self.assertEqual(
+            guard.strip_wrappers(["sudo", "KUBECONFIG=/k", "kubectl", "get"], env),
+            ["kubectl", "get"])
+        self.assertEqual(env, {"KUBECONFIG": "/k"})
 
     def test_is_command_lookup(self):
         self.assertTrue(guard.is_command_lookup(["-v", "kubectl"]))
@@ -3371,6 +3397,43 @@ class SpecialCaseTests(unittest.TestCase):
                     "sudo --version kubectl delete ns foo"):
             with self.subTest(cmd=cmd):
                 self.assertEqual(run_hook(cmd, home=home)[0], "deny")
+
+    # --- Q240: sudo's NAME=value operands ----------------------------------
+
+    def test_sudo_assignment_operand_does_not_hide_the_tool(self):
+        # The assignment was read as the command head, so the guard deferred
+        # the production delete behind it.
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        for cmd in ("sudo FOO=1 kubectl delete ns foo",
+                    "sudo -u root FOO=1 kubectl delete ns foo",
+                    "sudo FOO=1 -u root kubectl delete ns foo",
+                    "sudo A=1 -n kubectl delete ns foo",
+                    "sudo 1=x -E kubectl delete ns foo",
+                    "sudo 'a b=c' kubectl delete ns foo",
+                    "sudo A=1 -- kubectl delete ns foo",
+                    "timeout 5 sudo A=1 kubectl delete ns foo"):
+            with self.subTest(cmd=cmd):
+                decision, reason = run_hook(cmd, home=home)
+                self.assertEqual(decision, "deny")
+                self.assertIn("kubectl delete", reason)
+
+    def test_sudo_operand_arms_the_override_like_env(self):
+        # Behind sudo the operand was the command head, so the segment
+        # deferred; it now asks, as `env PROD_GUARD_OVERRIDE=` does (Q176).
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        self.assertEqual(run_hook(
+            "sudo PROD_GUARD_OVERRIDE=incident kubectl delete ns foo",
+            home=home)[0], "ask")
+
+    def test_sudo_runs_what_follows_dashdash_or_a_slash(self):
+        # sudo assigns nothing after `--`, nor a word starting `/`, so the
+        # command it runs is that word, not kubectl.
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        for cmd in ("sudo -- A=1 kubectl delete ns foo",
+                    "sudo /x=1 kubectl delete ns foo",
+                    "sudo A=1 -l kubectl delete ns foo"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(run_hook(cmd, home=home)[0])
 
     # --- Q161: stdbuf/unbuffer prefix a command like any other wrapper ---
 
