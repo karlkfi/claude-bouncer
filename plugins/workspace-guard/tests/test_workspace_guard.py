@@ -8749,8 +8749,18 @@ class PeelWrappersTests(unittest.TestCase):
         # is judged rather than read as chrt's operand.
         self.assertRuns("chrt -o cat f", ["cat", "f"])
 
+    def test_sudo_h_names_a_host_and_runs_what_follows_it(self):
+        # sudo 1.8.8 through 1.9.17 takes a plain word after `-h` as the host
+        # and runs the command after it (CVE-2025-32462), so the command is
+        # judged rather than the host (Q158). The help form reads the same way
+        # here, which judges a command that never runs.
+        for cmd in ("sudo -h host cat f", "sudo -hhost cat f",
+                    "sudo --host host cat f", "sudo -u bob -h host cat f"):
+            self.assertRuns(cmd, ["cat", "f"])
+        self.assertRuns("sudo -h cat f", ["f"])
+
     def test_a_lost_privilege_wrapper_is_never_guessed_past(self):
-        for cmd in ("sudo -h cat f", "sudo -h host cat f", "sudo -Z cat f",
+        for cmd in ("sudo -h $H cat f", "sudo -Z cat f",
                     "sudo -u $U cat f", "sudo $OPT cat f", "sudo A=$X cat f",
                     "doas -Z cat f", "caffeinate -h cat f", "chrt $P cat f",
                     "taskset $M cat f", "flock $L cat f", "flock -h l cat f"):

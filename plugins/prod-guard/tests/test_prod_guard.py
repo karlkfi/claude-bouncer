@@ -508,13 +508,19 @@ class ParsingTests(unittest.TestCase):
             with self.subTest(flags=flags):
                 self.assertIsNone(guard.peel_sudo(flags + ["kubectl"]))
         # `-k` runs the command when given one -- the opposite answer to `-K`,
-        # differing only in case. `-h` is left to Q158, `-V` to Q181.
+        # differing only in case. `-h` before a plain word names a host
+        # (Q158); `-V` is left to Q181.
         for flags in (["-k"], ["-u", "root"], ["-i"], ["-s"], ["-b"],
                       ["-h"], ["-V"], ["--"], ["-p", "prompt"],
                       # A value that looks like a mode is a value, not a mode.
                       ["-p", "-l"], ["-u", "-e"]):
             with self.subTest(flags=flags):
                 self.assertIsNotNone(guard.peel_sudo(flags + ["kubectl"]))
+        # `-h` with nothing, or an option, after it is `--help` (Q158).
+        for operands in (["-h"], ["-h", "-n", "kubectl"], ["-h", "--", "kubectl"],
+                         ["-u", "bob", "-h"]):
+            with self.subTest(operands=operands):
+                self.assertIsNone(guard.peel_sudo(operands))
 
     def test_attached_flag_value_is_not_scanned_for_modes(self):
         # A short flag's value can be attached to it, and a username or a
@@ -3441,16 +3447,48 @@ class SpecialCaseTests(unittest.TestCase):
                 self.assertEqual(decision, "deny")
                 self.assertIn("kubectl delete", reason)
 
-    def test_sudo_h_and_version_are_left_to_their_own_rows(self):
-        # Pinned so this change is not read as having settled either. `-h` is
-        # both --help and --host (Q158); --help/--version are the class every
-        # wrapper shares (Q181). Both still deny, unchanged by Q157.
+    def test_sudo_version_is_left_to_its_own_row(self):
+        # --help/--version are the class every wrapper shares (Q181). Still
+        # deny, unchanged by Q157 and Q158.
         home = make_home(kubeconfig=KUBECONFIG_PROD)
-        for cmd in ("sudo -h kubectl delete ns foo",
-                    "sudo -V kubectl delete ns foo",
+        for cmd in ("sudo -V kubectl delete ns foo",
                     "sudo --version kubectl delete ns foo"):
             with self.subTest(cmd=cmd):
                 self.assertEqual(run_hook(cmd, home=home)[0], "deny")
+
+    # --- Q158: `sudo -h` is a host before a plain word, help otherwise ----
+
+    def test_sudo_host_runs_the_command_behind_it(self):
+        # sudo 1.8.8 through 1.9.17 runs the command under `-h HOST`
+        # (CVE-2025-32462), and the hook cannot see which sudo it will meet.
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        for cmd in ("sudo -h myhost kubectl delete ns foo",
+                    "sudo --host myhost kubectl delete ns foo",
+                    "sudo -u bob -h myhost kubectl delete ns foo",
+                    "sudo -hmyhost kubectl delete ns foo",
+                    "sudo --host=myhost kubectl delete ns foo",
+                    "sudo FOO=bar -h myhost kubectl delete ns foo",
+                    # Stricter than sudo, which reads both of these as help:
+                    # a false deny costs a rewrite, a false defer reaches the
+                    # cluster (the comment above SUDO_RUN_NOTHING).
+                    "sudo -nh myhost kubectl delete ns foo",
+                    "sudo -h FOO=bar kubectl delete ns foo"):
+            with self.subTest(cmd=cmd):
+                decision, reason = run_hook(cmd, home=home)
+                self.assertEqual(decision, "deny")
+                self.assertIn("kubectl delete", reason)
+
+    def test_sudo_help_and_a_tool_named_as_host_run_nothing_guarded(self):
+        # `-h` before an option or nothing is help. Before a plain word that
+        # word is the host, so `kubectl` here is a host name and `delete` the
+        # command sudo would run.
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        for cmd in ("sudo -h -n kubectl delete ns foo",
+                    "sudo -h -- kubectl delete ns foo",
+                    "sudo -h kubectl delete ns foo",
+                    "sudo -h"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(run_hook(cmd, home=home)[0])
 
     # --- Q240: sudo's NAME=value operands ----------------------------------
 

@@ -1137,14 +1137,16 @@ class SlowCommandPositionTests(unittest.TestCase):
         # value flag takes the next word, an attached value takes none, and a
         # unique prefix of a long value flag is that flag.
         for prefix in ("sudo -nu root", "sudo -uroot", "sudo -T 60",
-                       "sudo --user=root", "sudo --us root", "sudo -h",
+                       "sudo --user=root", "sudo --us root", "sudo -h host",
                        "env -iu FOO", "env -iC /", "env -P /bin", "env -a x",
                        "env -uFOO", "env --unset=FOO", "env --ch /",
                        "/usr/bin/time --form %e", "stdbuf --o L"):
             with self.subTest(prefix=prefix):
                 self.assert_runs(prefix + " scripts/gate.sh")
-        # The value flag eats the script, so it is not what runs.
-        for prefix in ("sudo -nu", "env -iu", "env --un", "stdbuf --out L cat"):
+        # The value flag eats the script, so it is not what runs. A plain word
+        # after sudo's `-h` is the host (Q158).
+        for prefix in ("sudo -nu", "sudo -h", "env -iu", "env --un",
+                       "stdbuf --out L cat"):
             with self.subTest(prefix=prefix):
                 self.assert_mention(prefix + " scripts/gate.sh")
         # sudo's getopt takes these whatever the build supports (Q233).
