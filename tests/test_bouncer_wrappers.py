@@ -17,10 +17,11 @@ import bouncer_wrappers as wrappers  # noqa: E402
 class GrammarTests(unittest.TestCase):
     def test_sudo_value_options_match_its_getopt(self):
         # sudo 1.9.17p2 answers `option requires an argument` for exactly these
-        # short letters; `-h` takes an optional one and is left to Q158.
+        # short letters, plus `-h`: getopt takes it as `h::`, and sudo's own
+        # parse then takes a plain next word as the host (Q158).
         self.assertEqual(
             {o for o in wrappers.WRAPPER_VALUE_OPTS['sudo'] if len(o) == 2},
-            {'-' + c for c in 'acCDgprRtTuU'})
+            {'-' + c for c in 'acCDghprRtTuU'})
         self.assertNotIn('h', wrappers.WRAPPER_GRAMMAR['sudo'].short_none)
 
     def test_env_carries_both_bsd_and_gnu_value_options(self):
