@@ -701,38 +701,53 @@ SUDO_RUN_NOTHING_LONG = frozenset({
     '--list', '--validate', '--edit', '--remove-timestamp', '--other-user'})
 
 
-def is_sudo_run_nothing(operands):
-    """Whether sudo's flags put it in a mode that runs no command (Q157).
+def sudo_option_runs_nothing(tok):
+    """Whether sudo option word `tok` puts it in a mode that runs no command
+    (Q157). The sudo-side twin of `is_command_lookup`.
 
-    The sudo-side twin of `is_command_lookup`. Flags bundle and `--` ends
-    them, so a short token is walked one character at a time rather than
-    tested whole: a value-taking flag ends the walk, because what follows it
-    in the token is that flag's value and a username or prompt is free to
+    Flags bundle, so a short word is walked one character at a time rather
+    than tested whole: a value-taking flag ends the walk, because what follows
+    it in the word is that flag's value and a username or prompt is free to
     contain a mode letter. `sudo -uKarl` is the case -- reading the `K` as
     `--remove-timestamp` would defer a command sudo really runs."""
+    if tok.startswith('--'):
+        return tok.split('=', 1)[0] in SUDO_RUN_NOTHING_LONG
+    for char in tok[1:]:
+        if char in SUDO_RUN_NOTHING:
+            return True
+        if '-' + char in WRAPPER_VALUE_OPTS['sudo']:
+            return False
+    return False
+
+
+def peel_sudo(operands):
+    """(command, assignments) for the words after `sudo`, or None when its
+    options put it in a mode that runs no command.
+
+    sudo goes back to getopt_long after each `NAME=value` operand, so options
+    and assignments can come in any order (`sudo A=1 -u root cmd`), and one
+    walk takes both until neither matches. An operand assigns by sudo's own
+    rule, its `is_envar`: it holds `=` and starts with neither `/` nor `=`, so
+    `sudo 'a b=c' cmd` assigns where bash would not (Q218). `--` ends both,
+    and after it sudo assigns nothing: `sudo -- A=1 cmd` runs `A=1` (Q240)."""
     value_flags = WRAPPER_VALUE_OPTS['sudo']
+    assigned = {}
     i = 0
     while i < len(operands):
         tok = operands[i]
-        if not tok.startswith('-') or tok in ('-', '--'):
-            return False
-        if tok.startswith('--'):
-            name = tok.split('=', 1)[0]
-            if name in SUDO_RUN_NOTHING_LONG:
-                return True
+        if tok == '--':
+            return operands[i + 1:], assigned
+        if tok.startswith('-'):
+            if sudo_option_runs_nothing(tok):
+                return None
             i += wrapper_option(operands[i:], value_flags)[0]
-        else:
+        elif '=' in tok and tok[0] not in '/=':
+            name, _, value = tok.partition('=')
+            assigned[name] = value
             i += 1
-            for pos, char in enumerate(tok[1:], start=2):
-                if char in SUDO_RUN_NOTHING:
-                    return True
-                if '-' + char in value_flags:
-                    # The value is the rest of the token, or the next operand
-                    # when this flag ends it. Either way it is not flags.
-                    if pos == len(tok):
-                        i += 1
-                    break
-    return False
+        else:
+            break
+    return operands[i:], assigned
 
 
 def strip_wrappers(argv, env):
@@ -746,11 +761,11 @@ def strip_wrappers(argv, env):
             # A run-nothing mode makes the operands behind it something other
             # than a command, so leaving `sudo` in place defers the segment --
             # the same move `command -v` makes below (Q142, Q157).
-            if is_sudo_run_nothing(argv[1:]):
+            peeled = peel_sudo(argv[1:])
+            if peeled is None:
                 break
-            argv = argv[1:]
-            while argv and argv[0].startswith('-'):
-                argv = argv[wrapper_option(argv, value_flags)[0]:]
+            argv, assigned = peeled
+            env.update(assigned)
         elif head == 'env':
             argv = argv[1:]
             assigned = False
