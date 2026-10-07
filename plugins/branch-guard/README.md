@@ -1091,8 +1091,7 @@ protected branch (main/master) or destructive git commands. To keep work flowing
   branch protection.
 - Command wrappers are read from a fixed list. One outside it (`xargs`, whose
   arguments arrive on stdin, or a site-specific launcher) hides the `git`
-  behind it, and the command defers to the normal permission flow. So does
-  `sudo -h <host>`, which a stock sudoers cannot run.
+  behind it, and the command defers to the normal permission flow.
 - The push guard parses the command string, so unusual refspecs may not be
   classified (it asks/defers rather than allowing). Auto-approval is a
   convenience layer, not a security boundary — for hard guarantees use a git
