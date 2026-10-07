@@ -2835,6 +2835,93 @@ check "[wrap][grants] a wrapped worktree add records nothing" absent \
   "$(grant_dir_state "$WRAP_HOME")"
 rm -rf "$WRAP" "$WRAP_MAIN" "$WRAP_HOME"
 
+# 30. Reserved words and compound commands (Q302). A `{`, `if`, `then`, `!` or
+#     `do` in command position was read as the program, so the git command
+#     behind it went unjudged and the whole command deferred. `( … )` always
+#     split, so it is the control. Its own repo: a `main` checkout and a linked
+#     worktree on a feature branch, so a `cd` between the two changes the branch.
+GRP="$(mktemp -d "$REPO_ROOT/tmp/grp.XXXXXX")"
+git -C "$GRP" init -q -b main
+git -C "$GRP" config user.name "Test"
+git -C "$GRP" config user.email "test@example.com"
+git -C "$GRP" commit -q --allow-empty -m init
+git -C "$GRP" worktree add -q "$GRP.feat" -b claude/x
+GRP_MAIN="../$(basename "$GRP")"
+GRP_FEAT="../$(basename "$GRP.feat")"
+
+for c in 'git commit -m x' 'git push --force origin main'; do
+  for w in '%s' '( %s )' '{ %s; }' '{ %s; } 2>&1' 'true && { %s; }' \
+           'if true; then %s; fi' 'if %s; then echo ok; fi' '! %s' \
+           'while true; do %s; break; done' 'for i in 1; do %s; done' \
+           'f() { %s; }; f' 'function f { %s; }; f' 'function f() { %s; }; f'; do
+    # shellcheck disable=SC2059
+    cmd="$(printf "$w" "$c")"
+    check "[group] $cmd on main -> ask" ask \
+      "$(decision_for "$(bash_payload "$cmd")" "$GRP")"
+  done
+done
+#     The allow side moves with it: a group of safe reads is a safe read.
+check "[group] { git status; } -> allow" allow \
+  "$(decision_for "$(bash_payload '{ git status; }')" "$GRP")"
+check "[group] { git commit; } on a feature branch -> allow" allow \
+  "$(decision_for "$(bash_payload '{ git commit -m x; }')" "$GRP.feat")"
+#     A quoted reserved word is a program name, not the keyword.
+check "[group] '{' git commit on main -> none" none \
+  "$(decision_for "$(bash_payload "'{' git commit -m x")" "$GRP")"
+
+#     30a. Where the `cd` lands. bash runs `{ }`, `if` and loop bodies in the
+#     current shell, so a `cd` inside one moves what follows, and runs `( )` in
+#     a subshell, so leaving one puts the cwd back. Each pair crosses the
+#     direction: the commit that lands on the feature branch is a `cd`
+#     elsewhere, so it defers; the one that lands on `main` asks.
+check "[group] from main, { cd <feat>; git commit; } -> none" none \
+  "$(decision_for "$(bash_payload "{ cd $GRP_FEAT; git commit -m x; }")" "$GRP")"
+check "[group] from feat, { cd <main>; }; git commit -> ask" ask \
+  "$(decision_for "$(bash_payload "{ cd $GRP_MAIN; }; git commit -m x")" "$GRP.feat")"
+check "[group] from feat, ( cd <main> ); git commit -> none" none \
+  "$(decision_for "$(bash_payload "( cd $GRP_MAIN ); git commit -m x")" "$GRP.feat")"
+check "[group] from main, ( cd <feat> ); git commit -> ask" ask \
+  "$(decision_for "$(bash_payload "( cd $GRP_FEAT ); git commit -m x")" "$GRP")"
+check "[group] from feat, if true; then cd <main>; git commit; fi -> ask" ask \
+  "$(decision_for "$(bash_payload "if true; then cd $GRP_MAIN; git commit -m x; fi")" "$GRP.feat")"
+#     A pipeline stage and a backgrounded list run in a fork, so a `cd` there,
+#     bare or inside a group, is undone when it ends, as in `( )`. Each of
+#     these commits on the branch the command started on.
+for w in '{ cd %s; } | true; ' '{ cd %s; } |& true; ' '{ cd %s; } & ' \
+         'true | { cd %s; }; ' '{ cd %s; } && true & ' 'cd %s | true; ' \
+         'cd %s & '; do
+  # shellcheck disable=SC2059
+  cmd="$(printf "${w}git commit -m x" "$GRP_FEAT")"
+  check "[group] from main, $cmd -> ask" ask \
+    "$(decision_for "$(bash_payload "$cmd")" "$GRP")"
+  # shellcheck disable=SC2059
+  cmd="$(printf "${w}git commit -m x" "$GRP_MAIN")"
+  check "[group] from feat, $cmd -> none" none \
+    "$(decision_for "$(bash_payload "$cmd")" "$GRP.feat")"
+done
+#     The control: the same group run in the shell keeps its `cd`.
+check "[group] from main, { cd <feat>; } && git commit -> none" none \
+  "$(decision_for "$(bash_payload "{ cd $GRP_FEAT; } && git commit -m x")" "$GRP")"
+
+#     A body that may not run leaves the cwd unknown after it, so the commit is
+#     judged against the session's own checkout, as after a `cd \$VAR`. Each of
+#     these lands on `main` whenever the body did not run.
+for w in 'if false; then cd %s; fi' 'for i in; do cd %s; done' \
+         'f() { cd %s; }' 'function f { cd %s; }' \
+         'if false; then cd %s; else git status; fi' \
+         'case a in b) cd %s;; esac'; do
+  # shellcheck disable=SC2059
+  pre="$(printf "$w" "$GRP_FEAT")"
+  check "[group] from main, $pre; git commit -> ask" ask \
+    "$(decision_for "$(bash_payload "$pre; git commit -m x")" "$GRP")"
+done
+#     The `else` arm starts where the `if` did, not where the `then` arm left.
+check "[group] from main, if …; then cd <feat>; else git commit; fi -> ask" ask \
+  "$(decision_for "$(bash_payload "if false; then cd $GRP_FEAT; else git commit -m x; fi")" "$GRP")"
+check "[group] from main, case arm cd, next arm git commit -> ask" ask \
+  "$(decision_for "$(bash_payload "case a in b) cd $GRP_FEAT;; *) git commit -m x;; esac")" "$GRP")"
+rm -rf "$GRP" "$GRP.feat"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 
 # A FLOOR, not an exact count. The suite used to assert its own size against a
