@@ -79,8 +79,8 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 from bouncer_parse import (                                    # noqa: E402
     ASSIGN_APPEND, ASSIGN_SUBSCRIPT, ASSIGNMENT_RE, PUNCT_CHARS, QuotedStr,
-    QuoteTrackingLexer, command_substitutions, is_assignment, split_assignment,
-    strip_comments, strip_heredoc_bodies,
+    QuoteTrackingLexer, command_substitutions, is_assignment, is_reserved_word,
+    split_assignment, strip_comments, strip_heredoc_bodies, strip_sh_keywords,
 )
 from bouncer_grants import grants_path, load_grants, record_grants  # noqa: E402
 from bouncer_wrappers import (                                 # noqa: E402
@@ -561,6 +561,198 @@ def split_simple_commands(tokens):
     if cur:
         groups.append(cur)
     return groups
+
+
+# Reserved words that open a body bash may run any number of times, including
+# none, and the words that close one. `for` and `select` are not in the shared
+# keyword set, so they stand at the head of their own segment.
+BLOCK_OPENERS = frozenset({'if', 'while', 'until', 'case'})
+BLOCK_HEADS = frozenset({'for', 'select'})
+BLOCK_CLOSERS = frozenset({'fi', 'done', 'esac'})
+
+
+# Operator units, longest first: shlex hands several back glued as one token
+# (`);`, `&\n`, `()`).
+_OP_UNITS = ('&>>', '<<<', '&&', '||', '|&', ';;', '>>', '<<', '>&', '<&',
+             '&>', '>|', '(', ')', '|', '&', ';', '\n', '>', '<')
+_LIST_OPS = frozenset({';', '\n', ';;', '&&', '||', '&', '|', '|&'})
+_PIPE_OPS = frozenset({'|', '|&'})
+
+
+def _op_units(tok):
+    out, i = [], 0
+    while i < len(tok):
+        unit = next((u for u in _OP_UNITS if tok.startswith(u, i)), tok[i])
+        out.append(unit)
+        i += len(unit)
+    return out
+
+
+def segment_layout(tokens):
+    """One entry per segment `split_simple_commands` makes, in its order:
+    (the segment, its reserved words, the command behind them, the blocks
+    those words open or close, and whether the command runs apart from the
+    shell -- a pipeline stage, a backgrounded list, or inside `( … )` -- so
+    nothing it assigns reaches the commands after it (Q300).
+
+    Each block is `('pop',)` or `('push', kind)`, in word order. A `{ …; }`
+    pushes 'runs', a conditional or loop 'maybe', a function body
+    ('fn', name), and any of them run apart -- piped, backgrounded, or in
+    parentheses -- 'apart', which is how exit-status-guard scopes them
+    (Q263)."""
+    segs, cur, ops = [], [], []
+    for t in tokens:
+        if _is_operator_token(t):
+            if cur:
+                segs.append([cur, []])
+                cur = []
+            if segs:
+                segs[-1][1].extend(_op_units(str(t)))
+            else:
+                ops.extend(_op_units(str(t)))
+        else:
+            cur.append(t)
+    if cur:
+        segs.append([cur, []])
+
+    def list_op(j):
+        """(the list operator ending the command at segment j, the segment it
+        follows): a redirect's target is a segment of its own, so step past."""
+        while j < len(segs):
+            units = segs[j][1]
+            hit = next((u for u in units if u in _LIST_OPS or u == ')'), None)
+            if hit is not None or not units:
+                return hit, j
+            j += 1
+        return None, j
+
+    def apart(first, last):
+        before = segs[first - 1][1] if first else ops
+        if any(u in _PIPE_OPS for u in before[-1:]):
+            return True
+        op, k = list_op(last)
+        while op in ('&&', '||') and k + 1 < len(segs):
+            op, k = list_op(k + 1)
+        return op in _PIPE_OPS or op == '&'
+
+    # Pair openers with closers and track parentheses, in one walk.
+    stripped, opens, closes, depth = [], {}, {}, []
+    stack, parens, case_parens = [], [u for u in ops if u == '('], []
+    for i, (group, units) in enumerate(segs):
+        words, body = strip_keywords(group)
+        stripped.append((words, body))
+        depth.append(len(parens))
+        for w in words:
+            if w in BLOCK_CLOSERS or w == '}':
+                if stack:
+                    o, w0 = stack.pop()
+                    closes.setdefault(i, []).append(o)
+                    if w0 == 'case':
+                        case_parens.pop()
+            elif w in BLOCK_OPENERS or w == '{':
+                stack.append((i, str(w)))
+                opens.setdefault(i, []).append(str(w))
+                if w == 'case':
+                    case_parens.append(len(parens))
+        if body and body[0] in BLOCK_HEADS \
+                and getattr(body[0], 'quoted_from', None) is None:
+            stack.append((i, 'for'))
+            opens.setdefault(i, []).append('for')
+        for u in units:
+            if u == '(':
+                parens.append(i)
+            elif u == ')':
+                # A `case` pattern's `)` opened nothing, so it closes nothing.
+                if parens and not (case_parens
+                                   and len(parens) <= case_parens[-1]):
+                    parens.pop()
+    span = {}
+    for i, starts in closes.items():
+        for o in starts:
+            span.setdefault(o, []).append(i)
+    layout = []
+    for i, (group, units) in enumerate(segs):
+        words, body = stripped[i]
+        blocks = []
+        # Closers come innermost first, and openers outermost first.
+        ends = list(span.get(i, []))
+        for w in words:
+            if w in BLOCK_CLOSERS or w == '}':
+                blocks.append(('pop',))
+            elif w in BLOCK_OPENERS or w == '{':
+                last = ends.pop() if ends else len(segs) - 1
+                if w == '{' and function_defined(tokens, group, words):
+                    kind = ('fn', function_defined(tokens, group, words))
+                elif apart(i, last) or depth[i]:
+                    kind = 'apart'
+                else:
+                    kind = 'runs' if w == '{' else 'maybe'
+                blocks.append(('push', kind))
+        if body and body[0] in BLOCK_HEADS \
+                and getattr(body[0], 'quoted_from', None) is None:
+            last = ends.pop() if ends else len(segs) - 1
+            blocks.append(('push', 'apart' if apart(i, last) or depth[i]
+                           else 'maybe'))
+        layout.append((group, words, body, blocks,
+                       bool(depth[i]) or apart(i, i)))
+    return layout
+
+
+def _assign(values, defining, maybe, functions, *scopes, unknown=()):
+    """Make assignments persist the way bash would. Inside a function body they
+    wait for a call, so they are only recorded; inside a body that may not run
+    the names become unknown, in `unknown` too; elsewhere they take their
+    values."""
+    if defining is not None:
+        functions[defining].update(values)
+    elif maybe == 'apart':
+        return
+    elif maybe:
+        _forget(values, *scopes, *unknown)
+    else:
+        for scope in scopes:
+            scope.update(values)
+
+
+def _forget(names, *scopes):
+    """Drop `names` from every scope: assigned where bash may not have run the
+    assignment, the value is unknown, so the target prompts rather than
+    resolving to a value the command may never see."""
+    for scope in scopes:
+        for name in names:
+            scope.pop(name, None)
+
+
+def strip_keywords(group):
+    """(reserved words, the simple command behind them) for one segment.
+
+    `{`, `if`, `then`, `!`, `do` and the rest stand in command position ahead
+    of the command bash runs, and left in place one becomes the head that no
+    evaluator covers, so the segment defers (Q300). `function NAME` drops the
+    name too. A `time` goes back to the wrapper walk, which reads its `-p` and
+    `--` where the shared strip does not (Q241)."""
+    body = strip_sh_keywords(group)
+    if len(body) < len(group) and group[len(group) - len(body) - 1] == 'function' \
+            and body:
+        body = strip_sh_keywords(body[1:])
+    cut = len(group) - len(body)
+    if cut and group[cut - 1] == 'time' and is_reserved_word(group[cut - 1]):
+        cut -= 1
+    return group[:cut], group[cut:]
+
+
+def function_defined(tokens, group, words):
+    """The name a segment's `{` opens the body of, or None. `NAME()` reaches
+    here as the segment before, with `()` as one operator token between, and
+    `function NAME` as reserved words of this one."""
+    if 'function' in words:
+        rest = group[len(words) - words[::-1].index('function'):]
+        return str(rest[0]) if rest else None
+    at = next((i for i, t in enumerate(tokens) if t is group[0]), None)
+    if at is not None and at >= 2 and tokens[at - 1] == '()' \
+            and _is_operator_token(tokens[at - 1]):
+        return str(tokens[at - 2])
+    return None
 
 
 def extract_env_prefix(argv, base_env=None):
@@ -2803,7 +2995,31 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
         exported = dict(os.environ)
     shell_env = dict(exported if shell is None else shell)
     exported = dict(exported)
-    for group in split_simple_commands(tokens):
+    # Open compound commands, innermost last. A plain `{ …; }` always runs, so
+    # what it assigns stays assigned. A conditional or a loop may not run, so a
+    # name assigned in one is unknown after it. A function body runs where the
+    # function is called, so what it assigns is recorded against the name and
+    # forgotten at each call. Its commands are judged where they are written,
+    # against the values in scope there.
+    # A segment that runs apart, or sits in a block that does, assigns
+    # nothing the later segments see.
+    blocks, functions = [], {}
+    for whole, words, group, changes, seg_apart in segment_layout(tokens):
+        for change in changes:
+            if change[0] == 'pop':
+                if blocks:
+                    blocks.pop()
+            else:
+                blocks.append(change[1])
+                if isinstance(change[1], tuple):
+                    functions.setdefault(change[1][1], set())
+        defining = next((b[1] for b in reversed(blocks)
+                         if isinstance(b, tuple)), None)
+        maybe = 'maybe' in blocks
+        if seg_apart or 'apart' in blocks:
+            maybe, defining = 'apart', None
+        if not group:
+            continue
         seg_env, argv_raw = extract_env_prefix(group, shell_env)
         # This segment's inline `A=x cmd` assignments, already resolved. They
         # export to this command's own children but do not persist to the
@@ -2844,8 +3060,10 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
         if 'PROD_GUARD_SESSION_OVERRIDE' in seg_inline and session_reason is None:
             session_reason = seg_inline['PROD_GUARD_SESSION_OVERRIDE']
         if not argv:
-            # Assignment-only segment (`P=x`): a shell var, not exported.
-            shell_env.update(seg_inline)
+            # Assignment-only segment (`P=x`): a shell var, not exported. In
+            # a body that may not run, the name's value is no longer known.
+            _assign(seg_inline, defining, maybe, functions, shell_env,
+                    unknown=(exported,))
             continue
         tool = os.path.basename(argv[0])
         if tool in ASSIGN_BUILTINS:
@@ -2860,8 +3078,8 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
                     # gives just `v` (Q174).
                     if form == ASSIGN_APPEND:
                         value = shell_env.get(name, '') + value
-                    shell_env[name] = value
-                    exported[name] = value
+                    _assign({name: value}, defining, maybe, functions,
+                            shell_env, exported)
             continue
         if tool in SHELL_NAMES:
             # bash -c 'kubectl ...': evaluate the -c body as its own command,
@@ -2915,9 +3133,14 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
             if left and _runs_in_one_shell(raw):
                 for scope, start, end in ((shell_env, same_shell, left['shell']),
                                           (exported, child_env, left['exported'])):
-                    scope.update({k: v for k, v in end.items()
-                                  if k not in seg_inline and start.get(k) != v})
+                    changed = {k: v for k, v in end.items()
+                               if k not in seg_inline and start.get(k) != v}
+                    _assign(changed, defining, maybe, functions, scope)
             continue
+        if tool in functions and defining is None and maybe != 'apart':
+            # A call runs the body, so what it assigns is no longer known --
+            # unless the call itself runs apart, where it reaches nothing.
+            _forget(functions[tool], shell_env, exported)
         evaluator = EVALUATORS.get(tool)
         if evaluator is None:
             continue  # uncovered tool: defer
