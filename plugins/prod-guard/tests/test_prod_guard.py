@@ -453,7 +453,13 @@ class ParsingTests(unittest.TestCase):
                      ["env", "-S", "kubectl", "delete"],
                      # STRING may carry env's own options, and another wrapper.
                      ["env", "-S", "-u FOO kubectl delete"],
-                     ["env", "-S", "sudo kubectl delete"]):
+                     ["env", "-S", "sudo kubectl delete"],
+                     # A bundle ending in `S` takes the string too (Q287).
+                     ["env", "-iS", "kubectl delete"],
+                     ["env", "-vS", "kubectl delete"],
+                     ["env", "-i0S", "kubectl delete"],
+                     ["env", "-iSkubectl delete"],
+                     ["env", "-uX", "-iS", "kubectl delete"]):
             with self.subTest(argv=argv):
                 self.assertEqual(guard.strip_wrappers(argv, {}),
                                  ["kubectl", "delete"])
@@ -475,6 +481,9 @@ class ParsingTests(unittest.TestCase):
         self.assertIsNone(guard.env_split_string(["-S", 'kubectl "x']))
         self.assertIsNone(guard.env_split_string(["-S"]))
         self.assertIsNone(guard.env_split_string(["-u", "FOO"]))
+        self.assertIsNone(guard.env_split_string(["-iS", 'kubectl "x']))
+        # `-u` takes the `S` as its value, so no string is split.
+        self.assertIsNone(guard.env_split_string(["-uS", "kubectl"]))
 
     def test_command_wrapper_strips_only_an_invocation(self):
         # `command kubectl delete` runs kubectl, so the wrapper comes off.
@@ -3302,11 +3311,54 @@ class SpecialCaseTests(unittest.TestCase):
                     "env -i -S 'kubectl delete ns foo'",
                     "env -S '-u FOO kubectl delete ns foo'",
                     "env -S 'sudo kubectl delete ns foo'",
-                    "env -S 'stdbuf -oL kubectl delete ns foo'"):
+                    "env -S 'stdbuf -oL kubectl delete ns foo'",
+                    # A bundle ending in `S` (Q287).
+                    "env -iS 'kubectl delete ns foo'",
+                    "env -vS 'kubectl delete ns foo'",
+                    "env -iS'kubectl delete ns foo'",
+                    "sudo env -iS 'kubectl delete ns foo'"):
             with self.subTest(cmd=cmd):
                 decision, reason = run_hook(cmd, home=home)
                 self.assertEqual(decision, "deny")
                 self.assertIn("kubectl delete", reason)
+
+    def test_env_split_string_known_only_at_run_time_is_read_both_ways(self):
+        # `"$X"` may split into the command or into nothing, and env then
+        # runs the operands after it, so the guard judges both (Q287).
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        for cmd in ("env -S \"$X\" kubectl delete ns foo",
+                    "env -iS \"$X\" kubectl delete ns foo",
+                    "env -iS '${X}' kubectl delete ns foo",
+                    "env -iS \"$(printf %s -i)\" kubectl delete ns foo",
+                    "env --split-string=\"$X\" kubectl delete ns foo",
+                    "env -S 'kubectl get pods ${X}' kubectl delete ns foo",
+                    "env -S 'kubectl delete ns ${NS}' extra"):
+            with self.subTest(cmd=cmd):
+                decision, reason = run_hook(cmd, home=home)
+                self.assertEqual(decision, "deny")
+                self.assertIn("kubectl delete", reason)
+        for cmd in ("env -S \"$X\" kubectl get pods",
+                    "env -S \"$X\" --namespace y"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(run_hook(cmd, home=home)[0])
+
+    def test_an_override_in_one_reading_reaches_only_that_reading(self):
+        # After a split string, `PROD_GUARD_OVERRIDE=why` is an assignment only
+        # in the reading where the string splits into nothing; where it splits
+        # into the command, env passes it to that command as an argument. So
+        # it downgrades the first reading's deny and no other (Q287 review).
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        for cmd in ("env -S 'kubectl delete ns foo ${X}' PROD_GUARD_OVERRIDE=why",
+                    "env -S 'kubectl delete ns foo $X' PROD_GUARD_OVERRIDE=why",
+                    "env -S 'kubectl delete ns foo ${X}' "
+                    "PROD_GUARD_SESSION_OVERRIDE=why",
+                    "env -S \"$X\" PROD_GUARD_OVERRIDE=why kubectl get pods; "
+                    "kubectl delete ns bar"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(run_hook(cmd, home=home)[0], "deny")
+        self.assertEqual(run_hook(
+            "env -S \"$X\" PROD_GUARD_OVERRIDE=why kubectl delete ns foo",
+            home=home)[0], "ask")
 
     def test_env_split_string_is_not_a_shell(self):
         # env splits STRING into words and runs one command; it honours no
@@ -3329,7 +3381,9 @@ class SpecialCaseTests(unittest.TestCase):
                     "env -S 'kubectl get pods'",
                     "env -S 'kubectl delete --help'",
                     "env -S ''",
-                    "env -S"):
+                    "env -S",
+                    "env -iS 'kubectl get pods'",
+                    "env -iS"):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(run_hook(cmd, home=home)[0])
 

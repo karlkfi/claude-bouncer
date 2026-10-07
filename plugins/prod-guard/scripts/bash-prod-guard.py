@@ -661,26 +661,17 @@ def env_split_string(argv):
     positional parameters. That is why the caller splices instead of recursing
     into evaluate_command_string, which would do both differently (Q159).
 
-    Reads `-S STRING`, `-SSTRING`, `--split-string=STRING` and
-    `--split-string STRING`, the long form abbreviated to any prefix from
-    `--s` up, which no other GNU env option shares (Q228). A value that will
-    not tokenize is env's error to report, not ours to guess at, so it returns
-    None and the flag is left alone."""
-    tok = argv[0]
-    name, eq, attached = tok.partition('=')
-    long_form = len(name) > 2 and '--split-string'.startswith(name)
-    if tok == '-S' or (long_form and not eq):
-        if len(argv) < 2:
-            return None
-        value, rest = argv[1], argv[2:]
-    elif long_form:
-        value, rest = attached, argv[1:]
-    elif tok.startswith('-S') and len(tok) > 2:
-        value, rest = tok[2:], argv[1:]
-    else:
+    The option is read through the shared `wrapper_option` walk, so every
+    spelling env takes is covered: `-S STRING` and `-SSTRING`, a bundle
+    ending in `S` (`-iS STRING`, Q287), and `--split-string` attached,
+    detached or abbreviated to any prefix from `--s` up (Q228). A value that
+    will not tokenize is env's error to report, not ours to guess at, so it
+    returns None and the flag is left alone."""
+    used, opt, value = wrapper_option(argv, WRAPPER_VALUE_OPTS['env'])
+    if opt not in ('-S', '--split-string') or value is None:
         return None
     try:
-        return shlex.split(value), rest
+        return shlex.split(value), argv[used:]
     except ValueError:
         return None
 
@@ -750,10 +741,13 @@ def peel_sudo(operands):
     return operands[i:], assigned
 
 
-def strip_wrappers(argv, env):
+def strip_wrappers(argv, env, alternates=None):
     """Remove leading launcher commands (sudo, env, timeout, xargs, ...) so
     the covered tool underneath is classified, not the wrapper. `env`
-    assignments found behind `env`/`sudo` merge into the segment env."""
+    assignments found behind `env`/`sudo` merge into the segment env.
+
+    A list passed as `alternates` gets each second reading the walk could not
+    rule out, as `(argv, env)`: the caller judges those too."""
     while argv:
         head = os.path.basename(argv[0])
         value_flags = WRAPPER_VALUE_OPTS.get(head, frozenset())
@@ -777,6 +771,13 @@ def strip_wrappers(argv, env):
                     split = env_split_string(argv)
                     if split is not None:
                         words, rest = split
+                        # A string holding `$` or a backtick is known only at
+                        # run time, and env expands `${NAME}` in it itself: it
+                        # may split into nothing or a bare option, and env then
+                        # runs the operands after it. Both readings are judged.
+                        if (alternates is not None and rest
+                                and any(set('$`') & set(w) for w in words)):
+                            alternates.append((['env'] + rest, dict(env)))
                         argv = words + rest
                         continue
                     argv = argv[wrapper_option(argv, value_flags)[0]:]
@@ -2719,8 +2720,25 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
         child_env = {**exported, **seg_inline}     # for its `sh -c` body
         # Expanded view for classification; raw view (nested-body extraction)
         # is left unexpanded so the child re-expands it against child_env.
-        argv = strip_wrappers(expand_argv(argv_raw, same_shell), seg_inline)
+        alternates = []
+        argv = strip_wrappers(expand_argv(argv_raw, same_shell), seg_inline,
+                              alternates)
         argv_raw = strip_wrappers(list(argv_raw), {})
+        for alt, alt_env in alternates:
+            # Already expanded, so the child's env is all it needs (Q287). An
+            # override among its operands is in effect only in that reading:
+            # in the other one env passes it to the command as an argument.
+            # So it downgrades this reading's denies and reaches nothing else.
+            sub_f, sub_o, sub_s = evaluate_command_string(
+                shlex.join(alt), ctx, depth + 1, {**exported, **alt_env},
+                same_shell)
+            if sub_o or sub_s is not None:
+                sub_f = [(ASK if sev == DENY else sev,
+                          'prod-guard: override acknowledged in one reading '
+                          'of an `env -S` string -- downgraded from deny to '
+                          'a confirmation prompt. ' + r if sev == DENY else r,
+                          gts) for sev, r, gts in sub_f]
+            findings += sub_f
         # Read after the walk, which merges `env NAME=v` operands into
         # seg_inline, so `env PROD_GUARD_OVERRIDE=why cmd` arms like the bare
         # prefix (Q176). An exported name is in neither and still does not.
