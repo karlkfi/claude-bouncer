@@ -653,6 +653,45 @@ def is_command_lookup(operands):
     return False
 
 
+# Every wrapper prints its usage or version for these and runs nothing: the GNU
+# tools print and exit 0, and the BSD ones reject the word and exit non-zero.
+# A shell builtin (`command`, `exec`, `builtin`) prints its help (Q181).
+PRINT_ONLY_LONG = frozenset({'--help', '--version'})
+
+
+def long_option(head, tok):
+    """The long option word `tok` names for wrapper `head`: its exact
+    spelling, else the one option it is a unique prefix of, as getopt_long
+    matches. None when it names none or several."""
+    name = tok.partition('=')[0]
+    longs = ['--' + o for o in WRAPPER_GRAMMAR[head].long]
+    matches = [o for o in longs if o == name] or [
+        o for o in longs if o.startswith(name)]
+    return matches[0] if len(matches) == 1 else None
+
+
+def wrapper_prints_only(head, tok):
+    """Whether option word `tok` makes wrapper `head` print its help or version
+    and run nothing, so the operands behind it are not a command (Q181). A
+    wrapper with no long options takes the two spellings exactly: getopt
+    rejects them, and a builtin prints its help."""
+    if not tok.startswith('--') or tok == '--':
+        return False
+    if not WRAPPER_GRAMMAR[head].long:
+        return tok in PRINT_ONLY_LONG
+    return long_option(head, tok) in PRINT_ONLY_LONG
+
+
+def wrapper_prints_only_before(head, operands, value_opts):
+    """Whether a help or version word stands among the options at the front of
+    `operands`, before `--` or the first operand ends them."""
+    while operands and operands[0].startswith('-') and operands[0] != '--':
+        if wrapper_prints_only(head, operands[0]):
+            return True
+        operands = operands[wrapper_option(operands, value_opts)[0]:]
+    return False
+
+
 def env_reshape_child(argv, child):
     """Apply what the `env` option word at argv[0] does to the environment the
     command inherits: `-i`, `-` and `--ignore-environment` empty it, and
@@ -665,11 +704,7 @@ def env_reshape_child(argv, child):
     tok = argv[0]
     used, opt, value = wrapper_option(argv, WRAPPER_VALUE_OPTS['env'])
     if tok.startswith('--'):
-        name = tok.partition('=')[0]
-        longs = ['--' + o for o in WRAPPER_GRAMMAR['env'].long]
-        matches = [o for o in longs if o == name] or [
-            o for o in longs if o.startswith(name)]
-        clears = matches == ['--ignore-environment']
+        clears = long_option('env', tok) == '--ignore-environment'
     else:
         letters = tok[1:] if opt is None else tok[1:tok.index(opt[1], 1)]
         clears = tok == '-' or 'i' in letters
@@ -718,8 +753,9 @@ def env_split_string(argv):
 # a bundled `-nh WORD` and `-h NAME=value` as help too; reading those as a host
 # denies where sudo prints usage, which costs a rewrite where the other error
 # lets a command reach the cluster on a sudo before 1.9.17p1.
-# `--help` and `--version` are the class every wrapper shares (Q181).
-SUDO_RUN_NOTHING = frozenset('lveKU')
+# `-V` prints the version, and `--help`/`--version` are the class every wrapper
+# shares (Q181).
+SUDO_RUN_NOTHING = frozenset('lveKUV')
 SUDO_RUN_NOTHING_LONG = frozenset({
     '--list', '--validate', '--edit', '--remove-timestamp', '--other-user'})
 
@@ -735,7 +771,7 @@ def sudo_option_runs_nothing(tok, nxt=None):
     contain a mode letter. `sudo -uKarl` is the case -- reading the `K` as
     `--remove-timestamp` would defer a command sudo really runs."""
     if tok.startswith('--'):
-        return tok.split('=', 1)[0] in SUDO_RUN_NOTHING_LONG
+        return long_option('sudo', tok) in SUDO_RUN_NOTHING_LONG | PRINT_ONLY_LONG
     for pos, char in enumerate(tok[1:], start=2):
         if char in SUDO_RUN_NOTHING:
             return True
@@ -805,11 +841,18 @@ def strip_wrappers(argv, env, alternates=None, child=None):
         elif head == 'env':
             argv = argv[1:]
             assigned = False
+            ended = False
             while argv:
                 # Options stop at the first NAME=val operand: `env A=1 -S ...`
                 # runs a program called `-S` and fails, so there is nothing
                 # behind it to classify.
                 if argv[0].startswith('-') and not assigned:
+                    # `--help` leaves `env` at the head, so the segment defers
+                    # the way `command -v` does below. After `--` it is the
+                    # program env runs.
+                    if not ended and wrapper_prints_only('env', argv[0]):
+                        return ['env'] + argv
+                    ended = ended or argv[0] == '--'
                     env_reshape_child(argv, child)
                     split = env_split_string(argv)
                     if split is not None:
@@ -842,6 +885,8 @@ def strip_wrappers(argv, env, alternates=None, child=None):
                 else:
                     break
         elif head in OPERAND_WRAPPERS:
+            if wrapper_prints_only_before(head, argv[1:], value_flags):
+                break
             argv = argv[1:]
             while argv and argv[0].startswith('-'):
                 argv = argv[wrapper_option(argv, value_flags)[0]:]
@@ -851,6 +896,8 @@ def strip_wrappers(argv, env, alternates=None, child=None):
             # Skip xargs and everything up to the first covered tool; if none
             # appears the segment holds nothing we guard.
             rest = argv[1:]
+            if wrapper_prints_only_before(head, rest, value_flags):
+                return []
             for i, t in enumerate(rest):
                 if os.path.basename(t) in COVERED_TOOLS or os.path.basename(t) in SHELL_NAMES:
                     return rest[i:]
@@ -865,6 +912,8 @@ def strip_wrappers(argv, env, alternates=None, child=None):
             # `command` is the only one of these wrappers with a flag that
             # means "do not run"; a `-v` elsewhere still runs the command.
             if head == 'command' and is_command_lookup(argv[1:]):
+                break
+            if wrapper_prints_only_before(head, argv[1:], value_flags):
                 break
             argv = argv[1:]
             while argv and argv[0].startswith('-'):

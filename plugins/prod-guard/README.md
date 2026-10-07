@@ -93,7 +93,10 @@ across `&&`/`|`/`;`/`$( )` chains):
   This is the outcome for read-only verbs, non-production targets, uncovered
   tools, any segment that only asks a CLI for its usage text (`--help`, `-h`,
   or `help` as the first word), and any segment whose sole argument is a
-  version flag (`--version`, `-version`, `-V`, `-v`). prod-guard never emits
+  version flag (`--version`, `-version`, `-V`, `-v`). The same holds one level
+  up: a wrapper given its own `--help` or `--version` (`sudo --help kubectl …`,
+  `timeout --version 5 kubectl …`) prints and runs nothing, so the command
+  behind it is not judged. prod-guard never emits
   `allow`, so it composes with other guards instead of overriding them.
 
 Every `deny` and `ask` reason opens `prod-guard: `. Claude Code names the plugin
@@ -118,6 +121,7 @@ the opener is what identifies which guard decided when several are installed.
 | `ssh deploy@prod-web-1 uptime` | **deny** |
 | `ssh dev-box uptime` | defer |
 | `helm upgrade --help` | defer |
+| `env --help kubectl delete ns x` (env prints its usage) | defer |
 | `docker run -h box nginx` (`-h` is `--hostname`, not help) | judged as a run |
 | `ssh prod-web-1 --help` (OpenSSH runs it on the remote) | **deny** |
 | `ansible --version` (sole argument: no target in the command) | defer |
