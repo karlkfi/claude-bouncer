@@ -2725,13 +2725,20 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
                               alternates)
         argv_raw = strip_wrappers(list(argv_raw), {})
         for alt, alt_env in alternates:
-            # Already expanded, so the child's env is all it needs (Q287).
+            # Already expanded, so the child's env is all it needs (Q287). An
+            # override among its operands is in effect only in that reading:
+            # in the other one env passes it to the command as an argument.
+            # So it downgrades this reading's denies and reaches nothing else.
             sub_f, sub_o, sub_s = evaluate_command_string(
                 shlex.join(alt), ctx, depth + 1, {**exported, **alt_env},
                 same_shell)
+            if sub_o or sub_s is not None:
+                sub_f = [(ASK if sev == DENY else sev,
+                          'prod-guard: override acknowledged in one reading '
+                          'of an `env -S` string -- downgraded from deny to '
+                          'a confirmation prompt. ' + r if sev == DENY else r,
+                          gts) for sev, r, gts in sub_f]
             findings += sub_f
-            override = override or sub_o
-            session_reason = session_reason if session_reason is not None else sub_s
         # Read after the walk, which merges `env NAME=v` operands into
         # seg_inline, so `env PROD_GUARD_OVERRIDE=why cmd` arms like the bare
         # prefix (Q176). An exported name is in neither and still does not.

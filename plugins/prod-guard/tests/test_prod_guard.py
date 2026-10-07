@@ -3342,6 +3342,24 @@ class SpecialCaseTests(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(run_hook(cmd, home=home)[0])
 
+    def test_an_override_in_one_reading_reaches_only_that_reading(self):
+        # After a split string, `PROD_GUARD_OVERRIDE=why` is an assignment only
+        # in the reading where the string splits into nothing; where it splits
+        # into the command, env passes it to that command as an argument. So
+        # it downgrades the first reading's deny and no other (Q287 review).
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        for cmd in ("env -S 'kubectl delete ns foo ${X}' PROD_GUARD_OVERRIDE=why",
+                    "env -S 'kubectl delete ns foo $X' PROD_GUARD_OVERRIDE=why",
+                    "env -S 'kubectl delete ns foo ${X}' "
+                    "PROD_GUARD_SESSION_OVERRIDE=why",
+                    "env -S \"$X\" PROD_GUARD_OVERRIDE=why kubectl get pods; "
+                    "kubectl delete ns bar"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(run_hook(cmd, home=home)[0], "deny")
+        self.assertEqual(run_hook(
+            "env -S \"$X\" PROD_GUARD_OVERRIDE=why kubectl delete ns foo",
+            home=home)[0], "ask")
+
     def test_env_split_string_is_not_a_shell(self):
         # env splits STRING into words and runs one command; it honours no
         # operators. `foo;` is an argument to kubectl, and `rm` never runs --
