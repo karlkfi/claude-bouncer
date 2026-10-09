@@ -2689,9 +2689,10 @@ check "[grants] add -b records the path, not the branch name" \
 #     push, so the guard has to judge it as one rather than as `timeout`. A
 #     wrapper is peeled for the protective verdicts only: what it adds --
 #     another user, a cleared environment, another directory -- is nothing the
-#     classifier read, so a wrapped `allow` still defers and the break-glass
-#     never lifts through one. Its own repo, so no earlier section's state
-#     leaks in.
+#     classifier read, so a wrapped `allow` still defers. The break-glass
+#     lifts through any wrapper that leaves the directory alone, since the loss
+#     is the one the classifier measured. Its own repo, so no earlier section's
+#     state leaks in.
 WRAP="$(mktemp -d "$REPO_ROOT/tmp/wrap.XXXXXX")"
 git -C "$WRAP" init -q -b main
 git -C "$WRAP" config user.name "Test"
@@ -2715,7 +2716,8 @@ for w in 'env' 'env -i' 'env -' 'env FOO=1' 'env -u FOO' 'env -uFOO' \
          'stdbuf -o0' 'stdbuf -o 0' 'setsid -w' 'time' 'time -p' 'exec' \
          'exec -a x' 'sudo' 'sudo -u root' 'sudo -uroot' 'sudo -nu root' \
          'sudo -r role -t type' 'sudo --us root' 'sudo FOO=1' \
-         'sudo -u x env A=1 timeout 5 nohup'; do
+         'sudo -u x env A=1 timeout 5 nohup' 'sudo A=1 -u root' \
+         'sudo A=1 -u root B=2 -n' 'sudo -i' 'sudo -iu root'; do
   check "[wrap] $w git push --force origin main -> ask" ask \
     "$(decision_for "$(bash_payload "$w git push --force origin main")" "$WRAP")"
 done
@@ -2748,6 +2750,11 @@ check "[wrap] command -v git push origin main -> none" none \
   "$(decision_for "$(bash_payload 'command -v git push origin main')" "$WRAP")"
 check "[wrap] env A=1 -i git push origin main -> none" none \
   "$(decision_for "$(bash_payload 'env A=1 -i git push origin main')" "$WRAP")"
+#     sudo is the exception: it goes back to its options after each operand
+#     (29a's `sudo A=1 -u root`), and after `--` it assigns nothing, so
+#     `sudo -- A=1 git …` runs a program called `A=1` (Q275).
+check "[wrap] sudo -- A=1 git push origin main -> none" none \
+  "$(decision_for "$(bash_payload 'sudo -- A=1 git push origin main')" "$WRAP")"
 
 #     29c. A wrapped allow defers, each beside the unwrapped control that allows.
 for c in 'git status' 'git push' 'gh pr view 1'; do
@@ -2757,16 +2764,58 @@ for c in 'git status' 'git push' 'gh pr view 1'; do
     "$(decision_for "$(bash_payload "timeout 5 $c")" "$WRAP")"
 done
 
-#     29d. The break-glass does not lift through a wrapper, and the denial does
-#     not advertise a prefix that would fail. The unwrapped lift is the control.
+#     29d. The break-glass lifts through a wrapper, armed from a prefix in
+#     front of it or from an operand `env` or `sudo` assigns, since either one
+#     sets the variable. The unwrapped lift is the control, and the unarmed
+#     wrapped deny names the prefix where the unwrapped one does.
 printf 'dirty\n' >> "$WRAP/file.txt"
 check "[wrap][dontAsk] control: override on reset --hard, dirty -> allow" allow \
   "$(decision_for "$(bash_mode "$OVR git reset --hard" dontAsk)" "$WRAP")"
-check "[wrap][dontAsk] override on timeout 5 reset --hard, dirty -> deny" deny \
-  "$(decision_for "$(bash_mode "$OVR timeout 5 git reset --hard" dontAsk)" "$WRAP")"
-check_text "[wrap][dontAsk] wrapped deny does not name the prefix" lacks \
-  'BRANCH_GUARD_OVERRIDE' \
+for w in 'timeout 5' 'env' 'env -i' 'env FOO=1' 'nice' 'nohup' 'command' \
+         'stdbuf -o0' 'setsid' 'time' 'exec' 'sudo' 'sudo -u root' \
+         'timeout 5 sudo -n'; do
+  check "[wrap][dontAsk] override on $w reset --hard, dirty -> allow" allow \
+    "$(decision_for "$(bash_mode "$OVR $w git reset --hard" dontAsk)" "$WRAP")"
+done
+for w in 'env BRANCH_GUARD_OVERRIDE=why' 'env -i BRANCH_GUARD_OVERRIDE=why' \
+         "env 'BRANCH_GUARD_OVERRIDE=why'" 'env FOO=1 BRANCH_GUARD_OVERRIDE=why' \
+         'timeout 5 env BRANCH_GUARD_OVERRIDE=why' \
+         'sudo BRANCH_GUARD_OVERRIDE=why' 'sudo -u root BRANCH_GUARD_OVERRIDE=why' \
+         'sudo BRANCH_GUARD_OVERRIDE=why -u root' \
+         'sudo A=1 -n BRANCH_GUARD_OVERRIDE=why'; do
+  check "[wrap][dontAsk] $w git reset --hard, dirty -> allow" allow \
+    "$(decision_for "$(bash_mode "$w git reset --hard" dontAsk)" "$WRAP")"
+done
+#     What does not arm. env exports `NAME[0]` and `NAME+` under those literal
+#     names, so neither sets the variable; an empty reason is the switch-off
+#     spelling; and the name as an argument to anything else is a positional.
+for c in 'env BRANCH_GUARD_OVERRIDE[0]=why git reset --hard' \
+         'env BRANCH_GUARD_OVERRIDE+=why git reset --hard' \
+         'env BRANCH_GUARD_OVERRIDE= git reset --hard' \
+         "sudo BRANCH_GUARD_OVERRIDE='  ' git reset --hard" \
+         'echo env BRANCH_GUARD_OVERRIDE=why; timeout 5 git reset --hard' \
+         'timeout 5 git reset --hard BRANCH_GUARD_OVERRIDE=why'; do
+  check "[wrap][dontAsk] $c, dirty -> deny" deny \
+    "$(decision_for "$(bash_mode "$c" dontAsk)" "$WRAP")"
+done
+#     After `--` sudo assigns nothing, so this runs a program called the
+#     assignment and no git at all.
+check "[wrap][dontAsk] sudo -- BRANCH_GUARD_OVERRIDE=why git reset --hard -> none" none \
+  "$(decision_for "$(bash_mode 'sudo -- BRANCH_GUARD_OVERRIDE=why git reset --hard' dontAsk)" "$WRAP")"
+#     A wrapper that changes directory keeps the ask whatever arms it, as
+#     `git -C` does: the loss lands in a checkout the session may not own.
+for c in "$OVR git -C . reset --hard" "$OVR env -C . git reset --hard" \
+         "$OVR sudo -D . git reset --hard" "$OVR sudo -i git reset --hard" \
+         'env -C . BRANCH_GUARD_OVERRIDE=why git reset --hard'; do
+  check "[wrap][dontAsk] $c, dirty -> deny" deny \
+    "$(decision_for "$(bash_mode "$c" dontAsk)" "$WRAP")"
+done
+check_text "[wrap][dontAsk] wrapped deny names the prefix" has \
+  'BRANCH_GUARD_OVERRIDE=<reason>' \
   "$(reason_for "$(bash_mode 'timeout 5 git reset --hard' dontAsk)" "$WRAP")"
+check_text "[wrap][dontAsk] a directory-changing wrapper's deny does not" lacks \
+  'BRANCH_GUARD_OVERRIDE' \
+  "$(reason_for "$(bash_mode 'env -C . git reset --hard' dontAsk)" "$WRAP")"
 git -C "$WRAP" checkout -q -- file.txt
 
 #     29e. A wrapper that changes to a literal directory is followed the way
@@ -2816,9 +2865,25 @@ for w in 'env -C .' 'env --chdir=.' 'sudo -D .'; do
   check "[wrap] $w reset --hard on an irrecoverable tip -> deny" deny \
     "$(decision_for "$(bash_payload "$w git reset --hard HEAD~1")" "$WRAP")"
 done
-for w in 'env -C "$X"' 'sudo -R .'; do
+for w in 'env -C "$X"' 'sudo -R .' 'sudo -i' 'sudo -iu root'; do
   check "[wrap] $w reset --hard on an irrecoverable tip -> ask" ask \
     "$(decision_for "$(bash_payload "$w git reset --hard HEAD~1")" "$WRAP")"
+done
+#     The break-glass lifts the wrapped deny in an interactive mode too, as it
+#     lifts the bare one, and the deny names it. A leading `cd .` stays in the
+#     worktree, so it keeps the lift (the 1.11.0 rule).
+check_text "[wrap] wrapped irrecoverable-tip deny names the prefix" has \
+  'BRANCH_GUARD_OVERRIDE=<reason>' \
+  "$(reason_for "$(bash_payload 'timeout 5 git reset --hard HEAD~1')" "$WRAP")"
+for c in 'BRANCH_GUARD_OVERRIDE=why git reset --hard HEAD~1' \
+         'BRANCH_GUARD_OVERRIDE=why timeout 60 git reset --hard HEAD~1' \
+         'env BRANCH_GUARD_OVERRIDE=why git reset --hard HEAD~1' \
+         'sudo BRANCH_GUARD_OVERRIDE=why git reset --hard HEAD~1' \
+         'cd . && BRANCH_GUARD_OVERRIDE=why git reset --hard HEAD~1' \
+         'cd . && BRANCH_GUARD_OVERRIDE=why timeout 60 git reset --hard HEAD~1' \
+         'cd . && env BRANCH_GUARD_OVERRIDE=why git reset --hard HEAD~1'; do
+  check "[wrap] $c on an irrecoverable tip -> allow" allow \
+    "$(decision_for "$(bash_payload "$c")" "$WRAP")"
 done
 
 #     29f. A wrapped `worktree add` records no grant: `sudo` makes a checkout

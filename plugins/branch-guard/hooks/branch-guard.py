@@ -991,11 +991,26 @@ def record_worktree_grant(data):
                   'approved `git worktree add`')
 
 
-def peel_wrappers(argv):
+def sudo_login(tok):
+    """True if a sudo option word sets `-i`, which runs the command from the
+    target user's home directory rather than from this one."""
+    if tok.startswith('--'):
+        return tok == '--login'
+    for char in tok[1:]:
+        if char == 'i':
+            return True
+        if '-' + char in WRAPPER_VALUE_OPTS['sudo']:
+            return False                            # the rest is its value
+    return False
+
+
+def peel_wrappers(argv, assigned=None):
     """(argv, chdir): `argv` with its leading command wrappers removed, and the
     directories they moved the command to first, in order — None for a hop
-    that names no directory under this one (a chroot, a missing value). argv is
-    None when a wrapper runs nothing (`command -v git`)."""
+    that names no directory under this one (a chroot, a login shell, a missing
+    value). argv is None when a wrapper runs nothing (`command -v git`). The
+    operands `env` and `sudo` assign from are appended to ``assigned`` when one
+    is passed."""
     chdir = []
     while argv:
         head = argv[0].rsplit('/', 1)[-1]
@@ -1003,29 +1018,43 @@ def peel_wrappers(argv):
             break
         value_opts = WRAPPER_VALUE_OPTS[head]
         argv = argv[1:]
-        # A bare `-` is env's `-i`; to every other wrapper it is an operand.
-        while argv and argv[0].startswith('-') and (argv[0] != '-' or head == 'env'):
-            if argv[0] == '--':
-                argv = argv[1:]
+        ended = False
+        while True:
+            # A bare `-` is env's `-i`; to every other wrapper it is an operand.
+            while argv and argv[0].startswith('-') and (argv[0] != '-' or head == 'env'):
+                if argv[0] == '--':
+                    argv, ended = argv[1:], True
+                    break
+                if head == 'command' and set(argv[0][1:]) & {'v', 'V'}:
+                    return None, chdir              # a lookup: runs nothing
+                if head == 'sudo' and sudo_login(argv[0]):
+                    chdir.append(None)
+                used, opt, value = wrapper_option(argv, value_opts)
+                if opt in WRAPPER_CHDIR_OPTS.get(head, ()):
+                    chdir.append(None if opt in WRAPPER_CHROOT_OPTS else value)
+                if head == 'env' and opt in ENV_SPLIT_OPTS and value is not None:
+                    try:
+                        argv = shlex.split(value) + argv[used:]
+                    except ValueError:
+                        return None, chdir
+                    continue
+                argv = argv[used:]
+            if head not in ('env', 'sudo') or (head == 'sudo' and ended):
                 break
-            if head == 'command' and set(argv[0][1:]) & {'v', 'V'}:
-                return None, chdir                  # a lookup: runs nothing
-            used, opt, value = wrapper_option(argv, value_opts)
-            if opt in WRAPPER_CHDIR_OPTS.get(head, ()):
-                chdir.append(None if opt in WRAPPER_CHROOT_OPTS else value)
-            if head == 'env' and opt in ENV_SPLIT_OPTS and value is not None:
-                try:
-                    argv = shlex.split(value) + argv[used:]
-                except ValueError:
-                    return None, chdir
-                continue
-            argv = argv[used:]
-        if head in ('env', 'sudo'):
             # env takes any operand holding `=` as an assignment, wider than
-            # the shell's rule (Q218); sudo passes its own the same way.
+            # the shell's rule (Q218); sudo passes its own the same way, but
+            # assigns nothing after `--`, where `A=1` is the program it runs.
+            took = False
             while argv and '=' in argv[0]:
-                argv = argv[1:]
-        elif head == 'timeout' and argv:
+                if assigned is not None:
+                    assigned.append(argv[0])
+                argv, took = argv[1:], True
+            # sudo goes back to its options after an operand, so the two
+            # interleave: `sudo A=1 -u root git …` (Q275). env does not.
+            if head == 'env' or not took or not argv[:1] \
+                    or not argv[0].startswith('-'):
+                break
+        if head == 'timeout' and argv:
             argv = argv[1:]                         # the DURATION operand
     return argv, chdir
 
@@ -2224,16 +2253,24 @@ def override_reason(segments):
     the name disarming anything when it merely appears in a command: a real
     prefix sits in command position, while the name inside a commit message,
     a grep pattern, or an `echo` argument is a positional and matches nothing
-    here."""
+    here. An operand `env` or `sudo` assigns from counts too, since the wrapper
+    sets it, and its name is read verbatim: either one exports `NAME[0]=r` or
+    `NAME+=r` under that literal name."""
     for seg, _, _ in segments:
-        for tok in seg:
-            if not is_assignment(tok):
-                break
+        i = 0
+        while i < len(seg) and is_assignment(seg[i]):
             # `NAME+=reason` is an assignment in command position too (Q174).
             # `NAME[0]=reason` sets no NAME, so it does not arm (Q214).
-            name, form, value = split_assignment(tok)
+            name, form, value = split_assignment(seg[i])
             if name == OVERRIDE_VAR and form != ASSIGN_SUBSCRIPT \
                     and value.strip():
+                return value.strip()
+            i += 1
+        operands = []
+        peel_wrappers(seg[i:], operands)
+        for tok in operands:
+            name, _, value = tok.partition('=')
+            if name == OVERRIDE_VAR and value.strip():
                 return value.strip()
     return None
 
@@ -2266,12 +2303,13 @@ def is_overridable(inv, verdict, writes):
 
     The four exclusions below are what keep the override inside the scope it
     claims. An output redirect to a file writes content the classifier never
-    saw; a command wrapper can run git as another user or in another directory
-    (`sudo`, `env -C`); a `git -c`/`--config-env` escape hatch can run arbitrary
-    code (`-c core.pager='!sh …'`); and a `git -C`/`--git-dir` pointing
-    elsewhere puts the loss in a checkout this session doesn't own — the one
-    thing "damage stops at this machine" has to rule out."""
-    if inv is None or writes or inv['wrapped'] or inv['prog'] != 'git':
+    saw; a wrapper that changes directory (`env -C`, `sudo -D`, `sudo -i`) and
+    a `git -C`/`--git-dir` pointing elsewhere put the loss in a checkout this
+    session may not own — the one thing "damage stops at this machine" has to
+    rule out; and a `git -c`/`--config-env` escape hatch can run arbitrary code
+    (`-c core.pager='!sh …'`). Any other wrapper runs the same git on the same
+    checkout, so the loss it lifts is the one the classifier measured."""
+    if inv is None or writes or inv['chdir'] or inv['prog'] != 'git':
         return False
     if set(inv['globals']) & GIT_ESCAPE_HATCHES or targets_other_repo(inv['globals']):
         return False
