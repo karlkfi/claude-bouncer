@@ -455,7 +455,10 @@ BRANCH_GUARD_OVERRIDE="reverting a superseded local change" git restore file.txt
 
 The reason is **required** — a bare `BRANCH_GUARD_OVERRIDE=` lifts nothing — and
 it is echoed into the emitted decision, so the approval is on the record rather
-than silent. It is a command prefix rather than a `settings.json` variable because
+than silent. Behind `env` or `sudo` it also arms as an operand —
+`env BRANCH_GUARD_OVERRIDE=… git restore file.txt` — because the wrapper sets it;
+`env BRANCH_GUARD_OVERRIDE[0]=…` does not, since that exports a different name.
+It is a command prefix rather than a `settings.json` variable because
 a `PreToolUse` hook inherits Claude Code's environment, not the one the command is
 about to run in; an env-var override could only be switched on for a whole
 session, by hand, which is the opposite of scoping it to the moment.
@@ -484,7 +487,8 @@ already approved — see the exception below.
 - **A command that reaches further than the subcommand it was granted for.** An
   output redirect to a file (`… > out`), a `git -c`/`--config-env` escape hatch
   (which can run arbitrary code), and a `git -C`/`--git-dir` aimed at another
-  repository all keep the ask.
+  repository all keep the ask, as does a wrapper that changes directory
+  (`env -C`, `sudo -D`, `sudo -i`). Any other wrapper is lifted with it.
 - **A command carrying anything unrecognized.** The all-segments rule applies
   unchanged, so `BRANCH_GUARD_OVERRIDE=… git clean -fd && rm -rf junk` still asks.
   A safe segment alongside is fine: `… git status && git clean -fd` is lifted,
@@ -851,12 +855,14 @@ update step and restart.
    (`git -C path`, `-c k=v`) to find the `git`/`gh` subcommand and its
    arguments. Combined short flags (`git clean -fd`) are decomposed. A wrapped
    command gets every `ask` and `deny` the bare one would, but is never
-   auto-approved and never lifted by the break-glass: the wrapper can change
-   the user or the environment, neither of which the classifier reads. A
+   auto-approved: the wrapper can change the user or the environment, neither
+   of which the classifier reads. The break-glass does lift through one, since
+   the loss is the one measured, unless the wrapper changes directory. A
    literal directory (`env -C dir`, `sudo -D dir`) is followed the way
    `git -C dir` is, so the branch judged is the one checked out there; a
-   directory only the shell can compute (`env -C "$DIR"`), and a `sudo -R`
-   chroot, leave the command judged against the session's own checkout.
+   directory only the shell can compute (`env -C "$DIR"`), a `sudo -R`
+   chroot, and a `sudo -i` login shell leave the command judged against the
+   session's own checkout.
 4. **Classify** each segment as `allow` / `ask` / `deny` / `defer` / non-git:
    read-only git and gh and harmless mutations (`add`, `restore --staged`,
    `switch -c`, `worktree add`, branch/tag create) allow on any branch;
