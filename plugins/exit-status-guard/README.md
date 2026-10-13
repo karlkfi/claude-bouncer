@@ -114,6 +114,15 @@ never denied. A subshell is a statement like any other, so `(make check); git
 push` and `make check; (git push)` deny the same way; `(make check; git push)`
 is the subshell's own sequence and is left alone.
 
+The `;` that ends an `if`, `elif`, `while` or `until` condition is not a
+sequence, because `then` or `do` consumes the status:
+`if git merge x; then make check; else git merge --abort; fi` is not denied,
+and neither is `until make check; do sleep 5; done; git push`. The deny comes
+back where the compound throws a failed check away. An `if` whose failure path
+neither exits nor returns ends with status 0, so
+`if make check; then :; fi; git push` pushes on a failure and still denies,
+and so does `while make check; do …; done; git push`.
+
 A newline between the two sequences the same way, and the deny names it rather
 than a `;` the command does not hold. The shape that leaves one is a heredoc,
 `git commit -F - <<'MSG' … MSG` with the next command on the line after the

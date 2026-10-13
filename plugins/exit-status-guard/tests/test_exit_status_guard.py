@@ -852,6 +852,57 @@ CASES = [
     ('a subshell test of a captured status',
      'make check > log; rc=$?; ( [ "$rc" -eq 0 ] && git push )', False, False, ''),
 
+    # --- A `;` that closes a condition or a branch (Q281) ---------------------
+    # `then` and `do` consume the condition's status, so the `;` before them
+    # sequences nothing. Denied on 2.2.0 with "`git merge --no-edit -q $sha` is
+    # sequenced before `git merge --abort`" in a reviewer's trial-merge loop.
+    ('a trial merge tested by if, aborted in else',
+     'for sha in a b; do if git merge --no-edit -q "$sha" >> m.log 2>&1; then '
+     'echo "$sha OK"; else echo CONFLICT; git merge --abort; fi; done',
+     False, False, ''),
+    ('a gate tested by if', 'if make check; then git push; fi', False, False, ''),
+    ('a gate tested by if, across lines', 'if make check\nthen\n  git push\nfi',
+     False, False, ''),
+    ('a negated gate that exits', 'if ! make check; then exit 1; fi; git push',
+     False, False, ''),
+    ('a gate whose else exits', 'if make check; then :; else exit 1; fi; git push',
+     False, False, ''),
+    ('a gate tested by elif', 'if x; then :; elif make check; then git push; fi',
+     False, False, ''),
+    ('a gate tested by while', 'while make check; do git push; break; done',
+     False, False, ''),
+    ('a gate retried by until', 'until make check; do sleep 5; done; git push',
+     False, False, ''),
+    ('a gate retried by while !', 'while ! make check; do sleep 5; done; git push',
+     False, False, ''),
+    ('a gate in a group tested by if', 'if { make check; }; then git push; fi',
+     False, False, ''),
+    ('a gate ending a then, a mutator in its else',
+     'if x; then make check; else git merge --abort; fi', False, False, ''),
+    # The failure path falls through the closer with status 0, or the else
+    # branch's, so whatever follows `fi` or `done` runs on a failed check.
+    ('a gate tested by if with no failure branch, then ;',
+     'if make check; then :; fi; git push', False, True, 'is sequenced before'),
+    ('a gate tested by if whose else does not exit',
+     'if make check; then echo ok; else echo bad; fi; git push', False, True,
+     'is sequenced before'),
+    ('an exit joined with && does not always exit',
+     'if make check; then :; else x && exit 1; fi; git push', False, True,
+     'is sequenced before'),
+    ('a gate tested by elif with no failure branch',
+     'if x; then :; elif make check; then :; fi; git push', False, True,
+     'is sequenced before'),
+    ('a while that ends on the gate failing',
+     'while make check; do :; done; git push', False, True, 'is sequenced before'),
+    ('a gate ending a then branch, then ;',
+     'if x; then make check; fi; git push', False, True, 'is sequenced before'),
+    ('an if in a subshell, then ;', '(if make check; then :; fi); git push',
+     False, True, 'is sequenced before'),
+    ('a gate sequenced inside a condition list',
+     'if make check; git push; then :; fi', False, True, 'is sequenced before'),
+    ('a gate ending a for body, then ;', 'for x in a; do make check; done; git push',
+     False, True, 'is sequenced before'),
+
     # --- A gate inside a process substitution (Q277) --------------------------
     # The command around `<(…)` reads a file name, so a failed body is never
     # seen: under bash 5.3.15, `tail <(false); echo $?` prints 0.
