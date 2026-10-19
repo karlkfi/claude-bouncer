@@ -1020,6 +1020,105 @@ def tested_form(segs, gate_at, mutator_at):
     return False
 
 
+def source_index(segs, idx):
+    """The index of `status_source(segs, idx)`, or -1."""
+    while idx >= 0 and not head_words(segs[idx]):
+        idx -= 1
+    return idx
+
+
+def condition_fates(segs):
+    """{index: closer index or None} for each statement whose `;` closes a
+    condition or a branch of an `if`, `while` or `until` rather than
+    sequencing it before the next statement.
+
+    In `if make check; then git push; fi` the `;` hands the check's status to
+    `then`, which consumes it, so nothing after the `;` runs whatever the check
+    returned (Q281). None marks a status consumed outright. A closer index
+    marks one that surfaces where the compound ends instead: an `if` whose
+    failure path falls through without exiting yields 0, and a `while` ends on
+    its condition failing, so `if make check; then :; fi; git push` pushes on
+    a failed check exactly as `make check; git push` does. A branch's last
+    statement surfaces there too -- `then make check; else git merge --abort`
+    never runs the abort after the check.
+
+    `for`, `select`, `case` and `{ … }` are left as they are read today. A
+    negated condition is recognised only where the `!` leads the condition's
+    last statement.
+    """
+    fates, stack = {}, []
+    for i, seg in enumerate(segs):
+        toks = seg.tokens
+        if toks and all(t in COMPOUND_CLOSERS for t in toks):
+            for _ in toks:
+                if not stack:
+                    break
+                frame = stack.pop()
+                if frame['kind'] != 'other':
+                    _end_branch(segs, frame, i)
+                    _settle(frame, i, fates)
+            continue
+        k = 0
+        while k < len(toks) and (toks[k] in SH_KEYWORDS or toks[k] in COMPOUND_OPENERS):
+            word, top = toks[k], stack[-1] if stack else None
+            if word in ('if', 'while', 'until'):
+                stack.append({'kind': word, 'phase': 'cond', 'exits': False,
+                              'conds': [], 'branches': [], 'lasts': []})
+            elif word in COMPOUND_OPENERS:
+                stack.append({'kind': 'other'})
+            elif not top or top['kind'] == 'other':
+                pass
+            elif word in ('then', 'do') and top['phase'] == 'cond':
+                at = source_index(segs, i - 1)
+                if at >= 0:
+                    lead = list(segs[at].tokens)
+                    neg = '!' in lead[:len(lead) - len(strip_sh_keywords(lead))]
+                    top['conds'].append((at, neg, len(top['branches'])))
+                top['phase'], top['exits'] = 'then', False
+            elif word in ('elif', 'else') and top['phase'] != 'cond':
+                _end_branch(segs, top, i)
+                top['phase'], top['exits'] = ('cond' if word == 'elif' else 'else'), False
+            k += 1
+        prev_op = next_op(segs[i - 1].post_ops) if i else ''
+        words = head_words(seg)
+        if (stack and stack[-1]['kind'] != 'other' and words
+                and words[0] in ('exit', 'return') and prev_op not in CHAIN_OPS):
+            stack[-1]['exits'] = True
+    return fates
+
+
+def _end_branch(segs, frame, i):
+    """Close the branch that ends before ``segs[i]``: its last statement's
+    status is the compound's, which surfaces at the closer."""
+    at = source_index(segs, i - 1)
+    if at >= 0:
+        frame['lasts'].append(at)
+    frame['branches'].append((frame['phase'], frame['exits']))
+
+
+def _settle(frame, closer, fates):
+    """Record in ``fates`` where each condition and branch of a closed
+    compound sends its status.
+
+    A condition is consumed when the branch a failure runs exits, or when the
+    loop it tests ends on success; otherwise it surfaces at the closer.
+    """
+    for at in frame['lasts']:
+        fates[at] = closer
+    branches = frame['branches']
+    for at, neg, nth in frame['conds']:
+        if frame['kind'] == 'if':
+            # A failed check runs its own `then` when negated, and otherwise
+            # the `else` right after that `then`. A later `elif`, or no
+            # failure branch at all, falls through.
+            fail = nth if neg else nth + 1
+            consumed = (fail < len(branches) and branches[fail][1]
+                        and (neg or branches[fail][0] == 'else'))
+        else:
+            consumed = (frame['kind'] == 'while') == neg
+        fates[at] = None if consumed else closer
+
+
 def sequenced_mutation(segs, reg):
     """(gate, mutator, separator) when a gate is sequenced before a
     state-changing command with `;` or a newline rather than `&&`, or
@@ -1044,7 +1143,16 @@ def sequenced_mutation(segs, reg):
     and a two-step teardown would then deny on its second step. A mutator that
     hangs off a test of the capture (`[ "$rc" -eq 0 ] && git push`) is skipped
     the same way.
+
+    A `;` that closes an `if`, `while` or `until` condition, or one of its
+    branches, sequences nothing: the status goes where `condition_fates` says,
+    and a gate it surfaces at a closer is sequenced from there.
     """
+    fates = condition_fates(segs)
+    surfaced = collections.defaultdict(list)
+    for at, closer in fates.items():
+        if closer is not None:
+            surfaced[closer].append(at)
     gate, gate_at, sep = '', -1, ''
     for i, seg in enumerate(segs):
         words = head_words(seg)
@@ -1057,8 +1165,12 @@ def sequenced_mutation(segs, reg):
         if seg.post_ops.count(')') < seg.depth:
             continue
         op = next_op(seg.post_ops)
-        if op in (';', '\n') and reg.is_gate(words):
-            gate, gate_at, sep = ' '.join(words), i, op
+        if op not in (';', '\n'):
+            continue
+        for at in ([] if i in fates else [i]) + surfaced[i]:
+            gate_words = head_words(segs[at])
+            if reg.is_gate(gate_words):
+                gate, gate_at, sep = ' '.join(gate_words), i, op
     return '', '', ''
 
 
