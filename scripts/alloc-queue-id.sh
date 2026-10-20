@@ -44,6 +44,8 @@ remote=origin
 store=
 table=
 titles=()
+last_ref=
+last_err=
 
 die() {
 	printf 'alloc-queue-id: %s\n' "$*" >&2
@@ -125,8 +127,11 @@ claim() {
 	# Unique per claimant and per attempt: property 1 above.
 	blob="$(printf 'queue-id claim Q%s %s %s\n' "$n" "$$" "${EPOCHREALTIME:-$RANDOM}" |
 		git -C "$root" hash-object -w --stdin)"
-	git -C "$root" push --force-with-lease="$ref:" --quiet \
-		"$remote" "${blob}:${ref}" 2>/dev/null
+	# A lost race is routine and stays quiet; its text is kept so a run that
+	# never wins can say what the last push was told.
+	last_ref="$ref"
+	last_err="$(git -C "$root" push --force-with-lease="$ref:" --quiet \
+		"$remote" "${blob}:${ref}" 2>&1 >/dev/null)"
 }
 
 floor_local="$(highest_local || true)"
@@ -146,6 +151,8 @@ for title in "${titles[@]}"; do
 			break
 		fi
 	done
-	[[ -n "$won" ]] || die "no ID claimed in $MAX_ATTEMPTS attempts; is $remote reachable?"
+	[[ -n "$won" ]] || die "no ID claimed in $MAX_ATTEMPTS attempts; is $remote reachable?
+last push, to $last_ref, said:
+$(printf '%s\n' "${last_err:-(nothing)}" | sed 's/^/  /')"
 	printf '%s\n' "$won"
 done
