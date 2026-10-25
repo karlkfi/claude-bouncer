@@ -1327,8 +1327,9 @@ GH_API_PIPED_REASON = (
     " is piped into a filter, so this call's exit status is the filter's, not "
     "gh's -- a failed request reads exactly like a pass. Filter with gh's own "
     "`--jq` (`-q`) instead, which keeps gh's exit status: "
-    "gh api <endpoint> ... --jq '<filter>'. Where the filter is not jq, "
-    "redirect and read the log in a separate call: "
+    "gh api <endpoint> ... --jq '<filter>'. Where the filter is not jq, or "
+    "the call passes `--slurp`, which gh refuses beside `--jq`, redirect and "
+    "read the log in a separate call: "
     "<MKDIR>cmd > <LOG> 2>&1; echo \"EXIT=$?\"." + OVERRIDE_HINT)
 
 LOST_STATUS_REASON = (

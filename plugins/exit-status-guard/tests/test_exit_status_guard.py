@@ -1630,6 +1630,9 @@ class TestGhApiRewrite(unittest.TestCase):
                            self.reg)
         self.assertLess(reason.index('--jq'), reason.index('out.log'))
         self.assertNotIn('FAILED', reason)
+        # gh 2.101.0 exits 1 on `--slurp` beside `--jq`, so the log form
+        # has to be offered for it.
+        self.assertIn('--slurp', reason)
 
     def test_other_gh_gates_keep_the_log_form(self):
         reason = pg.decide('gh pr create --fill | tail -1', False, self.reg)
