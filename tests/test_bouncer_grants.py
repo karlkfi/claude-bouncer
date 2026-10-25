@@ -150,6 +150,26 @@ class GrantStoreTests(unittest.TestCase):
         grants.record_grants('alpha', 's1', {'x'}, 'why')
         self.assertEqual({'x'}, grants.load_grants('alpha', 's1'))
 
+    def test_a_future_timestamp_is_replaced_rather_than_kept(self):
+        """load_grants reads a timestamp ahead of the clock as expired, so
+        record must too, or a skewed entry blocks renewal for good."""
+        t0 = 1_000_000.0
+        grants.record_grants('alpha', 's1', {'x'}, 'why', now=t0 + 100)
+        grants.record_grants('alpha', 's1', {'x'}, 'why', now=t0)
+        self.assertEqual({'x'}, grants.load_grants('alpha', 's1', now=t0))
+        self.assertEqual([t0], [g['ts'] for g in self._entries()])
+
+    def test_a_live_duplicate_keeps_the_target_without_a_new_entry(self):
+        path = grants.grants_path('alpha', 's1')
+        os.makedirs(os.path.dirname(path))
+        t0 = 1_000_000.0
+        with open(path, 'w') as f:
+            json.dump({'grants': [{'target': 'x', 'ts': t0 - 9 * 3600},
+                                  {'target': 'x', 'ts': t0 - 60}]}, f)
+        grants.record_grants('alpha', 's1', {'x'}, 'why', now=t0)
+        self.assertEqual([t0 - 9 * 3600, t0 - 60],
+                         [g['ts'] for g in self._entries()])
+
     def test_renewal_leaves_other_targets_alone(self):
         t0 = 1_000_000.0
         grants.record_grants('alpha', 's1', {'x', 'y'}, 'why', now=t0)
