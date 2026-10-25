@@ -4,7 +4,7 @@ outside the workspace; allow when it only touches workspace files or pipes.
 
 Reads the hook JSON on stdin, emits a PreToolUse decision on stdout.
 """
-import sys, os, json, re, shlex, shutil, fnmatch, collections, tempfile
+import sys, os, json, re, shlex, shutil, fnmatch, collections, functools, subprocess, tempfile
 
 # The parsing primitives every claude-bouncer guard shares -- lexing, comment
 # and heredoc stripping, substitution scanning, command-head normalising. The
@@ -3503,6 +3503,11 @@ def classify_outside(rp, ctx, is_read):
     # extras). Write access is never exempt here.
     if is_read and any(path_at_or_under(rp, p) for p in ctx.read_prefixes):
         return None
+    # Read-only: source and notes trees Claude Code or the Go toolchain wrote,
+    # resolved only here because finding Go's costs a subprocess. (Q311)
+    if is_read and any(path_at_or_under(rp, p)
+                       for p in installed_read_trees(ctx.session_tmp_root)):
+        return None
     # Read-only: a sibling session of the SAME project sharing the scratch parent
     # (dispatcher tails workers). (#61)
     if is_read and ctx.session_proj_dir \
@@ -6627,6 +6632,87 @@ def _checkout_backlinked(co):
     if not os.path.isabs(back):
         back = os.path.join(co['admin'], back)
     return os.path.realpath(back) == os.path.realpath(dotgit)
+
+
+def _real_dir(path):
+    """Realpath of ``path`` when it is a directory and not itself a symlink,
+    else None. A linked root would let one ``ln -s`` move the exemption onto
+    any directory, the laundering :func:`installed_skill_targets` refuses."""
+    try:
+        if os.path.isdir(path) and not os.path.islink(path):
+            return os.path.realpath(path)
+    except OSError:
+        pass
+    return None
+
+
+def go_source_dirs():
+    """The Go standard library sources: ``$(go env GOROOT)/src`` and each
+    downloaded toolchain's ``src`` under ``$(go env GOMODCACHE)``. Vendoring
+    reaches a module's dependencies and never the standard library, so a
+    session reading ``net/http`` asked every time (Q311).
+
+    ``go env`` runs with ``GOENV=off``, ``GOTOOLCHAIN=local`` and an empty
+    ``GOFLAGS``, from the filesystem root: an agent can rewrite the user's
+    ``go env -w`` file with an unguarded command, and pointing ``GOMODCACHE``
+    at the home directory must not exempt it. A tree also has to look like a
+    Go root, ``VERSION`` beside ``src/runtime``. No ``go`` on ``PATH``, a
+    failure or a two-second timeout all yield none, so the reads keep asking.
+    """
+    go = shutil.which('go')
+    if not go:
+        return []
+    env = dict(os.environ, GOENV='off', GOTOOLCHAIN='local', GOFLAGS='')
+    try:
+        printed = subprocess.run([go, 'env', 'GOROOT', 'GOMODCACHE'],
+                             cwd=os.path.abspath(os.sep), env=env,
+                             capture_output=True, text=True, timeout=2).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    lines = printed.splitlines()
+    if len(lines) != 2:
+        return []
+    goroot, modcache = lines
+    roots = [goroot] if goroot else []
+    if modcache:
+        try:
+            names = os.listdir(os.path.join(modcache, 'golang.org'))
+        except OSError:
+            names = []
+        roots.extend(os.path.join(modcache, 'golang.org', n)
+                     for n in names if n.startswith('toolchain@'))
+    out = []
+    for root in roots:
+        src = _real_dir(os.path.join(root, 'src'))
+        if src and os.path.isdir(os.path.join(src, 'runtime')) \
+                and os.path.isfile(os.path.join(root, 'VERSION')):
+            out.append(src)
+    return out
+
+
+@functools.lru_cache(maxsize=None)
+def installed_read_trees(tmp_root):
+    """Read-only trees written by Claude Code or the Go toolchain rather than by
+    anything in a session, beside :func:`claude_code_dirs` (Q311):
+
+    * ``<tmp_root>/bundled-skills/``, where Claude Code unpacks the skills it
+      ships. It carries no session id, so neither temp exemption reaches it.
+    * ``~/Library/Application Support/Claude/side-session-notes/``, the desktop
+      app's shared notes folder. The app adds it to the session as a working
+      directory, but the hook input names no additional directories (checked
+      against 2.1.308), so the guard cannot learn that from the payload.
+    * :func:`go_source_dirs`.
+
+    Resolved lazily, once per process, only for a read that would otherwise ask.
+    """
+    candidates = [os.path.join(tmp_root, 'bundled-skills')]
+    home = resolved_home()
+    if home:
+        candidates.append(os.path.join(home, 'Library', 'Application Support',
+                                       'Claude', 'side-session-notes'))
+    out = [rp for rp in map(_real_dir, candidates) if rp]
+    out.extend(go_source_dirs())
+    return tuple(out)
 
 
 def main():

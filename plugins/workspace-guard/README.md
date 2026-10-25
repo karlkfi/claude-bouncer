@@ -1519,6 +1519,14 @@ exemption, a symlink deeper inside a skill's tree widens nothing, and an entry
 pointing at somewhere that is not a skill (`~/.claude/skills/x -> /etc`) gets
 no exemption at all.
 
+Claude Code's `/tmp/claude-<uid>/bundled-skills/`, the desktop app's
+`~/Library/Application Support/Claude/side-session-notes/` (the hook input does
+not name a session's added directories), and the Go standard library are exempt
+too — `$(go env GOROOT)/src` and each toolchain's `src` under `GOMODCACHE`, from
+a `go env` run only for a read that would otherwise ask, with `GOENV=off` so a
+`go env -w` cannot move it. A root that is a symlink, or a Go tree without
+`VERSION` beside `src/runtime`, is not exempt.
+
 You can extend the defaults with additional prefixes:
 
 | Env var | Default | Effect |

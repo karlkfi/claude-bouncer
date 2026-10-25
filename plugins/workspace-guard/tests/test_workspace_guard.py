@@ -9459,6 +9459,119 @@ class SameRepoSessionScratchE2ETests(unittest.TestCase):
         self._expect(f"cat in.txt > {self._out('peer')}", "ask", self.wt, "wt")
 
 
+class InstalledReadTreesE2ETests(unittest.TestCase):
+    """Q311: bundled skills, the desktop app's side-session notes and the Go
+    standard library are exempt for reads only. Builds a fake home and a fake
+    ``go`` that prints fixture roots, under the real home so a path that is NOT
+    exempt reads as an outside ``ask`` rather than a host-temp deny."""
+
+    def setUp(self):
+        home = guard.resolved_home()                      # Q43: not $HOME
+        self.assertTrue(home and os.path.isdir(home))
+        self._tmp = tempfile.TemporaryDirectory(dir=home)
+        base = os.path.realpath(self._tmp.name)
+        self.workspace = os.path.join(base, "ws")
+        os.mkdir(self.workspace)
+        with open(os.path.join(self.workspace, "in.txt"), "w") as f:
+            f.write("x\n")
+        self.home = os.path.join(base, "home")
+        self.notes = os.path.join(self.home, "Library", "Application Support",
+                                  "Claude", "side-session-notes")
+        os.makedirs(os.path.join(self.notes, "family"))
+        self.goroot = self._go_root(os.path.join(base, "goroot"))
+        self.modcache = os.path.join(base, "mod")
+        self.toolchain = self._go_root(os.path.join(
+            self.modcache, "golang.org", "toolchain@v0.0.1-go9.9.9.test"))
+        self.bin = os.path.join(base, "bin")
+        os.mkdir(self.bin)
+        with open(os.path.join(self.bin, "go"), "w") as f:
+            # Answers only when the hook isolated it from the user's go env
+            # file and from toolchain switching, so dropping either goes red.
+            f.write('#!/bin/sh\n'
+                    '[ "$GOENV" = off ] && [ "$GOTOOLCHAIN" = local ] || exit 1\n'
+                    'printf \'%s\\n%s\\n\' "$FAKE_GOROOT" "$FAKE_GOMODCACHE"\n')
+        os.chmod(os.path.join(self.bin, "go"), 0o755)
+        with open(os.path.join(self.bin, "go.cmd"), "w") as f:
+            f.write('@if not "%GOENV%"=="off" exit /b 1\r\n'
+                    '@if not "%GOTOOLCHAIN%"=="local" exit /b 1\r\n'
+                    "@echo %FAKE_GOROOT%\r\n@echo %FAKE_GOMODCACHE%\r\n")
+        self.env = {"HOME": self.home, "USERPROFILE": self.home,
+                    "PATH": self.bin + os.pathsep + os.environ.get("PATH", ""),
+                    "FAKE_GOROOT": self.goroot,
+                    "FAKE_GOMODCACHE": self.modcache}
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    @staticmethod
+    def _go_root(root):
+        os.makedirs(os.path.join(root, "src", "runtime"))
+        with open(os.path.join(root, "VERSION"), "w") as f:
+            f.write("go9.9.9\n")
+        return root
+
+    def _expect(self, cmd, expected, **env):
+        out = run_hook(cmd, self.workspace, env_extra=dict(self.env, **env))
+        self.assertIsNotNone(out, f"expected a decision, got defer for: {cmd!r}")
+        got = out["hookSpecificOutput"]["permissionDecision"]
+        self.assertEqual(
+            got, expected,
+            f"expected {expected!r} for {cmd!r}; got {got!r} "
+            f"(reason: {out['hookSpecificOutput'].get('permissionDecisionReason')!r})")
+
+    def _src(self, root, name="x.go"):
+        return sh(os.path.join(root, "src", "runtime", name))
+
+    def test_side_session_notes_read_allowed(self):
+        self._expect(f"cat {sh(os.path.join(self.notes, 'family', 'n.md'))}",
+                     "allow")
+
+    def test_side_session_notes_write_still_asks(self):
+        self._expect(
+            f"cp ./in.txt {sh(os.path.join(self.notes, 'family', 'n.md'))}",
+            "ask")
+
+    def test_linked_notes_root_is_not_exempt(self):
+        real = os.path.join(self.home, "elsewhere")
+        os.mkdir(real)
+        shutil.rmtree(self.notes)
+        os.symlink(real, self.notes)
+        self._expect(f"cat {sh(os.path.join(real, 'n.md'))}", "ask")
+
+    def test_goroot_and_toolchain_src_read_allowed(self):
+        self._expect(f"grep -n func {self._src(self.goroot)}", "allow")
+        self._expect(f"cat {self._src(self.toolchain)}", "allow")
+
+    def test_goroot_write_still_asks(self):
+        self._expect(f"cp ./in.txt {self._src(self.goroot)}", "ask")
+
+    def test_goroot_outside_src_still_asks(self):
+        self._expect(f"cat {sh(os.path.join(self.goroot, 'VERSION'))}", "ask")
+
+    def test_tree_without_go_markers_still_asks(self):
+        # GOMODCACHE pointed at a directory that is not a Go install, which an
+        # agent could arrange with an unguarded `go env -w`.
+        os.remove(os.path.join(self.goroot, "VERSION"))
+        self._expect(f"cat {self._src(self.goroot)}", "ask")
+
+    def test_no_go_on_path_still_asks(self):
+        empty = os.path.join(self.home, "nobin")
+        os.mkdir(empty)
+        self._expect(f"cat {self._src(self.goroot)}", "ask", PATH=empty)
+
+    def test_bundled_skills_read_allowed_write_asks(self):
+        root = os.path.join(guard.claude_tmp_root(), "bundled-skills")
+        made_root = not os.path.isdir(root)
+        skill = os.path.join(root, "guardtest-%d" % os.getpid())
+        os.makedirs(skill, exist_ok=True)
+        try:
+            target = sh(os.path.join(skill, "SKILL.md"))
+            self._expect(f"cat {target}", "allow")
+            self._expect(f"cp ./in.txt {target}", "ask")
+        finally:
+            shutil.rmtree(root if made_root else skill, ignore_errors=True)
+
+
 class LiteralAssignmentValueTests(unittest.TestCase):
     """Purity check for assignment RHS values (issue 58)."""
 
