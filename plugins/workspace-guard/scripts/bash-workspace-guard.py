@@ -3744,17 +3744,26 @@ def escalate_suppression(signal, mode, override=None, prefixable=True):
         if rewritable:
             lead = ("Prompting because WORKSPACE_GUARD_OVERRIDE is set (%s). "
                     % override)
-    if decision == 'deny' and mode != 'bypassPermissions':
-        fix += "." + override_hint("a command you need as written", prefixable)
-    else:
+    # A deny's reason reaches the agent and an ask's reaches a person, so each
+    # names only the routes its reader can take (Q210). Nobody can approve a
+    # deny, and the agent cannot set a variable in the hook's environment.
+    if decision == 'ask':
         fix += ", or approve this one."
+        knob = " Set WORKSPACE_GUARD_ESCALATE=off to restore the silence."
+    else:
+        fix += "."
+        if mode != 'bypassPermissions':
+            fix += override_hint("a command you need as written", prefixable)
+        knob = (" WORKSPACE_GUARD_ESCALATE=off restores the silence, but only "
+                "where the operator sets it: the shell Claude Code is launched "
+                "from, or a settings.json `env` block, for sessions started "
+                "after. It cannot be set from inside this session.")
     return (decision,
             ATTRIBUTION + lead + "This command mixes a guarded command with "
             "%s, so the hook will not vouch for the whole string. Withholding "
             "`allow` normally hands the question to your own permission rules; "
             "in `%s` those pre-approve it, so the hook puts the decision back. "
-            "%s Set WORKSPACE_GUARD_ESCALATE=off to restore the silence."
-            % (what, mode, fix))
+            "%s%s" % (what, mode, fix, knob))
 
 
 def decide(offenders, ctx, bypass):
