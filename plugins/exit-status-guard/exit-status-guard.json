@@ -41,7 +41,9 @@
     "^git\\s+(pull|push|rebase|merge|cherry-pick|apply|am|commit|revert|add|stash|clone|fetch|checkout|switch|worktree|reset)(\\s|$)",
     "^git\\s+tag\\s+(-\\S+\\s+)*(-[A-Za-z]*[adefmsuF]|--(annotate|sign|no-sign|local-user|message|file|force|delete|edit|cleanup))(\\s|=|$)",
     "^git\\s+tag\\s+[^-\\s]",
-    "^gh\\s+(pr\\s+(create|merge|edit|close|ready|review|checkout)|release\\s+(create|edit|delete|upload)|repo\\s+(create|delete|fork|clone)|workflow\\s+run|run\\s+rerun|api)(\\s|$)"
+    "^gh\\s+(pr\\s+(create|merge|edit|close|ready|review|checkout)|release\\s+(create|edit|delete|upload)|repo\\s+(create|delete|fork|clone)|workflow\\s+run|run\\s+rerun)(\\s|$)",
+    "^gh\\s+api\\s(.*\\s)?(-i?X|--method)(=|\\s+)?(?!(?i:get)(\\s|$))[^\\s=]",
+    "^gh\\s+api\\s(?!(.*\\s)?(-i?X|--method))(.*\\s)?(-i?[fF]|--field|--raw-field|--input)"
   ],
 
   "exempt": [

@@ -653,6 +653,58 @@ CASES = [
     ('ls', 'ls -la | head', False, False, ''),
     ('ps piped', 'ps aux | grep python', False, False, ''),
 
+    # --- gh api: the method decides, not the subcommand (Q312) ---------------
+    # A request is a GET unless `-X`/`--method` names another method, or, with
+    # no method named, a field or `--input` switches it to POST. An explicit
+    # GET sends fields as a query string, graphql included. Measured on gh
+    # 2.101.0 with --verbose, which also showed the method is upper-cased.
+    ('gh api GET piped', 'gh api repos/o/r/commits/abc/check-runs | jq .',
+     False, False, ''),
+    ('gh api paginated GET', 'gh api --paginate repos/o/r/pulls | jq length',
+     False, False, ''),
+    ('gh api -X GET with fields', 'gh api -X GET search/issues -f q=x | jq .',
+     False, False, ''),
+    ('gh api -XGET attached', 'gh api -XGET search/issues -f q=x | jq .',
+     False, False, ''),
+    ('gh api -X=GET', 'gh api -X=GET -f q=x search/issues | jq .',
+     False, False, ''),
+    ('gh api --method=get, lower case',
+     'gh api --method=get search/issues -F q=x | jq .', False, False, ''),
+    ('gh api graphql sent as GET',
+     "gh api graphql -X GET -f query='{viewer{login}}' | jq .",
+     False, False, ''),
+    ('gh api header value is not a field',
+     "gh api -H 'Accept: application/vnd.github.raw' repos/o/r/contents/x"
+     " | head", False, False, ''),
+    ('gh api --method=PATCH piped',
+     'gh api --method=PATCH repos/o/r/pulls/1 -f state=closed | jq .',
+     False, True, '--jq'),
+    ('gh api -XPATCH piped', 'gh api -XPATCH repos/o/r/pulls/1 | jq .',
+     False, True, '--jq'),
+    ('gh api -X PATCH piped', 'gh api -X PATCH repos/o/r/pulls/1 | jq .',
+     False, True, '--jq'),
+    ('gh api -X delete, lower case',
+     'gh api -X delete repos/o/r/git/refs/heads/b | cat', False, True, ''),
+    ('gh api -iXPOST clustered', 'gh api -iXPOST repos/o/r/issues | head',
+     False, True, ''),
+    ('gh api -f implies POST', 'gh api repos/o/r/issues -f title=x | jq .',
+     False, True, '--jq'),
+    ('gh api -ftitle attached', 'gh api repos/o/r/issues -ftitle=x | jq .',
+     False, True, ''),
+    ('gh api --raw-field implies POST',
+     'gh api repos/o/r/issues --raw-field title=x | jq .', False, True, ''),
+    ('gh api --field= implies POST',
+     'gh api repos/o/r/issues --field=title=x | jq .', False, True, ''),
+    ('gh api -F implies POST', 'gh api repos/o/r/issues -F n=1 | jq .',
+     False, True, ''),
+    ('gh api --input - implies POST',
+     'gh api repos/o/r/issues --input - < body.json | jq .', False, True, ''),
+    ('gh api graphql posts a query too',
+     "gh api graphql -f query='{viewer{login}}' | jq .", False, True, '--jq'),
+    ('gh api write backgrounded behind an echo',
+     'gh api -X POST repos/o/r/dispatches --input x.json > l 2>&1; echo done',
+     True, True, ''),
+
     # --- Capability probes, not gate runs ------------------------------------
     # A --version/--help invocation prints and exits, so there is no result for
     # the pipe to swallow. Every registered gate is covered, not just the one
@@ -1524,7 +1576,8 @@ class TestSuggestedLogPath(unittest.TestCase):
     DENIALS = (('make check | tail -5', False),
                ('make check > c.log 2>&1; echo "EXIT=$?"', True),
                ('echo $PIPESTATUS', False),
-               ('make check; git push', False))
+               ('make check; git push', False),
+               ('gh api -X POST repos/o/r/issues | jq .', False))
 
     @classmethod
     def setUpClass(cls):
@@ -1532,8 +1585,9 @@ class TestSuggestedLogPath(unittest.TestCase):
 
     def test_every_template_carries_both_placeholders(self):
         """A template that loses one names no path, or names one uncreated."""
-        for name in ('PIPESTATUS_REASON', 'PIPED_REASON', 'LOST_STATUS_REASON',
-                     'SEQUENCED_REASON', 'SEQUENCED_NEWLINE_REASON'):
+        for name in ('PIPESTATUS_REASON', 'PIPED_REASON', 'GH_API_PIPED_REASON',
+                     'LOST_STATUS_REASON', 'SEQUENCED_REASON',
+                     'SEQUENCED_NEWLINE_REASON'):
             with self.subTest(name):
                 template = getattr(pg, name)
                 self.assertIn(pg.LOG_PLACEHOLDER, template)
@@ -1561,6 +1615,26 @@ class TestSuggestedLogPath(unittest.TestCase):
             with self.subTest(cmd):
                 self.assertIn('mkdir -p tmp && cmd > tmp/out.log',
                               pg.decide(cmd, bg, self.reg))
+
+
+class TestGhApiRewrite(unittest.TestCase):
+    """`--jq` is offered where it runs: `gh api` has it, the other gh gates do
+    not, so naming it for `gh pr create` would hand over a flag gh rejects."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = shipped_registry()
+
+    def test_gh_api_names_jq_before_the_log(self):
+        reason = pg.decide('gh api -X POST repos/o/r/issues | jq .', False,
+                           self.reg)
+        self.assertLess(reason.index('--jq'), reason.index('out.log'))
+        self.assertNotIn('FAILED', reason)
+
+    def test_other_gh_gates_keep_the_log_form(self):
+        reason = pg.decide('gh pr create --fill | tail -1', False, self.reg)
+        self.assertIn('FAILED', reason)
+        self.assertNotIn('--jq', reason)
 
 
 class TestScratchDir(unittest.TestCase):

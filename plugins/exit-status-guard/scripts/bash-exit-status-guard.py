@@ -1320,6 +1320,17 @@ PIPED_REASON = (
     "<MKDIR>cmd > <LOG> 2>&1; echo \"EXIT=$?\"; "
     "grep -E 'FAILED|Error [0-9]|^make:' <LOG>." + OVERRIDE_HINT)
 
+# `gh api` filters its own response, and of the `gh` gates it is the only one
+# with `--jq`, so the rewrite that keeps the status and needs no pipe comes
+# first. The grep above is for a build log and has nothing to find in JSON.
+GH_API_PIPED_REASON = (
+    " is piped into a filter, so this call's exit status is the filter's, not "
+    "gh's -- a failed request reads exactly like a pass. Filter with gh's own "
+    "`--jq` (`-q`) instead, which keeps gh's exit status: "
+    "gh api <endpoint> ... --jq '<filter>'. Where the filter is not jq, "
+    "redirect and read the log in a separate call: "
+    "<MKDIR>cmd > <LOG> 2>&1; echo \"EXIT=$?\"." + OVERRIDE_HINT)
+
 LOST_STATUS_REASON = (
     " runs in the background, but this call's exit status is its LAST "
     "statement's -- an echo exits 0 whatever the gate did, so the task "
@@ -1402,8 +1413,9 @@ def decide(cmd, background, reg, scratch='', depth=0, pipefail=False):
     # the suppression is scoped to the pipe verdict.
     gate = piped_gate(segs, reg, pipefail)
     if gate:
-        return with_log_path(
-            '`' + truncate(gate) + '`' + PIPED_REASON, scratch)
+        reason = (GH_API_PIPED_REASON if gate.split()[:2] == ['gh', 'api']
+                  else PIPED_REASON)
+        return with_log_path('`' + truncate(gate) + '`' + reason, scratch)
 
     gate = lost_background_status(segs, background, reg)
     if gate:
