@@ -1727,7 +1727,8 @@ def load_session_grants(session_id, now=None):
 
 def record_session_grants(session_id, targets, reason, now=None):
     """Record grants for the explicit prod targets a command actually hit."""
-    record_grants(GRANT_NAMESPACE, session_id, targets, reason, now=now)
+    record_grants(GRANT_NAMESPACE, session_id, targets, reason, now=now,
+                  ttl=SESSION_GRANT_TTL)
 
 
 # ---------------------------------------------------------------------------

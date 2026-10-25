@@ -64,22 +64,24 @@ def load_grants(namespace, session_id, now=None, ttl=DEFAULT_TTL):
     except (OSError, ValueError, AttributeError):
         return set()
     now = time.time() if now is None else now
-    out = set()
-    for g in grants:
-        if not isinstance(g, dict):
-            continue
-        target, ts = g.get('target'), g.get('ts')
-        if isinstance(target, str) and isinstance(ts, (int, float)) \
-                and 0 <= now - ts <= ttl:
-            out.add(target)
-    return out
+    return {g['target'] for g in grants
+            if isinstance(g, dict) and isinstance(g.get('target'), str)
+            and _live(g, now, ttl)}
 
 
-def record_grants(namespace, session_id, targets, reason, now=None):
-    """Append grants for `targets` not already on record. The first-grant
-    timestamp is kept, so the TTL never slides. Atomic replace so a torn write
-    cannot corrupt the store; any failure is silent and loses only the
-    recording, which costs one more prompt."""
+def _live(grant, now, ttl):
+    ts = grant.get('ts')
+    return isinstance(ts, (int, float)) and 0 <= now - ts <= ttl
+
+
+def record_grants(namespace, session_id, targets, reason, now=None,
+                  ttl=DEFAULT_TTL):
+    """Record grants for `targets` not live on record. A live grant keeps its
+    first-grant timestamp, so the TTL never slides; an expired one is replaced,
+    since an approval after expiry is a new grant. Pass the `ttl` the caller
+    loads with. Atomic replace so a torn write cannot corrupt the store; any
+    failure is silent and loses only the recording, which costs one more
+    prompt."""
     path = grants_path(namespace, session_id)
     if path is None or not targets:
         return
@@ -89,10 +91,13 @@ def record_grants(namespace, session_id, targets, reason, now=None):
         try:
             with open(path, encoding='utf-8') as f:
                 data = json.load(f)
-            grants = [g for g in data.get('grants', []) if isinstance(g, dict)]
+            grants = [g for g in data.get('grants', []) if isinstance(g, dict)
+                      and isinstance(g.get('target'), str)]
         except (OSError, ValueError, AttributeError):
             grants = []
-        have = {g.get('target') for g in grants}
+        have = {g.get('target') for g in grants if _live(g, now, ttl)}
+        grants = [g for g in grants
+                  if g.get('target') in have or g.get('target') not in targets]
         for t in sorted(targets):
             if t not in have:
                 grants.append({'target': t, 'reason': reason, 'ts': now})
