@@ -3351,8 +3351,7 @@ def finish(decision, reason, offenders, data):
         # The tool ran, so an `ask` on these shapes was approved.
         if decision == 'ask' and shapes:
             record_grants(GRANT_NAMESPACE, data.get('session_id'), shapes,
-                          'approved outside-workspace access',
-                          ttl=SESSION_GRANT_TTL)
+                          'approved outside-workspace access', ttl=SESSION_GRANT_TTL)
         return
     if decision == 'ask' and shapes:
         granted = load_grants(GRANT_NAMESPACE, data.get('session_id'),
