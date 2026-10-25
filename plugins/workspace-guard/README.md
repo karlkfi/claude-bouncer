@@ -1578,7 +1578,7 @@ whether the refusal can carry a rewrite the agent applies itself:
 | Construct | `auto`, `acceptEdits` | `bypassPermissions` |
 | --- | --- | --- |
 | A wrapper hiding operands (`xargs`, an unreadable wrapper flag) | `deny`, naming the files on the command itself | `deny` |
-| A kill whose targets it cannot see | `deny`, naming the literal-pid rewrite | `deny` |
+| A kill whose targets it cannot see | `deny`, naming the split: `kill <pid>` as its own call | `deny` |
 | A `sh -c` body under a container or remote wrapper | `ask` | `deny` |
 | Interpreter code (only under `WORKSPACE_GUARD_ESCALATE=all`) | `ask` | `deny` |
 

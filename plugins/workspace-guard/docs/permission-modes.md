@@ -76,7 +76,7 @@ README's Configuration section.
 
 Q310 moved the wrapper and kill signals to `deny` in all three modes. Each one's
 reason already carried a rewrite the agent can apply — name the files on the
-command itself, signal the literal pid — so the `ask` in `auto` and
+command itself, run `kill <pid>` as its own call — so the `ask` in `auto` and
 `acceptEdits` spent a person on a question whose answer was in the prompt.
 `WORKSPACE_GUARD_OVERRIDE=<reason>` downgrades either deny to `ask` for a
 command needed as written, and clears neither; under `bypassPermissions` it

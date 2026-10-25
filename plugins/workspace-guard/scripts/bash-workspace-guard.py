@@ -3685,9 +3685,10 @@ def escalate_suppression(signal, mode, override=None, prefixable=True):
 
     The verdict turns on whether the reason can carry a rewrite the caller
     applies itself. A wrapper hiding its operands and a kill hiding its targets
-    both can — name the files, signal the literal pid — so those deny in every
-    escalating mode, and a person is never asked a question whose answer is
-    already written in the reason (Q310, reversing Q74's ask for these two). A
+    both can — name the files, run `kill <pid>` on its own — so those deny
+    in every escalating mode, and a person is never asked a question whose
+    answer is already written in the reason (Q310, reversing Q74's ask for
+    these two). A
     `sh -c` body under a container or remote wrapper has no plain-command
     rewrite, and neither does interpreter code, so those split on who is at the
     prompt: `ask` in `auto` and `acceptEdits`, `deny` under
@@ -3719,16 +3720,19 @@ def escalate_suppression(signal, mode, override=None, prefixable=True):
                "`grep -r`)")
     elif signal == 'taskkill':
         what = "a `taskkill` whose targets it cannot see"
-        fix = ('Fix: run `tasklist /FI "IMAGENAME eq <name>"` and `taskkill '
-               "/PID <pid>` for the one you meant")
+        fix = ("Fix: run `taskkill /PID <pid>` as its own call, so the rest of "
+               'the string can be vouched for (`tasklist /FI "IMAGENAME eq '
+               '<name>"` finds the pid)')
     elif signal == 'Stop-Process':
         what = "a `Stop-Process` whose targets it cannot see"
-        fix = ("Fix: run `Get-Process <name> | Select-Object Id, Path` and "
-               "`Stop-Process -Id <pid>` for the one you meant")
+        fix = ("Fix: run `Stop-Process -Id <pid>` as its own call, so the rest "
+               "of the string can be vouched for (`Get-Process <name> | "
+               "Select-Object Id, Path` finds the pid)")
     else:
         what = "a `%s` whose targets it cannot see" % signal
-        fix = ("Fix: inspect with `pgrep -fl` and signal the literal pid you "
-               "meant")
+        fix = ("Fix: signal the literal pid with `kill <pid>` as its own call, "
+               "so the rest of the string can be vouched for (`pgrep -fl` finds "
+               "the pid)")
     rewritable = signal not in ('sh -c', INTERPRETER_SIGNAL)
     lead = ""
     if mode == 'bypassPermissions':

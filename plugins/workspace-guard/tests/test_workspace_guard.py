@@ -8074,9 +8074,26 @@ class SuppressionEscalationTests(unittest.TestCase):
         self.assertIn("WORKSPACE_GUARD_ESCALATE=off", reason)
 
     def test_the_kill_reason_names_the_kill_rewrite(self):
-        reason = self._decision(self.SCOPED[1], "deny",
-                                permission_mode="bypassPermissions")
-        self.assertIn("pgrep -fl", reason)
+        # The pid is not literal here, so the reason has to say how to find
+        # one as well as where to run it.
+        for cmd in (self.SCOPED[1], "cat in.txt; kill $pid"):
+            for mode in ("auto", "bypassPermissions"):
+                reason = self._decision(cmd, "deny", permission_mode=mode)
+                self.assertIn("pgrep -fl", reason)
+                self.assertIn("`kill <pid>` as its own call", reason)
+
+    def test_a_literal_pid_kill_is_told_to_split_and_the_split_clears(self):
+        # The pid is already literal here, so "signal the literal pid" alone
+        # would hand back the command it just refused. What the hook cannot
+        # vouch for is the string as a whole, and running the kill on its own
+        # is the rewrite that clears.
+        for cmd in ("cat in.txt; kill 12345", "cat in.txt; kill -0 12345"):
+            for mode in ("auto", "bypassPermissions"):
+                reason = self._decision(cmd, "deny", permission_mode=mode)
+                self.assertIn("`kill <pid>` as its own call", reason)
+        for mode, _ in self.ESCALATING:
+            self._decision("kill 12345", "defer", permission_mode=mode)
+            self._decision("cat in.txt", "allow", permission_mode=mode)
 
     def test_the_interpreter_reason_names_the_repo_resident_rewrite(self):
         reason = self._decision(self.INTERPRETED, "ask", permission_mode="auto",
@@ -8315,6 +8332,11 @@ class PowerShellSuppressionEscalationTests(unittest.TestCase):
         reason = self._decision(self.KILL, "deny", permission_mode="auto")
         self.assertIn("Get-Process", reason)
         self.assertNotIn("pgrep", reason)
+
+    def test_a_literal_pid_stop_process_is_told_to_split(self):
+        reason = self._decision(self.KILL, "deny", permission_mode="auto")
+        self.assertIn("`Stop-Process -Id <pid>` as its own call", reason)
+        self._decision("Stop-Process -Id 1234", "defer", permission_mode="auto")
 
     def test_a_clean_cmdlet_still_allows(self):
         self._decision("Get-Content .\\in.txt", "allow",
