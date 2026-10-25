@@ -4,7 +4,7 @@ outside the workspace; allow when it only touches workspace files or pipes.
 
 Reads the hook JSON on stdin, emits a PreToolUse decision on stdout.
 """
-import sys, os, json, re, shlex, shutil, fnmatch, collections, tempfile
+import sys, os, json, re, shlex, shutil, fnmatch, collections, functools, tempfile
 
 # The parsing primitives every claude-bouncer guard shares -- lexing, comment
 # and heredoc stripping, substitution scanning, command-head normalising. The
@@ -3553,6 +3553,10 @@ def classify_outside(rp, ctx, is_read):
     if is_read and ctx.session_proj_dir \
             and path_at_or_under(rp, ctx.session_proj_dir):
         return None
+    # Read-only: the same, for a session in another checkout of this repository,
+    # which Claude Code files under a slug of its own. (Q311)
+    if is_read and is_same_repo_session_path(rp, ctx):
+        return None
     # The write half of that exemption, which stays excluded: a session writing
     # into a SIBLING session's scratch. Usually a path the agent carried across
     # a resume or a compaction — each mints a new session id and a new scratch
@@ -6583,6 +6587,65 @@ def handle_powershell(data):
     else:
         decision, reason = "allow", "Guarded cmdlets target workspace only"
     finish(decision, reason, outside, data)
+
+
+_SLUG_UNSAFE_RE = re.compile(r'[^A-Za-z0-9]')
+
+
+def _checkout_slugs(path):
+    """The project slugs Claude Code may give a session started in ``path``:
+    every non-alphanumeric character becomes ``-``, for the path as written and
+    as resolved. Only ever applied forward, to a path git already named."""
+    out = {_SLUG_UNSAFE_RE.sub('-', path)}
+    try:
+        out.add(_SLUG_UNSAFE_RE.sub('-', os.path.realpath(path)))
+    except OSError:
+        pass
+    return out
+
+
+@functools.lru_cache(maxsize=None)
+def _repo_checkout_roots(common):
+    """Roots of every checkout git records for the repo at ``common``: the main
+    checkout (the parent of a ``.git`` common dir) and each linked worktree,
+    read from ``<common>/worktrees/*/gitdir``. Metadata files only."""
+    roots = []
+    if os.path.basename(common) == '.git':
+        roots.append(os.path.dirname(common))
+    try:
+        names = os.listdir(os.path.join(common, 'worktrees'))
+    except OSError:
+        names = []
+    for name in names:
+        gitdir = _read_git_meta(os.path.join(common, 'worktrees', name, 'gitdir'))
+        if gitdir and gitdir.strip():
+            roots.append(os.path.dirname(gitdir.strip()))
+    return tuple(roots)
+
+
+def is_same_repo_session_path(rp, ctx):
+    """True when resolved path ``rp`` is in another session's scratch under the
+    Claude temp root and that session's project slug belongs to a checkout of
+    THIS session's repository.
+
+    Claude Code gives every worktree its own slug, so the same-slug exemption
+    in :func:`classify_outside` never reached a dispatcher reading its workers
+    (Q311). Which slugs are the same repository comes from git's common dir,
+    never from decoding a slug: the encoding is lossy, and ``claude-bouncer-foo``
+    would otherwise pass for a worktree of ``claude-bouncer``. The encoding is trusted only once it
+    reproduces this session's own slug from its project root; when Claude Code
+    changes it, or truncates a long path, nothing matches and the read asks.
+    """
+    if not (ctx.session_proj_dir and ctx.session_wt):
+        return False
+    root = ctx.session_tmp_root
+    if not rp.startswith(root + os.sep):
+        return False
+    slug = rp[len(root) + 1:].split(os.sep, 1)[0]
+    if os.path.basename(ctx.session_proj_dir) not in _checkout_slugs(ctx.proj):
+        return False
+    return any(slug in _checkout_slugs(r)
+               for r in _repo_checkout_roots(ctx.session_wt['common']))
 
 
 def main():

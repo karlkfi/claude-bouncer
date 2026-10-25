@@ -117,7 +117,9 @@ dispatch. Writing into another session's scratch is **denied**, with this
 session's own scratchpad named in the refusal, because the usual cause is a
 path the agent carried across a resume or a compaction — each mints a new
 session id and a new scratch dir, leaving the remembered path pointing at the
-old one. A different project's scratch still asks entirely.
+old one. Reads reach a session in any other checkout of the same repository
+too, since Claude Code files each worktree under its own scratch dir; a
+different repository's scratch still asks entirely.
 
 | Command                              | Decision |
 | ------------------------------------ | -------- |
@@ -1039,6 +1041,14 @@ through the same boundary rules and produce the same reasons. Symlink staging
      slug that holds the current `session_id`, so it never depends on Claude's
      undocumented slug encoding (which differs between a worktree and the main
      checkout); if it can't be located, the read simply keeps prompting.
+     Because every worktree gets a slug of its own, the same read is allowed
+     under the slug of any other checkout git records for this repository —
+     the main checkout and each `git worktree` — so a dispatcher in one
+     worktree can tail workers in others. Which slugs those are comes from the
+     repository's git common dir, never from reading a slug: another
+     repository whose slug merely starts the same way still asks, as does a
+     removed worktree, and so does every one of them if Claude Code's slug for
+     this session isn't the one its encoding would give.
 
    The write half of that second rule is **denied** rather than allowed, and the
    refusal names this session's own `scratchpad/`. The usual cause is a path the

@@ -9301,6 +9301,112 @@ class SiblingSessionScratchE2ETests(unittest.TestCase):
                       out["hookSpecificOutput"]["permissionDecisionReason"])
 
 
+class SameRepoSessionScratchE2ETests(unittest.TestCase):
+    """Q311: Claude Code files each worktree's sessions under a slug of its own,
+    so the #61 read exemption has to reach every checkout of the repository —
+    and only those. Builds a real repo with two linked worktrees, plants a
+    session under each checkout's slug, and plants a decoy whose slug a prefix
+    test or a decoded slug would take for the same repository."""
+
+    def _git(self, args, cwd):
+        env = os.environ.copy()
+        env.update({
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_SYSTEM": os.devnull,
+            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+            "GIT_TERMINAL_PROMPT": "0",
+        })
+        subprocess.run(["git"] + args, cwd=cwd, env=env,
+                       capture_output=True, text=True, check=True)
+
+    @staticmethod
+    def _slug(path):
+        return re.sub(r"[^A-Za-z0-9]", "-", path)
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        base = os.path.realpath(self._tmp.name)
+        self.main = os.path.join(base, "repo")
+        os.mkdir(self.main)
+        self._git(["init"], self.main)
+        with open(os.path.join(self.main, "in.txt"), "w") as f:
+            f.write("x\n")
+        self._git(["add", "."], self.main)
+        self._git(["commit", "-m", "init"], self.main)
+        self.wt = os.path.join(base, "repo", ".claude", "worktrees", "wt-a")
+        self._git(["worktree", "add", "-b", "feat-a", self.wt], self.main)
+        self.peer = os.path.join(base, "repo", ".claude", "worktrees", "wt-b")
+        self._git(["worktree", "add", "-b", "feat-b", self.peer], self.main)
+        # Another repository whose slug extends the main checkout's, so it
+        # passes a prefix test on the slug and fails the git common-dir one.
+        self.decoy = os.path.join(base, "repo-wt-c")
+        os.mkdir(self.decoy)
+        self._git(["init"], self.decoy)
+        self.root = guard.claude_tmp_root()
+        tag = "%012x" % os.getpid()
+        self.sessions = {}
+        self.planted = []
+        for name, path in (("main", self.main), ("wt", self.wt),
+                           ("peer", self.peer), ("decoy", self.decoy)):
+            sid = "%s-1111-2222-3333-%s" % ((name[0] * 8), tag)
+            slug_dir = os.path.join(self.root, self._slug(path))
+            os.makedirs(os.path.join(slug_dir, sid, "tasks"), exist_ok=True)
+            self.planted.append(slug_dir)
+            self.sessions[name] = (sid, os.path.join(slug_dir, sid, "tasks",
+                                                     "out.output"))
+
+    def tearDown(self):
+        for d in self.planted:
+            shutil.rmtree(d, ignore_errors=True)
+        self._tmp.cleanup()
+
+    def _expect(self, cmd, expected, proj, session):
+        out = run_hook(cmd, proj, project_dir=proj,
+                       session_id=self.sessions[session][0])
+        self.assertIsNotNone(out, f"expected a decision, got defer for: {cmd!r}")
+        got = out["hookSpecificOutput"]["permissionDecision"]
+        self.assertEqual(
+            got, expected,
+            f"expected {expected!r} for {cmd!r}; got {got!r} "
+            f"(reason: {out['hookSpecificOutput'].get('permissionDecisionReason')!r})")
+
+    def _out(self, session):
+        return sh(self.sessions[session][1])
+
+    def test_worktree_session_reads_peer_worktree_scratch(self):
+        self._expect(f"tail -20 {self._out('peer')}", "allow", self.wt, "wt")
+
+    def test_worktree_session_reads_main_checkout_scratch(self):
+        self._expect(f"cat {self._out('main')}", "allow", self.wt, "wt")
+
+    def test_main_checkout_session_reads_worktree_scratch(self):
+        self._expect(f"grep -q EXIT= {self._out('wt')}", "allow",
+                     self.main, "main")
+
+    def test_other_repo_with_prefix_sharing_slug_still_asks(self):
+        self._expect(f"cat {self._out('decoy')}", "ask", self.main, "main")
+        self._expect(f"cat {self._out('decoy')}", "ask", self.wt, "wt")
+
+    def test_write_into_peer_worktree_scratch_not_exempt(self):
+        self._expect(f"cp ./in.txt {self._out('peer')}", "ask", self.wt, "wt")
+        self._expect(f"cat in.txt > {self._out('peer')}", "ask", self.wt, "wt")
+
+    def test_unverified_slug_encoding_disables_the_exemption(self):
+        # This session's own slug is not what the encoding gives for its
+        # project root, so the encoding is not trusted for anyone else's.
+        sid = "eeeeeeee-1111-2222-3333-%012x" % os.getpid()
+        odd = os.path.join(self.root, "-guardtest-odd-%d" % os.getpid())
+        os.makedirs(os.path.join(odd, sid), exist_ok=True)
+        self.planted.append(odd)
+        self.sessions["odd"] = (sid, None)
+        self._expect(f"cat {self._out('peer')}", "ask", self.wt, "odd")
+
+    def test_removed_worktree_scratch_asks(self):
+        self._git(["worktree", "remove", "--force", self.peer], self.main)
+        self._expect(f"cat {self._out('peer')}", "ask", self.wt, "wt")
+
+
 class LiteralAssignmentValueTests(unittest.TestCase):
     """Purity check for assignment RHS values (issue 58)."""
 
