@@ -137,7 +137,9 @@ which prompt in `manual`, `dontAsk` and `plan` and pre-approve in `auto`,
 `acceptEdits` and `bypassPermissions` — so in exactly the three modes a defer
 runs, the suppression above achieved nothing. The two suppressions naming a
 construct this guard already judges now escalate there instead (`ask` where a
-person is at the prompt, `deny` under `bypassPermissions`, which has none). The
+person is at the prompt, `deny` under `bypassPermissions`, which has none; Q310
+later made the wrapper and kill signals deny in all three, since their refusal
+carries the rewrite). The
 interpreter suppression does not, by default, and the split is a cost reading
 rather than a taste: replaying 89,133 commands from local transcripts on
 2026-09-09, 4,243 carry a withheld `allow` and 4,160 of them are the interpreter
