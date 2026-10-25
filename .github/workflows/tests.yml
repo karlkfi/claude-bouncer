@@ -93,7 +93,8 @@ jobs:
   # test_backlog.py runs scripts/queue.py over docs/queue/ and over stores
   # carrying one introduced defect each, so the gate is shown able to fail.
   shared-parser:
-    runs-on: ubuntu-latest
+    # ubuntu-latest moved to 26.04, which has no 3.9 build for setup-python.
+    runs-on: ${{ matrix.python-version == '3.9' && 'ubuntu-24.04' || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
@@ -304,6 +305,13 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
         python: ['3.9', '3.13']
+        # ubuntu-latest (26.04) has no 3.9 build; 24.04 still does.
+        exclude:
+          - os: ubuntu-latest
+            python: '3.9'
+        include:
+          - os: ubuntu-24.04
+            python: '3.9'
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
