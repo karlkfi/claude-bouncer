@@ -895,6 +895,65 @@ check "git worktree remove --force -> ask" ask \
   "$(decision_for "$(bash_cmd 'git worktree remove --force ../wt')" "$WORK")"
 check "git worktree remove -f -> ask" ask \
   "$(decision_for "$(bash_cmd 'git worktree remove -f ../wt')" "$WORK")"
+
+#     A worktree inside this session's own scratchpad is the exception (Q308):
+#     what --force would lose there is the session's own. The root is the one
+#     the hook infers -- `/tmp/claude-<uid>` on POSIX, `<temp>/claude` on
+#     Windows, where TMP is pointed at a harness dir so the root is known.
+#     Every allow is paired with the cell that differs in one fact.
+if [[ "$NATIVE_PATHS" == yes ]]; then
+  SCRATCH_TEMP="$(mktemp -d "$REPO_ROOT/tmp/scratch-temp.XXXXXX")"
+  SCRATCH_ROOT="$SCRATCH_TEMP/claude"
+else
+  SCRATCH_TEMP="${TMPDIR:-/tmp}"
+  SCRATCH_ROOT="/tmp/claude-$(id -u)"
+fi
+TEMP_ENV=(TMPDIR="$(nat "$SCRATCH_TEMP")" TEMP="$(nat "$SCRATCH_TEMP")"
+          TMP="$(nat "$SCRATCH_TEMP")")
+SESS="bg-q308-$$-own"
+SCRATCH_PROJ="$SCRATCH_ROOT/branch-guard-test-$$"
+OWN="$SCRATCH_PROJ/$SESS/scratchpad"
+PEER="$SCRATCH_PROJ/bg-q308-$$-peer/scratchpad"
+mkdir -p "$OWN" "$PEER"
+ln -s "$WORK/tmp" "$OWN/escape" 2>/dev/null || true
+# sess_payload COMMAND [SESSION] -> a Bash payload carrying a session_id.
+sess_payload() {
+  jq -nc --arg cmd "$1" --arg sid "${2-$SESS}" \
+    '{tool_name: "Bash", tool_input: {command: $cmd}}
+     + (if $sid == "" then {} else {session_id: $sid} end)'
+}
+check "[scratchpad] worktree remove --force in own scratchpad -> allow" allow \
+  "$(decision_for "$(sess_payload "git worktree remove --force '$(nat "$OWN/pr1")'")" \
+     "$WORK" "${TEMP_ENV[@]}")"
+check "[scratchpad] worktree remove -f in own scratchpad -> allow" allow \
+  "$(decision_for "$(sess_payload "git worktree remove -f '$(nat "$OWN/pr1")'")" \
+     "$WORK" "${TEMP_ENV[@]}")"
+check "[scratchpad] relative path through a literal -C -> allow" allow \
+  "$(decision_for "$(sess_payload "git -C '$(nat "$OWN")' worktree remove --force pr1")" \
+     "$WORK" "${TEMP_ENV[@]}")"
+check "[scratchpad] another session's scratchpad -> ask" ask \
+  "$(decision_for "$(sess_payload "git worktree remove --force '$(nat "$PEER/pr1")'")" \
+     "$WORK" "${TEMP_ENV[@]}")"
+check "[scratchpad] no session_id in the payload -> ask" ask \
+  "$(decision_for "$(sess_payload "git worktree remove --force '$(nat "$OWN/pr1")'" '')" \
+     "$WORK" "${TEMP_ENV[@]}")"
+# Git Bash's `ln -s` copies unless Windows permits a real link (5e), and a
+# copy is a real directory inside the scratchpad, so only a link is asserted.
+if [[ -L "$OWN/escape" ]]; then
+  check "[scratchpad] a symlink out of the scratchpad -> ask" ask \
+    "$(decision_for "$(sess_payload "git worktree remove --force '$(nat "$OWN/escape")'")" \
+       "$WORK" "${TEMP_ENV[@]}")"
+fi
+check "[scratchpad] a path the hook cannot expand -> ask" ask \
+  "$(decision_for "$(sess_payload 'git worktree remove --force "$SCRATCH/pr1"')" \
+     "$WORK" "${TEMP_ENV[@]}")"
+check "[scratchpad] relative path with no literal directory -> ask" ask \
+  "$(decision_for "$(sess_payload "cd \"\$X\" && git worktree remove --force pr1")" \
+     "$WORK" "${TEMP_ENV[@]}")"
+check "[scratchpad] own session id outside the temp root -> ask" ask \
+  "$(decision_for "$(sess_payload "git worktree remove --force '$(nat "$WORK/$SESS/pr1")'")" \
+     "$WORK" "${TEMP_ENV[@]}")"
+rm -rf "$SCRATCH_PROJ"
 check "git worktree prune -> ask" ask \
   "$(decision_for "$(bash_cmd 'git worktree prune')" "$WORK")"
 check "git worktree move -> ask" ask \

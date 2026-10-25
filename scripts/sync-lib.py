@@ -21,7 +21,8 @@ import os
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MODULES = ('bouncer_parse.py', 'bouncer_grants.py', 'bouncer_wrappers.py')
+MODULES = ('bouncer_parse.py', 'bouncer_grants.py', 'bouncer_wrappers.py',
+           'bouncer_session.py')
 PLUGINS = os.path.join(ROOT, 'plugins')
 
 BANNER = (

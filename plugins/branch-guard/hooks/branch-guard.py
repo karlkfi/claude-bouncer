@@ -116,6 +116,7 @@ from bouncer_parse import (                                   # noqa: E402
     split_assignment, split_operator_runs, strip_sh_keywords,
 )
 from bouncer_grants import record_grants                      # noqa: E402
+from bouncer_session import claude_tmp_root, is_session_tmp_path  # noqa: E402
 from bouncer_wrappers import WRAPPER_VALUE_OPTS as _VALUE_OPTS, wrapper_option  # noqa: E402
 
 # Branch names protected no matter what the environment says. Configuration only
@@ -1928,7 +1929,8 @@ def classify_reset(branch, cwd, probe):
     return ('allow', None)
 
 
-def classify_git(sub, args, branch, policy, cwd, probe, mode=''):
+def classify_git(sub, args, branch, policy, cwd, probe, mode='',
+                 session_id=''):
     """Verdict ('allow' | 'ask' | 'ask-shared' | 'deny-rebase' |
     'deny-unreachable' | 'defer', reason) for a `git <sub>` command."""
     flags = {a for a in args if a.startswith('-')}
@@ -2030,6 +2032,19 @@ def classify_git(sub, args, branch, policy, cwd, probe, mode=''):
             # untracked files alone, so the non-force form cannot destroy
             # uncommitted work and needs no probe. Only `--force` can.
             if 'f' in short or '--force' in flags:
+                # Inside this session's own scratchpad the work it would lose is
+                # the session's: nobody else writes there (workspace-guard
+                # denies a write into another session's), and what a reviewer
+                # leaves behind in its `<scratchpad>/prN` is build output. A
+                # relative path needs `probe`, since it resolves against a
+                # directory the hook has to have named. (Q308)
+                target = pos[1] if len(pos) == 2 else None
+                if target and is_literal_path(target) \
+                        and (probe or os.path.isabs(target)):
+                    rp = resolve_path(cwd, target)
+                    if rp and is_session_tmp_path(rp, session_id,
+                                                  claude_tmp_root()):
+                        return ('allow', None)
                 return ('ask', "`git worktree remove --force` deletes a worktree "
                                "holding modified or untracked files")
             return ('allow', None)
@@ -2319,7 +2334,7 @@ def is_overridable(inv, verdict, writes):
             and inv['sub'] in OVERRIDABLE_GIT)
 
 
-def classify_segment(inv, branch, policy, cwd, probe, mode=''):
+def classify_segment(inv, branch, policy, cwd, probe, mode='', session_id=''):
     """Verdict ('nongit' | 'allow' | 'ask' | 'ask-shared' | 'deny-rebase' |
     'deny-unreachable' | 'defer', reason) for one segment. 'nongit' marks a
     segment that isn't a git/gh invocation (so the whole command can't be
@@ -2342,7 +2357,7 @@ def classify_segment(inv, branch, policy, cwd, probe, mode=''):
         return ('defer', None)            # bare `git`
     else:
         verdict, reason = classify_git(inv['sub'], inv['args'], branch, policy,
-                                       cwd, probe, mode)
+                                       cwd, probe, mode, session_id)
     # An inline-config escape hatch blocks auto-allow, but must not weaken a
     # protective `ask` (e.g. `git -c k=v commit` on main still asks). A wrapper
     # does the same: it is peeled to find the protective verdicts (Q223), and
@@ -2843,7 +2858,7 @@ def main():
                 seen.add(seg_branch)
                 verdict, reason = classify_segment(
                     inv, seg_branch, policy, inv_cwd or cwd,
-                    inv_cwd is not None, mode)
+                    inv_cwd is not None, mode, data.get('session_id') or '')
                 # An output redirect to a file is a write side-effect the
                 # classifier can't see (`git log --format=… > f` writes
                 # possibly-attacker-influenced content). Downgrade a would-be

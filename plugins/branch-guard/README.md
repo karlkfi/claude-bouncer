@@ -84,6 +84,7 @@ the default `strict` [push policy](#push-guard).
 | `git switch -c claude/y` / `git checkout -b claude/y` | allow |
 | `git worktree add ../wt feature` | allow *(**ask** with [`BRANCH_GUARD_WORKTREE_GRANTS=1`](#configuration))* |
 | `git worktree remove ../wt` *(git refuses one holding modified or untracked files)* | allow |
+| `git worktree remove --force <scratchpad>/pr1` *(a worktree in this session's own Claude Code scratchpad; another session's still asks)* | allow |
 | `git commit -m "fix"` *(feature branch)* | allow |
 | `git add -A && git commit -m x && git push` *(feature branch)* | allow |
 | `git push` / `git push -u origin HEAD` *(worktree branch)* | allow |
@@ -138,7 +139,7 @@ the default `strict` [push policy](#push-guard).
 | `gh api -X DELETE …/labels/bug` *(deletes a label)* | **ask** |
 | `gh api -X DELETE repos/o/r` *(deletes a repository — exact `repos/{o}/{r}` path)* | **ask** |
 | `git restore file.txt` *(discards working changes)* | **ask** |
-| `git worktree remove --force ../wt` *(deletes a worktree holding modified or untracked files)* | **ask** |
+| `git worktree remove --force ../wt` *(deletes a worktree holding modified or untracked files, anywhere but this session's scratchpad)* | **ask** |
 | `git config --global user.name x` | **ask** |
 | `BRANCH_GUARD_OVERRIDE=<reason> git restore file.txt` *(break-glass on a local-loss ask — see below)* | allow |
 | `BRANCH_GUARD_OVERRIDE=<reason> git push` *(break-glass on an overlap deny — the policy had already approved this push)* | allow |
