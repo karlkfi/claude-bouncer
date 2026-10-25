@@ -4,7 +4,7 @@ outside the workspace; allow when it only touches workspace files or pipes.
 
 Reads the hook JSON on stdin, emits a PreToolUse decision on stdout.
 """
-import sys, os, json, re, shlex, shutil, fnmatch, collections, functools, tempfile
+import sys, os, json, re, shlex, shutil, fnmatch, collections, tempfile
 
 # The parsing primitives every claude-bouncer guard shares -- lexing, comment
 # and heredoc stripping, substitution scanning, command-head normalising. The
@@ -6589,63 +6589,64 @@ def handle_powershell(data):
     finish(decision, reason, outside, data)
 
 
-_SLUG_UNSAFE_RE = re.compile(r'[^A-Za-z0-9]')
+def session_transcript_cwd(slug, session_id, limit=65536):
+    """The ``cwd`` Claude Code recorded for session ``session_id`` in its
+    transcript, ``~/.claude/projects/<slug>/<session_id>.jsonl``, or None.
 
-
-def _checkout_slugs(path):
-    """The project slugs Claude Code may give a session started in ``path``:
-    every non-alphanumeric character becomes ``-``, for the path as written and
-    as resolved. Only ever applied forward, to a path git already named."""
-    out = {_SLUG_UNSAFE_RE.sub('-', path)}
+    Records are read in order from the first ``limit`` bytes until one carries
+    an absolute ``cwd``; a sample of 62 transcripts had one within 18 KB. The
+    file is Claude Code's write, outside every project root, so a session
+    cannot forge one without an approved write.
+    """
+    cpd = claude_projects_dir()
+    if not (cpd and slug and session_id):
+        return None
     try:
-        out.add(_SLUG_UNSAFE_RE.sub('-', os.path.realpath(path)))
+        with open(os.path.join(cpd, slug, session_id + '.jsonl'), 'rb') as f:
+            while limit > 0:
+                line = f.readline(limit)
+                if not line:
+                    break
+                limit -= len(line)
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                cwd = rec.get('cwd') if isinstance(rec, dict) else None
+                if isinstance(cwd, str) and os.path.isabs(cwd):
+                    return cwd
     except OSError:
         pass
-    return out
-
-
-@functools.lru_cache(maxsize=None)
-def _repo_checkout_roots(common):
-    """Roots of every checkout git records for the repo at ``common``: the main
-    checkout (the parent of a ``.git`` common dir) and each linked worktree,
-    read from ``<common>/worktrees/*/gitdir``. Metadata files only."""
-    roots = []
-    if os.path.basename(common) == '.git':
-        roots.append(os.path.dirname(common))
-    try:
-        names = os.listdir(os.path.join(common, 'worktrees'))
-    except OSError:
-        names = []
-    for name in names:
-        gitdir = _read_git_meta(os.path.join(common, 'worktrees', name, 'gitdir'))
-        if gitdir and gitdir.strip():
-            roots.append(os.path.dirname(gitdir.strip()))
-    return tuple(roots)
+    return None
 
 
 def is_same_repo_session_path(rp, ctx):
-    """True when resolved path ``rp`` is in another session's scratch under the
-    Claude temp root and that session's project slug belongs to a checkout of
-    THIS session's repository.
+    """True when resolved path ``rp`` is in another session's scratch,
+    ``<tmp_root>/<slug>/<session-uuid>/...``, and that session ran in a checkout
+    of THIS session's repository.
 
     Claude Code gives every worktree its own slug, so the same-slug exemption
     in :func:`classify_outside` never reached a dispatcher reading its workers
-    (Q311). Which slugs are the same repository comes from git's common dir,
-    never from decoding a slug: the encoding is lossy, and ``claude-bouncer-foo``
-    would otherwise pass for a worktree of ``claude-bouncer``. The encoding is trusted only once it
-    reproduces this session's own slug from its project root; when Claude Code
-    changes it, or truncates a long path, nothing matches and the read asks.
+    (Q311). The slug is never decoded or encoded: its encoding is many-to-one,
+    so ``git worktree add <base>/other.repo`` would claim ``<base>/other-repo``.
+    Where the session ran comes from its transcript, and which repository that
+    is comes from walking up from there to a ``.git``, the direction git's own
+    backlink points, so metadata written into this repository's
+    ``.git/worktrees/`` cannot claim another one.
     """
-    if not (ctx.session_proj_dir and ctx.session_wt):
+    if not ctx.session_wt:
         return False
     root = ctx.session_tmp_root
     if not rp.startswith(root + os.sep):
         return False
-    slug = rp[len(root) + 1:].split(os.sep, 1)[0]
-    if os.path.basename(ctx.session_proj_dir) not in _checkout_slugs(ctx.proj):
+    parts = rp[len(root) + 1:].split(os.sep)
+    if len(parts) < 2:
         return False
-    return any(slug in _checkout_slugs(r)
-               for r in _repo_checkout_roots(ctx.session_wt['common']))
+    cwd = session_transcript_cwd(parts[0], parts[1])
+    if cwd is None:
+        return False
+    co = _resolve_checkout(os.path.realpath(cwd))
+    return co is not None and co['common'] == ctx.session_wt['common']
 
 
 def main():
