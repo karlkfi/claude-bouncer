@@ -90,6 +90,8 @@ the default `strict` [push policy](#push-guard).
 | `git push` / `git push -u origin HEAD` *(worktree branch)* | allow |
 | `git push --force` *(worktree branch)* | allow |
 | `git push --force-with-lease=other origin HEAD:other` *(rewrites an unprotected branch, lease names the destination)* | allow |
+| `git branch feat/new` then `git push -u origin feat/new` *(a branch this session created while the name was free)* | allow |
+| `git push --force-with-lease=refs/queue-ids/Q42: origin <blob>:refs/queue-ids/Q42` *(a create-only queue-id claim)* | allow |
 | `git push` *(worktree branch; the base moved, but not into the lines this branch edits)* | allow |
 | `git push --dry-run` / `git push --delete origin claude/x` *(nothing lands on the base, so no overlap to have)* | allow |
 | `git push` *(on `release/1.2` — a release branch is diverged from the base on purpose)* | allow |
@@ -511,7 +513,7 @@ variable:
 
 | Policy | Behavior |
 | --- | --- |
-| `strict` *(default)* | **allow** a push of the worktree's own current branch, including a force push of it, and a *leased rewrite* of one other unprotected branch (see below). **ask** before any other push — a *different* branch (`git push origin other`), foreign refspecs (`git push origin HEAD:other`), wildcards, `--all`/`--mirror`, a tag (`git push origin v1.3.0`, `refs/tags/v1.3.0`, `--tags`), or a protected target. |
+| `strict` *(default)* | **allow** a push of the worktree's own current branch, including a force push of it, a *leased rewrite* of one other unprotected branch, a push of a branch this session created, and a create-only queue-id claim (see below). **ask** before any other push — a *different* branch (`git push origin other`), foreign refspecs (`git push origin HEAD:other`), wildcards, `--all`/`--mirror`, a tag (`git push origin v1.3.0`, `refs/tags/v1.3.0`, `--tags`), or a protected target. |
 | `protected` | **ask** before a push whose target is `main`/`master` (including `git push origin main`, `HEAD:main`, deleting `main`, and `--all`/`--mirror`). Any other push defers. Never auto-approves. |
 | `off` | Pushes are not guarded at all. |
 
@@ -571,6 +573,37 @@ protected set: `git push --force-with-lease=main origin HEAD:main` asks like any
 other push at `main`, and widening
 [`BRANCH_GUARD_PROTECTED_BRANCHES`](#configuration) withdraws the auto-approve
 for whatever you add.
+
+**Branches this session created.** A session that makes a branch with
+`git branch <new>`, `git switch -c`, `git checkout -b` or `git worktree add -b`
+and then pushes it from another worktree branch used to be asked, because the
+guard could not tell that branch from a peer's. Creation is the one moment
+that shows ownership, so branch-guard records it: the `PreToolUse` hook notes
+each name the command is about to create that has no local branch and no
+remote-tracking ref, and the `PostToolUse` hook for that same tool call (matched
+by `tool_use_id`) grants the ones that exist afterwards, for 8 hours and for that session only, under
+`~/.claude/branch-guard/session-grants/`. A push to a granted branch then
+allows like the worktree branch's, from the worktree branch or from itself;
+a deletion, a third branch as the source, a protected name, and another
+session still ask. A creation behind a `cd` records nothing, since the guard
+does not follow it to the repository it lands in. The residual is a peer's
+branch of the same name that this clone has not fetched: the name looks free,
+and a force push of it would overwrite the peer's, as a force push of the
+worktree branch would.
+
+**Queue-id claims.** `git push --force-with-lease=refs/queue-ids/QN: origin
+<src>:refs/queue-ids/QN` allows. The empty expectation tells the remote the
+ref must not exist, so the push cannot overwrite a claim. Every other spelling
+into the namespace asks, including the ones that defeat the lease: a `+`
+refspec, `--force`, `-f` (bundled too), a lease expecting a commit, and a
+second lease after a first one naming the same ref, since git applies the
+first.
+
+Both of these allows, a claim and a push of a branch the session created,
+also ask when the push carries a long option the guard does not read exactly.
+git accepts any unambiguous abbreviation, so `--force-w=` is a lease the guard
+would not see; ahead of the create-only lease it overwrote an existing claim
+(git 2.55).
 
 **Overlap with a moved base.** An auto-approved push is in bounds. That says
 nothing about the branch still being built on what it thinks it is. When the base

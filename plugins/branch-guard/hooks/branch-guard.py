@@ -115,7 +115,7 @@ from bouncer_parse import (                                   # noqa: E402
     ASSIGN_SUBSCRIPT, PUNCT_CHARS, is_assignment, lex, note_discarded_writes,
     split_assignment, split_operator_runs, strip_sh_keywords,
 )
-from bouncer_grants import record_grants                      # noqa: E402
+from bouncer_grants import load_grants, record_grants         # noqa: E402
 from bouncer_session import claude_tmp_root, is_session_tmp_path  # noqa: E402
 from bouncer_wrappers import WRAPPER_VALUE_OPTS as _VALUE_OPTS, wrapper_option  # noqa: E402
 
@@ -387,6 +387,17 @@ NO_FORCE_WITH_LEASE = '--no-force-with-lease'
 # from the branch already being pushed, and `push.followTags` can enable the same
 # behavior from config where the hook can't see it — see README "Limitations".
 PUSH_TAG_FLAGS = {'--tags'}
+
+# Long options the push walk reads exactly. git also accepts any unambiguous
+# abbreviation (`--force-w=` is `--force-with-lease=`), which the walk does
+# not expand, so an owned-branch push or a queue-id claim carrying any other
+# long option asks: measured on git 2.55, an abbreviated lease ahead of the
+# create-only one overwrote an existing claim.
+PUSH_READ_LONG_OPTS = frozenset({
+    FORCE_WITH_LEASE, NO_FORCE_WITH_LEASE, '--force', '--delete',
+    '--set-upstream', '--quiet', '--verbose', '--dry-run', '--no-verify',
+    '--verify', '--atomic', '--porcelain', '--progress',
+}) | PUSH_VALUE_OPTS | PUSH_MANY_FLAGS | PUSH_TAG_FLAGS
 
 # Push-guard policy (env var BRANCH_GUARD_PUSH_POLICY):
 #   strict (default) — auto-approve a push of the worktree's own current branch
@@ -992,6 +1003,131 @@ def record_worktree_grant(data):
                   'approved `git worktree add`')
 
 
+# --- Branches this session created (Q309) ----------------------------------
+# A push of a branch other than the worktree's asks, because the guard cannot
+# tell a branch the session started from a peer's. Creation is the one moment
+# that shows ownership, and only when the name was free: so the PreToolUse
+# side notes each name a command is about to create that has no local branch
+# and no remote-tracking ref, and the PostToolUse side grants the ones that
+# now exist. A push to a granted branch then allows the way the worktree
+# branch's does. Keyed by the repository's common dir, since worktrees share
+# branches and two repositories do not.
+
+BRANCH_NAMESPACE = 'branch-guard'
+PENDING_TTL = 600             # bounds the store; the tool_use_id is what scopes a mark
+
+
+def created_branch_name(inv):
+    """The branch a creating form names — `checkout -b`, `switch -c` or
+    `--create`, `worktree add -b`, or a flag-less `git branch <new> [<start>]`
+    — or None. The -B/-C forms reset a name that may exist, so they show no
+    ownership; a protected name is never granted."""
+    sub, args = inv['sub'], inv['args'] or []
+    if sub == 'checkout':
+        name = force_create_name(args, 'b', {'b', 'B'})
+    elif sub == 'switch':
+        name = force_create_name(args, 'c', {'c', 'C'}, '--create')
+    elif sub == 'worktree' and args[:1] == ['add']:
+        name = force_create_name(args[1:], 'b', {'b', 'B'})
+    elif sub == 'branch' and 1 <= len(args) <= 2 \
+            and not any(a.startswith('-') for a in args):
+        name = args[0]
+    else:
+        return None
+    if not name or set(name) & NON_LITERAL_PATH_CHARS or is_protected(name):
+        return None
+    return name
+
+
+def branch_creations(data):
+    """(cwd, name) for each branch a Bash command creates. Empty when the
+    command changes directory anywhere: this walk does not follow a `cd`, and
+    a grant keyed to the wrong repository is a grant on a peer's branch."""
+    cmd = (data.get('tool_input') or {}).get('command') or ''
+    try:
+        tokens = tokenize(strip_heredocs(cmd))
+    except ValueError:
+        return []
+    cwd = data.get('cwd') or os.getcwd()
+    out = []
+    for seg, _writes, _marks in command_segments(tokens):
+        if cd_destination(seg, cwd)[0] or seg[:1] in (['pushd'], ['popd']):
+            return []
+        inv = parse_invocation(seg)
+        if not inv or inv.get('prog') != 'git' or inv['wrapped']:
+            continue
+        name = created_branch_name(inv)
+        if name is None:
+            continue
+        here = invocation_cwd(cwd, inv)
+        if here is None:
+            return []
+        out.append((here, name))
+    return out
+
+
+def git_common_dir(cwd):
+    r = run_git(cwd, 'rev-parse', '--path-format=absolute', '--git-common-dir')
+    if r is None or r.returncode != 0 or not r.stdout.strip():
+        return None
+    return os.path.realpath(r.stdout.strip())
+
+
+def remote_tracks(cwd, name):
+    """True/False if some remote-tracking ref carries <name>; None if unknown."""
+    r = run_git(cwd, 'for-each-ref', '--format=%(refname)',
+                'refs/remotes/*/' + name)
+    if r is None or r.returncode != 0:
+        return None
+    return bool(r.stdout.strip())
+
+
+def note_branch_creations(data):
+    """PreToolUse: mark each name this command is about to create while it is
+    still free. Nothing is granted here — the command has not run. The mark
+    carries the tool_use_id, so only this command's PostToolUse can redeem
+    it: a Pre whose command never ran leaves nothing a later one can use."""
+    tuid = data.get('tool_use_id')
+    if not tuid:
+        return
+    pending = set()
+    for here, name in branch_creations(data):
+        common = git_common_dir(here)
+        if common and branch_exists(here, name) is False \
+                and remote_tracks(here, name) is False:
+            pending.add(f'pending:{tuid}:{common}:{name}')
+    record_grants(BRANCH_NAMESPACE, data.get('session_id'), pending,
+                  'free before the creating command ran', ttl=PENDING_TTL)
+
+
+def record_branch_grants(data):
+    """PostToolUse: grant each name that was free before the command and
+    exists after it."""
+    sid, tuid = data.get('session_id'), data.get('tool_use_id')
+    if not tuid:
+        return
+    pending = load_grants(BRANCH_NAMESPACE, sid, ttl=PENDING_TTL)
+    made = set()
+    for here, name in branch_creations(data):
+        common = git_common_dir(here)
+        if common and f'pending:{tuid}:{common}:{name}' in pending \
+                and branch_exists(here, name) is True:
+            made.add(f'created:{common}:{name}')
+    record_grants(BRANCH_NAMESPACE, sid, made, 'created by this session')
+
+
+def owned_branches(cwd, session_id):
+    """Names this session created in the repository at <cwd>. Reads the store
+    first, so a session that created nothing costs no git call."""
+    granted = [t for t in load_grants(BRANCH_NAMESPACE, session_id)
+               if t.startswith('created:')]
+    common = git_common_dir(cwd) if granted else None
+    if common is None:
+        return frozenset()
+    prefix = f'created:{common}:'
+    return frozenset(t[len(prefix):] for t in granted if t.startswith(prefix))
+
+
 def sudo_login(tok):
     """True if a sudo option word sets `-i`, which runs the command from the
     target user's home directory rather than from this one."""
@@ -1346,7 +1482,7 @@ def lease_target(token, current):
     return None if glob or other is not None else branch
 
 
-def push_decision(args, current, policy):
+def push_decision(args, current, policy, owned=frozenset(), off_branch=None):
     """Given the tokens after `push`, the worktree's current branch, and the
     policy, return (decision, reason) where decision is 'allow', 'ask',
     'ask-shared' (a protected target), or None (defer). strict auto-approves a
@@ -1356,15 +1492,23 @@ def push_decision(args, current, policy):
     only asks on a protected target. Leans toward
     asking (strict) / deferring (protected) on parsing uncertainty, never toward
     allowing. No push verdict is liftable by the break-glass — a push leaves
-    this machine, which puts every form of it outside OVERRIDABLE_GIT."""
+    this machine, which puts every form of it outside OVERRIDABLE_GIT.
+
+    `owned` names branches this session created (`owned_branches`); a push to
+    one allows like a push of the worktree branch. A queue-id claim allows in
+    its create-only form alone (`queue_claim`). When every refspec is one of
+    those two and none sends the worktree branch, `off_branch` gets an entry:
+    the overlap check measures HEAD, which such a push does not send."""
     positionals, many, tags, delete, i = [], False, False, False, 0
-    leased = set()
+    leased, leases, forced, unread = set(), [], False, False
     while i < len(args):
         t = args[i]
         if t == '--':
             positionals += args[i + 1:]
             break
         if t.startswith('-'):
+            if t.startswith('--') and t.partition('=')[0] not in PUSH_READ_LONG_OPTS:
+                unread = True
             if t in PUSH_MANY_FLAGS:
                 many = True
             if t in PUSH_TAG_FLAGS:
@@ -1373,6 +1517,14 @@ def push_decision(args, current, policy):
                 delete = True
             if t == NO_FORCE_WITH_LEASE:
                 leased.clear()
+                leases.clear()
+            if t.startswith(FORCE_WITH_LEASE + '='):
+                ref, colon, expect = t[len(FORCE_WITH_LEASE) + 1:].partition(':')
+                leases.append((ref, expect if colon else None))
+            # `+`, `--force` and `-f` (bundled too) override a lease: measured
+            # on git 2.55, each overwrote a claim the lease alone refused.
+            if t == '--force' or (not t.startswith('--') and 'f' in t[1:]):
+                forced = True
             target = lease_target(t, current)
             if target is not None:
                 leased.add(target)
@@ -1394,8 +1546,14 @@ def push_decision(args, current, policy):
     refspecs = positionals[1:] if positionals else []
     pairs = ([parse_refspec(s, current, delete) for s in refspecs]
              if refspecs else [(current, current, False, None)])
+    claims = [not delete and not forced and not unread and queue_claim(s, leases)
+              for s in refspecs] or [False]
+    fresh = 0
 
-    for src_b, dst_b, glob, other in pairs:
+    for (src_b, dst_b, glob, other), claim in zip(pairs, claims):
+        if claim:
+            fresh += 1
+            continue
         if glob:
             return ('ask', "Push uses a wildcard refspec (multiple branches)")
         if dst_b and is_protected(dst_b):
@@ -1424,14 +1582,39 @@ def push_decision(args, current, policy):
             # asks — nothing there says the session has seen what it sends.
             leased_rewrite = (not delete and dst_b in leased
                               and src_b in (current, dst_b))
-            if dst_b is not None and dst_b != current and not leased_rewrite:
+            # A branch this session created is the session's the way the
+            # worktree branch is, so the same third-branch rule applies.
+            owned_push = (not delete and not unread and dst_b in owned
+                          and src_b in (current, dst_b))
+            if dst_b is not None and dst_b != current \
+                    and not (leased_rewrite or owned_push):
                 return ('ask', f"Push targets '{dst_b}', not the worktree branch '{current}'")
-            if src_b is not None and src_b != current and not leased_rewrite:
+            if src_b is not None and src_b != current \
+                    and not (leased_rewrite or owned_push):
                 return ('ask', f"Push sends local branch '{src_b}', not the worktree branch '{current}'")
+            if owned_push and src_b != current:
+                fresh += 1
 
     if policy == 'strict':
+        if off_branch is not None and fresh == len(pairs):
+            off_branch.append(True)
         return ('allow', f"Push of worktree branch '{current}' — auto-approved.")
     return (None, None)
+
+
+QUEUE_ID_RE = re.compile(r'refs/queue-ids/Q[0-9]+')
+
+
+def queue_claim(spec, leases):
+    """True for `<src>:refs/queue-ids/QN` when the first lease naming that
+    ref expects it absent (`--force-with-lease=refs/queue-ids/QN:`). The
+    remote then refuses the push if the claim exists, so it cannot overwrite
+    one. git applies the first lease for a ref (measured on 2.55), so a later
+    one naming a commit does not reopen it; the caller rules out `--force`."""
+    src, colon, dst = spec.partition(':')
+    if not colon or not src or src.startswith('+') or not QUEUE_ID_RE.fullmatch(dst):
+        return False
+    return next((e for r, e in leases if r == dst), None) == ''
 
 
 def push_policy():
@@ -1945,7 +2128,11 @@ def classify_git(sub, args, branch, policy, cwd, probe, mode='',
     if sub == 'push':
         if policy == 'off' or branch is None:
             return ('defer', None)
-        decision, reason = push_decision(args, branch, policy)
+        off_branch = []
+        decision, reason = push_decision(
+            args, branch, policy,
+            owned_branches(cwd, session_id) if probe else frozenset(),
+            off_branch)
         # An auto-approve says the push is in bounds; it says nothing about the
         # branch still being built on what it thinks it is. Checked ONLY on a
         # would-be `allow`, so `protected` and `off` never run it and no verdict
@@ -1962,7 +2149,8 @@ def classify_git(sub, args, branch, policy, cwd, probe, mode='',
         # it: these read whichever tree the caller resolved for this segment,
         # so a target it could not resolve has to stand them down rather than
         # measure the tree the push is not coming from.
-        if decision == 'allow' and probe and not skips_base(flags, short):
+        if decision == 'allow' and probe and not off_branch \
+                and not skips_base(flags, short):
             base, paths = push_overlap(cwd, branch)
             if paths:
                 return ('deny-rebase', push_overlap_reason(base, paths))
@@ -2775,6 +2963,7 @@ def main():
     # PostToolUse only records; it never decides, and never emits.
     if data.get('hook_event_name') == 'PostToolUse':
         record_worktree_grant(data)
+        record_branch_grants(data)
         return
 
     tool = data.get('tool_name') or ''
@@ -2799,6 +2988,7 @@ def main():
         invs = [parse_invocation(seg) for seg, _, _ in segments]
         if not any(invs):
             return                                 # no git/gh command -> defer
+        note_branch_creations(data)
 
         policy = push_policy()
         cwd = data.get('cwd') or os.getcwd()
