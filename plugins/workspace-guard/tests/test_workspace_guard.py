@@ -9301,6 +9301,164 @@ class SiblingSessionScratchE2ETests(unittest.TestCase):
                       out["hookSpecificOutput"]["permissionDecisionReason"])
 
 
+class SameRepoSessionScratchE2ETests(unittest.TestCase):
+    """Q311: Claude Code files each worktree's sessions under a slug of its own,
+    so the #61 read exemption has to reach every checkout of the repository —
+    and only those. Builds a real repo with two linked worktrees and an
+    unrelated repo, plants a session for each under the real Claude temp root,
+    and records where each ran in a transcript under a fake home. The slugs are
+    arbitrary on purpose: the hook must never read meaning into one."""
+
+    def _git(self, args, cwd):
+        env = os.environ.copy()
+        env.update({
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_SYSTEM": os.devnull,
+            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+            "GIT_TERMINAL_PROMPT": "0",
+        })
+        subprocess.run(["git"] + args, cwd=cwd, env=env,
+                       capture_output=True, text=True, check=True)
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        base = os.path.realpath(self._tmp.name)
+        self.base = base
+        self.main = os.path.join(base, "repo")
+        os.mkdir(self.main)
+        self._git(["init"], self.main)
+        with open(os.path.join(self.main, "in.txt"), "w") as f:
+            f.write("x\n")
+        self._git(["add", "."], self.main)
+        self._git(["commit", "-m", "init"], self.main)
+        self.wt = os.path.join(base, "repo", ".claude", "worktrees", "wt-a")
+        self._git(["worktree", "add", "-b", "feat-a", self.wt], self.main)
+        self.peer = os.path.join(base, "elsewhere", "wt-b")
+        self._git(["worktree", "add", "-b", "feat-b", self.peer], self.main)
+        self.other = os.path.join(base, "other-repo")
+        os.mkdir(self.other)
+        self._git(["init"], self.other)
+        self.home = os.path.join(base, "home")
+        self.root = guard.claude_tmp_root()
+        self.tag = "%012x" % os.getpid()
+        self.sessions = {}
+        self.planted = []
+        for name, path in (("main", self.main), ("wt", self.wt),
+                           ("peer", self.peer), ("other", self.other)):
+            self._plant(name, path)
+
+    def _plant(self, name, cwd, transcript=True):
+        sid = "%s-1111-2222-3333-%s" % (name[:8].ljust(8, "x"), self.tag)
+        slug = "-guardtest-q311-%s-%d" % (name, os.getpid())
+        slug_dir = os.path.join(self.root, slug)
+        os.makedirs(os.path.join(slug_dir, sid, "tasks"), exist_ok=True)
+        self.planted.append(slug_dir)
+        if transcript:
+            tdir = os.path.join(self.home, ".claude", "projects", slug)
+            os.makedirs(tdir, exist_ok=True)
+            with open(os.path.join(tdir, sid + ".jsonl"), "w") as f:
+                f.write('{"type":"summary"}\n')
+                f.write(json.dumps({"type": "user", "cwd": cwd}) + "\n")
+        self.sessions[name] = (sid, os.path.join(slug_dir, sid, "tasks",
+                                                 "out.output"))
+
+    def tearDown(self):
+        for d in self.planted:
+            shutil.rmtree(d, ignore_errors=True)
+        self._tmp.cleanup()
+
+    def _expect(self, cmd, expected, proj, session):
+        out = run_hook(cmd, proj, project_dir=proj,
+                       session_id=self.sessions[session][0],
+                       env_extra={"HOME": self.home, "USERPROFILE": self.home})
+        self.assertIsNotNone(out, f"expected a decision, got defer for: {cmd!r}")
+        got = out["hookSpecificOutput"]["permissionDecision"]
+        self.assertEqual(
+            got, expected,
+            f"expected {expected!r} for {cmd!r}; got {got!r} "
+            f"(reason: {out['hookSpecificOutput'].get('permissionDecisionReason')!r})")
+
+    def _out(self, session):
+        return sh(self.sessions[session][1])
+
+    @staticmethod
+    def _rewrite(path, text):
+        # git hides a worktree's .git file on Windows, where opening a hidden
+        # file for writing is refused and removing one is not.
+        os.remove(path)
+        with open(path, "w") as f:
+            f.write(text)
+
+    def test_worktree_session_reads_peer_worktree_scratch(self):
+        self._expect(f"tail -20 {self._out('peer')}", "allow", self.wt, "wt")
+
+    def test_worktree_session_reads_main_checkout_scratch(self):
+        self._expect(f"cat {self._out('main')}", "allow", self.wt, "wt")
+
+    def test_main_checkout_session_reads_worktree_scratch(self):
+        self._expect(f"grep -q EXIT= {self._out('wt')}", "allow",
+                     self.main, "main")
+
+    def test_other_repo_scratch_still_asks(self):
+        self._expect(f"cat {self._out('other')}", "ask", self.main, "main")
+        self._expect(f"cat {self._out('other')}", "ask", self.wt, "wt")
+
+    def test_worktree_whose_slug_collides_with_other_repo_claims_nothing(self):
+        # Review of #279: `other.repo` and `other-repo` share an encoding.
+        self._git(["worktree", "add", "-b", "c",
+                   os.path.join(self.base, "other.repo")], self.main)
+        self._expect(f"cat {self._out('other')}", "ask", self.main, "main")
+
+    def test_planted_worktree_metadata_claims_nothing(self):
+        # Review of #279: a gitdir file git never wrote, naming another repo.
+        zz = os.path.join(self.main, ".git", "worktrees", "zz")
+        os.makedirs(zz)
+        with open(os.path.join(zz, "gitdir"), "w") as f:
+            f.write(os.path.join(self.other, ".git") + "\n")
+        self._expect(f"cat {self._out('other')}", "ask", self.main, "main")
+
+    def test_forged_own_checkout_identity_claims_nothing(self):
+        # Review of #279 at 75b8ed4: this session's .git is inside its own
+        # root, so two silent writes could name another repo's common dir.
+        fake = os.path.join(self.wt, "fakeadmin")
+        os.mkdir(fake)
+        with open(os.path.join(fake, "commondir"), "w") as f:
+            f.write(os.path.join(self.other, ".git") + "\n")
+        self._rewrite(os.path.join(self.wt, ".git"), "gitdir: fakeadmin\n")
+        self._expect(f"cat {self._out('other')}", "ask", self.wt, "wt")
+
+    def test_forged_admin_with_its_own_backlink_claims_nothing(self):
+        # The gitdir backlink alone is writable too when the admin dir is
+        # in-root; only git's layout, <common>/worktrees/<name>, pins it.
+        fake = os.path.join(self.wt, "fakeadmin")
+        os.mkdir(fake)
+        with open(os.path.join(fake, "commondir"), "w") as f:
+            f.write(os.path.join(self.other, ".git") + "\n")
+        with open(os.path.join(fake, "gitdir"), "w") as f:
+            f.write(os.path.join(self.wt, ".git") + "\n")
+        self._rewrite(os.path.join(self.wt, ".git"), "gitdir: fakeadmin\n")
+        self._expect(f"cat {self._out('other')}", "ask", self.wt, "wt")
+
+    def test_main_checkout_with_linked_dotgit_claims_nothing(self):
+        linked = os.path.join(self.base, "linked")
+        os.mkdir(linked)
+        os.symlink(os.path.join(self.other, ".git"), os.path.join(linked, ".git"))
+        self._expect(f"cat {self._out('other')}", "ask", linked, "main")
+
+    def test_session_whose_cwd_is_gone_asks(self):
+        self._plant("gone", os.path.join(self.main, "removed-dir"))
+        self._expect(f"cat {self._out('gone')}", "ask", self.wt, "wt")
+
+    def test_session_without_transcript_asks(self):
+        self._plant("bare", self.peer, transcript=False)
+        self._expect(f"cat {self._out('bare')}", "ask", self.wt, "wt")
+
+    def test_write_into_peer_worktree_scratch_not_exempt(self):
+        self._expect(f"cp ./in.txt {self._out('peer')}", "ask", self.wt, "wt")
+        self._expect(f"cat in.txt > {self._out('peer')}", "ask", self.wt, "wt")
+
+
 class LiteralAssignmentValueTests(unittest.TestCase):
     """Purity check for assignment RHS values (issue 58)."""
 
