@@ -4,7 +4,7 @@ outside the workspace; allow when it only touches workspace files or pipes.
 
 Reads the hook JSON on stdin, emits a PreToolUse decision on stdout.
 """
-import sys, os, json, re, shlex, shutil, fnmatch, collections, tempfile
+import sys, os, json, re, shlex, shutil, fnmatch, collections, functools, tempfile
 
 # The parsing primitives every claude-bouncer guard shares -- lexing, comment
 # and heredoc stripping, substitution scanning, command-head normalising. The
@@ -3503,6 +3503,11 @@ def classify_outside(rp, ctx, is_read):
     # extras). Write access is never exempt here.
     if is_read and any(path_at_or_under(rp, p) for p in ctx.read_prefixes):
         return None
+    # Read-only: skills and notes trees Claude Code wrote, resolved only for a
+    # read that would otherwise ask. (Q311)
+    if is_read and any(path_at_or_under(rp, p)
+                       for p in installed_read_trees(ctx.session_tmp_root)):
+        return None
     # Read-only: a sibling session of the SAME project sharing the scratch parent
     # (dispatcher tails workers). (#61)
     if is_read and ctx.session_proj_dir \
@@ -6627,6 +6632,40 @@ def _checkout_backlinked(co):
     if not os.path.isabs(back):
         back = os.path.join(co['admin'], back)
     return os.path.realpath(back) == os.path.realpath(dotgit)
+
+
+def _real_dir(path):
+    """Realpath of ``path`` when it is a directory and not itself a symlink,
+    else None. A linked root would let one ``ln -s`` move the exemption onto
+    any directory, the laundering :func:`installed_skill_targets` refuses."""
+    try:
+        if os.path.isdir(path) and not os.path.islink(path):
+            return os.path.realpath(path)
+    except OSError:
+        pass
+    return None
+
+
+@functools.lru_cache(maxsize=None)
+def installed_read_trees(tmp_root):
+    """Read-only trees written by Claude Code rather than by anything in a
+    session, beside :func:`claude_code_dirs` (Q311):
+
+    * ``<tmp_root>/bundled-skills/``, where Claude Code unpacks the skills it
+      ships. It carries no session id, so neither temp exemption reaches it.
+    * ``~/Library/Application Support/Claude/side-session-notes/``, the desktop
+      app's shared notes folder. The app adds it to the session as a working
+      directory, but the hook input names no additional directories (checked
+      against 2.1.308), so the guard cannot learn that from the payload.
+
+    Resolved lazily, once per process, only for a read that would otherwise ask.
+    """
+    candidates = [os.path.join(tmp_root, 'bundled-skills')]
+    home = resolved_home()
+    if home:
+        candidates.append(os.path.join(home, 'Library', 'Application Support',
+                                       'Claude', 'side-session-notes'))
+    return tuple(rp for rp in map(_real_dir, candidates) if rp)
 
 
 def main():

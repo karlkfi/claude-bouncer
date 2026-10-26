@@ -9459,6 +9459,86 @@ class SameRepoSessionScratchE2ETests(unittest.TestCase):
         self._expect(f"cat in.txt > {self._out('peer')}", "ask", self.wt, "wt")
 
 
+class InstalledReadTreesE2ETests(unittest.TestCase):
+    """Q311: bundled skills and the desktop app's side-session notes are exempt
+    for reads only. Builds a fake home under the real one, so a path that is NOT
+    exempt reads as an outside ``ask`` rather than a host-temp deny."""
+
+    def setUp(self):
+        home = guard.resolved_home()                      # Q43: not $HOME
+        self.assertTrue(home and os.path.isdir(home))
+        self._tmp = tempfile.TemporaryDirectory(dir=home)
+        base = os.path.realpath(self._tmp.name)
+        self.workspace = os.path.join(base, "ws")
+        os.mkdir(self.workspace)
+        with open(os.path.join(self.workspace, "in.txt"), "w") as f:
+            f.write("x\n")
+        self.home = os.path.join(base, "home")
+        self.notes = os.path.join(self.home, "Library", "Application Support",
+                                  "Claude", "side-session-notes")
+        os.makedirs(os.path.join(self.notes, "family"))
+        self.env = {"HOME": self.home, "USERPROFILE": self.home}
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _expect(self, cmd, expected, **env):
+        out = run_hook(cmd, self.workspace, env_extra=dict(self.env, **env))
+        self.assertIsNotNone(out, f"expected a decision, got defer for: {cmd!r}")
+        got = out["hookSpecificOutput"]["permissionDecision"]
+        self.assertEqual(
+            got, expected,
+            f"expected {expected!r} for {cmd!r}; got {got!r} "
+            f"(reason: {out['hookSpecificOutput'].get('permissionDecisionReason')!r})")
+
+    def test_side_session_notes_read_allowed(self):
+        self._expect(f"cat {sh(os.path.join(self.notes, 'family', 'n.md'))}",
+                     "allow")
+
+    def test_side_session_notes_write_still_asks(self):
+        self._expect(
+            f"cp ./in.txt {sh(os.path.join(self.notes, 'family', 'n.md'))}",
+            "ask")
+
+    def test_linked_notes_root_is_not_exempt(self):
+        real = os.path.join(self.home, "elsewhere")
+        os.mkdir(real)
+        shutil.rmtree(self.notes)
+        os.symlink(real, self.notes)
+        self._expect(f"cat {sh(os.path.join(real, 'n.md'))}", "ask")
+
+    def test_go_source_is_opt_in_and_go_never_runs(self):
+        # The first `go` on PATH can be any file a session wrote, so the hook
+        # neither runs it nor guesses where Go lives.
+        goroot = os.path.join(self.home, "goroot")
+        os.makedirs(os.path.join(goroot, "src", "runtime"))
+        os.mkdir(os.path.join(goroot, "bin"))
+        ran = os.path.join(self.home, "go-ran")
+        with open(os.path.join(goroot, "bin", "go"), "w") as f:
+            f.write("#!/bin/sh\ntouch %s\n" % sh(ran))
+        os.chmod(os.path.join(goroot, "bin", "go"), 0o755)
+        with open(os.path.join(goroot, "bin", "go.cmd"), "w") as f:
+            f.write('@type nul > "%s"\r\n' % ran)
+        path = os.path.join(goroot, "bin") + os.pathsep + os.environ.get("PATH", "")
+        target = sh(os.path.join(goroot, "src", "runtime", "x.go"))
+        self._expect(f"cat {target}", "ask", PATH=path)
+        self.assertFalse(os.path.exists(ran), "the hook ran go")
+        self._expect(f"cat {target}", "allow", PATH=path,
+                     WORKSPACE_GUARD_READ_ALLOW_PREFIXES=os.path.join(goroot, "src"))
+
+    def test_bundled_skills_read_allowed_write_asks(self):
+        root = os.path.join(guard.claude_tmp_root(), "bundled-skills")
+        made_root = not os.path.isdir(root)
+        skill = os.path.join(root, "guardtest-%d" % os.getpid())
+        os.makedirs(skill, exist_ok=True)
+        try:
+            target = sh(os.path.join(skill, "SKILL.md"))
+            self._expect(f"cat {target}", "allow")
+            self._expect(f"cp ./in.txt {target}", "ask")
+        finally:
+            shutil.rmtree(root if made_root else skill, ignore_errors=True)
+
+
 class LiteralAssignmentValueTests(unittest.TestCase):
     """Purity check for assignment RHS values (issue 58)."""
 
