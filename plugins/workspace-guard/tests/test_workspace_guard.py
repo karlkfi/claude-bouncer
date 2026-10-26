@@ -7962,9 +7962,11 @@ class SuppressionEscalationTests(unittest.TestCase):
     )
 
     def test_scoped_signals_escalate_where_defer_runs(self):
-        for cmd in self.SCOPED:
-            for mode, expected in self.ESCALATING:
-                self._decision(cmd, expected, permission_mode=mode)
+        # A `sh -c` body splits on who is at the prompt; a kill has a rewrite
+        # the reason can carry, so it denies in every escalating mode (Q310).
+        for mode, expected in self.ESCALATING:
+            self._decision(self.SCOPED[0], expected, permission_mode=mode)
+            self._decision(self.SCOPED[1], "deny", permission_mode=mode)
 
     def test_scoped_signals_keep_deferring_where_defer_blocks(self):
         # The other half of the mode condition. Escalating here would spend a
@@ -8072,14 +8074,86 @@ class SuppressionEscalationTests(unittest.TestCase):
         self.assertIn("WORKSPACE_GUARD_ESCALATE=off", reason)
 
     def test_the_kill_reason_names_the_kill_rewrite(self):
-        reason = self._decision(self.SCOPED[1], "deny",
-                                permission_mode="bypassPermissions")
-        self.assertIn("pgrep -fl", reason)
+        # The pid is not literal here, so the reason has to say how to find
+        # one as well as where to run it.
+        for cmd in (self.SCOPED[1], "cat in.txt; kill $pid"):
+            for mode in ("auto", "bypassPermissions"):
+                reason = self._decision(cmd, "deny", permission_mode=mode)
+                self.assertIn("pgrep -fl", reason)
+                self.assertIn("`kill <pid>` as its own call", reason)
+
+    def test_a_literal_pid_kill_is_told_to_split_and_the_split_clears(self):
+        # The pid is already literal here, so "signal the literal pid" alone
+        # would hand back the command it just refused. What the hook cannot
+        # vouch for is the string as a whole, and running the kill on its own
+        # is the rewrite that clears.
+        for cmd in ("cat in.txt; kill 12345", "cat in.txt; kill -0 12345"):
+            for mode in ("auto", "bypassPermissions"):
+                reason = self._decision(cmd, "deny", permission_mode=mode)
+                self.assertIn("`kill <pid>` as its own call", reason)
+        for mode, _ in self.ESCALATING:
+            self._decision("kill 12345", "defer", permission_mode=mode)
+            self._decision("cat in.txt", "allow", permission_mode=mode)
 
     def test_the_interpreter_reason_names_the_repo_resident_rewrite(self):
         reason = self._decision(self.INTERPRETED, "ask", permission_mode="auto",
                                 scope="all")
         self.assertIn("inside the project root", reason)
+
+    # --- the override, and which signals it reaches (Q310) -------------------
+
+    REWRITABLE = (
+        "git ls-files | xargs grep foo",                            # wrapper
+        "cat in.txt; grep foo in.txt | xargs kill",                 # kill
+    )
+    OVERRIDE = "WORKSPACE_GUARD_OVERRIDE=q310 "
+
+    def test_a_rewritable_signal_denies_with_its_fix_and_the_override(self):
+        for cmd in self.REWRITABLE:
+            for mode in ("auto", "acceptEdits"):
+                reason = self._decision(cmd, "deny", permission_mode=mode)
+                self.assertIn("Fix:", reason)
+                self.assertIn("prefix the command with "
+                              "WORKSPACE_GUARD_OVERRIDE=<reason>", reason)
+                # A deny reaches the model, and the model cannot approve it.
+                self.assertNotIn("approve this one", reason)
+
+    def test_the_override_downgrades_a_rewritable_deny_to_ask(self):
+        for cmd in self.REWRITABLE:
+            for mode in ("auto", "acceptEdits"):
+                reason = self._decision(self.OVERRIDE + cmd, "ask",
+                                        permission_mode=mode)
+                self.assertIn("WORKSPACE_GUARD_OVERRIDE is set (q310)", reason)
+
+    def test_the_override_clears_nothing(self):
+        # Allowing would run a body the hook says it cannot read, on the
+        # caller's word; the most the override buys is a person's look.
+        for cmd in self.REWRITABLE + self.SCOPED:
+            for mode, _ in self.ESCALATING:
+                out = self._run(self.OVERRIDE + cmd, mode)
+                self.assertIsNotNone(out, cmd)
+                self.assertNotEqual(
+                    "allow", out["hookSpecificOutput"]["permissionDecision"])
+
+    def test_bypass_keeps_its_deny_under_the_override(self):
+        # An `ask` there has nobody to answer it (Q210).
+        for cmd in self.REWRITABLE + self.SCOPED:
+            self._decision(self.OVERRIDE + cmd, "deny",
+                           permission_mode="bypassPermissions")
+
+    def test_the_override_moves_nothing_for_an_unrewritable_body(self):
+        # `sh -c` and interpreter code already ask where a person is present.
+        for mode in ("auto", "acceptEdits"):
+            self._decision(self.OVERRIDE + self.SCOPED[0], "ask",
+                           permission_mode=mode)
+            self._decision(self.OVERRIDE + self.INTERPRETED, "ask",
+                           permission_mode=mode, scope="all")
+
+    def test_the_override_still_defers_where_defer_blocks(self):
+        for cmd in self.REWRITABLE:
+            for mode in self.DEFERRING:
+                self._decision(self.OVERRIDE + cmd, "defer",
+                               permission_mode=mode)
 
 
 class ShellCEscalationReadsOnlyUnreachableBodiesTests(unittest.TestCase):
@@ -8180,7 +8254,7 @@ class NestedSignalOutranksTheInterpreterLabelTests(unittest.TestCase):
             out = self._run(cmd, "auto")
             self.assertIsNotNone(out, cmd)
             self.assertEqual(
-                "ask", out["hookSpecificOutput"]["permissionDecision"], cmd)
+                "deny", out["hookSpecificOutput"]["permissionDecision"], cmd)
 
     def test_the_reason_names_the_kill_rather_than_the_body(self):
         out = self._run(self.WRAPPED_KILL[0], "auto")
@@ -8240,9 +8314,8 @@ class PowerShellSuppressionEscalationTests(unittest.TestCase):
     INTERPRETED = "Get-Content .\\in.txt; python3 -c 'import os'"
 
     def test_a_kill_escalates_where_defer_runs(self):
-        for mode, expected in (("auto", "ask"), ("acceptEdits", "ask"),
-                               ("bypassPermissions", "deny")):
-            self._decision(self.KILL, expected, permission_mode=mode)
+        for mode in ("auto", "acceptEdits", "bypassPermissions"):
+            self._decision(self.KILL, "deny", permission_mode=mode)
 
     def test_a_kill_keeps_deferring_where_defer_blocks(self):
         for mode in ("manual", "dontAsk", "plan", None):
@@ -8256,9 +8329,14 @@ class PowerShellSuppressionEscalationTests(unittest.TestCase):
     def test_the_kill_reason_names_the_powershell_rewrite(self):
         # The bash rewrite (`pgrep -fl`) is not runnable here, so a shared
         # message would send the reader at a command their shell does not have.
-        reason = self._decision(self.KILL, "ask", permission_mode="auto")
+        reason = self._decision(self.KILL, "deny", permission_mode="auto")
         self.assertIn("Get-Process", reason)
         self.assertNotIn("pgrep", reason)
+
+    def test_a_literal_pid_stop_process_is_told_to_split(self):
+        reason = self._decision(self.KILL, "deny", permission_mode="auto")
+        self.assertIn("`Stop-Process -Id <pid>` as its own call", reason)
+        self._decision("Stop-Process -Id 1234", "defer", permission_mode="auto")
 
     def test_a_clean_cmdlet_still_allows(self):
         self._decision("Get-Content .\\in.txt", "allow",
@@ -8873,7 +8951,7 @@ class WrappedCommandTests(unittest.TestCase):
         # runs it escalates the way a `sh -c` body does; `off` restores it.
         for cmd in ("xargs cat in.txt", "git ls-files | xargs grep foo"):
             self._decision(cmd, "defer")
-            reason = self._decision(cmd, "ask", permission_mode="auto")
+            reason = self._decision(cmd, "deny", permission_mode="auto")
             self.assertIn("an `xargs`, or a wrapper flag", reason)
             self._decision(cmd, "deny", permission_mode="bypassPermissions")
             self._decision(cmd, "defer", permission_mode="auto", escalate="off")
@@ -8890,8 +8968,8 @@ class WrappedCommandTests(unittest.TestCase):
                            permission_mode=mode)
 
     def test_the_wrapper_label_does_not_mask_a_kill(self):
-        reason = self._decision("cat in.txt; xargs cat in.txt; kill $pid", "ask",
-                                permission_mode="auto")
+        reason = self._decision("cat in.txt; xargs cat in.txt; kill $pid",
+                                "deny", permission_mode="auto")
         self.assertIn("`kill` whose targets it cannot see", reason)
 
 
@@ -9031,7 +9109,7 @@ class FindExecTests(unittest.TestCase):
         self._decision("cat in.txt; find -files0-from list -exec cat {} \\;",
                        "defer")
         reason = self._decision("cat in.txt; find -files0-from list -delete",
-                                "ask", permission_mode="auto")
+                                "deny", permission_mode="auto")
         self.assertIn("a wrapper flag", reason)
 
     def test_the_command_is_judged_whole(self):

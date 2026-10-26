@@ -3674,22 +3674,32 @@ def escalation_scope():
     return v if v in ('scoped', 'all', 'off') else 'scoped'
 
 
-def escalate_suppression(signal, mode):
+def escalate_suppression(signal, mode, override=None, prefixable=True):
     """Map a withheld `allow` to a ``(decision, reason)`` pair, or None to keep
     deferring.
 
-    ``signal`` is what suppressed — `'sh -c'`, `'interpreter'`, or the name of a
-    signalling command — and None when nothing did. Only a mode in
-    :data:`DEFER_RUNS_MODES` escalates: everywhere else the defer already
+    ``signal`` is what suppressed — `'sh -c'`, `'interpreter'`, `'wrapper'`, or
+    the name of a signalling command — and None when nothing did. Only a mode
+    in :data:`DEFER_RUNS_MODES` escalates: everywhere else the defer already
     blocks, so this would buy a prompt and no protection.
 
-    The verdict splits on who is at the prompt, which is the one distinction
-    this must not collapse. `bypassPermissions` has nobody, so an `ask` blocks
-    and strands the agent while a `deny` blocks and hands back the rewrite —
-    the Q17 reasoning `decide` already applies to an offender. `auto` and
-    `acceptEdits` DO reach a person, and a prompt there is precisely what the
-    operator's own rules would have raised had they not opted out, so those ask.
-    Denying in them would remove the human rather than protect them."""
+    The verdict turns on whether the reason can carry a rewrite the caller
+    applies itself. A wrapper hiding its operands and a kill hiding its targets
+    both can — name the files, run `kill <pid>` on its own — so those deny
+    in every escalating mode, and a person is never asked a question whose
+    answer is already written in the reason (Q310, reversing Q74's ask for
+    these two). A
+    `sh -c` body under a container or remote wrapper has no plain-command
+    rewrite, and neither does interpreter code, so those split on who is at the
+    prompt: `ask` in `auto` and `acceptEdits`, `deny` under
+    `bypassPermissions`, where an `ask` blocks and strands the agent.
+
+    ``override`` is the way through for a deny the caller really needs as
+    written. It downgrades one to `ask`, the way it does for the cross-workspace
+    categories in :func:`decide`, and clears nothing: allowing would run a body
+    the hook has just said it cannot read, on the caller's word. Under
+    `bypassPermissions` it changes nothing, because that `ask` would have
+    nobody to answer it (Q210)."""
     scope = escalation_scope()
     if signal is None or scope == 'off' or mode not in DEFER_RUNS_MODES:
         return None
@@ -3698,36 +3708,52 @@ def escalate_suppression(signal, mode):
     if signal == 'sh -c':
         what = ("a shell `-c` body it could not reach (a container or remote "
                 "wrapper, or an untracked cwd)")
-        fix = ("Fix: run the body as a plain command so its paths are checked, "
-               "or approve this one.")
+        fix = "Fix: run the body as a plain command so its paths are checked"
     elif signal == INTERPRETER_SIGNAL:
         what = "interpreter code it cannot read (an inline body, a heredoc, -m)"
         fix = ("Fix: move the code into a file inside the project root and run "
-               "that — a repo-resident script vouches — or approve this one.")
+               "that (a repo-resident script vouches)")
     elif signal == WRAPPER_SIGNAL:
         what = ("an `xargs`, or a wrapper flag it cannot read, that hides "
                 "operands that command will act on")
         fix = ("Fix: name the files on the command itself (`git grep`, "
-               "`grep -r`), or approve this one.")
+               "`grep -r`)")
     elif signal == 'taskkill':
         what = "a `taskkill` whose targets it cannot see"
-        fix = ('Fix: run `tasklist /FI "IMAGENAME eq <name>"` and `taskkill '
-               "/PID <pid>` for the one you meant, or approve this one.")
+        fix = ("Fix: run `taskkill /PID <pid>` as its own call, so the rest of "
+               'the string can be vouched for (`tasklist /FI "IMAGENAME eq '
+               '<name>"` finds the pid)')
     elif signal == 'Stop-Process':
         what = "a `Stop-Process` whose targets it cannot see"
-        fix = ("Fix: run `Get-Process <name> | Select-Object Id, Path` and "
-               "`Stop-Process -Id <pid>` for the one you meant, or approve "
-               "this one.")
+        fix = ("Fix: run `Stop-Process -Id <pid>` as its own call, so the rest "
+               "of the string can be vouched for (`Get-Process <name> | "
+               "Select-Object Id, Path` finds the pid)")
     else:
         what = "a `%s` whose targets it cannot see" % signal
-        fix = ("Fix: inspect with `pgrep -fl` and signal the literal pid you "
-               "meant, or approve this one.")
-    return ('deny' if mode == 'bypassPermissions' else 'ask',
-            ATTRIBUTION + "This command mixes a guarded command with %s, so the "
-            "hook will not vouch for the whole string. Withholding `allow` "
-            "normally hands the question to your own permission rules; in `%s` "
-            "those pre-approve it, so the hook puts the decision back. %s Set "
-            "WORKSPACE_GUARD_ESCALATE=off to restore the silence."
+        fix = ("Fix: signal the literal pid with `kill <pid>` as its own call, "
+               "so the rest of the string can be vouched for (`pgrep -fl` finds "
+               "the pid)")
+    rewritable = signal not in ('sh -c', INTERPRETER_SIGNAL)
+    lead = ""
+    if mode == 'bypassPermissions':
+        decision = 'deny'
+    elif rewritable and override is None:
+        decision = 'deny'
+    else:
+        decision = 'ask'
+        if rewritable:
+            lead = ("Prompting because WORKSPACE_GUARD_OVERRIDE is set (%s). "
+                    % override)
+    if decision == 'deny' and mode != 'bypassPermissions':
+        fix += "." + override_hint("a command you need as written", prefixable)
+    else:
+        fix += ", or approve this one."
+    return (decision,
+            ATTRIBUTION + lead + "This command mixes a guarded command with "
+            "%s, so the hook will not vouch for the whole string. Withholding "
+            "`allow` normally hands the question to your own permission rules; "
+            "in `%s` those pre-approve it, so the hook puts the decision back. "
+            "%s Set WORKSPACE_GUARD_ESCALATE=off to restore the silence."
             % (what, mode, fix))
 
 
@@ -5177,7 +5203,8 @@ def handle_bash(data):
         # `DEFER_RUNS_MODES` names those rules say yes. Escalating is that
         # suppression finishing its job where the fallback has no teeth. (Q74)
         esc = escalate_suppression(suppressed[0] if suppressed else None,
-                                   data.get("permission_mode"))
+                                   data.get("permission_mode"),
+                                   ctx.override, ctx.prefixable)
         if esc is not None:
             finish(esc[0], esc[1], [], data)
         return
@@ -6535,7 +6562,8 @@ def handle_powershell(data):
                                           suppressed=suppressed)
     if not outside and not guarded:
         esc = escalate_suppression(suppressed[0] if suppressed else None,
-                                   data.get("permission_mode"))
+                                   data.get("permission_mode"),
+                                   ctx.override, ctx.prefixable)
         if esc is not None:
             finish(esc[0], esc[1], [], data)
         return

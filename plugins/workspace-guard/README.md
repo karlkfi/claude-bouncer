@@ -257,7 +257,7 @@ old one. A different project's scratch still asks entirely.
 | `env cat /etc/hosts` · `timeout 5 cat /etc/hosts` · `nohup cp in.txt /etc/x` | **ask** |
 | `command cd /etc && cat hosts` (the shell's own `cd`, behind `command`) | **ask** |
 | `nohup cat in.txt` · `env -C sub cat in.txt` | allow |
-| `git ls-files \| xargs grep foo` (xargs appends its input; escalates in `auto`) | defer |
+| `git ls-files \| xargs grep foo` (xargs appends its input; denies in `auto`) | defer |
 | `find /etc -name hosts -exec cat {} \;` · `find . -exec cat /etc/hosts \;` | **ask** |
 | `find . -name '*.py' -exec grep foo {} +` (a `find` command, read at one remove) | defer |
 | `find /etc/x -delete` · `find . -fprint /etc/x` | **ask** |
@@ -1537,7 +1537,7 @@ both, and it is read from two places:
 
 | Where | Reaches | Effect |
 | --- | --- | --- |
-| `WORKSPACE_GUARD_OVERRIDE=<reason>` as a command prefix | that one Bash call | Downgrades the sibling-checkout deny, the cross-session scratch-write deny, and the unanchored-kill deny to `ask`, for work that deliberately reaches another checkout or session. The reason is echoed back in the prompt. |
+| `WORKSPACE_GUARD_OVERRIDE=<reason>` as a command prefix | that one Bash call | Downgrades the sibling-checkout deny, the cross-session scratch-write deny, and the unanchored-kill deny to `ask`, for work that deliberately reaches another checkout or session. It downgrades the wrapper and kill escalation deny the same way (see [Suppression escalation](#suppression-escalation-in-pre-approving-modes)). The reason is echoed back in the prompt. |
 | `WORKSPACE_GUARD_OVERRIDE` in the hook's own environment | every call in the session | The same downgrade, held open for as long as it is set. |
 
 `WORKSPACE_GUARD_OVERRIDE` is the one knob that *loosens* this guard, so it's
@@ -1572,12 +1572,30 @@ where those rules prompt. In `auto`, `acceptEdits` and `bypassPermissions` they
 pre-approve, so the command simply runs (see
 [`docs/permission-modes.md`](docs/permission-modes.md)).
 
-In those three modes the hook now puts the decision back, and the verdict splits
-on whether anyone is at the prompt: `ask` in `auto` and `acceptEdits`, where a
-person can answer, and `deny` under `bypassPermissions`, where an `ask` would
-block and strand the agent while a `deny` blocks and hands back the rewrite. The
-other three modes are untouched — a defer already stops the command there, so
-escalating would buy a prompt and no protection.
+In those three modes the hook now puts the decision back. The verdict turns on
+whether the refusal can carry a rewrite the agent applies itself:
+
+| Construct | `auto`, `acceptEdits` | `bypassPermissions` |
+| --- | --- | --- |
+| A wrapper hiding operands (`xargs`, an unreadable wrapper flag) | `deny`, naming the files on the command itself | `deny` |
+| A kill whose targets it cannot see | `deny`, naming the split: `kill <pid>` as its own call | `deny` |
+| A `sh -c` body under a container or remote wrapper | `ask` | `deny` |
+| Interpreter code (only under `WORKSPACE_GUARD_ESCALATE=all`) | `ask` | `deny` |
+
+The first two have a mechanical fix, so asking a person would spend their
+attention on a question whose answer is already in the reason. The last two have
+no plain-command rewrite, so they ask where somebody can answer. Under
+`bypassPermissions` everything denies, because an `ask` there blocks and strands
+the agent while a `deny` blocks and hands back the rewrite. The other three
+modes are untouched: a defer already stops the command there, so escalating
+would buy a prompt and no protection.
+
+When the agent really needs a wrapper or kill command as written,
+`WORKSPACE_GUARD_OVERRIDE=<reason>` downgrades the deny to `ask`, as it does for
+the [cross-workspace denies](#cross-workspace-denies). It never clears one,
+since allowing would run operands the hook has just said it cannot see, and it
+changes nothing under `bypassPermissions`, where nobody could answer the
+prompt.
 
 | Env var | Default | Effect |
 | --- | --- | --- |
@@ -1972,9 +1990,9 @@ final output.
   the hook judges, and the string defers rather than allowing, because a wrong
   guess about where the command starts is how a value gets read as the command.
   `xargs` defers for a second reason, that its operands arrive on stdin. In
-  `auto`, `acceptEdits` and `bypassPermissions` those two escalate the way a
-  `sh -c` body does, but only when the command behind the wrapper is one the
-  hook judges, so `ls | xargs echo` stays silent. Replaying 195,692 corpus
+  `auto`, `acceptEdits` and `bypassPermissions` those two escalate to a deny,
+  but only when the command behind the wrapper is one the hook judges, so
+  `ls | xargs echo` stays silent. Replaying 195,692 corpus
   commands (2026-10-04), they fired on 132 (0.067%), against 71 (0.036%) for
   `sh -c` bodies and kills together; that count predates the last six wrappers
   above. Their modes that run no command — `sudo -l`, `-v`, `-K`, `doas -L`,

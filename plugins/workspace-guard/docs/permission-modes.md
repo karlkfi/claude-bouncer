@@ -74,11 +74,20 @@ escalates about three times as often as it would without it.
 `WORKSPACE_GUARD_ESCALATE` moves that line in either direction; see the
 README's Configuration section.
 
+Q310 moved the wrapper and kill signals to `deny` in all three modes. Each one's
+reason already carried a rewrite the agent can apply — name the files on the
+command itself, run `kill <pid>` as its own call — so the `ask` in `auto` and
+`acceptEdits` spent a person on a question whose answer was in the prompt.
+`WORKSPACE_GUARD_OVERRIDE=<reason>` downgrades either deny to `ask` for a
+command needed as written, and clears neither; under `bypassPermissions` it
+changes nothing (Q210).
+
 **Do not read the escalation as a reason to treat the three modes alike.** They
 share one property — a defer runs — and differ on the one that picks the
-verdict: `auto` and `acceptEdits` have a person at the prompt and
-`bypassPermissions` does not. Collapsing them denies in a mode where somebody
-was there to say yes, which removes the human rather than protecting them.
+verdict for a construct with no rewrite: `auto` and `acceptEdits` have a person
+at the prompt and `bypassPermissions` does not. Denying a `sh -c` body in a mode
+where somebody was there to say yes removes the human rather than protecting
+them, since the refusal has no fix to hand back instead.
 
 This also qualifies a claim in [`design.md`](design.md): defer is described as
 net-neutral, leaving the operator "no worse off than without the hook." True —
