@@ -2035,12 +2035,14 @@ def classify_git(sub, args, branch, policy, cwd, probe, mode='',
                 # Inside this session's own scratchpad the work it would lose is
                 # the session's: nobody else writes there (workspace-guard
                 # denies a write into another session's), and what a reviewer
-                # leaves behind in its `<scratchpad>/prN` is build output. A
-                # relative path needs `probe`, since it resolves against a
-                # directory the hook has to have named. (Q308)
+                # leaves behind in its `<scratchpad>/prN` is build output.
+                # Absolute only: git matches a relative operand against every
+                # worktree's path by suffix before trying it as a path, so
+                # `pr9` from a directory holding no `pr9` removes whichever
+                # worktree ends in `/pr9`, a peer's included. An absolute one
+                # names no worktree but itself (git 2.55, rc=128). (Q308)
                 target = pos[1] if len(pos) == 2 else None
-                if target and is_literal_path(target) \
-                        and (probe or os.path.isabs(target)):
+                if target and is_literal_path(target) and os.path.isabs(target):
                     rp = resolve_path(cwd, target)
                     if rp and is_session_tmp_path(rp, session_id,
                                                   claude_tmp_root()):

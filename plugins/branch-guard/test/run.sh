@@ -928,7 +928,9 @@ check "[scratchpad] worktree remove --force in own scratchpad -> allow" allow \
 check "[scratchpad] worktree remove -f in own scratchpad -> allow" allow \
   "$(decision_for "$(sess_payload "git worktree remove -f '$(nat "$OWN/pr1")'")" \
      "$WORK" "${TEMP_ENV[@]}")"
-check "[scratchpad] relative path through a literal -C -> allow" allow \
+# git matches a relative operand by suffix against every worktree, so `pr1`
+# here could remove a peer's `.../pr1`: it asks even where it resolves inside.
+check "[scratchpad] relative operand, though it resolves inside -> ask" ask \
   "$(decision_for "$(sess_payload "git -C '$(nat "$OWN")' worktree remove --force pr1")" \
      "$WORK" "${TEMP_ENV[@]}")"
 check "[scratchpad] another session's scratchpad -> ask" ask \
@@ -946,9 +948,6 @@ if [[ -L "$OWN/escape" ]]; then
 fi
 check "[scratchpad] a path the hook cannot expand -> ask" ask \
   "$(decision_for "$(sess_payload 'git worktree remove --force "$SCRATCH/pr1"')" \
-     "$WORK" "${TEMP_ENV[@]}")"
-check "[scratchpad] relative path with no literal directory -> ask" ask \
-  "$(decision_for "$(sess_payload "cd \"\$X\" && git worktree remove --force pr1")" \
      "$WORK" "${TEMP_ENV[@]}")"
 check "[scratchpad] own session id outside the temp root -> ask" ask \
   "$(decision_for "$(sess_payload "git worktree remove --force '$(nat "$WORK/$SESS/pr1")'")" \
