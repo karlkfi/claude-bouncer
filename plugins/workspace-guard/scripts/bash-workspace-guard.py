@@ -4,7 +4,7 @@ outside the workspace; allow when it only touches workspace files or pipes.
 
 Reads the hook JSON on stdin, emits a PreToolUse decision on stdout.
 """
-import sys, os, json, re, shlex, shutil, fnmatch, collections, functools, subprocess, tempfile
+import sys, os, json, re, shlex, shutil, fnmatch, collections, functools, tempfile
 
 # The parsing primitives every claude-bouncer guard shares -- lexing, comment
 # and heredoc stripping, substitution scanning, command-head normalising. The
@@ -3504,7 +3504,7 @@ def classify_outside(rp, ctx, is_read):
     if is_read and any(path_at_or_under(rp, p) for p in ctx.read_prefixes):
         return None
     # Read-only: source and notes trees Claude Code or the Go toolchain wrote,
-    # resolved only here because finding Go's costs a subprocess. (Q311)
+    # resolved only here, since they cost directory scans. (Q311)
     if is_read and any(path_at_or_under(rp, p)
                        for p in installed_read_trees(ctx.session_tmp_root)):
         return None
@@ -6647,40 +6647,39 @@ def _real_dir(path):
 
 
 def go_source_dirs():
-    """The Go standard library sources: ``$(go env GOROOT)/src`` and each
-    downloaded toolchain's ``src`` under ``$(go env GOMODCACHE)``. Vendoring
-    reaches a module's dependencies and never the standard library, so a
-    session reading ``net/http`` asked every time (Q311).
+    """The Go standard library sources: ``<GOROOT>/src`` and each downloaded
+    toolchain's ``src`` under the module cache. Vendoring reaches a module's
+    dependencies and never the standard library, so a session reading
+    ``net/http`` asked every time (Q311).
 
-    ``go env`` runs with ``GOENV=off``, ``GOTOOLCHAIN=local`` and an empty
-    ``GOFLAGS``, from the filesystem root: an agent can rewrite the user's
-    ``go env -w`` file with an unguarded command, and pointing ``GOMODCACHE``
-    at the home directory must not exempt it. A tree also has to look like a
-    Go root, ``VERSION`` beside ``src/runtime``. No ``go`` on ``PATH``, a
-    failure or a two-second timeout all yield none, so the reads keep asking.
+    Nothing is executed: the first ``go`` on ``PATH`` may be any file a
+    user-writable directory holds. ``GOROOT`` is two levels above the real path
+    of that ``go``, and the cache is ``GOMODCACHE``, else the first ``GOPATH``
+    entry's ``pkg/mod``, else ``~/go/pkg/mod`` — so a ``go env -w`` setting is
+    not seen. A tree must look like a Go root, ``VERSION`` beside
+    ``src/runtime``, and below the cache root no ``golang.org``,
+    ``toolchain@*`` or ``src`` may be a link.
     """
+    roots = []
     go = shutil.which('go')
-    if not go:
-        return []
-    env = dict(os.environ, GOENV='off', GOTOOLCHAIN='local', GOFLAGS='')
-    try:
-        printed = subprocess.run([go, 'env', 'GOROOT', 'GOMODCACHE'],
-                             cwd=os.path.abspath(os.sep), env=env,
-                             capture_output=True, text=True, timeout=2).stdout
-    except (OSError, subprocess.SubprocessError):
-        return []
-    lines = printed.splitlines()
-    if len(lines) != 2:
-        return []
-    goroot, modcache = lines
-    roots = [goroot] if goroot else []
-    if modcache:
+    if go:
+        roots.append(os.path.dirname(os.path.dirname(os.path.realpath(go))))
+    modcache = os.environ.get('GOMODCACHE', '')
+    if not modcache:
+        gopath = os.environ.get('GOPATH', '').split(os.pathsep)[0]
+        if not gopath and resolved_home():
+            gopath = os.path.join(resolved_home(), 'go')
+        modcache = os.path.join(gopath, 'pkg', 'mod') if gopath else ''
+    toolchains = _real_dir(os.path.join(modcache, 'golang.org')) \
+        if os.path.isabs(modcache) else None
+    if toolchains:
         try:
-            names = os.listdir(os.path.join(modcache, 'golang.org'))
+            names = os.listdir(toolchains)
         except OSError:
             names = []
-        roots.extend(os.path.join(modcache, 'golang.org', n)
-                     for n in names if n.startswith('toolchain@'))
+        roots.extend(r for r in (_real_dir(os.path.join(toolchains, n))
+                                 for n in names if n.startswith('toolchain@'))
+                     if r)
     out = []
     for root in roots:
         src = _real_dir(os.path.join(root, 'src'))

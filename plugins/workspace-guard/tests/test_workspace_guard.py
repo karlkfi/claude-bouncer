@@ -9462,8 +9462,9 @@ class SameRepoSessionScratchE2ETests(unittest.TestCase):
 class InstalledReadTreesE2ETests(unittest.TestCase):
     """Q311: bundled skills, the desktop app's side-session notes and the Go
     standard library are exempt for reads only. Builds a fake home and a fake
-    ``go`` that prints fixture roots, under the real home so a path that is NOT
-    exempt reads as an outside ``ask`` rather than a host-temp deny."""
+    Go install whose ``go`` records being run, under the real home so a path
+    that is NOT exempt reads as an outside ``ask`` rather than a host-temp
+    deny."""
 
     def setUp(self):
         home = guard.resolved_home()                      # Q43: not $HOME
@@ -9482,23 +9483,19 @@ class InstalledReadTreesE2ETests(unittest.TestCase):
         self.modcache = os.path.join(base, "mod")
         self.toolchain = self._go_root(os.path.join(
             self.modcache, "golang.org", "toolchain@v0.0.1-go9.9.9.test"))
-        self.bin = os.path.join(base, "bin")
+        self.ran = os.path.join(base, "go-ran")
+        self.bin = os.path.join(self.goroot, "bin")
         os.mkdir(self.bin)
+        # The hook must find GOROOT without running this: the first `go` on
+        # PATH can be any file a session wrote.
         with open(os.path.join(self.bin, "go"), "w") as f:
-            # Answers only when the hook isolated it from the user's go env
-            # file and from toolchain switching, so dropping either goes red.
-            f.write('#!/bin/sh\n'
-                    '[ "$GOENV" = off ] && [ "$GOTOOLCHAIN" = local ] || exit 1\n'
-                    'printf \'%s\\n%s\\n\' "$FAKE_GOROOT" "$FAKE_GOMODCACHE"\n')
+            f.write("#!/bin/sh\ntouch %s\n" % sh(self.ran))
         os.chmod(os.path.join(self.bin, "go"), 0o755)
         with open(os.path.join(self.bin, "go.cmd"), "w") as f:
-            f.write('@if not "%GOENV%"=="off" exit /b 1\r\n'
-                    '@if not "%GOTOOLCHAIN%"=="local" exit /b 1\r\n'
-                    "@echo %FAKE_GOROOT%\r\n@echo %FAKE_GOMODCACHE%\r\n")
+            f.write('@type nul > "%s"\r\n' % self.ran)
         self.env = {"HOME": self.home, "USERPROFILE": self.home,
                     "PATH": self.bin + os.pathsep + os.environ.get("PATH", ""),
-                    "FAKE_GOROOT": self.goroot,
-                    "FAKE_GOMODCACHE": self.modcache}
+                    "GOMODCACHE": self.modcache, "GOPATH": ""}
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -9541,6 +9538,36 @@ class InstalledReadTreesE2ETests(unittest.TestCase):
     def test_goroot_and_toolchain_src_read_allowed(self):
         self._expect(f"grep -n func {self._src(self.goroot)}", "allow")
         self._expect(f"cat {self._src(self.toolchain)}", "allow")
+        self.assertFalse(os.path.exists(self.ran), "the hook ran go")
+
+    def test_goroot_found_through_a_linked_go(self):
+        # Homebrew's shape: PATH holds a link into the real install's bin.
+        links = os.path.join(self.home, "linkbin")
+        os.mkdir(links)
+        for name in ("go", "go.cmd"):
+            os.symlink(os.path.join(self.bin, name), os.path.join(links, name))
+        self._expect(f"cat {self._src(self.goroot)}", "allow", PATH=links)
+
+    def test_toolchain_found_through_gopath(self):
+        gopath = os.path.join(self.home, "gp")
+        tc = self._go_root(os.path.join(gopath, "pkg", "mod", "golang.org",
+                                        "toolchain@v0.0.1-go9.9.8.test"))
+        self._expect(f"cat {self._src(tc)}", "allow",
+                     GOMODCACHE="", GOPATH=gopath)
+
+    def test_linked_toolchain_dir_still_asks(self):
+        shaped = self._go_root(os.path.join(self.home, "shaped"))
+        os.symlink(shaped, os.path.join(self.modcache, "golang.org",
+                                        "toolchain@v0.0.1-go9.9.7.test"))
+        self._expect(f"cat {self._src(shaped)}", "ask")
+
+    def test_linked_golang_org_dir_still_asks(self):
+        cache = os.path.join(self.home, "mod2")
+        os.mkdir(cache)
+        os.symlink(os.path.dirname(self.toolchain),
+                   os.path.join(cache, "golang.org"))
+        self._expect(f"cat {self._src(self.toolchain)}", "ask",
+                     GOMODCACHE=cache)
 
     def test_goroot_write_still_asks(self):
         self._expect(f"cp ./in.txt {self._src(self.goroot)}", "ask")
@@ -9549,8 +9576,7 @@ class InstalledReadTreesE2ETests(unittest.TestCase):
         self._expect(f"cat {sh(os.path.join(self.goroot, 'VERSION'))}", "ask")
 
     def test_tree_without_go_markers_still_asks(self):
-        # GOMODCACHE pointed at a directory that is not a Go install, which an
-        # agent could arrange with an unguarded `go env -w`.
+        # PATH or GOMODCACHE pointed at a directory that is not a Go install.
         os.remove(os.path.join(self.goroot, "VERSION"))
         self._expect(f"cat {self._src(self.goroot)}", "ask")
 
