@@ -102,6 +102,82 @@ class GrantStoreTests(unittest.TestCase):
         self.assertEqual(early, by_target['x'])
         self.assertNotEqual(early, by_target['y'])
 
+    def _entries(self):
+        with open(grants.grants_path('alpha', 's1')) as f:
+            return json.load(f)['grants']
+
+    def test_an_approval_after_expiry_renews_the_grant(self):
+        """Q307: an expired entry used to block the re-record, so every later
+        command in the session asked."""
+        t0 = 1_000_000.0
+        grants.record_grants('alpha', 's1', {'x'}, 'first', now=t0)
+        later = t0 + 9 * 3600
+        self.assertEqual(set(), grants.load_grants('alpha', 's1', now=later))
+        grants.record_grants('alpha', 's1', {'x'}, 'second', now=later)
+        self.assertEqual({'x'}, grants.load_grants('alpha', 's1', now=later))
+        self.assertEqual([{'target': 'x', 'reason': 'second', 'ts': later}],
+                         self._entries())
+
+    def test_a_grant_live_at_exactly_the_ttl_is_not_extended(self):
+        t0 = 1_000_000.0
+        grants.record_grants('alpha', 's1', {'x'}, 'why', now=t0)
+        at = t0 + grants.DEFAULT_TTL
+        self.assertEqual({'x'}, grants.load_grants('alpha', 's1', now=at))
+        grants.record_grants('alpha', 's1', {'x'}, 'why', now=at)
+        self.assertEqual([t0], [g['ts'] for g in self._entries()])
+
+    def test_a_grant_one_second_past_the_ttl_is_replaced(self):
+        t0 = 1_000_000.0
+        grants.record_grants('alpha', 's1', {'x'}, 'why', now=t0)
+        past = t0 + grants.DEFAULT_TTL + 1
+        grants.record_grants('alpha', 's1', {'x'}, 'why', now=past)
+        self.assertEqual([past], [g['ts'] for g in self._entries()])
+
+    def test_expiry_on_record_follows_the_callers_ttl(self):
+        """A caller loading with a short TTL must record with the same one, or
+        a grant load calls expired is one record still calls live."""
+        t0 = 1_000_000.0
+        grants.record_grants('alpha', 's1', {'x'}, 'why', now=t0, ttl=50)
+        grants.record_grants('alpha', 's1', {'x'}, 'why', now=t0 + 100, ttl=50)
+        self.assertEqual({'x'}, grants.load_grants('alpha', 's1',
+                                                   now=t0 + 100, ttl=50))
+
+    def test_a_malformed_entry_does_not_block_recording(self):
+        path = grants.grants_path('alpha', 's1')
+        os.makedirs(os.path.dirname(path))
+        with open(path, 'w') as f:
+            json.dump({'grants': [{'target': ['x'], 'ts': 0}]}, f)
+        grants.record_grants('alpha', 's1', {'x'}, 'why')
+        self.assertEqual({'x'}, grants.load_grants('alpha', 's1'))
+
+    def test_a_future_timestamp_is_replaced_rather_than_kept(self):
+        """load_grants reads a timestamp ahead of the clock as expired, so
+        record must too, or a skewed entry blocks renewal for good."""
+        t0 = 1_000_000.0
+        grants.record_grants('alpha', 's1', {'x'}, 'why', now=t0 + 100)
+        grants.record_grants('alpha', 's1', {'x'}, 'why', now=t0)
+        self.assertEqual({'x'}, grants.load_grants('alpha', 's1', now=t0))
+        self.assertEqual([t0], [g['ts'] for g in self._entries()])
+
+    def test_a_live_duplicate_keeps_the_target_without_a_new_entry(self):
+        path = grants.grants_path('alpha', 's1')
+        os.makedirs(os.path.dirname(path))
+        t0 = 1_000_000.0
+        with open(path, 'w') as f:
+            json.dump({'grants': [{'target': 'x', 'ts': t0 - 9 * 3600},
+                                  {'target': 'x', 'ts': t0 - 60}]}, f)
+        grants.record_grants('alpha', 's1', {'x'}, 'why', now=t0)
+        self.assertEqual([t0 - 9 * 3600, t0 - 60],
+                         [g['ts'] for g in self._entries()])
+
+    def test_renewal_leaves_other_targets_alone(self):
+        t0 = 1_000_000.0
+        grants.record_grants('alpha', 's1', {'x', 'y'}, 'why', now=t0)
+        later = t0 + 9 * 3600
+        grants.record_grants('alpha', 's1', {'x'}, 'why', now=later)
+        self.assertEqual({'x': later, 'y': t0},
+                         {g['target']: g['ts'] for g in self._entries()})
+
 
 if __name__ == '__main__':
     unittest.main()
