@@ -3503,8 +3503,8 @@ def classify_outside(rp, ctx, is_read):
     # extras). Write access is never exempt here.
     if is_read and any(path_at_or_under(rp, p) for p in ctx.read_prefixes):
         return None
-    # Read-only: source and notes trees Claude Code or the Go toolchain wrote,
-    # resolved only here, since they cost directory scans. (Q311)
+    # Read-only: skills and notes trees Claude Code wrote, resolved only for a
+    # read that would otherwise ask. (Q311)
     if is_read and any(path_at_or_under(rp, p)
                        for p in installed_read_trees(ctx.session_tmp_root)):
         return None
@@ -6646,53 +6646,10 @@ def _real_dir(path):
     return None
 
 
-def go_source_dirs():
-    """The Go standard library sources: ``<GOROOT>/src`` and each downloaded
-    toolchain's ``src`` under the module cache. Vendoring reaches a module's
-    dependencies and never the standard library, so a session reading
-    ``net/http`` asked every time (Q311).
-
-    Nothing is executed: the first ``go`` on ``PATH`` may be any file a
-    user-writable directory holds. ``GOROOT`` is two levels above the real path
-    of that ``go``, and the cache is ``GOMODCACHE``, else the first ``GOPATH``
-    entry's ``pkg/mod``, else ``~/go/pkg/mod`` — so a ``go env -w`` setting is
-    not seen. A tree must look like a Go root, ``VERSION`` beside
-    ``src/runtime``, and below the cache root no ``golang.org``,
-    ``toolchain@*`` or ``src`` may be a link.
-    """
-    roots = []
-    go = shutil.which('go')
-    if go:
-        roots.append(os.path.dirname(os.path.dirname(os.path.realpath(go))))
-    modcache = os.environ.get('GOMODCACHE', '')
-    if not modcache:
-        gopath = os.environ.get('GOPATH', '').split(os.pathsep)[0]
-        if not gopath and resolved_home():
-            gopath = os.path.join(resolved_home(), 'go')
-        modcache = os.path.join(gopath, 'pkg', 'mod') if gopath else ''
-    toolchains = _real_dir(os.path.join(modcache, 'golang.org')) \
-        if os.path.isabs(modcache) else None
-    if toolchains:
-        try:
-            names = os.listdir(toolchains)
-        except OSError:
-            names = []
-        roots.extend(r for r in (_real_dir(os.path.join(toolchains, n))
-                                 for n in names if n.startswith('toolchain@'))
-                     if r)
-    out = []
-    for root in roots:
-        src = _real_dir(os.path.join(root, 'src'))
-        if src and os.path.isdir(os.path.join(src, 'runtime')) \
-                and os.path.isfile(os.path.join(root, 'VERSION')):
-            out.append(src)
-    return out
-
-
 @functools.lru_cache(maxsize=None)
 def installed_read_trees(tmp_root):
-    """Read-only trees written by Claude Code or the Go toolchain rather than by
-    anything in a session, beside :func:`claude_code_dirs` (Q311):
+    """Read-only trees written by Claude Code rather than by anything in a
+    session, beside :func:`claude_code_dirs` (Q311):
 
     * ``<tmp_root>/bundled-skills/``, where Claude Code unpacks the skills it
       ships. It carries no session id, so neither temp exemption reaches it.
@@ -6700,7 +6657,6 @@ def installed_read_trees(tmp_root):
       app's shared notes folder. The app adds it to the session as a working
       directory, but the hook input names no additional directories (checked
       against 2.1.308), so the guard cannot learn that from the payload.
-    * :func:`go_source_dirs`.
 
     Resolved lazily, once per process, only for a read that would otherwise ask.
     """
@@ -6709,9 +6665,7 @@ def installed_read_trees(tmp_root):
     if home:
         candidates.append(os.path.join(home, 'Library', 'Application Support',
                                        'Claude', 'side-session-notes'))
-    out = [rp for rp in map(_real_dir, candidates) if rp]
-    out.extend(go_source_dirs())
-    return tuple(out)
+    return tuple(rp for rp in map(_real_dir, candidates) if rp)
 
 
 def main():

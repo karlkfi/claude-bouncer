@@ -1519,19 +1519,24 @@ exemption, a symlink deeper inside a skill's tree widens nothing, and an entry
 pointing at somewhere that is not a skill (`~/.claude/skills/x -> /etc`) gets
 no exemption at all.
 
-Claude Code's `/tmp/claude-<uid>/bundled-skills/`, the desktop app's
+Claude Code's `/tmp/claude-<uid>/bundled-skills/` and the desktop app's
 `~/Library/Application Support/Claude/side-session-notes/` (the hook input does
-not name a session's added directories), and the Go standard library are exempt
-too — `src` of the install the first `go` on `PATH` resolves into, and each
-toolchain's `src` under `GOMODCACHE` (else `GOPATH/pkg/mod`). The hook runs no
-`go`, so a `go env -w` setting goes unseen. A symlink at a root or below the
-module cache, or a Go tree without `VERSION` beside `src/runtime`, is not exempt.
+not name a session's added directories) are exempt too. A root that is a
+symlink is not.
 
 You can extend the defaults with additional prefixes:
 
 | Env var | Default | Effect |
 | --- | --- | --- |
 | `WORKSPACE_GUARD_READ_ALLOW_PREFIXES` | (empty) | Extra read-exempt prefixes, separated by the platform list separator (`:` on POSIX, `;` on Windows) or a comma. **Additive** — it extends the built-in list. |
+
+The Go standard library is not a default, because vendoring never brings it
+into a project and finding it would mean running the first `go` on `PATH`,
+which can be any file a session wrote. A Go user opts in with the two trees
+`go env GOROOT GOMODCACHE` prints, as literal paths:
+`<GOROOT>/src:<GOMODCACHE>/golang.org` — for an official install,
+`/usr/local/go/src:/Users/me/go/pkg/mod/golang.org`. The second covers each
+downloaded toolchain's `src`, and the `golang.org/x` modules beside them.
 
 Each entry is run through `realpath` so platform symlinks resolve correctly.
 Scope entries tightly: anything under a configured prefix is silently allowed
