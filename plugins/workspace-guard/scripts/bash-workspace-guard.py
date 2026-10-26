@@ -3719,17 +3719,18 @@ def escalate_suppression(signal, mode, override=None, prefixable=True):
         fix = ("Fix: name the files on the command itself (`git grep`, "
                "`grep -r`)")
     elif signal == 'taskkill':
-        what = "a `taskkill` whose targets it cannot see"
+        what = "a `taskkill`, which signals a process the hook cannot judge"
         fix = ("Fix: run `taskkill /PID <pid>` as its own call, so the rest of "
                'the string can be vouched for (`tasklist /FI "IMAGENAME eq '
                '<name>"` finds the pid)')
     elif signal == 'Stop-Process':
-        what = "a `Stop-Process` whose targets it cannot see"
+        what = ("a `Stop-Process`, which signals a process the hook cannot "
+                "judge")
         fix = ("Fix: run `Stop-Process -Id <pid>` as its own call, so the rest "
                "of the string can be vouched for (`Get-Process <name> | "
                "Select-Object Id, Path` finds the pid)")
     else:
-        what = "a `%s` whose targets it cannot see" % signal
+        what = "a `%s`, which signals a process the hook cannot judge" % signal
         fix = ("Fix: signal the literal pid with `kill <pid>` as its own call, "
                "so the rest of the string can be vouched for (`pgrep -fl` finds "
                "the pid)")

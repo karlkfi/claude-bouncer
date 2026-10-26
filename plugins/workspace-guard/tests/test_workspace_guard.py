@@ -8293,7 +8293,8 @@ class NestedSignalOutranksTheInterpreterLabelTests(unittest.TestCase):
     def test_the_reason_names_the_kill_rather_than_the_body(self):
         out = self._run(self.WRAPPED_KILL[0], "auto")
         reason = out["hookSpecificOutput"]["permissionDecisionReason"]
-        self.assertIn("`kill` whose targets it cannot see", reason)
+        self.assertIn("`kill`, which signals a process the hook cannot judge",
+                      reason)
         self.assertNotIn("could not reach", reason)
 
     def test_bypass_permissions_denies_rather_than_running_it(self):
@@ -9004,7 +9005,8 @@ class WrappedCommandTests(unittest.TestCase):
     def test_the_wrapper_label_does_not_mask_a_kill(self):
         reason = self._decision("cat in.txt; xargs cat in.txt; kill $pid",
                                 "deny", permission_mode="auto")
-        self.assertIn("`kill` whose targets it cannot see", reason)
+        self.assertIn("`kill`, which signals a process the hook cannot judge",
+                      reason)
 
 
 class FindPartsTests(unittest.TestCase):
