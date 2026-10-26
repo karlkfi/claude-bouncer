@@ -594,6 +594,14 @@ check "[queue-id] short lease spelling -> ask" ask \
   "$(decision_for "$(push "git push --force-with-lease=queue-ids/Q42: origin abc123:$Q42")" "$WORK")"
 check "[queue-id] deletion -> ask" ask \
   "$(decision_for "$(push "git push --force-with-lease=$Q42: origin :$Q42")" "$WORK")"
+check "[queue-id] abbreviated lease ahead of the create-only one -> ask" ask \
+  "$(decision_for "$(push "git push --force-w=$Q42:abc123 --force-with-lease=$Q42: origin abc123:$Q42")" "$WORK")"
+check "[queue-id] abbreviated create-only lease alone -> ask" ask \
+  "$(decision_for "$(push "git push --force-with=$Q42: origin abc123:$Q42")" "$WORK")"
+check "[queue-id] --force-if-includes beside it -> ask" ask \
+  "$(decision_for "$(push "git push --force-if-includes --force-with-lease=$Q42: origin abc123:$Q42")" "$WORK")"
+check "[queue-id] exact readable option beside it -> allow" allow \
+  "$(decision_for "$(push "git push --quiet --force-with-lease=$Q42: origin abc123:$Q42")" "$WORK")"
 check "[queue-id] --delete -> ask" ask \
   "$(decision_for "$(push "git push --delete --force-with-lease=$Q42: origin $Q42")" "$WORK")"
 check "[queue-id] not a Q-ID -> ask" ask \
@@ -609,16 +617,19 @@ check "[protected] create-only claim -> none" none \
 #     Each case runs the way Claude Code runs it: the PreToolUse hook, the
 #     command itself, then the PostToolUse hook, against a private grant store.
 OWN_HOME="$(mktemp -d "$REPO_ROOT/tmp/own-home.XXXXXX")"
-own_payload() {   # COMMAND EVENT [SESSION]
+own_payload() {   # COMMAND EVENT [SESSION] [TOOL_USE_ID]
   jq -nc --arg cmd "$1" --arg cwd "$(nat "$WORK")" --arg ev "$2" \
-         --arg sid "${3:-sess-own}" \
+         --arg sid "${3:-sess-own}" --arg tu "${4:-}" \
     '{tool_name: "Bash", tool_input: {command: $cmd}, cwd: $cwd, session_id: $sid}
-     + (if $ev == "" then {} else {hook_event_name: $ev} end)'
+     + (if $ev == "" then {} else {hook_event_name: $ev} end)
+     + (if $tu == "" then {} else {tool_use_id: $tu} end)'
 }
-own_create() {    # COMMAND [SESSION]
-  decision_for "$(own_payload "$1" '' "${2:-}")" "$WORK" HOME="$OWN_HOME" >/dev/null
+OWN_N=0
+own_create() {    # COMMAND [SESSION]  (one tool_use_id per command, as Claude Code sends)
+  OWN_N=$((OWN_N + 1))
+  decision_for "$(own_payload "$1" '' "${2:-}" "toolu-own-$OWN_N")" "$WORK" HOME="$OWN_HOME" >/dev/null
   ( cd "$WORK" && eval "$1" ) >/dev/null 2>&1 || true   # a create may fail by design
-  decision_for "$(own_payload "$1" PostToolUse "${2:-}")" "$WORK" HOME="$OWN_HOME" >/dev/null
+  decision_for "$(own_payload "$1" PostToolUse "${2:-}" "toolu-own-$OWN_N")" "$WORK" HOME="$OWN_HOME" >/dev/null
 }
 own_push() {      # COMMAND [SESSION]
   decision_for "$(own_payload "$1" '' "${2:-}")" "$WORK" HOME="$OWN_HOME"
@@ -645,7 +656,7 @@ git -C "$WORK" update-ref refs/remotes/origin/feat/q309-c HEAD
 own_create 'git branch feat/q309-c'
 check "[owned] a name a remote already carries -> ask" ask \
   "$(own_push 'git push -u origin feat/q309-c')"
-decision_for "$(own_payload 'git branch feat/q309-d' '')" "$WORK" HOME="$OWN_HOME" >/dev/null
+decision_for "$(own_payload 'git branch feat/q309-d' '' '' toolu-own-d)" "$WORK" HOME="$OWN_HOME" >/dev/null
 git -C "$WORK" branch feat/q309-d
 check "[owned] a PreToolUse with no PostToolUse grants nothing -> ask" ask \
   "$(own_push 'git push -u origin feat/q309-d')"
@@ -662,6 +673,23 @@ own_create 'git worktree add -q -b feat/q309-h ../q309-wt'
 check "[owned] worktree add -b -> allow" allow \
   "$(own_push 'git push -u origin feat/q309-h')"
 git -C "$WORK" worktree remove --force ../q309-wt
+# A Pre whose command never ran, a peer then taking the name, and a failing
+# create of it in a later command: the later Post must not redeem the first
+# command's mark (review of #283).
+decision_for "$(own_payload 'git branch feat/q309-race' '' '' toolu-own-race)" "$WORK" HOME="$OWN_HOME" >/dev/null
+git -C "$WORK" branch feat/q309-race
+own_create 'git branch feat/q309-race'
+check "[owned] a mark from a command that never ran is not redeemed later -> ask" ask \
+  "$(own_push 'git push -u origin feat/q309-race')"
+decision_for "$(own_payload 'git branch feat/q309-i' '')" "$WORK" HOME="$OWN_HOME" >/dev/null
+git -C "$WORK" branch feat/q309-i
+decision_for "$(own_payload 'git branch feat/q309-i' PostToolUse)" "$WORK" HOME="$OWN_HOME" >/dev/null
+check "[owned] a payload with no tool_use_id grants nothing -> ask" ask \
+  "$(own_push 'git push -u origin feat/q309-i')"
+check "[owned] an abbreviated long option (--mirr) -> ask" ask \
+  "$(own_push 'git push --mirr origin feat/q309-a')"
+check "[owned] an exact readable option beside it -> allow" allow \
+  "$(own_push 'git push --quiet --set-upstream origin feat/q309-a')"
 check "[owned] a fresh store grants nothing -> ask" ask \
   "$(decision_for "$(own_payload 'git push -u origin feat/q309-a' '')" "$WORK" \
      HOME="$(mktemp -d "$REPO_ROOT/tmp/own-empty.XXXXXX")")"

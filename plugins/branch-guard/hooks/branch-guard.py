@@ -388,6 +388,17 @@ NO_FORCE_WITH_LEASE = '--no-force-with-lease'
 # behavior from config where the hook can't see it — see README "Limitations".
 PUSH_TAG_FLAGS = {'--tags'}
 
+# Long options the push walk reads exactly. git also accepts any unambiguous
+# abbreviation (`--force-w=` is `--force-with-lease=`), which the walk does
+# not expand, so an owned-branch push or a queue-id claim carrying any other
+# long option asks: measured on git 2.55, an abbreviated lease ahead of the
+# create-only one overwrote an existing claim.
+PUSH_READ_LONG_OPTS = frozenset({
+    FORCE_WITH_LEASE, NO_FORCE_WITH_LEASE, '--force', '--delete',
+    '--set-upstream', '--quiet', '--verbose', '--dry-run', '--no-verify',
+    '--verify', '--atomic', '--porcelain', '--progress',
+}) | PUSH_VALUE_OPTS | PUSH_MANY_FLAGS | PUSH_TAG_FLAGS
+
 # Push-guard policy (env var BRANCH_GUARD_PUSH_POLICY):
 #   strict (default) — auto-approve a push of the worktree's own current branch
 #                      (including force pushes), and a rewrite of one other
@@ -1003,7 +1014,7 @@ def record_worktree_grant(data):
 # branches and two repositories do not.
 
 BRANCH_NAMESPACE = 'branch-guard'
-PENDING_TTL = 600             # a creation finishes within the command that makes it
+PENDING_TTL = 600             # bounds the store; the tool_use_id is what scopes a mark
 
 
 def created_branch_name(inv):
@@ -1073,13 +1084,18 @@ def remote_tracks(cwd, name):
 
 def note_branch_creations(data):
     """PreToolUse: mark each name this command is about to create while it is
-    still free. Nothing is granted here — the command has not run."""
+    still free. Nothing is granted here — the command has not run. The mark
+    carries the tool_use_id, so only this command's PostToolUse can redeem
+    it: a Pre whose command never ran leaves nothing a later one can use."""
+    tuid = data.get('tool_use_id')
+    if not tuid:
+        return
     pending = set()
     for here, name in branch_creations(data):
         common = git_common_dir(here)
         if common and branch_exists(here, name) is False \
                 and remote_tracks(here, name) is False:
-            pending.add(f'pending:{common}:{name}')
+            pending.add(f'pending:{tuid}:{common}:{name}')
     record_grants(BRANCH_NAMESPACE, data.get('session_id'), pending,
                   'free before the creating command ran', ttl=PENDING_TTL)
 
@@ -1087,12 +1103,14 @@ def note_branch_creations(data):
 def record_branch_grants(data):
     """PostToolUse: grant each name that was free before the command and
     exists after it."""
-    sid = data.get('session_id')
+    sid, tuid = data.get('session_id'), data.get('tool_use_id')
+    if not tuid:
+        return
     pending = load_grants(BRANCH_NAMESPACE, sid, ttl=PENDING_TTL)
     made = set()
     for here, name in branch_creations(data):
         common = git_common_dir(here)
-        if common and f'pending:{common}:{name}' in pending \
+        if common and f'pending:{tuid}:{common}:{name}' in pending \
                 and branch_exists(here, name) is True:
             made.add(f'created:{common}:{name}')
     record_grants(BRANCH_NAMESPACE, sid, made, 'created by this session')
@@ -1482,13 +1500,15 @@ def push_decision(args, current, policy, owned=frozenset(), off_branch=None):
     those two and none sends the worktree branch, `off_branch` gets an entry:
     the overlap check measures HEAD, which such a push does not send."""
     positionals, many, tags, delete, i = [], False, False, False, 0
-    leased, leases, forced = set(), [], False
+    leased, leases, forced, unread = set(), [], False, False
     while i < len(args):
         t = args[i]
         if t == '--':
             positionals += args[i + 1:]
             break
         if t.startswith('-'):
+            if t.startswith('--') and t.partition('=')[0] not in PUSH_READ_LONG_OPTS:
+                unread = True
             if t in PUSH_MANY_FLAGS:
                 many = True
             if t in PUSH_TAG_FLAGS:
@@ -1526,7 +1546,7 @@ def push_decision(args, current, policy, owned=frozenset(), off_branch=None):
     refspecs = positionals[1:] if positionals else []
     pairs = ([parse_refspec(s, current, delete) for s in refspecs]
              if refspecs else [(current, current, False, None)])
-    claims = [not delete and not forced and queue_claim(s, leases)
+    claims = [not delete and not forced and not unread and queue_claim(s, leases)
               for s in refspecs] or [False]
     fresh = 0
 
@@ -1564,7 +1584,7 @@ def push_decision(args, current, policy, owned=frozenset(), off_branch=None):
                               and src_b in (current, dst_b))
             # A branch this session created is the session's the way the
             # worktree branch is, so the same third-branch rule applies.
-            owned_push = (not delete and dst_b in owned
+            owned_push = (not delete and not unread and dst_b in owned
                           and src_b in (current, dst_b))
             if dst_b is not None and dst_b != current \
                     and not (leased_rewrite or owned_push):

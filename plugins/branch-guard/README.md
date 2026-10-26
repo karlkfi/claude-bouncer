@@ -580,8 +580,8 @@ and then pushes it from another worktree branch used to be asked, because the
 guard could not tell that branch from a peer's. Creation is the one moment
 that shows ownership, so branch-guard records it: the `PreToolUse` hook notes
 each name the command is about to create that has no local branch and no
-remote-tracking ref, and the `PostToolUse` hook grants the ones that exist
-afterwards, for 8 hours and for that session only, under
+remote-tracking ref, and the `PostToolUse` hook for that same tool call (matched
+by `tool_use_id`) grants the ones that exist afterwards, for 8 hours and for that session only, under
 `~/.claude/branch-guard/session-grants/`. A push to a granted branch then
 allows like the worktree branch's, from the worktree branch or from itself;
 a deletion, a third branch as the source, a protected name, and another
@@ -598,6 +598,12 @@ into the namespace asks, including the ones that defeat the lease: a `+`
 refspec, `--force`, `-f` (bundled too), a lease expecting a commit, and a
 second lease after a first one naming the same ref, since git applies the
 first.
+
+Both of these allows, a claim and a push of a branch the session created,
+also ask when the push carries a long option the guard does not read exactly.
+git accepts any unambiguous abbreviation, so `--force-w=` is a lease the guard
+would not see; ahead of the create-only lease it overwrote an existing claim
+(git 2.55).
 
 **Overlap with a moved base.** An auto-approved push is in bounds. That says
 nothing about the branch still being built on what it thinks it is. When the base
