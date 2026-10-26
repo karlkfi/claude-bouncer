@@ -9410,6 +9410,40 @@ class SameRepoSessionScratchE2ETests(unittest.TestCase):
             f.write(os.path.join(self.other, ".git") + "\n")
         self._expect(f"cat {self._out('other')}", "ask", self.main, "main")
 
+    def test_forged_own_checkout_identity_claims_nothing(self):
+        # Review of #279 at 75b8ed4: this session's .git is inside its own
+        # root, so two silent writes could name another repo's common dir.
+        fake = os.path.join(self.wt, "fakeadmin")
+        os.mkdir(fake)
+        with open(os.path.join(fake, "commondir"), "w") as f:
+            f.write(os.path.join(self.other, ".git") + "\n")
+        with open(os.path.join(self.wt, ".git"), "w") as f:
+            f.write("gitdir: fakeadmin\n")
+        self._expect(f"cat {self._out('other')}", "ask", self.wt, "wt")
+
+    def test_forged_admin_with_its_own_backlink_claims_nothing(self):
+        # The gitdir backlink alone is writable too when the admin dir is
+        # in-root; only git's layout, <common>/worktrees/<name>, pins it.
+        fake = os.path.join(self.wt, "fakeadmin")
+        os.mkdir(fake)
+        with open(os.path.join(fake, "commondir"), "w") as f:
+            f.write(os.path.join(self.other, ".git") + "\n")
+        with open(os.path.join(fake, "gitdir"), "w") as f:
+            f.write(os.path.join(self.wt, ".git") + "\n")
+        with open(os.path.join(self.wt, ".git"), "w") as f:
+            f.write("gitdir: fakeadmin\n")
+        self._expect(f"cat {self._out('other')}", "ask", self.wt, "wt")
+
+    def test_main_checkout_with_linked_dotgit_claims_nothing(self):
+        linked = os.path.join(self.base, "linked")
+        os.mkdir(linked)
+        os.symlink(os.path.join(self.other, ".git"), os.path.join(linked, ".git"))
+        self._expect(f"cat {self._out('other')}", "ask", linked, "main")
+
+    def test_session_whose_cwd_is_gone_asks(self):
+        self._plant("gone", os.path.join(self.main, "removed-dir"))
+        self._expect(f"cat {self._out('gone')}", "ask", self.wt, "wt")
+
     def test_session_without_transcript_asks(self):
         self._plant("bare", self.peer, transcript=False)
         self._expect(f"cat {self._out('bare')}", "ask", self.wt, "wt")

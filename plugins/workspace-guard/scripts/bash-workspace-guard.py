@@ -6632,9 +6632,12 @@ def is_same_repo_session_path(rp, ctx):
     Where the session ran comes from its transcript, and which repository that
     is comes from walking up from there to a ``.git``, the direction git's own
     backlink points, so metadata written into this repository's
-    ``.git/worktrees/`` cannot claim another one.
+    ``.git/worktrees/`` cannot claim another one. Both checkouts, this
+    session's included, must pass :func:`_checkout_backlinked`: this session's
+    ``.git`` is inside its own project root, so it can be rewritten to name
+    another repository's common dir without a prompt.
     """
-    if not ctx.session_wt:
+    if not (ctx.session_wt and _checkout_backlinked(ctx.session_wt)):
         return False
     root = ctx.session_tmp_root
     if not rp.startswith(root + os.sep):
@@ -6643,10 +6646,32 @@ def is_same_repo_session_path(rp, ctx):
     if len(parts) < 2:
         return False
     cwd = session_transcript_cwd(parts[0], parts[1])
-    if cwd is None:
+    if cwd is None or not os.path.isdir(cwd):
         return False
     co = _resolve_checkout(os.path.realpath(cwd))
-    return co is not None and co['common'] == ctx.session_wt['common']
+    return co is not None and _checkout_backlinked(co) \
+        and co['common'] == ctx.session_wt['common']
+
+
+def _checkout_backlinked(co):
+    """True when git's own records agree that ``co`` (a :func:`_resolve_checkout`
+    dict) is the checkout it claims to be. A main checkout's ``.git`` must be a
+    real directory, not a link to another repository's. A linked worktree's
+    admin dir must sit at ``<common>/worktrees/<name>`` and its ``gitdir`` must
+    point back at this root's ``.git`` file, which a ``.git`` rewritten to name
+    a forged admin dir cannot arrange without writing into the other repository.
+    """
+    dotgit = os.path.join(co['root'], '.git')
+    if co['admin'] == co['common']:
+        return not os.path.islink(dotgit)
+    if os.path.dirname(co['admin']) != os.path.join(co['common'], 'worktrees'):
+        return False
+    back = (_read_git_meta(os.path.join(co['admin'], 'gitdir')) or '').strip()
+    if not back:
+        return False
+    if not os.path.isabs(back):
+        back = os.path.join(co['admin'], back)
+    return os.path.realpath(back) == os.path.realpath(dotgit)
 
 
 def main():
