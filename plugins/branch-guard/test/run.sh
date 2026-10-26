@@ -556,6 +556,116 @@ check "[protected] leased rewrite of another branch -> none" none \
 check "[protected] leased rewrite from the destination itself -> none" none \
   "$(decision_for "$(push 'git push --force-with-lease=other origin other:other')" "$WORK" "$PROT")"
 
+# 7c. A queue-id claim in its create-only form cannot overwrite a claim: the
+#     remote refuses it when the ref exists. Every spelling that can overwrite
+#     keeps the ask, and each was driven against a real remote on git 2.55 —
+#     `+`, `--force`, `-f` and `-uf` each overwrote an existing claim through
+#     the same lease, and git applies the FIRST lease naming a ref.
+Q42='refs/queue-ids/Q42'
+check "[queue-id] create-only claim -> allow" allow \
+  "$(decision_for "$(push "git push --force-with-lease=$Q42: origin abc123:$Q42")" "$WORK")"
+check "[queue-id] create-only claim from HEAD -> allow" allow \
+  "$(decision_for "$(push "git push --force-with-lease=$Q42: origin HEAD:$Q42")" "$WORK")"
+check "[queue-id] claim beside the worktree branch -> allow" allow \
+  "$(decision_for "$(push "git push --force-with-lease=$Q42: origin HEAD abc123:$Q42")" "$WORK")"
+check "[queue-id] no lease -> ask" ask \
+  "$(decision_for "$(push "git push origin abc123:$Q42")" "$WORK")"
+check "[queue-id] lease expecting a commit -> ask" ask \
+  "$(decision_for "$(push "git push --force-with-lease=$Q42:def456 origin abc123:$Q42")" "$WORK")"
+check "[queue-id] lease with no expectation -> ask" ask \
+  "$(decision_for "$(push "git push --force-with-lease=$Q42 origin abc123:$Q42")" "$WORK")"
+check "[queue-id] bare lease -> ask" ask \
+  "$(decision_for "$(push "git push --force-with-lease origin abc123:$Q42")" "$WORK")"
+check "[queue-id] + refspec -> ask" ask \
+  "$(decision_for "$(push "git push --force-with-lease=$Q42: origin +abc123:$Q42")" "$WORK")"
+check "[queue-id] --force -> ask" ask \
+  "$(decision_for "$(push "git push --force --force-with-lease=$Q42: origin abc123:$Q42")" "$WORK")"
+check "[queue-id] -f -> ask" ask \
+  "$(decision_for "$(push "git push -f --force-with-lease=$Q42: origin abc123:$Q42")" "$WORK")"
+check "[queue-id] bundled -uf -> ask" ask \
+  "$(decision_for "$(push "git push -uf --force-with-lease=$Q42: origin abc123:$Q42")" "$WORK")"
+check "[queue-id] lease names another claim -> ask" ask \
+  "$(decision_for "$(push "git push --force-with-lease=refs/queue-ids/Q43: origin abc123:$Q42")" "$WORK")"
+check "[queue-id] a commit lease first, create-only second -> ask" ask \
+  "$(decision_for "$(push "git push --force-with-lease=$Q42:def456 --force-with-lease=$Q42: origin abc123:$Q42")" "$WORK")"
+check "[queue-id] lease cleared by --no-force-with-lease -> ask" ask \
+  "$(decision_for "$(push "git push --force-with-lease=$Q42: --no-force-with-lease origin abc123:$Q42")" "$WORK")"
+check "[queue-id] short lease spelling -> ask" ask \
+  "$(decision_for "$(push "git push --force-with-lease=queue-ids/Q42: origin abc123:$Q42")" "$WORK")"
+check "[queue-id] deletion -> ask" ask \
+  "$(decision_for "$(push "git push --force-with-lease=$Q42: origin :$Q42")" "$WORK")"
+check "[queue-id] --delete -> ask" ask \
+  "$(decision_for "$(push "git push --delete --force-with-lease=$Q42: origin $Q42")" "$WORK")"
+check "[queue-id] not a Q-ID -> ask" ask \
+  "$(decision_for "$(push "git push --force-with-lease=refs/queue-ids/next: origin abc123:refs/queue-ids/next")" "$WORK")"
+check "[dontAsk] create-only claim -> allow" allow \
+  "$(decision_for "$(push_mode "git push --force-with-lease=$Q42: origin abc123:$Q42" 'dontAsk')" "$WORK")"
+check "[dontAsk] claim without a lease -> deny" deny \
+  "$(decision_for "$(push_mode "git push origin abc123:$Q42" 'dontAsk')" "$WORK")"
+check "[protected] create-only claim -> none" none \
+  "$(decision_for "$(push "git push --force-with-lease=$Q42: origin abc123:$Q42")" "$WORK" "$PROT")"
+
+# 7d. A branch this session created pushes like the worktree branch (Q309).
+#     Each case runs the way Claude Code runs it: the PreToolUse hook, the
+#     command itself, then the PostToolUse hook, against a private grant store.
+OWN_HOME="$(mktemp -d "$REPO_ROOT/tmp/own-home.XXXXXX")"
+own_payload() {   # COMMAND EVENT [SESSION]
+  jq -nc --arg cmd "$1" --arg cwd "$(nat "$WORK")" --arg ev "$2" \
+         --arg sid "${3:-sess-own}" \
+    '{tool_name: "Bash", tool_input: {command: $cmd}, cwd: $cwd, session_id: $sid}
+     + (if $ev == "" then {} else {hook_event_name: $ev} end)'
+}
+own_create() {    # COMMAND [SESSION]
+  decision_for "$(own_payload "$1" '' "${2:-}")" "$WORK" HOME="$OWN_HOME" >/dev/null
+  ( cd "$WORK" && eval "$1" ) >/dev/null 2>&1 || true   # a create may fail by design
+  decision_for "$(own_payload "$1" PostToolUse "${2:-}")" "$WORK" HOME="$OWN_HOME" >/dev/null
+}
+own_push() {      # COMMAND [SESSION]
+  decision_for "$(own_payload "$1" '' "${2:-}")" "$WORK" HOME="$OWN_HOME"
+}
+git -C "$WORK" checkout -q claude/x
+own_create 'git branch feat/q309-a'
+check "[owned] push -u of a branch this session created -> allow" allow \
+  "$(own_push 'git push -u origin feat/q309-a')"
+check "[owned] HEAD onto it -> allow" allow \
+  "$(own_push 'git push origin HEAD:feat/q309-a')"
+check "[owned] another session pushing it -> ask" ask \
+  "$(own_push 'git push -u origin feat/q309-a' sess-other)"
+check "[owned] deleting it -> ask" ask \
+  "$(own_push 'git push origin --delete feat/q309-a')"
+git -C "$WORK" branch feat/q309-b
+check "[owned] a branch made outside the session -> ask" ask \
+  "$(own_push 'git push -u origin feat/q309-b')"
+check "[owned] a third branch as the source -> ask" ask \
+  "$(own_push 'git push origin feat/q309-b:feat/q309-a')"
+own_create 'git branch feat/q309-b'
+check "[owned] a create that found the name taken -> ask" ask \
+  "$(own_push 'git push -u origin feat/q309-b')"
+git -C "$WORK" update-ref refs/remotes/origin/feat/q309-c HEAD
+own_create 'git branch feat/q309-c'
+check "[owned] a name a remote already carries -> ask" ask \
+  "$(own_push 'git push -u origin feat/q309-c')"
+decision_for "$(own_payload 'git branch feat/q309-d' '')" "$WORK" HOME="$OWN_HOME" >/dev/null
+git -C "$WORK" branch feat/q309-d
+check "[owned] a PreToolUse with no PostToolUse grants nothing -> ask" ask \
+  "$(own_push 'git push -u origin feat/q309-d')"
+own_create 'cd . && git branch feat/q309-e'
+check "[owned] a create behind a cd -> ask" ask \
+  "$(own_push 'git push -u origin feat/q309-e')"
+own_create 'git switch -q -c feat/q309-f && git switch -q claude/x'
+check "[owned] switch -c -> allow" allow \
+  "$(own_push 'git push -u origin feat/q309-f')"
+own_create 'git checkout -q -b feat/q309-g && git checkout -q claude/x'
+check "[owned] checkout -b -> allow" allow \
+  "$(own_push 'git push -u origin feat/q309-g')"
+own_create 'git worktree add -q -b feat/q309-h ../q309-wt'
+check "[owned] worktree add -b -> allow" allow \
+  "$(own_push 'git push -u origin feat/q309-h')"
+git -C "$WORK" worktree remove --force ../q309-wt
+check "[owned] a fresh store grants nothing -> ask" ask \
+  "$(decision_for "$(own_payload 'git push -u origin feat/q309-a' '')" "$WORK" \
+     HOME="$(mktemp -d "$REPO_ROOT/tmp/own-empty.XXXXXX")")"
+
 # 8. protected policy: ask only on a protected target; never auto-approve.
 check "[protected] push origin main -> ask" ask \
   "$(decision_for "$(push 'git push origin main')" "$WORK" "$PROT")"
@@ -2137,6 +2247,12 @@ check "[overlap] base moved into the same line -> deny" deny \
   "$(decision_for "$(push 'git push')" "$OVL")"
 check "[overlap] same, push origin HEAD -> deny" deny \
   "$(decision_for "$(push 'git push origin HEAD')" "$OVL")"
+#      A queue-id claim sends no branch, so HEAD's overlap is not its business;
+#      sent beside the branch, the branch's overlap still denies.
+check "[overlap] a queue-id claim from the overlapping branch -> allow" allow \
+  "$(decision_for "$(push 'git push --force-with-lease=refs/queue-ids/Q42: origin HEAD:refs/queue-ids/Q42')" "$OVL")"
+check "[overlap] the claim beside the branch itself -> deny" deny \
+  "$(decision_for "$(push 'git push --force-with-lease=refs/queue-ids/Q42: origin HEAD HEAD:refs/queue-ids/Q42')" "$OVL")"
 ovl_reason="$(reason_for "$(push 'git push')" "$OVL")"
 check_text "[overlap] reason names the file" has "file.txt" "$ovl_reason"
 check_text "[overlap] reason names the base ref" has "origin/main" "$ovl_reason"
