@@ -9382,6 +9382,14 @@ class SameRepoSessionScratchE2ETests(unittest.TestCase):
     def _out(self, session):
         return sh(self.sessions[session][1])
 
+    @staticmethod
+    def _rewrite(path, text):
+        # git hides a worktree's .git file on Windows, where opening a hidden
+        # file for writing is refused and removing one is not.
+        os.remove(path)
+        with open(path, "w") as f:
+            f.write(text)
+
     def test_worktree_session_reads_peer_worktree_scratch(self):
         self._expect(f"tail -20 {self._out('peer')}", "allow", self.wt, "wt")
 
@@ -9417,8 +9425,7 @@ class SameRepoSessionScratchE2ETests(unittest.TestCase):
         os.mkdir(fake)
         with open(os.path.join(fake, "commondir"), "w") as f:
             f.write(os.path.join(self.other, ".git") + "\n")
-        with open(os.path.join(self.wt, ".git"), "w") as f:
-            f.write("gitdir: fakeadmin\n")
+        self._rewrite(os.path.join(self.wt, ".git"), "gitdir: fakeadmin\n")
         self._expect(f"cat {self._out('other')}", "ask", self.wt, "wt")
 
     def test_forged_admin_with_its_own_backlink_claims_nothing(self):
@@ -9430,8 +9437,7 @@ class SameRepoSessionScratchE2ETests(unittest.TestCase):
             f.write(os.path.join(self.other, ".git") + "\n")
         with open(os.path.join(fake, "gitdir"), "w") as f:
             f.write(os.path.join(self.wt, ".git") + "\n")
-        with open(os.path.join(self.wt, ".git"), "w") as f:
-            f.write("gitdir: fakeadmin\n")
+        self._rewrite(os.path.join(self.wt, ".git"), "gitdir: fakeadmin\n")
         self._expect(f"cat {self._out('other')}", "ask", self.wt, "wt")
 
     def test_main_checkout_with_linked_dotgit_claims_nothing(self):
