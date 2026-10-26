@@ -8155,6 +8155,40 @@ class SuppressionEscalationTests(unittest.TestCase):
                 self._decision(self.OVERRIDE + cmd, "defer",
                                permission_mode=mode)
 
+    # --- each verdict names only routes its reader can take (Q210) ----------
+
+    OPERATOR_ONLY = "cannot be set from inside this session"
+
+    def test_a_bypass_deny_offers_neither_approval_nor_the_override(self):
+        # Nobody is at the prompt to approve, and the override cannot lift a
+        # bypass deny, so naming either would send the agent at a dead end.
+        cases = [(cmd, None) for cmd in self.SCOPED + self.REWRITABLE]
+        cases.append((self.INTERPRETED, "all"))
+        for cmd, scope in cases:
+            reason = self._decision(cmd, "deny",
+                                    permission_mode="bypassPermissions",
+                                    scope=scope)
+            self.assertIn("Fix:", reason)
+            self.assertNotIn("approve this one", reason)
+            self.assertNotIn("WORKSPACE_GUARD_OVERRIDE", reason)
+            self.assertIn(self.OPERATOR_ONLY, reason)
+            self.assertNotIn("Set WORKSPACE_GUARD_ESCALATE=off", reason)
+
+    def test_an_attended_deny_names_the_knob_as_the_operators(self):
+        for cmd in self.REWRITABLE:
+            reason = self._decision(cmd, "deny", permission_mode="auto")
+            self.assertIn(self.OPERATOR_ONLY, reason)
+            self.assertNotIn("Set WORKSPACE_GUARD_ESCALATE=off", reason)
+
+    def test_an_ask_keeps_approval_and_the_knob_for_the_person(self):
+        # An ask's reason reaches the person at the prompt, who can do both.
+        for cmd in (self.SCOPED[0], self.OVERRIDE + self.REWRITABLE[0]):
+            reason = self._decision(cmd, "ask", permission_mode="auto")
+            self.assertIn("or approve this one.", reason)
+            self.assertIn("Set WORKSPACE_GUARD_ESCALATE=off to restore the "
+                          "silence.", reason)
+            self.assertNotIn(self.OPERATOR_ONLY, reason)
+
 
 class ShellCEscalationReadsOnlyUnreachableBodiesTests(unittest.TestCase):
     """The `sh -c` escalation fires only on a body nobody could read (Q211).
@@ -8259,7 +8293,8 @@ class NestedSignalOutranksTheInterpreterLabelTests(unittest.TestCase):
     def test_the_reason_names_the_kill_rather_than_the_body(self):
         out = self._run(self.WRAPPED_KILL[0], "auto")
         reason = out["hookSpecificOutput"]["permissionDecisionReason"]
-        self.assertIn("`kill` whose targets it cannot see", reason)
+        self.assertIn("`kill`, which signals a process the hook cannot judge",
+                      reason)
         self.assertNotIn("could not reach", reason)
 
     def test_bypass_permissions_denies_rather_than_running_it(self):
@@ -8970,7 +9005,8 @@ class WrappedCommandTests(unittest.TestCase):
     def test_the_wrapper_label_does_not_mask_a_kill(self):
         reason = self._decision("cat in.txt; xargs cat in.txt; kill $pid",
                                 "deny", permission_mode="auto")
-        self.assertIn("`kill` whose targets it cannot see", reason)
+        self.assertIn("`kill`, which signals a process the hook cannot judge",
+                      reason)
 
 
 class FindPartsTests(unittest.TestCase):
