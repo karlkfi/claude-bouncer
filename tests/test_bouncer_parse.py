@@ -73,6 +73,35 @@ class StripCommentsTests(unittest.TestCase):
         self.assertEqual('(true)', bp.strip_comments('(true)#b; id'))
         self.assertEqual('echo $(true) ', bp.strip_comments('echo $(true) #b; id'))
 
+    def test_an_extglob_group_or_regex_operand_holds_no_comment(self):
+        # bash 5.3.15 runs `id` after each (Q293): a `#` anywhere in an extglob
+        # group or a `(( … ))` is text, so is one glued after an extglob close,
+        # and in a `=~` operand one glued to `(`, `|` or `)`.
+        for cmd in ('[[ x == @(a|#b) ]]; id', 'echo @(a|#b); id',
+                    'echo @(a #b); id', 'echo @(a\n#b); id', 'echo @(a)#b; id',
+                    'echo !(a|#b) *(#) +(a|#x) ?(#); id',
+                    '[[ a =~ (#x) ]] || id', '[[ x =~ a|#b ]] || id',
+                    '[[ x =~ (a)#b ]] || id', '[[ x ]] && [[ y =~ (#a) ]]; id',
+                    '(( 1 #2 )); id', 'f() { (( 1 #2 )); id; }'):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(cmd, bp.strip_comments(cmd))
+
+    def test_a_dbracket_still_holds_comments(self):
+        # Inside `[[ … ]]` bash starts a comment after a blank and after a
+        # grouping `(`, and `id` runs on the next line. Kept as text, the `'`
+        # in the first would open a quote over the rest of the string.
+        for cmd, want in (("[[ -n x #it's\n]] && id", '[[ -n x \n]] && id'),
+                          ('[[ (#c\n-n x) ]] && id', '[[ (\n-n x) ]] && id'),
+                          ('[[ x =~ ( #c\n) ]] || id', '[[ x =~ ( \n) ]] || id'),
+                          ('[[ x =~ a ]] #c\nid', '[[ x =~ a ]] \nid'),
+                          ('[[ x ]] && echo a|#b\nid', '[[ x ]] && echo a|\nid'),
+                          ('[[ x =~ @(a) ]] && echo a|#b\nid',
+                           '[[ x =~ @(a) ]] && echo a|\nid')):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(want, bp.strip_comments(cmd))
+        # `!(` in command position is a negated subshell, unless extglob is on.
+        self.assertEqual('!(true \n) ; id', bp.strip_comments('!(true #c\n) ; id'))
+
     def test_a_backtick_or_brace_expansion_holds_no_comment(self):
         # bash 5.3.15 runs `id` after each: a comment in backticks ends at the
         # closing backtick, and a `#` in `${...}` is text (Q254).
