@@ -3647,15 +3647,32 @@ class SpecialCaseTests(unittest.TestCase):
                     "(C=kind-ci);", "(export C=kind-ci);", "C=kind-ci | true;",
                     "C=kind-ci &", "f() ( C=kind-ci; ); f;",
                     "f() { C=kind-ci; }; f | cat;",
-                    "f() { C=kind-ci; }; true | f;"):
+                    "f() { C=kind-ci; }; true | f;",
+                    # A command substitution runs in a subshell too (Q290).
+                    "x=$(C=kind-ci);", "x=`C=kind-ci`;",
+                    'echo "$(C=kind-ci)";', "x=$(export C=kind-ci);",
+                    "x=$(echo $(C=kind-ci));", ": $(C=kind-ci);"):
             with self.subTest(mid=mid):
                 self.assertEqual(
                     run_hook(pre + mid + use, home=home)[0], "deny")
         for mid in ("{ C=kind-ci; } > /dev/null;", "{ C=kind-ci; } <<< x;",
                     "{ C=kind-ci; true | true; };", "! { C=kind-ci; };",
-                    "true && { C=kind-ci; };", "{ C=kind-ci; }\n"):
+                    "true && { C=kind-ci; };", "{ C=kind-ci; }\n",
+                    "x=$(C=a) C=kind-ci;", "C=kind-ci; x=$(true);",
+                    "C=kind-ci; x=$(C=gke_acme_prod-us);"):
             with self.subTest(mid=mid):
                 self.assertIsNone(run_hook(pre + mid + use, home=home)[0])
+
+    def test_a_substitution_assignment_leaves_the_name_unset(self):
+        # bash 5.3.15 prints `[]` for `$C` after each of these, so the target
+        # is unknown and the mutation asks, as with no assignment at all.
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        for pre in ("x=$(C=kind-ci); ", "x=`C=kind-ci`; ",
+                    "x=$(export C=kind-ci); "):
+            with self.subTest(pre=pre):
+                self.assertEqual(run_hook(
+                    pre + "kubectl --context $C delete ns x", home=home)[0],
+                    "ask")
 
     def test_strip_keywords_takes_time_and_its_options(self):
         # `time`'s `-p` and `--` go with it, so an assignment behind them is

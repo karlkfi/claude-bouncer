@@ -514,7 +514,11 @@ def _hoist_substitutions(tokens, raw, spans, bodies, sentinels):
     """Restore every masked word and insert each substitution body it held,
     tokenized, ahead of the simple command the word belongs to. A marker
     inside a comment never reaches a token, so a commented-out substitution
-    stays unjudged, as bash leaves it unrun."""
+    stays unjudged, as bash leaves it unrun.
+
+    Each body goes in inside `( … )`, since bash runs it in a subshell: what it
+    assigns dies there, and `segment_layout` reads the parentheses as running
+    apart, so nothing after it sees the assignment (Q290)."""
     if not sentinels:
         return tokens
     marker = re.compile('%s(.)%s*' % sentinels)
@@ -528,8 +532,8 @@ def _hoist_substitutions(tokens, raw, spans, bodies, sentinels):
             for m in marker.finditer(t):
                 sub_tokens = tokenize(bodies[ord(m.group(1)) - _SUBST_BASE])
                 if sub_tokens:
-                    out[seg_start:seg_start] = sub_tokens + [';']
-                    seg_start += len(sub_tokens) + 1
+                    out[seg_start:seg_start] = ['('] + sub_tokens + [')', ';']
+                    seg_start += len(sub_tokens) + 3
             restored = QuotedStr(marker.sub(
                 lambda m: raw[slice(*spans[ord(m.group(1)) - _SUBST_BASE])], t))
             restored.quotes = getattr(t, 'quotes', frozenset())
