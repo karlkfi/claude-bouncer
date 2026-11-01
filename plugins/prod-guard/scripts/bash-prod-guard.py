@@ -374,6 +374,13 @@ def strip_quoted_heredocs(raw):
     return '\n'.join(out)
 
 
+_HEREDOC_ESCAPE = re.compile(r'\\([`$\\\n])')
+
+
+def _unescape(m):
+    return '' if m.group(1) == '\n' else m.group(1)
+
+
 def tokenize(raw):
     """shlex-tokenize with POSIX quoting and punctuation grouping. Newlines
     are rewritten to `;` first, because shlex treats a newline as plain
@@ -394,8 +401,8 @@ def tokenize(raw):
 
     Returns None on unbalanced quotes (caller defers: fail-open on parse
     errors)."""
-    expanded = []
-    raw = _strip_comments(strip_heredoc_bodies(raw, expanded, expanded))
+    expanded, unterminated = [], []
+    raw = _strip_comments(strip_heredoc_bodies(raw, expanded, unterminated))
     spans = []
     bodies = command_substitutions(raw, spans=spans)[:_SUBST_MAX]
     sentinels = _subst_sentinels(raw)
@@ -419,15 +426,25 @@ def tokenize(raw):
         # substitutions are scanned with quoting off: `'$(cmd)'` there still
         # runs `cmd`. The same apostrophe can leave the body unlexable, which
         # costs the body's own words and nothing else.
-        for body in expanded:
+        #
+        # An expanded body's text is read the way the command receives it, with
+        # the escapes bash removes already gone: `\``, `\$`, `\\` and a
+        # backslash-newline (Q284). Left in, `\`` reads as an escaped character
+        # rather than the backtick a shell reading the body runs, and a `#`
+        # between two of them took the rest of the line as a comment. The
+        # substitution scan keeps the raw text, since that is what bash expands.
+        heredocs = ([(b, True) for b in expanded]
+                    + [(b, False) for b in unterminated])
+        for body, unescape in heredocs:
             for sub in command_substitutions(body, quotes=False):
                 sub_tokens = tokenize(sub)
                 if sub_tokens:
                     tokens.append(';')
                     tokens.extend(sub_tokens)
+            text = _HEREDOC_ESCAPE.sub(_unescape, body) if unescape else body
             try:
                 body_tokens = _lex_semicolons(
-                    _strip_comments(body, quotes=False)
+                    _strip_comments(text, quotes=False)
                     .replace('`', ';').replace('\n', ';'))
             except ValueError:
                 continue

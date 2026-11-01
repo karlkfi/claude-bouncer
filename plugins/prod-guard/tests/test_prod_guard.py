@@ -733,6 +733,33 @@ class HeredocDecisionTests(unittest.TestCase):
             "cat <<'EOF'\nnoise\nEOF\nkubectl delete ns payments", home=home)
         self.assertEqual(decision, "deny")
 
+    def test_unquoted_body_is_read_with_its_escapes_removed(self):
+        # Q284: bash removes the backslash from \` \$ \\ and a newline in an
+        # unquoted body before the command reads it. Each shape was driven on
+        # bash 5.3.15 with `echo RAN` in place of the kubectl command.
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        k = "kubectl delete ns payments"
+        for body, want in (
+                ("echo \\`true\\` ; %s", "deny"),         # control
+                ("echo \\`true # c\\` ; %s", "deny"),
+                ("echo \\`true # c\\`\\\n; %s", "deny"),
+                ("\\$(%s)", "deny"),
+                ("x=\\\\$(echo a) ; %s", "deny"),
+                # `\\` leaves `\`, which then continues the line into echo's
+                # arguments, so the inner shell runs no kubectl.
+                ("echo a \\\\\n%s", None)):
+            with self.subTest(body=body):
+                decision, _ = run_hook(
+                    "bash <<EOF\n%s\nEOF" % (body % k), home=home)
+                self.assertEqual(decision, want)
+
+    def test_quoted_body_keeps_its_escapes(self):
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        decision, _ = run_hook(
+            "bash <<'EOF'\necho \\`true # c\\` ; kubectl delete ns payments\nEOF",
+            home=home)
+        self.assertIsNone(decision)
+
     def test_unterminated_heredoc_still_judged(self):
         home = make_home(kubeconfig=KUBECONFIG_PROD)
         decision, _ = run_hook(
