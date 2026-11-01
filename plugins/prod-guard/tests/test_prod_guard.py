@@ -745,6 +745,10 @@ class HeredocDecisionTests(unittest.TestCase):
                 ("echo \\`true # c\\`\\\n; %s", "deny"),
                 ("\\$(%s)", "deny"),
                 ("x=\\\\$(echo a) ; %s", "deny"),
+                # Inside double quotes the inner shell still runs these.
+                ('echo "\\$(%s)"', "deny"),
+                ('echo "\\`%s\\`"', "deny"),
+                ("echo '\\$(%s)'", None),
                 # `\\` leaves `\`, which then continues the line into echo's
                 # arguments, so the inner shell runs no kubectl.
                 ("echo a \\\\\n%s", None)):

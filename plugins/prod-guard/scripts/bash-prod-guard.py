@@ -432,16 +432,21 @@ def tokenize(raw):
         # backslash-newline (Q284). Left in, `\`` reads as an escaped character
         # rather than the backtick a shell reading the body runs, and a `#`
         # between two of them took the rest of the line as a comment. The
-        # substitution scan keeps the raw text, since that is what bash expands.
+        # substitution scan keeps the raw text, since that is what bash expands,
+        # and the unescaped text gets a second one with quoting on, for what a
+        # shell reading the body runs: lexing alone leaves `"\$(cmd)"` whole.
         heredocs = ([(b, True) for b in expanded]
                     + [(b, False) for b in unterminated])
         for body, unescape in heredocs:
-            for sub in command_substitutions(body, quotes=False):
+            text = _HEREDOC_ESCAPE.sub(_unescape, body) if unescape else body
+            subs = command_substitutions(body, quotes=False)
+            if unescape:
+                subs += command_substitutions(text)
+            for sub in subs:
                 sub_tokens = tokenize(sub)
                 if sub_tokens:
                     tokens.append(';')
                     tokens.extend(sub_tokens)
-            text = _HEREDOC_ESCAPE.sub(_unescape, body) if unescape else body
             try:
                 body_tokens = _lex_semicolons(
                     _strip_comments(text, quotes=False)
