@@ -192,6 +192,15 @@ GIT_ESCAPE_HATCHES = {'-c', '--config-env'}
 # question — a literal `-C` names a tree they can run in.
 REPO_REDIRECT_OPTS = ('-C', '--git-dir', '--work-tree')
 
+# The same two reaches spelled as environment variables, set as a command
+# prefix or as an `env`/`sudo` operand (Q305): git reads `GIT_DIR` for
+# `--git-dir` and runs config from `GIT_CONFIG_COUNT`/`_KEY_n`/`_VALUE_n` or
+# `GIT_CONFIG_PARAMETERS` the way it does from `-c` (an alias defined through
+# each ran on git 2.55). A config variable is any `GIT_CONFIG*` name.
+GIT_REPO_ENV = frozenset({'GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR',
+                          'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY',
+                          'GIT_ALTERNATE_OBJECT_DIRECTORIES'})
+
 # Refs whose reachability makes a branch tip RECOVERABLE: any remote-tracking
 # branch, or a local integration branch. If one of these contains the tip, the
 # commits survive the branch being deleted or force-moved and the worst case is
@@ -1198,15 +1207,22 @@ def peel_wrappers(argv, assigned=None):
 
 def parse_invocation(tokens):
     """If a segment is a `git` or `gh` invocation, return
-    {'prog', 'sub', 'args', 'globals', 'wrapped', 'chdir'}; otherwise None.
-    Strips leading env assignments, command wrappers (`peel_wrappers`) and
-    program global options so `FOO=bar git -C path -c k=v commit -m x` ->
+    {'prog', 'sub', 'args', 'globals', 'wrapped', 'chdir', 'env'}; otherwise
+    None. Strips leading env assignments, command wrappers (`peel_wrappers`)
+    and program global options so `FOO=bar git -C path -c k=v commit -m x` ->
     {'prog': 'git', 'sub': 'commit', 'args': ['-m','x'],
-     'globals': ['-C','path','-c','k=v'], 'wrapped': False, 'chdir': []}."""
-    i = 0
+     'globals': ['-C','path','-c','k=v'], 'wrapped': False, 'chdir': [],
+     'env': {'FOO'}}. `env` names every variable the command sets for git,
+    from the prefix and from an `env` or `sudo` operand."""
+    i, env = 0, set()
     while i < len(tokens) and is_assignment(tokens[i]):
+        name, form, _ = split_assignment(tokens[i])
+        if form != ASSIGN_SUBSCRIPT:
+            env.add(name)
         i += 1
-    peeled, chdir = peel_wrappers(tokens[i:])
+    operands = []
+    peeled, chdir = peel_wrappers(tokens[i:], operands)
+    env.update(split_assignment(t, append_is_operator=False)[0] for t in operands)
     if not peeled:
         return None
     wrapped = tokens[i].rsplit('/', 1)[-1] in WRAPPER_VALUE_OPTS
@@ -1227,7 +1243,7 @@ def parse_invocation(tokens):
     sub = tokens[i] if i < len(tokens) else None
     args = tokens[i + 1:] if i < len(tokens) else []
     return {'prog': prog, 'sub': sub, 'args': args, 'globals': tokens[start:i],
-            'wrapped': wrapped, 'chdir': chdir}
+            'wrapped': wrapped, 'chdir': chdir, 'env': env}
 
 
 def is_safe_read_filter(tokens):
@@ -2412,6 +2428,18 @@ def targets_other_repo(globals_):
                for g in globals_ for o in REPO_REDIRECT_OPTS)
 
 
+def env_redirects(inv):
+    """True when the command sets a variable that aims git at another
+    repository, index or object store, as `--git-dir` does."""
+    return bool(inv['env'] & GIT_REPO_ENV)
+
+
+def env_configures(inv):
+    """True when the command sets a variable git reads config from, as `-c`
+    does."""
+    return any(n.startswith('GIT_CONFIG') for n in inv['env'])
+
+
 def git_cwd(cwd, globals_):
     """The directory a git invocation runs in: `cwd` walked through every `-C`
     in its global options, or None when the hook can't follow it.
@@ -2442,7 +2470,10 @@ def invocation_cwd(cwd, inv):
     wrapper's chdir (`env -C`, `sudo -D`), then through git's own `-C` — the
     order the shell and git apply them in — or None when the hook can't follow
     one. A non-literal directory and a chroot give up outright, as `git_cwd`
-    does on a `-C` only the shell can compute."""
+    does on a `-C` only the shell can compute, and so does a repository
+    variable, as `git_cwd` does on a `--git-dir`."""
+    if env_redirects(inv):
+        return None
     for hop in inv['chdir']:
         if hop is None or not is_literal_path(hop):
             return None
@@ -2512,11 +2543,13 @@ def is_overridable(inv, verdict, writes):
     a `git -C`/`--git-dir` pointing elsewhere put the loss in a checkout this
     session may not own — the one thing "damage stops at this machine" has to
     rule out; and a `git -c`/`--config-env` escape hatch can run arbitrary code
-    (`-c core.pager='!sh …'`). Any other wrapper runs the same git on the same
+    (`-c core.pager='!sh …'`). Both of the last two count in their environment
+    spelling as well, `GIT_DIR=…` and `GIT_CONFIG_COUNT=…`. Any other wrapper runs the same git on the same
     checkout, so the loss it lifts is the one the classifier measured."""
     if inv is None or writes or inv['chdir'] or inv['prog'] != 'git':
         return False
-    if set(inv['globals']) & GIT_ESCAPE_HATCHES or targets_other_repo(inv['globals']):
+    if set(inv['globals']) & GIT_ESCAPE_HATCHES or targets_other_repo(inv['globals']) \
+            or env_redirects(inv) or env_configures(inv):
         return False
     if verdict == 'deny-rebase':
         return inv['sub'] == 'push'
@@ -2553,7 +2586,7 @@ def classify_segment(inv, branch, policy, cwd, probe, mode='', session_id=''):
     # does the same: it is peeled to find the protective verdicts (Q223), and
     # what it adds -- another user, a cleared or extra environment -- is
     # nothing the classifier read, so it approves nothing.
-    if verdict == 'allow' and (inv['wrapped']
+    if verdict == 'allow' and (inv['wrapped'] or env_configures(inv)
                                or set(inv['globals']) & GIT_ESCAPE_HATCHES):
         return ('defer', None)
     return (verdict, reason)

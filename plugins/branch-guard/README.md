@@ -158,6 +158,7 @@ the default `strict` [push policy](#push-guard).
 | `git status <(touch evil)` *(process substitution)* | defer |
 | `git checkout file.txt` *(ambiguous: branch vs. file)* | defer |
 | `git -c core.pager=cat log` *(inline-config escape hatch)* | defer |
+| `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager … git log` / `GIT_CONFIG_PARAMETERS=… git log` *(the same hatch from the environment)* | defer |
 | `gh pr create` / `gh pr merge 5` / `gh pr merge 5 --delete-branch` / `gh run rerun` *(gh mutation; the merge lands the work before the branch is deleted)* | defer |
 | `gh api -X POST …` / `gh api … -f k=v` *(a write: non-GET method or a request body)* | defer |
 | `gh api -X DELETE user/following/x` / `gh api -X DELETE repos/o/r/issues/comments/1` *(non-repo API delete — not a recognized destructive endpoint)* | defer |
@@ -239,9 +240,9 @@ when the ref they overwrite is the one whose tip survives nowhere.
 The checks are local `git` queries and never touch the network. They can
 only ever turn a prompt into an approval, and only on a positive answer — if git
 can't be reached, the branch won't resolve, or the hook can't tell which working
-tree the command runs in (a `--git-dir`/`--work-tree` option, a `cd` or a `-C`
-whose target only the shell can compute), the command asks exactly as it did
-before.
+tree the command runs in (a `--git-dir`/`--work-tree` option or the `GIT_DIR`/
+`GIT_WORK_TREE` variable that spells it, a `cd` or a `-C` whose target only
+the shell can compute), the command asks exactly as it did before.
 
 One caveat worth knowing: "reachable from a remote-tracking branch" trusts your
 last `git fetch`. A stale `refs/remotes/origin/x` left behind after the branch
@@ -491,7 +492,11 @@ already approved — see the exception below.
   output redirect to a file (`… > out`), a `git -c`/`--config-env` escape hatch
   (which can run arbitrary code), and a `git -C`/`--git-dir` aimed at another
   repository all keep the ask, as does a wrapper that changes directory
-  (`env -C`, `sudo -D`, `sudo -i`). Any other wrapper is lifted with it.
+  (`env -C`, `sudo -D`, `sudo -i`). The last two count in their environment
+  spelling too, whether set as a prefix or as an `env` or `sudo` operand: any
+  `GIT_CONFIG*` variable, and `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`,
+  `GIT_INDEX_FILE` or an object-directory variable. Any other wrapper or
+  variable is lifted with it.
 - **A command carrying anything unrecognized.** The all-segments rule applies
   unchanged, so `BRANCH_GUARD_OVERRIDE=… git clean -fd && rm -rf junk` still asks.
   A safe segment alongside is fine: `… git status && git clean -fd` is lifted,
@@ -924,7 +929,8 @@ update step and restart.
    one git/gh segment is still required (`head -5` alone defers). Two things
    downgrade a would-be `allow` to defer
    without ever weakening a protective `ask`: an inline-config escape hatch
-   (`git -c core.pager='!sh …' log`), and a hidden command/process substitution
+   (`git -c core.pager='!sh …' log`, or a `GIT_CONFIG*` variable carrying the
+   same config), and a hidden command/process substitution
    in the raw token stream (`` `…` ``, `$(…)`, `<(…)`/`>(…)`, or an unrecognized
    operator run like `<>`) — checked over the raw tokens, before redirect targets
    are dropped, so `` git diff > `evil` `` is caught too. A small registry of
