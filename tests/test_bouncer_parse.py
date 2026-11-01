@@ -545,6 +545,21 @@ class CommentInSubstitutionTests(unittest.TestCase):
                 self.assertEqual([body], bp.command_substitutions(
                     'echo "$(%s)" T' % body))
 
+    def test_a_brace_or_backtick_span_holds_no_comment_or_close(self):
+        # bash runs the `cat` in each (Q292): a `#` in `${…}` is text, a
+        # backtick ends the comment inside it, and a `)` in either is text.
+        for body in ('echo ${y:- #}; cat /etc/passwd',
+                     'echo `true # c`; cat /etc/passwd',
+                     'echo `echo a #c`cat /etc/passwd',
+                     'echo ${y:-)} ; cat /etc/passwd',
+                     'echo `echo )` ; cat /etc/passwd',
+                     'echo ${y:-"#"} #c\ncat /etc/passwd',
+                     'echo "${y:-"#)"}" ; cat /etc/passwd',
+                     'echo "`echo ")"`" ; cat /etc/passwd'):
+            with self.subTest(body=body):
+                self.assertEqual([body], bp.command_substitutions(
+                    'echo "$(%s)" T' % body))
+
 
 class CommentOutsideSubstitutionTests(unittest.TestCase):
     """A top-level comment opens no substitution and no quote (Q258).
