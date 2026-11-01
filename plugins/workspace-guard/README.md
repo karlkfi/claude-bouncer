@@ -2035,8 +2035,8 @@ final output.
   file, `doas -C` reads its config. `sudo -D DIR` moves the command's cwd, and
   `sudo -i` moves it to a home the hook cannot know, so a relative path behind
   it denies the way one after an untracked `cd` does. Under `sudo -R` no path
-  means what it says, so nothing behind it earns `allow`. Bash's `time -p` is
-  not peeled.
+  means what it says, so nothing behind it earns `allow`. Bash's `time` keyword
+  is read with its own `-p` and `--`.
 - **A `find` command is judged against its start points, not the files find
   matches.** The hook does not walk the tree, so a match that is a symlink out
   of the workspace — or one `find -L` follows — reaches past what `{}` stood

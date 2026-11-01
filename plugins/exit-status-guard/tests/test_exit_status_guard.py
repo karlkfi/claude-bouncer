@@ -122,7 +122,19 @@ CASES = [
      False, True, ''),
     ('|& pipes stderr too', 'make check |& tail -5', False, True, ''),
     ('time-wrapped gate piped', 'time make check | tail -5', False, True, ''),
+    ('time -p gate piped', 'time -p make check | tail -5', False, True, ''),
+    ('time -- gate piped', 'time -- make check | tail -5', False, True, ''),
+    ('time -p -- gate piped', 'time -p -- make check | tail -5',
+     False, True, ''),
+    # bash 5.3.15 runs a program named `-p` here, never the gate.
+    ('time -- -p runs -p', 'time -- -p make check | tail -5', False, False, ''),
     ('sudo-wrapped gate piped', 'sudo make install | tail -5', False, True, ''),
+    # Q293: a `#` in an extglob group is text, and one after a blank inside
+    # `[[ … ]]` is still a comment, so the gate on the line after it runs.
+    ('gate behind an extglob #', '[[ x == @(a|#b) ]]; make check | tail -5',
+     False, True, ''),
+    ("gate behind a [[ comment", "[[ -n x #it's\n]] && make check | tail -5",
+     False, True, ''),
 
     # --- PIPESTATUS is not portable across shells ----------------------------
     ('PIPESTATUS[0] after a gate',

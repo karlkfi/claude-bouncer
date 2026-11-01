@@ -3078,6 +3078,13 @@ class HookEndToEndTests(unittest.TestCase):
         # The `do cat …` body group is its own token group after `;` splitting.
         self._decision("for f in a; do cat /etc/q28-fake-target; done", "ask")
 
+    def test_time_options_prefix_outside_ask(self):
+        # `time`'s `-p` and `--` are its own; bash 5.3.15 runs `cat` behind
+        # each (Q241).
+        for c in ("time -p", "time --", "time -p --", "time -p LC_ALL=C"):
+            with self.subTest(c=c):
+                self._decision(c + " cat /etc/q28-fake-target", "ask")
+
     def test_oneline_for_do_loopvar_outside_ask(self):
         # Pre-Q28 the `do` on the same line masked the guarded command and the
         # one-line `for … do … done` loop deferred; now the loop variable is

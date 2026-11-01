@@ -374,6 +374,13 @@ def strip_quoted_heredocs(raw):
     return '\n'.join(out)
 
 
+_HEREDOC_ESCAPE = re.compile(r'\\([`$\\\n])')
+
+
+def _unescape(m):
+    return '' if m.group(1) == '\n' else m.group(1)
+
+
 def tokenize(raw):
     """shlex-tokenize with POSIX quoting and punctuation grouping. Newlines
     are rewritten to `;` first, because shlex treats a newline as plain
@@ -394,8 +401,8 @@ def tokenize(raw):
 
     Returns None on unbalanced quotes (caller defers: fail-open on parse
     errors)."""
-    expanded = []
-    raw = _strip_comments(strip_heredoc_bodies(raw, expanded, expanded))
+    expanded, unterminated = [], []
+    raw = _strip_comments(strip_heredoc_bodies(raw, expanded, unterminated))
     spans = []
     bodies = command_substitutions(raw, spans=spans)[:_SUBST_MAX]
     sentinels = _subst_sentinels(raw)
@@ -419,15 +426,30 @@ def tokenize(raw):
         # substitutions are scanned with quoting off: `'$(cmd)'` there still
         # runs `cmd`. The same apostrophe can leave the body unlexable, which
         # costs the body's own words and nothing else.
-        for body in expanded:
-            for sub in command_substitutions(body, quotes=False):
+        #
+        # An expanded body's text is read the way the command receives it, with
+        # the escapes bash removes already gone: `\``, `\$`, `\\` and a
+        # backslash-newline (Q284). Left in, `\`` reads as an escaped character
+        # rather than the backtick a shell reading the body runs, and a `#`
+        # between two of them took the rest of the line as a comment. The
+        # substitution scan keeps the raw text, since that is what bash expands,
+        # and the unescaped text gets a second one with quoting on, for what a
+        # shell reading the body runs: lexing alone leaves `"\$(cmd)"` whole.
+        heredocs = ([(b, True) for b in expanded]
+                    + [(b, False) for b in unterminated])
+        for body, unescape in heredocs:
+            text = _HEREDOC_ESCAPE.sub(_unescape, body) if unescape else body
+            subs = command_substitutions(body, quotes=False)
+            if unescape:
+                subs += command_substitutions(text)
+            for sub in subs:
                 sub_tokens = tokenize(sub)
                 if sub_tokens:
                     tokens.append(';')
                     tokens.extend(sub_tokens)
             try:
                 body_tokens = _lex_semicolons(
-                    _strip_comments(body, quotes=False)
+                    _strip_comments(text, quotes=False)
                     .replace('`', ';').replace('\n', ';'))
             except ValueError:
                 continue
@@ -492,7 +514,11 @@ def _hoist_substitutions(tokens, raw, spans, bodies, sentinels):
     """Restore every masked word and insert each substitution body it held,
     tokenized, ahead of the simple command the word belongs to. A marker
     inside a comment never reaches a token, so a commented-out substitution
-    stays unjudged, as bash leaves it unrun."""
+    stays unjudged, as bash leaves it unrun.
+
+    Each body goes in inside `( … )`, since bash runs it in a subshell: what it
+    assigns dies there, and `segment_layout` reads the parentheses as running
+    apart, so nothing after it sees the assignment (Q290)."""
     if not sentinels:
         return tokens
     marker = re.compile('%s(.)%s*' % sentinels)
@@ -506,8 +532,8 @@ def _hoist_substitutions(tokens, raw, spans, bodies, sentinels):
             for m in marker.finditer(t):
                 sub_tokens = tokenize(bodies[ord(m.group(1)) - _SUBST_BASE])
                 if sub_tokens:
-                    out[seg_start:seg_start] = sub_tokens + [';']
-                    seg_start += len(sub_tokens) + 1
+                    out[seg_start:seg_start] = ['('] + sub_tokens + [')', ';']
+                    seg_start += len(sub_tokens) + 3
             restored = QuotedStr(marker.sub(
                 lambda m: raw[slice(*spans[ord(m.group(1)) - _SUBST_BASE])], t))
             restored.quotes = getattr(t, 'quotes', frozenset())
@@ -591,15 +617,17 @@ def _op_units(tok):
 def segment_layout(tokens):
     """One entry per segment `split_simple_commands` makes, in its order:
     (the segment, its reserved words, the command behind them, the blocks
-    those words open or close, and whether the command runs apart from the
-    shell -- a pipeline stage, a backgrounded list, or inside `( … )` -- so
-    nothing it assigns reaches the commands after it (Q300).
+    those words open or close, whether the command runs apart from the shell
+    -- a pipeline stage or a backgrounded list -- so nothing it assigns
+    reaches the commands after it (Q300), and the `( … )` it sits in,
+    outermost first, each named by where it opens.
+    A subshell's assignments reach the commands inside it and stop at its
+    `)`, so the caller scopes them by that depth (Q323).
 
     Each block is `('pop',)` or `('push', kind)`, in word order. A `{ …; }`
     pushes 'runs', a conditional or loop 'maybe', a function body
-    ('fn', name), and any of them run apart -- piped, backgrounded, or in
-    parentheses -- 'apart', which is how exit-status-guard scopes them
-    (Q263)."""
+    ('fn', name), and any of them run apart -- piped or backgrounded --
+    'apart', which is how exit-status-guard scopes them (Q263)."""
     segs, cur, ops = [], [], []
     for t in tokens:
         if _is_operator_token(t):
@@ -636,12 +664,15 @@ def segment_layout(tokens):
         return op in _PIPE_OPS or op == '&'
 
     # Pair openers with closers and track parentheses, in one walk.
-    stripped, opens, closes, depth = [], {}, {}, []
-    stack, parens, case_parens = [], [u for u in ops if u == '('], []
+    # Each open `(` is named by where it stands, so two sibling subshells at
+    # one depth are told apart.
+    stripped, opens, closes, nest = [], {}, {}, []
+    stack, case_parens = [], []
+    parens = [(-1, k) for k, u in enumerate(ops) if u == '(']
     for i, (group, units) in enumerate(segs):
         words, body = strip_keywords(group)
         stripped.append((words, body))
-        depth.append(len(parens))
+        nest.append(tuple(parens))
         for w in words:
             if w in BLOCK_CLOSERS or w == '}':
                 if stack:
@@ -658,9 +689,9 @@ def segment_layout(tokens):
                 and getattr(body[0], 'quoted_from', None) is None:
             stack.append((i, 'for'))
             opens.setdefault(i, []).append('for')
-        for u in units:
+        for k, u in enumerate(units):
             if u == '(':
-                parens.append(i)
+                parens.append((i, k))
             elif u == ')':
                 # A `case` pattern's `)` opened nothing, so it closes nothing.
                 if parens and not (case_parens
@@ -683,7 +714,7 @@ def segment_layout(tokens):
                 last = ends.pop() if ends else len(segs) - 1
                 if w == '{' and function_defined(tokens, group, words):
                     kind = ('fn', function_defined(tokens, group, words))
-                elif apart(i, last) or depth[i]:
+                elif apart(i, last):
                     kind = 'apart'
                 else:
                     kind = 'runs' if w == '{' else 'maybe'
@@ -691,10 +722,8 @@ def segment_layout(tokens):
         if body and body[0] in BLOCK_HEADS \
                 and getattr(body[0], 'quoted_from', None) is None:
             last = ends.pop() if ends else len(segs) - 1
-            blocks.append(('push', 'apart' if apart(i, last) or depth[i]
-                           else 'maybe'))
-        layout.append((group, words, body, blocks,
-                       bool(depth[i]) or apart(i, i)))
+            blocks.append(('push', 'apart' if apart(i, last) else 'maybe'))
+        layout.append((group, words, body, blocks, apart(i, i), nest[i]))
     return layout
 
 
@@ -729,15 +758,24 @@ def strip_keywords(group):
     `{`, `if`, `then`, `!`, `do` and the rest stand in command position ahead
     of the command bash runs, and left in place one becomes the head that no
     evaluator covers, so the segment defers (Q300). `function NAME` drops the
-    name too. A `time` goes back to the wrapper walk, which reads its `-p` and
-    `--` where the shared strip does not (Q241)."""
+    name too, and the shared strip takes `time`'s `-p` and `--` with it, so an
+    assignment behind them is peeled as one at the head would be (Q241).
+
+    Where the strip stops on a word after `time` that starts with `-`, `time`
+    goes back to the wrapper walk instead. bash reads `time -p -p cmd` as the
+    keyword running `-p`, but under `--posix` and in dash `time` before an
+    option is `/usr/bin/time`, which runs `cmd`."""
     body = strip_sh_keywords(group)
     if len(body) < len(group) and group[len(group) - len(body) - 1] == 'function' \
             and body:
         body = strip_sh_keywords(body[1:])
     cut = len(group) - len(body)
-    if cut and group[cut - 1] == 'time' and is_reserved_word(group[cut - 1]):
-        cut -= 1
+    if body and str(body[0]).startswith('-'):
+        j = cut
+        while j and group[j - 1] in ('-p', '--'):
+            j -= 1
+        if j and group[j - 1] == 'time' and is_reserved_word(group[j - 1]):
+            cut = j - 1
     return group[:cut], group[cut:]
 
 
@@ -826,9 +864,30 @@ def expand_vars(value, env):
 ASSIGN_BUILTINS = frozenset({'export', 'declare', 'typeset', 'readonly', 'local'})
 
 
+class MayVanish(str):
+    """A word that may expand to nothing: written unquoted and made only of
+    `$NAME` / `${NAME}` references, each unresolved or resolved to empty. Bash
+    drops such a word, and the word after it becomes the command (Q298)."""
+
+
+_VAR_REFS_RE = re.compile('(?:%s)*' % VAR_REF_RE.pattern)
+# What `env -S` expands in its string: the braced form only. Both env
+# implementations refuse a bare `$NAME` there and run nothing.
+_BRACED_REFS_RE = re.compile(r'(?:\$\{[A-Za-z_][A-Za-z0-9_]*\})+')
+
+
 def expand_argv(argv, env):
-    """Expand simple variable references in every token of `argv`."""
-    return [expand_vars(tok, env) for tok in argv]
+    """Expand simple variable references in every token of `argv`, marking
+    each word that may expand to nothing as a `MayVanish`."""
+    out = []
+    for tok in argv:
+        word = expand_vars(tok, env)
+        if (tok and getattr(tok, 'quoted_from', None) is None
+                and _VAR_REFS_RE.fullmatch(tok)
+                and _VAR_REFS_RE.fullmatch(word)):
+            word = MayVanish(word)
+        out.append(word)
+    return out
 
 
 def is_command_lookup(operands):
@@ -1056,7 +1115,8 @@ def strip_wrappers(argv, env, alternates=None, child=None):
                         if (alternates is not None and rest
                                 and any(set('$`') & set(w) for w in words)):
                             alternates.append((['env'] + rest, dict(child)))
-                        argv = words + rest
+                        argv = [MayVanish(w) if _BRACED_REFS_RE.fullmatch(w)
+                                else w for w in words] + rest
                         continue
                     argv = argv[wrapper_option(argv, value_flags)[0]:]
                 elif '=' in argv[0]:
@@ -1110,6 +1170,17 @@ def strip_wrappers(argv, env, alternates=None, child=None):
             argv = argv[1:]
             while argv and argv[0].startswith('-'):
                 argv = argv[wrapper_option(argv, value_flags)[0]:]
+        elif isinstance(argv[0], MayVanish) and alternates is not None:
+            # The word stays the command here. Where it expands to nothing,
+            # bash runs the word after it instead, so each reading with a
+            # leading run of such words gone is judged too (Q298).
+            k = 1
+            while k < len(argv):
+                alternates.append((argv[k:], dict(child)))
+                if not isinstance(argv[k], MayVanish):
+                    break
+                k += 1
+            break
         else:
             break
     return argv
@@ -3002,9 +3073,23 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
     # forgotten at each call. Its commands are judged where they are written,
     # against the values in scope there.
     # A segment that runs apart, or sits in a block that does, assigns
-    # nothing the later segments see.
-    blocks, functions = [], {}
-    for whole, words, group, changes, seg_apart in segment_layout(tokens):
+    # nothing the later segments see. Inside `( … )` the scopes are copies, so
+    # an assignment there reaches the rest of that subshell and nothing past
+    # its `)` (Q323).
+    blocks, functions, outer, inside = [], {}, [], ()
+    for whole, words, group, changes, seg_apart, subshells in \
+            segment_layout(tokens):
+        keep = 0
+        while keep < min(len(inside), len(subshells)) \
+                and inside[keep] == subshells[keep]:
+            keep += 1
+        while len(outer) > keep:
+            shell_env, exported, functions = outer.pop()
+        while len(outer) < len(subshells):
+            outer.append((shell_env, exported, functions))
+            shell_env, exported = dict(shell_env), dict(exported)
+            functions = {k: set(v) for k, v in functions.items()}
+        inside = subshells
         for change in changes:
             if change[0] == 'pop':
                 if blocks:
@@ -3155,6 +3240,8 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
         # drops what `env -i`/`-u` removed; a reader falls back to the hook's
         # own environment for a name it lacks.
         findings += evaluator(argv, child, ctx)
+    if outer:
+        shell_env, exported, functions = outer[0]
     if out is not None:
         out.update(shell=shell_env, exported=exported)
     return findings, override, session_reason
