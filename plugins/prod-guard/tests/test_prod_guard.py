@@ -3401,6 +3401,40 @@ class SpecialCaseTests(unittest.TestCase):
             "env -S \"$X\" PROD_GUARD_OVERRIDE=why kubectl delete ns foo",
             home=home)[0], "ask")
 
+    # --- Q298: a word that may expand to nothing is not the command ---------
+
+    def test_a_word_that_may_vanish_is_read_both_ways(self):
+        # bash 5.3.15 drops an unquoted `$X` that expands to nothing and runs
+        # the next word; `env -S` does the same for `${X}` in its string.
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        k = "kubectl --context=gke_acme_prod-us delete pod x"
+        for cmd in ("$X " + k, "${X} " + k, "$X$Y " + k, "$X $Y " + k,
+                    "sudo $X " + k, "env $X " + k, "nohup $X " + k,
+                    "X=; $X " + k, "$X sudo " + k,
+                    "env -S '${X} %s'" % k, "env -iS '${X} %s'" % k,
+                    "env -S '${X} ${Y} %s'" % k):
+            with self.subTest(cmd=cmd):
+                decision, reason = run_hook(cmd, home=home)
+                self.assertEqual(decision, "deny")
+                self.assertIn("delete", reason)
+
+    def test_a_word_that_cannot_vanish_stays_the_command(self):
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        k = "kubectl --context=gke_acme_prod-us delete pod x"
+        # A quoted expansion is an empty command name, which bash fails to
+        # run; so is `$X` set to a word; and env -S refuses a bare `$X`.
+        for cmd in ('"$X" ' + k, "'$X' " + k, "X=true; $X " + k,
+                    "env -S '$X %s'" % k, "$X kubectl get pods",
+                    "$EDITOR notes.txt"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(run_hook(cmd, home=home)[0])
+
+    def test_an_override_reaches_the_reading_it_is_in(self):
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        k = "kubectl --context=gke_acme_prod-us delete pod x"
+        self.assertEqual(
+            run_hook("PROD_GUARD_OVERRIDE=why $X " + k, home=home)[0], "ask")
+
     # --- Q269: what `env` hands the child reaches its `sh -c` body ----------
 
     def test_env_operands_reach_a_single_quoted_body(self):
