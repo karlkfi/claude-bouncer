@@ -553,7 +553,9 @@ class CommentInSubstitutionTests(unittest.TestCase):
                      'echo `echo a #c`cat /etc/passwd',
                      'echo ${y:-)} ; cat /etc/passwd',
                      'echo `echo )` ; cat /etc/passwd',
-                     'echo ${y:-"#"} #c\ncat /etc/passwd'):
+                     'echo ${y:-"#"} #c\ncat /etc/passwd',
+                     'echo "${y:-"#)"}" ; cat /etc/passwd',
+                     'echo "`echo ")"`" ; cat /etc/passwd'):
             with self.subTest(body=body):
                 self.assertEqual([body], bp.command_substitutions(
                     'echo "$(%s)" T' % body))

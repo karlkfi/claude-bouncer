@@ -825,7 +825,8 @@ def _scan_dollar_paren(text, start):
     ``>(…)`` is not one: bash reads ``$(a)#b`` and ``<(a)#b`` as single words,
     where ``(a)#b`` ends a subshell.
 
-    A ``${…}`` and a backtick span are stepped over whole (Q292). bash reads a
+    A ``${…}`` and a backtick span are stepped over whole (Q292), in double
+    quotes too, where a quote inside one nests. bash reads a
     ``#`` in one as text, or ends its comment at the closing backtick, and a
     ``)`` in one closes nothing: ``"$(echo ${y:- #}; cmd)"`` and
     ``"$(echo `echo )`; cmd)"`` both run ``cmd``.
@@ -851,7 +852,10 @@ def _scan_dollar_paren(text, start):
                 continue
             if c == '"':
                 in_double = False
-            i += 1
+            end = _brace_end(text, i) if text.startswith('${', i) else -1
+            if end < 0 and c == '`':
+                end = _scan_backticks(text, i + 1)[1]
+            i = max(end, i + 1)
             continue
         if c in ' \t\n':
             i += 1
