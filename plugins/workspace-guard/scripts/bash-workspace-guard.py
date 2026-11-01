@@ -3035,21 +3035,18 @@ def sed_script_slot(tokens):
     return len(files)
 
 
-# A `/…/` regex: an address, or the pattern and replacement of an `s`.
-SED_DELIMITED_RE = re.compile(r'/(?:[^/\\]|\\.)*/')
-
-
 def sed_script_is_inert(script):
     """True when `script`, read as a sed script, names no file and runs nothing.
 
-    Outside its `/…/` regexes it holds none of `w`/`W`/`r`/`R` (write or read a
-    file, including `s///w`) or GNU's `e` (run a command). Those letters in any
-    other role, such as the text of an `a` command, also count, which errs
-    toward keeping the token's own verdict. The `-e` rewrite Q232 hands back is
-    only safe for an inert script: the hook does not read a filename inside an
-    `-e` script, so steering a `w` command there would allow the write.
+    It holds none of `w`/`W`/`r`/`R` (write or read a file, including `s///w`)
+    or GNU's `e` (run a command) anywhere, regexes included: stripping `/…/`
+    pairs mis-pairs an `s` command's delimiters, so `/x/s/a/b/w F` loses its
+    `w`. A letter in any other role, such as `/here/d`, keeps the token's own
+    verdict. The `-e` rewrite Q232 hands back is only safe for an inert
+    script: the hook does not read a filename inside an `-e` script, so
+    steering a `w` command there would allow the write.
     """
-    return not re.search(r'[wWrRe]', SED_DELIMITED_RE.sub('', script))
+    return not re.search(r'[wWrRe]', script)
 
 
 def files_in_command(tokens):

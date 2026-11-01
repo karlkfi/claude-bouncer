@@ -1786,12 +1786,12 @@ final output.
   script and allowed instead of denied as unexpandable. Any other script there
   is still read as a path. Where it would ask as an outside path and, read as a
   script, names no file and runs nothing — none of `w`, `W`, `r`, `R` or `e`
-  outside its `/…/` regexes — the command denies with the `-e` rewrite instead:
+  anywhere in it — the command denies with the `-e` rewrite instead:
   `'/^#/d'` is an absolute path to the hook and a delete to macOS sed. A script
-  that does name a file (`'/x/w /out/leak'`) keeps the ask, because the hook
-  reads no filename inside an `-e` script and the rewrite would allow the
-  write; so does GNU's reading of a path holding those letters
-  (`sed -i '' /outside/target`). An unexpandable token (`"${n}d"`) keeps its
+  that does name a file (`'/x/w /out/leak'`, `'/x/s/a/b/w ../l'`) keeps the
+  ask, because the hook reads no filename inside an `-e` script and the
+  rewrite would allow the write; so does any script or path holding those
+  letters, regexes included (`'/here/d'`, `sed -i '' /outside/target`). An unexpandable token (`"${n}d"`) keeps its
   own deny, host temp and a sibling checkout keep theirs, and a token resolving
   inside the root stays allowed. The deny is not one `WORKSPACE_GUARD_OVERRIDE`
   downgrades, as for the other unparsed tokens. Use

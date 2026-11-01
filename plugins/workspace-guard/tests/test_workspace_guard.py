@@ -1693,6 +1693,15 @@ class HookEndToEndTests(unittest.TestCase):
             with self.subTest(script=script):
                 self._sed_keeps_its_ask(f"sed -i '' '{script}' in.txt", script)
 
+    def test_sed_s_command_writing_a_file_keeps_its_ask(self):
+        # Stripping `/…/` pairs left to right mis-pairs an `s` command's
+        # delimiters: `/x/s/a/b/w ../l` became `sbl`, losing the `w` flag
+        # (second review of #296). The filenames hold no w/r/e of their own.
+        for script in ("/x/s/a/b/w ../l", "/x/{s/a/b/w ../m\n}", "/x/s/a/b/;w ../l",
+                       "/x/{s/a/b/;w ../l\n}", "/x/s/a/b/gw ../l"):
+            with self.subTest(script=script):
+                self._sed_keeps_its_ask(f"sed -i '' '{script}' in.txt", script)
+
     def test_sed_gnu_reading_of_a_path_keeps_its_ask(self):
         # `target` holds `r` and `e`, which as a script could be a read or a
         # command, so the token keeps today's outside ask.
