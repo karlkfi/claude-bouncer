@@ -617,15 +617,16 @@ def _op_units(tok):
 def segment_layout(tokens):
     """One entry per segment `split_simple_commands` makes, in its order:
     (the segment, its reserved words, the command behind them, the blocks
-    those words open or close, and whether the command runs apart from the
-    shell -- a pipeline stage, a backgrounded list, or inside `( … )` -- so
-    nothing it assigns reaches the commands after it (Q300).
+    those words open or close, whether the command runs apart from the shell
+    -- a pipeline stage or a backgrounded list -- so nothing it assigns
+    reaches the commands after it (Q300), and how many `( … )` it sits in.
+    A subshell's assignments reach the commands inside it and stop at its
+    `)`, so the caller scopes them by that depth (Q323).
 
     Each block is `('pop',)` or `('push', kind)`, in word order. A `{ …; }`
     pushes 'runs', a conditional or loop 'maybe', a function body
-    ('fn', name), and any of them run apart -- piped, backgrounded, or in
-    parentheses -- 'apart', which is how exit-status-guard scopes them
-    (Q263)."""
+    ('fn', name), and any of them run apart -- piped or backgrounded --
+    'apart', which is how exit-status-guard scopes them (Q263)."""
     segs, cur, ops = [], [], []
     for t in tokens:
         if _is_operator_token(t):
@@ -709,7 +710,7 @@ def segment_layout(tokens):
                 last = ends.pop() if ends else len(segs) - 1
                 if w == '{' and function_defined(tokens, group, words):
                     kind = ('fn', function_defined(tokens, group, words))
-                elif apart(i, last) or depth[i]:
+                elif apart(i, last):
                     kind = 'apart'
                 else:
                     kind = 'runs' if w == '{' else 'maybe'
@@ -717,10 +718,8 @@ def segment_layout(tokens):
         if body and body[0] in BLOCK_HEADS \
                 and getattr(body[0], 'quoted_from', None) is None:
             last = ends.pop() if ends else len(segs) - 1
-            blocks.append(('push', 'apart' if apart(i, last) or depth[i]
-                           else 'maybe'))
-        layout.append((group, words, body, blocks,
-                       bool(depth[i]) or apart(i, i)))
+            blocks.append(('push', 'apart' if apart(i, last) else 'maybe'))
+        layout.append((group, words, body, blocks, apart(i, i), depth[i]))
     return layout
 
 
@@ -3070,9 +3069,17 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
     # forgotten at each call. Its commands are judged where they are written,
     # against the values in scope there.
     # A segment that runs apart, or sits in a block that does, assigns
-    # nothing the later segments see.
-    blocks, functions = [], {}
-    for whole, words, group, changes, seg_apart in segment_layout(tokens):
+    # nothing the later segments see. Inside `( … )` the scopes are copies, so
+    # an assignment there reaches the rest of that subshell and nothing past
+    # its `)` (Q323).
+    blocks, functions, outer = [], {}, []
+    for whole, words, group, changes, seg_apart, depth in \
+            segment_layout(tokens):
+        while len(outer) < depth:
+            outer.append((shell_env, exported))
+            shell_env, exported = dict(shell_env), dict(exported)
+        while len(outer) > depth:
+            shell_env, exported = outer.pop()
         for change in changes:
             if change[0] == 'pop':
                 if blocks:
@@ -3223,6 +3230,8 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
         # drops what `env -i`/`-u` removed; a reader falls back to the hook's
         # own environment for a name it lacks.
         findings += evaluator(argv, child, ctx)
+    if outer:
+        shell_env, exported = outer[0]
     if out is not None:
         out.update(shell=shell_env, exported=exported)
     return findings, override, session_reason

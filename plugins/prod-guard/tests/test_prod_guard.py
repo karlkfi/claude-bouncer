@@ -3663,6 +3663,26 @@ class SpecialCaseTests(unittest.TestCase):
             with self.subTest(mid=mid):
                 self.assertIsNone(run_hook(pre + mid + use, home=home)[0])
 
+    def test_a_subshell_assignment_reaches_the_rest_of_the_subshell(self):
+        # And stops at its `)`, which the test above holds (Q323). bash 5.3.15
+        # prints the assigned value for `$C` inside each of these.
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        k = "kubectl --context $C delete ns x"
+        for cmd in ("(C=gke_acme_prod-us; %s)" % k,
+                    "x=$(C=gke_acme_prod-us; %s)" % k,
+                    "C=kind-ci; (C=gke_acme_prod-us; (%s))" % k):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(run_hook(cmd, home=home)[0], "deny")
+        for cmd in ("(C=kind-ci; %s)" % k, "x=$(C=kind-ci; %s)" % k,
+                    "C=gke_acme_prod-us; (C=kind-ci; (%s))" % k,
+                    "C=gke_acme_prod-us; (C=kind-ci; { %s; })" % k,
+                    "C=gke_acme_prod-us; (export C=kind-ci; bash -c '%s')" % k):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(run_hook(cmd, home=home)[0])
+        # A pipeline stage inside it is still a process of its own.
+        self.assertEqual(
+            run_hook("(C=kind-ci | true; %s)" % k, home=home)[0], "ask")
+
     def test_a_substitution_assignment_leaves_the_name_unset(self):
         # bash 5.3.15 prints `[]` for `$C` after each of these, so the target
         # is unknown and the mutation asks, as with no assignment at all.
