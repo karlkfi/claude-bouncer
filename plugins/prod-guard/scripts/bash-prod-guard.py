@@ -79,8 +79,8 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 from bouncer_parse import (                                    # noqa: E402
     ASSIGN_APPEND, ASSIGN_SUBSCRIPT, ASSIGNMENT_RE, PUNCT_CHARS, QuotedStr,
-    QuoteTrackingLexer, command_substitutions, is_assignment, split_assignment,
-    strip_comments, strip_heredoc_bodies, strip_sh_keywords,
+    QuoteTrackingLexer, command_substitutions, is_assignment, is_reserved_word,
+    split_assignment, strip_comments, strip_heredoc_bodies, strip_sh_keywords,
 )
 from bouncer_grants import grants_path, load_grants, record_grants  # noqa: E402
 from bouncer_wrappers import (                                 # noqa: E402
@@ -752,12 +752,23 @@ def strip_keywords(group):
     of the command bash runs, and left in place one becomes the head that no
     evaluator covers, so the segment defers (Q300). `function NAME` drops the
     name too, and the shared strip takes `time`'s `-p` and `--` with it, so an
-    assignment behind them is peeled as one at the head would be (Q241)."""
+    assignment behind them is peeled as one at the head would be (Q241).
+
+    Where the strip stops on a word after `time` that starts with `-`, `time`
+    goes back to the wrapper walk instead. bash reads `time -p -p cmd` as the
+    keyword running `-p`, but under `--posix` and in dash `time` before an
+    option is `/usr/bin/time`, which runs `cmd`."""
     body = strip_sh_keywords(group)
     if len(body) < len(group) and group[len(group) - len(body) - 1] == 'function' \
             and body:
         body = strip_sh_keywords(body[1:])
     cut = len(group) - len(body)
+    if body and str(body[0]).startswith('-'):
+        j = cut
+        while j and group[j - 1] in ('-p', '--'):
+            j -= 1
+        if j and group[j - 1] == 'time' and is_reserved_word(group[j - 1]):
+            cut = j - 1
     return group[:cut], group[cut:]
 
 

@@ -3555,6 +3555,9 @@ class SpecialCaseTests(unittest.TestCase):
                       "time -p %s", "time -- %s", "time -p -- %s",
                       "time -p ! %s", "time FOO=x %s", "time -p FOO=x %s",
                       "time -p FOO[a;b]=x %s",
+                      # bash runs `-p` here, but `bash --posix` and dash run
+                      # /usr/bin/time, which runs the command.
+                      "time -p -p %s", 'time "-p" %s',
                       "{ bash -c '%s'; }", "if true; then eval '%s'; fi",
                       "f() { %s; }", "f() { %s; }; f", "function f { %s; }",
                       "function f() { %s; }; f"):
@@ -3628,6 +3631,8 @@ class SpecialCaseTests(unittest.TestCase):
                 (["!", "time", "-p", "kubectl"], ["!", "time", "-p"],
                  ["kubectl"]),
                 (["time", "FOO=x", "kubectl"], ["time"], ["FOO=x", "kubectl"]),
+                (["!", "time", "-p", "-p", "kubectl"], ["!"],
+                 ["time", "-p", "-p", "kubectl"]),
                 (["function", "f", "{", "kubectl"], ["function", "f", "{"],
                  ["kubectl"]),
                 (["then", "C=x"], ["then"], ["C=x"])):
