@@ -1653,6 +1653,48 @@ class HookEndToEndTests(unittest.TestCase):
     def test_sed_workspace_file_allow(self):
         self._decision("sed 's/a/b/' in.txt", "allow")
 
+    # --- Q232: the token after `sed -i ''` -----------------------------------
+
+    def _sed_script_deny(self, cmd, token, *, only=True):
+        out = self._decision(cmd, "deny")
+        reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn(f"sed script read as a path: {token}.", reason)
+        self.assertIn("sed -i '' -e SCRIPT FILE", reason)
+        if only:
+            self.assertNotIn("Outside-workspace", reason)
+        return reason
+
+    def test_sed_bsd_address_script_denies_with_the_e_rewrite(self):
+        # The row's measurement: macOS reads `/^#/d` as the script, the hook
+        # as an absolute path, and the prompt asked about a "path".
+        self._sed_script_deny("sed -i '' '/^#/d' in.txt", "/^#/d")
+        self._sed_script_deny("sed -ni '' '/^#/p' in.txt", "/^#/p")
+
+    def test_sed_bsd_e_form_allows(self):
+        self._decision("sed -i '' -e '/^#/d' in.txt", "allow")
+
+    def test_sed_relative_token_after_empty_suffix_is_unchanged(self):
+        # Resolves inside the root, so nothing blocks and the verdict is
+        # today's allow.
+        self._decision("sed -i '' 's/a/b/' in.txt", "allow")
+
+    def test_sed_gnu_reading_of_an_outside_path_denies(self):
+        # GNU runs an empty script over the file and changes nothing, so the
+        # deny strands no edit; it used to ask.
+        self._sed_script_deny("sed -i '' /q232-fake/target", "/q232-fake/target")
+
+    def test_sed_only_the_slot_after_the_suffix_changes(self):
+        # A genuinely outside file later in the argv keeps its own bucket.
+        reason = self._sed_script_deny(
+            "sed -i '' '/^#/d' in.txt /q232-fake/target", "/^#/d", only=False)
+        self.assertIn("Outside-workspace path(s): /q232-fake/target.", reason)
+
+    def test_sed_unexpandable_token_after_suffix_keeps_its_reason(self):
+        out = self._decision('sed -i \'\' "$f" in.txt', "deny")
+        reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("Runtime-expanded", reason)
+        self.assertNotIn("sed script read as a path", reason)
+
     def test_jq_program_only_workspace_allow(self):
         self._decision("jq '.a/.b' in.txt", "allow")
 

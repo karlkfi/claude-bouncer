@@ -129,6 +129,7 @@ different repository's scratch still asks entirely.
 | `jq '.a/.b' data.json`               | allow    |
 | `yq .foo data.yaml`                  | allow    |
 | `sed 's/a/b/g' notes.md`             | allow    |
+| `sed -i '' -e '/^#/d' notes.md` (BSD in-place) | allow |
 | `wc -l data.txt`                     | allow    |
 | `sort -o sorted.txt data.txt`        | allow    |
 | `cut -d / -f1 data.txt` (`/` is the delimiter) | allow |
@@ -197,6 +198,7 @@ different repository's scratch still asks entirely.
 | `cat /tmp/claude-501/<other-project>/…` (cross-project read) | **ask** |
 | `cat /tmp/out` · `cat /var/tmp/x`    | **deny** |
 | `sed -f /tmp/evil.sed notes.md`      | **deny** |
+| `sed -i '' '/^#/d' notes.md` (script or path?) | **deny** |
 | `grep foo data.txt > /tmp/out.txt`   | **deny** |
 | `sort -o /tmp/out.txt data.txt`      | **deny** |
 | `base64 -o /tmp/out.b64 data.bin` (BSD) | **deny** |
@@ -1775,9 +1777,15 @@ final output.
   `''` as a file, so a GNU file is still caught, with one exception: an `s` or
   `y` command holding a `$` expansion (`sed -i '' "s/x/$v/" f`) is taken as the
   script and allowed instead of denied as unexpandable. Any other script there
-  is still read as a path: one starting with an address (`'/^#/d'`) asks as an
-  absolute path, and one with an expansion in another shape (`"${n}d"`) is
-  denied. Use `-i '' -e SCRIPT`, which both seds read the same way.
+  is still read as a path, and where that path would block the command denies
+  with the `-e` rewrite rather than asking: one starting with an address
+  (`'/^#/d'`) is an absolute path to the hook, and one with an expansion in
+  another shape (`"${n}d"`) is unexpandable. A token resolving inside the root
+  stays allowed. The same deny reaches GNU's reading, `sed -i '' /outside/file`,
+  which runs an empty script over the file and changes nothing. Use
+  `sed -i '' -e SCRIPT FILE`: macOS sed makes the edit, and GNU sed makes it
+  too and then exits 2 on the empty `''` operand (GNU sed 4.9, measured in a
+  `debian:stable-slim` container on 2026-10-04).
 - Heredoc body lines are dropped from the raw command string before parsing, so
   path-like body content (`</div>`, `/title`), prose, or an unbalanced quote in
   the body is never mistaken for a file argument and never aborts the parse (a
