@@ -82,7 +82,8 @@ class StripCommentsTests(unittest.TestCase):
                     'echo !(a|#b) *(#) +(a|#x) ?(#); id',
                     '[[ a =~ (#x) ]] || id', '[[ x =~ a|#b ]] || id',
                     '[[ x =~ (a)#b ]] || id', '[[ x ]] && [[ y =~ (#a) ]]; id',
-                    '(( 1 #2 )); id', 'f() { (( 1 #2 )); id; }'):
+                    '(( 1 #2 )); id', 'f() { (( 1 #2 )); id; }',
+                    '(( (1+2) #c )); id', '((x=(1) #c\n)); id'):
             with self.subTest(cmd=cmd):
                 self.assertEqual(cmd, bp.strip_comments(cmd))
 
@@ -101,6 +102,11 @@ class StripCommentsTests(unittest.TestCase):
                 self.assertEqual(want, bp.strip_comments(cmd))
         # `!(` in command position is a negated subshell, unless extglob is on.
         self.assertEqual('!(true \n) ; id', bp.strip_comments('!(true #c\n) ; id'))
+        # `((` with no adjacent `))` is two subshells, not arithmetic.
+        for cmd, want in (("((echo a) #it's\nid)", '((echo a) \nid)'),
+                          ("((cd /tmp) # it's done\nid)", '((cd /tmp) \nid)')):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(want, bp.strip_comments(cmd))
 
     def test_a_backtick_or_brace_expansion_holds_no_comment(self):
         # bash 5.3.15 runs `id` after each: a comment in backticks ends at the

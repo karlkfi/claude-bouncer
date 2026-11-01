@@ -394,7 +394,9 @@ def strip_comments(cmd):
     operand is one not after a blank text, as in `[[ a =~ (#x) ]]`. Holding
     the whole `[[` span instead keeps a comment bash strips, and a `'` in one
     then hides the lines after it. A `(( … ))` arithmetic command holds no
-    comment either: `(( 1 #2 )); id` fails its arithmetic and runs `id`.
+    comment either: `(( 1 #2 )); id` fails its arithmetic and runs `id`. bash
+    reads `((` as one only when its two closes are adjacent; `((cmd) #c` is
+    two subshells, and the `#` there starts a comment.
     """
     out = []
     in_single = in_double = False
@@ -452,7 +454,9 @@ def strip_comments(cmd):
                     cmd[i-1] == '!' and _at_command_start(out[:-1])):
                 quiet = _skip_balanced_parens(cmd, i)       # extglob group
                 closes.add(quiet - 1)
-            elif at_word and cmd.startswith('((', i):
+            elif at_word and cmd.startswith('((', i) and \
+                    _skip_balanced_parens(cmd, i + 1) == \
+                    _skip_balanced_parens(cmd, i) - 1:
                 quiet = _skip_balanced_parens(cmd, i)       # `(( … ))`
             elif regex == 'op':
                 regex = 'next' if c in ' \t\n' else 'op'
