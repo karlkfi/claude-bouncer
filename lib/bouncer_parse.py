@@ -820,6 +820,11 @@ def _scan_dollar_paren(text, start):
     ``strip_comments``, and the close of a ``$(…)``, ``$((…))``, ``<(…)`` or
     ``>(…)`` is not one: bash reads ``$(a)#b`` and ``<(a)#b`` as single words,
     where ``(a)#b`` ends a subshell.
+
+    A ``${…}`` and a backtick span are stepped over whole (Q292). bash reads a
+    ``#`` in one as text, or ends its comment at the closing backtick, and a
+    ``)`` in one closes nothing: ``"$(echo ${y:- #}; cmd)"`` and
+    ``"$(echo `echo )`; cmd)"`` both run ``cmd``.
     """
     i, n = start, len(text)
     in_single = in_double = False
@@ -883,6 +888,10 @@ def _scan_dollar_paren(text, start):
             i += 2
             continue
         end = _ansi_c_end(text, i)
+        if end < 0 and text.startswith('${', i):
+            end = _brace_end(text, i)
+        elif end < 0 and c == '`':
+            end = _scan_backticks(text, i + 1)[1]
         if end > 0:
             cmd_pos = False
             i = end
