@@ -733,6 +733,37 @@ class HeredocDecisionTests(unittest.TestCase):
             "cat <<'EOF'\nnoise\nEOF\nkubectl delete ns payments", home=home)
         self.assertEqual(decision, "deny")
 
+    def test_unquoted_body_is_read_with_its_escapes_removed(self):
+        # Q284: bash removes the backslash from \` \$ \\ and a newline in an
+        # unquoted body before the command reads it. Each shape was driven on
+        # bash 5.3.15 with `echo RAN` in place of the kubectl command.
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        k = "kubectl delete ns payments"
+        for body, want in (
+                ("echo \\`true\\` ; %s", "deny"),         # control
+                ("echo \\`true # c\\` ; %s", "deny"),
+                ("echo \\`true # c\\`\\\n; %s", "deny"),
+                ("\\$(%s)", "deny"),
+                ("x=\\\\$(echo a) ; %s", "deny"),
+                # Inside double quotes the inner shell still runs these.
+                ('echo "\\$(%s)"', "deny"),
+                ('echo "\\`%s\\`"', "deny"),
+                ("echo '\\$(%s)'", None),
+                # `\\` leaves `\`, which then continues the line into echo's
+                # arguments, so the inner shell runs no kubectl.
+                ("echo a \\\\\n%s", None)):
+            with self.subTest(body=body):
+                decision, _ = run_hook(
+                    "bash <<EOF\n%s\nEOF" % (body % k), home=home)
+                self.assertEqual(decision, want)
+
+    def test_quoted_body_keeps_its_escapes(self):
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        decision, _ = run_hook(
+            "bash <<'EOF'\necho \\`true # c\\` ; kubectl delete ns payments\nEOF",
+            home=home)
+        self.assertIsNone(decision)
+
     def test_unterminated_heredoc_still_judged(self):
         home = make_home(kubeconfig=KUBECONFIG_PROD)
         decision, _ = run_hook(
@@ -3370,6 +3401,40 @@ class SpecialCaseTests(unittest.TestCase):
             "env -S \"$X\" PROD_GUARD_OVERRIDE=why kubectl delete ns foo",
             home=home)[0], "ask")
 
+    # --- Q298: a word that may expand to nothing is not the command ---------
+
+    def test_a_word_that_may_vanish_is_read_both_ways(self):
+        # bash 5.3.15 drops an unquoted `$X` that expands to nothing and runs
+        # the next word; `env -S` does the same for `${X}` in its string.
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        k = "kubectl --context=gke_acme_prod-us delete pod x"
+        for cmd in ("$X " + k, "${X} " + k, "$X$Y " + k, "$X $Y " + k,
+                    "sudo $X " + k, "env $X " + k, "nohup $X " + k,
+                    "X=; $X " + k, "$X sudo " + k,
+                    "env -S '${X} %s'" % k, "env -iS '${X} %s'" % k,
+                    "env -S '${X} ${Y} %s'" % k):
+            with self.subTest(cmd=cmd):
+                decision, reason = run_hook(cmd, home=home)
+                self.assertEqual(decision, "deny")
+                self.assertIn("delete", reason)
+
+    def test_a_word_that_cannot_vanish_stays_the_command(self):
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        k = "kubectl --context=gke_acme_prod-us delete pod x"
+        # A quoted expansion is an empty command name, which bash fails to
+        # run; so is `$X` set to a word; and env -S refuses a bare `$X`.
+        for cmd in ('"$X" ' + k, "'$X' " + k, "X=true; $X " + k,
+                    "env -S '$X %s'" % k, "$X kubectl get pods",
+                    "$EDITOR notes.txt"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(run_hook(cmd, home=home)[0])
+
+    def test_an_override_reaches_the_reading_it_is_in(self):
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        k = "kubectl --context=gke_acme_prod-us delete pod x"
+        self.assertEqual(
+            run_hook("PROD_GUARD_OVERRIDE=why $X " + k, home=home)[0], "ask")
+
     # --- Q269: what `env` hands the child reaches its `sh -c` body ----------
 
     def test_env_operands_reach_a_single_quoted_body(self):
@@ -3520,6 +3585,14 @@ class SpecialCaseTests(unittest.TestCase):
                       "while true; do %s; done", "until false; do %s; done",
                       "for i in 1; do %s; done", "select x in a; do %s; done",
                       "case x in x) %s;; esac", "! time -p %s",
+                      # Q241: `time`'s own options, and an assignment behind
+                      # it, which bash 5.3.15 makes before running the command.
+                      "time -p %s", "time -- %s", "time -p -- %s",
+                      "time -p ! %s", "time FOO=x %s", "time -p FOO=x %s",
+                      "time -p FOO[a;b]=x %s",
+                      # bash runs `-p` here, but `bash --posix` and dash run
+                      # /usr/bin/time, which runs the command.
+                      "time -p -p %s", 'time "-p" %s',
                       "{ bash -c '%s'; }", "if true; then eval '%s'; fi",
                       "f() { %s; }", "f() { %s; }; f", "function f { %s; }",
                       "function f() { %s; }; f"):
@@ -3575,21 +3648,92 @@ class SpecialCaseTests(unittest.TestCase):
                     "(C=kind-ci);", "(export C=kind-ci);", "C=kind-ci | true;",
                     "C=kind-ci &", "f() ( C=kind-ci; ); f;",
                     "f() { C=kind-ci; }; f | cat;",
-                    "f() { C=kind-ci; }; true | f;"):
+                    "f() { C=kind-ci; }; true | f;",
+                    # A command substitution runs in a subshell too (Q290).
+                    "x=$(C=kind-ci);", "x=`C=kind-ci`;",
+                    'echo "$(C=kind-ci)";', "x=$(export C=kind-ci);",
+                    "x=$(echo $(C=kind-ci));", ": $(C=kind-ci);"):
             with self.subTest(mid=mid):
                 self.assertEqual(
                     run_hook(pre + mid + use, home=home)[0], "deny")
         for mid in ("{ C=kind-ci; } > /dev/null;", "{ C=kind-ci; } <<< x;",
                     "{ C=kind-ci; true | true; };", "! { C=kind-ci; };",
-                    "true && { C=kind-ci; };", "{ C=kind-ci; }\n"):
+                    "true && { C=kind-ci; };", "{ C=kind-ci; }\n",
+                    "x=$(C=a) C=kind-ci;", "C=kind-ci; x=$(true);",
+                    "C=kind-ci; x=$(C=gke_acme_prod-us);"):
             with self.subTest(mid=mid):
                 self.assertIsNone(run_hook(pre + mid + use, home=home)[0])
 
-    def test_strip_keywords_hands_time_to_the_wrapper_walk(self):
+    def test_a_subshell_assignment_reaches_the_rest_of_the_subshell(self):
+        # And stops at its `)`, which the test above holds (Q323). bash 5.3.15
+        # prints the assigned value for `$C` inside each of these.
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        k = "kubectl --context $C delete ns x"
+        for cmd in ("(C=gke_acme_prod-us; %s)" % k,
+                    "x=$(C=gke_acme_prod-us; %s)" % k,
+                    "C=kind-ci; (C=gke_acme_prod-us; (%s))" % k):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(run_hook(cmd, home=home)[0], "deny")
+        for cmd in ("(C=kind-ci; %s)" % k, "x=$(C=kind-ci; %s)" % k,
+                    "C=gke_acme_prod-us; (C=kind-ci; (%s))" % k,
+                    "C=gke_acme_prod-us; (C=kind-ci; { %s; })" % k,
+                    "C=gke_acme_prod-us; (export C=kind-ci; bash -c '%s')" % k):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(run_hook(cmd, home=home)[0])
+        # A pipeline stage inside it is still a process of its own.
+        self.assertEqual(
+            run_hook("(C=kind-ci | true; %s)" % k, home=home)[0], "ask")
+
+    def test_a_sibling_subshell_starts_from_the_shell_not_its_sibling(self):
+        # Two subshells at one depth are two processes, so neither sees what
+        # the other assigned, and a function defined in one is gone after it.
+        # bash 5.3.15 prints the outer value for `$C` in each (Q290 review).
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        k = "kubectl --context $C delete ns x"
+        pre = "C=gke_acme_prod-us; "
+        for cmd in (pre + "(C=kind-ci); (%s)" % k,
+                    pre + "(C=kind-ci) && (%s)" % k,
+                    pre + "(C=kind-ci) | (%s)" % k,
+                    pre + "((C=kind-ci); (%s))" % k,
+                    pre + "echo $(C=kind-ci) $(%s)" % k,
+                    pre + "(f() { C=kind-ci; }); f; %s" % k,
+                    "export C=gke_acme_prod-us; (export C=kind-ci); "
+                    "(bash -c 'kubectl --context \"$C\" delete ns x')"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(run_hook(cmd, home=home)[0], "deny")
+
+    def test_nested_subshells_keep_the_nesting_depth_limit_apart(self):
+        # The subshell depth is not the `sh -c` recursion depth: a body three
+        # parentheses down is still read (Q290 review).
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        d = "kubectl --context gke_acme_prod-us delete ns x"
+        for shell in ("bash -c", "sh -c", "eval"):
+            with self.subTest(shell=shell):
+                self.assertEqual(run_hook(
+                    "x=$( ( ( %s '%s' ) ) )" % (shell, d), home=home)[0],
+                    "deny")
+
+    def test_a_substitution_assignment_leaves_the_name_unset(self):
+        # bash 5.3.15 prints `[]` for `$C` after each of these, so the target
+        # is unknown and the mutation asks, as with no assignment at all.
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        for pre in ("x=$(C=kind-ci); ", "x=`C=kind-ci`; ",
+                    "x=$(export C=kind-ci); "):
+            with self.subTest(pre=pre):
+                self.assertEqual(run_hook(
+                    pre + "kubectl --context $C delete ns x", home=home)[0],
+                    "ask")
+
+    def test_strip_keywords_takes_time_and_its_options(self):
+        # `time`'s `-p` and `--` go with it, so an assignment behind them is
+        # left at the head for the prefix peel (Q241).
         for group, words, rest in (
                 (["{", "kubectl"], ["{"], ["kubectl"]),
-                (["!", "time", "-p", "kubectl"], ["!"],
-                 ["time", "-p", "kubectl"]),
+                (["!", "time", "-p", "kubectl"], ["!", "time", "-p"],
+                 ["kubectl"]),
+                (["time", "FOO=x", "kubectl"], ["time"], ["FOO=x", "kubectl"]),
+                (["!", "time", "-p", "-p", "kubectl"], ["!"],
+                 ["time", "-p", "-p", "kubectl"]),
                 (["function", "f", "{", "kubectl"], ["function", "f", "{"],
                  ["kubectl"]),
                 (["then", "C=x"], ["then"], ["C=x"])):
