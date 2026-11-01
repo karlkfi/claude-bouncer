@@ -6773,11 +6773,8 @@ class SiblingCheckoutTests(unittest.TestCase):
 
     def test_bash_symlink_spellings_all_relax(self):
         link = sh(os.path.join(self.links, "new"))
-        for flags in ("-sf", "-fns", "--symbolic", "--sym", "-s -t"):
-            if flags.endswith("-t"):
-                cmd = f"ln {flags} {sh(self.links)} {self._symlink_into_main()}"
-            else:
-                cmd = f"ln {flags} {self._symlink_into_main()} {link}"
+        for flags in ("-sf", "-fns", "--symbolic", "--sym", "-b -s"):
+            cmd = f"ln {flags} {self._symlink_into_main()} {link}"
             with self.subTest(cmd=cmd):
                 out = self._bash(cmd)
                 self.assertEqual(self._decision(out), "ask")
@@ -6818,6 +6815,71 @@ class SiblingCheckoutTests(unittest.TestCase):
             f"ln -s {self._symlink_into_main()} {link} && echo hi > {link}")
         self.assertEqual(self._decision(out), "deny")
         self.assertIn("Sibling-checkout", self._reason(out))
+
+    def test_bash_write_through_an_unstaged_symlink_still_denies(self):
+        # The link lands at DIR/basename(SRC), a path the hook never stages,
+        # so a write through it later in the command would be judged as a
+        # plain outside path while landing in the sibling (review of #293).
+        src = self._symlink_into_main()
+        through = sh(os.path.join(self.links, "root.txt"))
+        links = sh(self.links)
+        for ln in (f"ln -s {src} {links}",
+                   f"ln -s {src} {sh(self.links + '/')}",
+                   f"ln -s -t {links} {src}",
+                   f"ln -s --target-directory={links} {src}"):
+            cmd = f"{ln} && echo hi > {through}"
+            with self.subTest(cmd=cmd):
+                out = self._bash(cmd)
+                self.assertEqual(self._decision(out), "deny")
+                self.assertIn("Sibling-checkout", self._reason(out))
+
+    def test_bash_abbreviated_suffix_option_is_a_hard_link(self):
+        # GNU reads `--suf -s` as the suffix `-s`, which makes a hard link.
+        out = self._bash(f"ln --suf -s {self._symlink_into_main()} "
+                         f"{sh(os.path.join(self.links, 'new'))}")
+        self.assertEqual(self._decision(out), "deny")
+        self.assertIn("Sibling-checkout", self._reason(out))
+
+    def test_bash_no_dereference_over_in_workspace_link_denies(self):
+        # `-n` replaces the in-workspace entry `./outlink` with a link into
+        # the sibling, so the link lands in-workspace whatever it points at.
+        os.symlink(self.links, os.path.join(self.wt, "outlink"))
+        for flags in ("-sfn", "-sn"):
+            cmd = f"ln {flags} {self._symlink_into_main()} ./outlink"
+            with self.subTest(cmd=cmd):
+                out = self._bash(cmd)
+                self.assertEqual(self._decision(out), "deny")
+                self.assertIn("Sibling-checkout", self._reason(out))
+
+    def _ps_deny_as_sibling(self, cmd):
+        out = self._run({"tool_name": "PowerShell",
+                         "tool_input": {"command": cmd}})
+        self.assertEqual(self._decision(out), "deny", cmd)
+        self.assertIn("Sibling-checkout", self._reason(out))
+
+    def test_ps_symlink_with_a_later_write_through_it_still_denies(self):
+        # PowerShell has no staging, so any other segment could write through
+        # the new link while being judged at the link's path.
+        link = ps(os.path.join(self.links, "new"))
+        target = ps(os.path.join(self.main, "root.txt"))
+        self._ps_deny_as_sibling(
+            f"New-Item -ItemType SymbolicLink -Path {link} -Target {target}; "
+            f"Set-Content -Path {link} -Value hi")
+
+    def test_ps_symlink_named_under_a_directory_still_denies(self):
+        target = ps(os.path.join(self.main, "root.txt"))
+        self._ps_deny_as_sibling(
+            f"New-Item -ItemType SymbolicLink -Path {ps(self.links)} "
+            f"-Name new -Target {target}")
+        # `-Name` under a path that does not exist yet, so only the `-Name`
+        # check stands between it and the relaxation.
+        self._ps_deny_as_sibling(
+            f"New-Item -ItemType SymbolicLink "
+            f"-Path {ps(os.path.join(self.links, 'sub'))} "
+            f"-Name new -Target {target}")
+        self._ps_deny_as_sibling(
+            f"New-Item -ItemType SymbolicLink -Path {ps(self.links)} "
+            f"-Target {target}")
 
     def _ps_new_item(self, item_type, path, target):
         return self._run({"tool_name": "PowerShell", "tool_input": {
