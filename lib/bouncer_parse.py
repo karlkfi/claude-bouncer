@@ -385,12 +385,27 @@ def strip_comments(cmd):
     quotes, where a `"` inside it does not end the outer string (Q257). A
     substitution body's own comments are the caller's, when it recurses into
     the body.
+
+    An extglob group is text to its balanced close, and its close does not
+    end a word: bash 5.3 prints `@(a #b)`, `@(a|#b)` and `@(a)#b` whole (Q293).
+    A `!(` in command position is a negated subshell instead, which is what
+    bash runs it as unless `shopt -s extglob` has run. Inside `[[ … ]]` a `#`
+    still starts a comment after a blank or a grouping `(`; only in a `=~`
+    operand is one not after a blank text, as in `[[ a =~ (#x) ]]`. Holding
+    the whole `[[` span instead keeps a comment bash strips, and a `'` in one
+    then hides the lines after it. A `(( … ))` arithmetic command holds no
+    comment either: `(( 1 #2 )); id` fails its arithmetic and runs `id`. bash
+    reads `((` as one only when its two closes are adjacent; `((cmd) #c` is
+    two subshells, and the `#` there starts a comment.
     """
     out = []
     in_single = in_double = False
     i, n = 0, len(cmd)
     closes = set()        # indices of the `)` that close a substitution
     glued = -1            # len(out) just past such a `)`
+    quiet = 0             # no comment before this index: an extglob group
+    dbracket = False      # inside `[[ … ]]`
+    regex = None          # a `=~` operand: None, 'op', 'next', paren depth
     while i < n:
         c = cmd[i]
         if in_single:
@@ -434,7 +449,33 @@ def strip_comments(cmd):
             if body is not None:
                 closes.add(end - 1)
         at_word = (not out or out[-1] in COMMENT_PRECEDERS) and len(out) != glued
-        if not in_double and c == '#' and at_word:
+        if not in_double and i >= quiet:
+            if c == '(' and i and cmd[i-1] in '?*+@!' and not (
+                    cmd[i-1] == '!' and _at_command_start(out[:-1])):
+                quiet = _skip_balanced_parens(cmd, i)       # extglob group
+                closes.add(quiet - 1)
+            elif at_word and cmd.startswith('((', i) and \
+                    _skip_balanced_parens(cmd, i + 1) == \
+                    _skip_balanced_parens(cmd, i) - 1:
+                quiet = _skip_balanced_parens(cmd, i)       # `(( … ))`
+            elif regex == 'op':
+                regex = 'next' if c in ' \t\n' else 'op'
+            elif regex is not None and c not in ' \t\n':
+                depth = 0 if regex == 'next' else regex
+                regex = depth + (c == '(') - (c == ')' and depth > 0)
+            elif regex == 0:
+                regex = None                         # the operand ends
+            if at_word and cmd[i+2:i+3] in ('', ' ', '\t', '\n'):
+                if cmd.startswith('[[', i):
+                    dbracket = True
+                elif dbracket and cmd.startswith('=~', i):
+                    regex = 'op'
+            if dbracket and regex is None and at_word \
+                    and cmd.startswith(']]', i) \
+                    and cmd[i+2:i+3] in ('', ' ', '\t', '\n', ';', '&', '|', ')'):
+                dbracket = False
+        if not in_double and c == '#' and at_word and i >= quiet \
+                and not (isinstance(regex, int) and out[-1] not in ' \t\n'):
             while i < n and cmd[i] != '\n':        # keep the newline itself
                 i += 1
             continue
@@ -449,6 +490,12 @@ def strip_comments(cmd):
             glued = len(out)
         i += 1
     return ''.join(out)
+
+def _at_command_start(out):
+    """Whether the text in ``out`` leaves the next word in command position:
+    nothing yet, or a separator or an opening `(` or `{` before any blanks."""
+    text = ''.join(out).rstrip(' \t')
+    return not text or text[-1] in ';&|(\n{'
 
 def _scan_heredoc_delim(text, i):
     """Read a heredoc delimiter at ``i`` -- the index just past the ``<<``.
