@@ -1687,7 +1687,9 @@ class HookEndToEndTests(unittest.TestCase):
         # A genuinely outside file later in the argv keeps its own bucket.
         reason = self._sed_script_deny(
             "sed -i '' '/^#/d' in.txt /q232-fake/target", "/^#/d", only=False)
-        self.assertIn("Outside-workspace path(s): /q232-fake/target.", reason)
+        # Not followed by `.`: on Windows the token is shown with its
+        # resolved path (`/q232-fake/target -> C:\\...`).
+        self.assertIn("Outside-workspace path(s): /q232-fake/target", reason)
 
     def test_sed_unexpandable_token_after_suffix_keeps_its_reason(self):
         out = self._decision('sed -i \'\' "$f" in.txt', "deny")
