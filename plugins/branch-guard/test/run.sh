@@ -596,7 +596,9 @@ check "[queue-id] deletion -> ask" ask \
   "$(decision_for "$(push "git push --force-with-lease=$Q42: origin :$Q42")" "$WORK")"
 check "[queue-id] abbreviated lease ahead of the create-only one -> ask" ask \
   "$(decision_for "$(push "git push --force-w=$Q42:abc123 --force-with-lease=$Q42: origin abc123:$Q42")" "$WORK")"
-check "[queue-id] abbreviated create-only lease alone -> ask" ask \
+#     git writes `--force-with=` out as `--force-with-lease=`, and so does the
+#     hook since Q285, so this is the create-only claim spelled short.
+check "[queue-id] abbreviated create-only lease alone -> allow" allow \
   "$(decision_for "$(push "git push --force-with=$Q42: origin abc123:$Q42")" "$WORK")"
 check "[queue-id] --force-if-includes beside it -> ask" ask \
   "$(decision_for "$(push "git push --force-if-includes --force-with-lease=$Q42: origin abc123:$Q42")" "$WORK")"
@@ -1154,6 +1156,92 @@ check_text "git pull on main names the branch" has \
 #     on a protected one -- it only advances main to what the remote already has.
 check "git pull --ff-only on main -> allow" allow \
   "$(decision_for "$(bash_cmd 'git pull --ff-only')" "$WORK")"
+git -C "$WORK" checkout -q claude/x
+
+# 15a. git expands any unambiguous prefix of a subcommand's long option, so
+#      every rule reads the abbreviation as the option it names (Q285). Each
+#      case has its full spelling beside it, and each ambiguous prefix keeps
+#      today's reading, since git refuses it and runs nothing. Measured on git
+#      2.55: `branch --forc` moved main, `switch --discard` dropped an edit,
+#      `switch --forc` and `push --forc` were refused as ambiguous.
+for w in --force --forc; do
+  check "git branch $w main claude/x -> ask" ask \
+    "$(decision_for "$(bash_cmd "git branch $w main claude/x")" "$WORK")"
+done
+for w in --delete --del --d; do
+  check "git branch $w main -> ask" ask \
+    "$(decision_for "$(bash_cmd "git branch $w main")" "$WORK")"
+done
+for w in --move --mo; do
+  check "git branch $w main renamed -> ask" ask \
+    "$(decision_for "$(bash_cmd "git branch $w main renamed")" "$WORK")"
+done
+for w in --copy --cop; do
+  check "git branch $w claude/x main -> ask" ask \
+    "$(decision_for "$(bash_cmd "git branch $w claude/x main")" "$WORK")"
+done
+for w in --discard-changes --discard --force; do
+  check "git switch $w feature-y -> ask" ask \
+    "$(decision_for "$(bash_cmd "git switch $w feature-y")" "$WORK")"
+done
+check "git switch --force-c main -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git switch --force-c main')" "$WORK")"
+#      `--forc` is both `--force` and `--force-create` to switch.
+check "git switch --forc feature-y (ambiguous) -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git switch --forc feature-y')" "$WORK")"
+for w in --worktree --work --wo; do
+  check "git restore --staged $w file.txt -> ask" ask \
+    "$(decision_for "$(bash_cmd "git restore --staged $w file.txt")" "$WORK")"
+done
+check "git restore --stag file.txt -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git restore --stag file.txt')" "$WORK")"
+#      `--s` is both `--source` and `--staged`.
+check "git restore --s file.txt (ambiguous) -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git restore --s file.txt')" "$WORK")"
+for w in --delete --del; do
+  check "git tag $w v1 -> ask" ask \
+    "$(decision_for "$(bash_cmd "git tag $w v1")" "$WORK")"
+done
+for w in --force --fo; do
+  check "git clean $w -d -> ask" ask \
+    "$(decision_for "$(bash_cmd "git clean $w -d")" "$WORK")"
+  check "git worktree remove $w ../wt -> ask" ask \
+    "$(decision_for "$(bash_cmd "git worktree remove $w ../wt")" "$WORK")"
+done
+printf 'dirty\n' >> "$WORK/file.txt"
+for w in --hard --ha --merge --me --keep --k; do
+  check "git reset $w, dirty worktree -> ask" ask \
+    "$(decision_for "$(bash_cmd "git reset $w HEAD~1")" "$WORK")"
+done
+git -C "$WORK" checkout -q -- file.txt
+for w in --mirror --mir --all --al; do
+  check "[default=strict] push $w origin -> ask" ask \
+    "$(decision_for "$(push "git push $w origin")" "$WORK")"
+done
+check "[default=strict] push --ta origin -> ask" ask \
+  "$(decision_for "$(push 'git push --ta origin')" "$WORK")"
+check "[default=strict] leased cross-name rewrite, abbreviated -> allow" allow \
+  "$(decision_for "$(push 'git push --force-w=other origin HEAD:other')" "$WORK")"
+git -C "$WORK" checkout -q main
+check "git pull --ff-o on main -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git pull --ff-o')" "$WORK")"
+#      `--ff` is an option of its own, so it must not read as `--ff-only`.
+check "git pull --ff on main -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git pull --ff')" "$WORK")"
+for w in --abort --abo; do
+  check "git rebase $w on main -> allow" allow \
+    "$(decision_for "$(bash_cmd "git rebase $w")" "$WORK")"
+  check "git merge $w on main -> allow" allow \
+    "$(decision_for "$(bash_cmd "git merge $w")" "$WORK")"
+done
+#      `--qu` is both `--quiet` and `--quit` to rebase.
+check "git rebase --qu on main (ambiguous) -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git rebase --qu')" "$WORK")"
+#      cherry-pick expands nothing: `--abort` runs and `--abo` prints usage.
+check "git cherry-pick --abort on main -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git cherry-pick --abort')" "$WORK")"
+check "git cherry-pick --abo on main (not an option) -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git cherry-pick --abo')" "$WORK")"
 git -C "$WORK" checkout -q claude/x
 
 # 16. Inline-config escape hatch blocks auto-allow but not a protective ask.
