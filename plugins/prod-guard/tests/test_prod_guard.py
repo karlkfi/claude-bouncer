@@ -3647,15 +3647,81 @@ class SpecialCaseTests(unittest.TestCase):
                     "(C=kind-ci);", "(export C=kind-ci);", "C=kind-ci | true;",
                     "C=kind-ci &", "f() ( C=kind-ci; ); f;",
                     "f() { C=kind-ci; }; f | cat;",
-                    "f() { C=kind-ci; }; true | f;"):
+                    "f() { C=kind-ci; }; true | f;",
+                    # A command substitution runs in a subshell too (Q290).
+                    "x=$(C=kind-ci);", "x=`C=kind-ci`;",
+                    'echo "$(C=kind-ci)";', "x=$(export C=kind-ci);",
+                    "x=$(echo $(C=kind-ci));", ": $(C=kind-ci);"):
             with self.subTest(mid=mid):
                 self.assertEqual(
                     run_hook(pre + mid + use, home=home)[0], "deny")
         for mid in ("{ C=kind-ci; } > /dev/null;", "{ C=kind-ci; } <<< x;",
                     "{ C=kind-ci; true | true; };", "! { C=kind-ci; };",
-                    "true && { C=kind-ci; };", "{ C=kind-ci; }\n"):
+                    "true && { C=kind-ci; };", "{ C=kind-ci; }\n",
+                    "x=$(C=a) C=kind-ci;", "C=kind-ci; x=$(true);",
+                    "C=kind-ci; x=$(C=gke_acme_prod-us);"):
             with self.subTest(mid=mid):
                 self.assertIsNone(run_hook(pre + mid + use, home=home)[0])
+
+    def test_a_subshell_assignment_reaches_the_rest_of_the_subshell(self):
+        # And stops at its `)`, which the test above holds (Q323). bash 5.3.15
+        # prints the assigned value for `$C` inside each of these.
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        k = "kubectl --context $C delete ns x"
+        for cmd in ("(C=gke_acme_prod-us; %s)" % k,
+                    "x=$(C=gke_acme_prod-us; %s)" % k,
+                    "C=kind-ci; (C=gke_acme_prod-us; (%s))" % k):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(run_hook(cmd, home=home)[0], "deny")
+        for cmd in ("(C=kind-ci; %s)" % k, "x=$(C=kind-ci; %s)" % k,
+                    "C=gke_acme_prod-us; (C=kind-ci; (%s))" % k,
+                    "C=gke_acme_prod-us; (C=kind-ci; { %s; })" % k,
+                    "C=gke_acme_prod-us; (export C=kind-ci; bash -c '%s')" % k):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(run_hook(cmd, home=home)[0])
+        # A pipeline stage inside it is still a process of its own.
+        self.assertEqual(
+            run_hook("(C=kind-ci | true; %s)" % k, home=home)[0], "ask")
+
+    def test_a_sibling_subshell_starts_from_the_shell_not_its_sibling(self):
+        # Two subshells at one depth are two processes, so neither sees what
+        # the other assigned, and a function defined in one is gone after it.
+        # bash 5.3.15 prints the outer value for `$C` in each (Q290 review).
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        k = "kubectl --context $C delete ns x"
+        pre = "C=gke_acme_prod-us; "
+        for cmd in (pre + "(C=kind-ci); (%s)" % k,
+                    pre + "(C=kind-ci) && (%s)" % k,
+                    pre + "(C=kind-ci) | (%s)" % k,
+                    pre + "((C=kind-ci); (%s))" % k,
+                    pre + "echo $(C=kind-ci) $(%s)" % k,
+                    pre + "(f() { C=kind-ci; }); f; %s" % k,
+                    "export C=gke_acme_prod-us; (export C=kind-ci); "
+                    "(bash -c 'kubectl --context \"$C\" delete ns x')"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(run_hook(cmd, home=home)[0], "deny")
+
+    def test_nested_subshells_keep_the_nesting_depth_limit_apart(self):
+        # The subshell depth is not the `sh -c` recursion depth: a body three
+        # parentheses down is still read (Q290 review).
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        d = "kubectl --context gke_acme_prod-us delete ns x"
+        for shell in ("bash -c", "sh -c", "eval"):
+            with self.subTest(shell=shell):
+                self.assertEqual(run_hook(
+                    "x=$( ( ( %s '%s' ) ) )" % (shell, d), home=home)[0],
+                    "deny")
+
+    def test_a_substitution_assignment_leaves_the_name_unset(self):
+        # bash 5.3.15 prints `[]` for `$C` after each of these, so the target
+        # is unknown and the mutation asks, as with no assignment at all.
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        for pre in ("x=$(C=kind-ci); ", "x=`C=kind-ci`; ",
+                    "x=$(export C=kind-ci); "):
+            with self.subTest(pre=pre):
+                self.assertEqual(run_hook(
+                    pre + "kubectl --context $C delete ns x", home=home)[0],
+                    "ask")
 
     def test_strip_keywords_takes_time_and_its_options(self):
         # `time`'s `-p` and `--` go with it, so an assignment behind them is
