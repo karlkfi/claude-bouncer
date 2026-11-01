@@ -857,9 +857,30 @@ def expand_vars(value, env):
 ASSIGN_BUILTINS = frozenset({'export', 'declare', 'typeset', 'readonly', 'local'})
 
 
+class MayVanish(str):
+    """A word that may expand to nothing: written unquoted and made only of
+    `$NAME` / `${NAME}` references, each unresolved or resolved to empty. Bash
+    drops such a word, and the word after it becomes the command (Q298)."""
+
+
+_VAR_REFS_RE = re.compile('(?:%s)*' % VAR_REF_RE.pattern)
+# What `env -S` expands in its string: the braced form only. Both env
+# implementations refuse a bare `$NAME` there and run nothing.
+_BRACED_REFS_RE = re.compile(r'(?:\$\{[A-Za-z_][A-Za-z0-9_]*\})+')
+
+
 def expand_argv(argv, env):
-    """Expand simple variable references in every token of `argv`."""
-    return [expand_vars(tok, env) for tok in argv]
+    """Expand simple variable references in every token of `argv`, marking
+    each word that may expand to nothing as a `MayVanish`."""
+    out = []
+    for tok in argv:
+        word = expand_vars(tok, env)
+        if (tok and getattr(tok, 'quoted_from', None) is None
+                and _VAR_REFS_RE.fullmatch(tok)
+                and _VAR_REFS_RE.fullmatch(word)):
+            word = MayVanish(word)
+        out.append(word)
+    return out
 
 
 def is_command_lookup(operands):
@@ -1087,7 +1108,8 @@ def strip_wrappers(argv, env, alternates=None, child=None):
                         if (alternates is not None and rest
                                 and any(set('$`') & set(w) for w in words)):
                             alternates.append((['env'] + rest, dict(child)))
-                        argv = words + rest
+                        argv = [MayVanish(w) if _BRACED_REFS_RE.fullmatch(w)
+                                else w for w in words] + rest
                         continue
                     argv = argv[wrapper_option(argv, value_flags)[0]:]
                 elif '=' in argv[0]:
@@ -1141,6 +1163,17 @@ def strip_wrappers(argv, env, alternates=None, child=None):
             argv = argv[1:]
             while argv and argv[0].startswith('-'):
                 argv = argv[wrapper_option(argv, value_flags)[0]:]
+        elif isinstance(argv[0], MayVanish) and alternates is not None:
+            # The word stays the command here. Where it expands to nothing,
+            # bash runs the word after it instead, so each reading with a
+            # leading run of such words gone is judged too (Q298).
+            k = 1
+            while k < len(argv):
+                alternates.append((argv[k:], dict(child)))
+                if not isinstance(argv[k], MayVanish):
+                    break
+                k += 1
+            break
         else:
             break
     return argv
