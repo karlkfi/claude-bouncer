@@ -1777,12 +1777,17 @@ final output.
   `''` as a file, so a GNU file is still caught, with one exception: an `s` or
   `y` command holding a `$` expansion (`sed -i '' "s/x/$v/" f`) is taken as the
   script and allowed instead of denied as unexpandable. Any other script there
-  is still read as a path, and where that path would block the command denies
-  with the `-e` rewrite rather than asking: one starting with an address
-  (`'/^#/d'`) is an absolute path to the hook, and one with an expansion in
-  another shape (`"${n}d"`) is unexpandable. A token resolving inside the root
-  stays allowed. The same deny reaches GNU's reading, `sed -i '' /outside/file`,
-  which runs an empty script over the file and changes nothing. Use
+  is still read as a path. Where it would ask as an outside path and, read as a
+  script, names no file and runs nothing — none of `w`, `W`, `r`, `R` or `e`
+  outside its `/…/` regexes — the command denies with the `-e` rewrite instead:
+  `'/^#/d'` is an absolute path to the hook and a delete to macOS sed. A script
+  that does name a file (`'/x/w /out/leak'`) keeps the ask, because the hook
+  reads no filename inside an `-e` script and the rewrite would allow the
+  write; so does GNU's reading of a path holding those letters
+  (`sed -i '' /outside/target`). An unexpandable token (`"${n}d"`) keeps its
+  own deny, host temp and a sibling checkout keep theirs, and a token resolving
+  inside the root stays allowed. The deny is not one `WORKSPACE_GUARD_OVERRIDE`
+  downgrades, as for the other unparsed tokens. Use
   `sed -i '' -e SCRIPT FILE`: macOS sed makes the edit, and GNU sed makes it
   too and then exits 2 on the empty `''` operand (GNU sed 4.9, measured in a
   `debian:stable-slim` container on 2026-10-04).

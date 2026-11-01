@@ -3015,7 +3015,8 @@ def sed_script_slot(tokens):
 
     None too where `files_in_command` has already dropped that token as an
     `s`/`y` script holding an expansion. The caller judges the token as a path
-    as before and, where it would block, denies with the `-e` rewrite instead
+    as before and, where it would ask as an outside path and is inert as a
+    script (`sed_script_is_inert`), denies with the `-e` rewrite instead
     (Q232): `/^#/d` is an absolute path to the hook and a script to macOS sed.
     """
     name = os.path.basename(tokens[0])
@@ -3032,6 +3033,23 @@ def sed_script_slot(tokens):
     if EXPANSION_RE.search(first) and SED_SUBST_RE.match(first):
         return None
     return len(files)
+
+
+# A `/…/` regex: an address, or the pattern and replacement of an `s`.
+SED_DELIMITED_RE = re.compile(r'/(?:[^/\\]|\\.)*/')
+
+
+def sed_script_is_inert(script):
+    """True when `script`, read as a sed script, names no file and runs nothing.
+
+    Outside its `/…/` regexes it holds none of `w`/`W`/`r`/`R` (write or read a
+    file, including `s///w`) or GNU's `e` (run a command). Those letters in any
+    other role, such as the text of an `a` command, also count, which errs
+    toward keeping the token's own verdict. The `-e` rewrite Q232 hands back is
+    only safe for an inert script: the hook does not read a filename inside an
+    `-e` script, so steering a `w` command there would allow the write.
+    """
+    return not re.search(r'[wWrRe]', SED_DELIMITED_RE.sub('', script))
 
 
 def files_in_command(tokens):
@@ -5156,7 +5174,8 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
             f_is_read = is_read and (out_from is None or i < out_from)
             o = check_file(f, cmd_cwd, cmd_cwd_unknown, is_read=f_is_read,
                            entry=entry_mask[i])
-            if o is not None and i == script_at and o[1] not in UNPARSED_CATS:
+            if o is not None and i == script_at and o[1] == 'outside' \
+                    and sed_script_is_inert(f):
                 o = (f, 'sedscript', None)
             if o is not None:
                 outside.append(o)
