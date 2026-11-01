@@ -113,12 +113,23 @@ WRAPPER_GRAMMAR = {
 }
 
 
+class ValueOptions(frozenset):
+    """A value-only view that still knows every long option of its row, in
+    `long`, since a long word is matched against all of them (Q306)."""
+
+    def __new__(cls, opts, long_opts=()):
+        self = super().__new__(cls, opts)
+        self.long = frozenset(long_opts)
+        return self
+
+
 def value_options(w):
     """The options of grammar row ``w`` that take a separate value, spelled
     as typed: `-u` and `--user`. An optional value is attached or absent, so
     those are not among them."""
-    return frozenset(['-' + c for c in w.short_val]
-                     + ['--' + k for k, a in w.long.items() if a == 'req'])
+    return ValueOptions(['-' + c for c in w.short_val]
+                        + ['--' + k for k, a in w.long.items() if a == 'req'],
+                        ['--' + k for k in w.long])
 
 
 # The value-only view, for a guard that skips any other option as a bare flag.
@@ -130,20 +141,23 @@ def wrapper_option(argv, value_opts):
     """(words consumed, value-taking option or None, its value) for the option
     word at argv[0]. A short word is walked a character at a time, so a bundle
     (`-iu NAME`) takes its value and the walk stops at the first value-taking
-    letter, whose value is the rest of the word (`-uroot`). A long word matches
-    by unique prefix, as getopt_long does: `--ch DIR` is `--chdir DIR`. A
-    prefix of two value-taking spellings is getopt's error, so nothing runs
-    behind it and the word is taken alone, as is `--`, which ends the options."""
+    letter, whose value is the rest of the word (`-uroot`). A long word is
+    matched as getopt_long matches it, against every long option of the row:
+    an exact spelling first, so sudo's `--login` is not `--login-class`, then
+    a unique prefix, so `--us root` is `--user root`. A prefix of two options
+    is getopt's error (`--log`), so nothing runs behind it and the word is
+    taken alone, as is `--`, which ends the options. A plain set carries no
+    `long`, and its own long spellings stand in for the row's."""
     tok = argv[0]
     nxt = argv[1] if len(argv) > 1 else None
     if tok == '--':
         return 1, None, None
     if tok.startswith('--'):
         name, eq, value = tok.partition('=')
-        matches = [o for o in value_opts if o.startswith('--') and o.startswith(name)]
-        if name in value_opts:
-            matches = [name]
-        if len(matches) != 1:
+        names = getattr(value_opts, 'long', value_opts)
+        matches = [name] if name in names else [
+            o for o in names if o.startswith(name)]
+        if len(matches) != 1 or matches[0] not in value_opts:
             return 1, None, None
         return (1, matches[0], value) if eq else (2, matches[0], nxt)
     for pos, char in enumerate(tok[1:], start=2):

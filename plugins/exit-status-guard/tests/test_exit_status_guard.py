@@ -518,6 +518,10 @@ CASES = [
      'sudo -uKarl make check | tail -5', False, True, ''),
     ('a long sudo flag and its value still reach the gate',
      'sudo --user root make check | tail -5', False, True, ''),
+    # sudo takes `--login` whole, as `-i`, though it prefixes the
+    # value-taking `--login-class` (Q306).
+    ('sudo --login is a flag, not --login-class taking the gate',
+     'sudo --login make check | tail -5', False, True, ''),
     ('a bundle ending in a value flag still reaches the gate',
      'env -iu FOO make check | tail -5', False, True, ''),
     # Options the shared table holds and this guard's own did not (Q233).
