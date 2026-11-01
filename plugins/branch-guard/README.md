@@ -600,10 +600,12 @@ second lease after a first one naming the same ref, since git applies the
 first.
 
 Both of these allows, a claim and a push of a branch the session created,
-also ask when the push carries a long option the guard does not read exactly.
-git accepts any unambiguous abbreviation, so `--force-w=` is a lease the guard
-would not see; ahead of the create-only lease it overwrote an existing claim
-(git 2.55).
+also ask when the push carries a long option the guard does not read. An
+abbreviation git accepts is read as the option it names, so `--force-w=` is
+the lease it spells; one git would refuse as ambiguous, or one the guard has
+no rule for (`--force-if-includes`), asks. Before abbreviations were written
+out, `--force-w=` ahead of the create-only lease was a lease the guard did not
+see, and it overwrote an existing claim (git 2.55).
 
 **Overlap with a moved base.** An auto-approved push is in bounds. That says
 nothing about the branch still being built on what it thinks it is. When the base
@@ -887,7 +889,12 @@ update step and restart.
    (`env`, `sudo`, `timeout`, `nice`, `nohup`, `command`, `stdbuf`, `setsid`,
    `time`, `exec`, with their own options), and program global options
    (`git -C path`, `-c k=v`) to find the `git`/`gh` subcommand and its
-   arguments. Combined short flags (`git clean -fd`) are decomposed. A wrapped
+   arguments. Combined short flags (`git clean -fd`) are decomposed, and an
+   abbreviated long option is written out the way git expands it
+   (`git branch --forc` is `--force`; `git switch --forc` is ambiguous between
+   `--force` and `--force-create`, so git refuses it and it is left as typed).
+   cherry-pick and revert expand no abbreviation, so none is read there. A
+   wrapped
    command gets every `ask` and `deny` the bare one would, but is never
    auto-approved: the wrapper can change the user or the environment, neither
    of which the classifier reads. The break-glass does lift through one, since
