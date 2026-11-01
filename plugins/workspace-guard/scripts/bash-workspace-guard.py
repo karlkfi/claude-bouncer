@@ -1670,6 +1670,42 @@ def ln_operands(tokens):
     return (positionals, None, False)
 
 
+def ln_is_symbolic(tokens):
+    """True when an `ln ...` command makes symbolic links (`-s`/`--symbolic`).
+
+    Only the plain spellings count: `-s` alone or inside a cluster of flags
+    that take no value, `--symbolic`, and an abbreviation of it down to `--sy`
+    (`--s` is ambiguous with `--suffix`). A value-taking flag, or an
+    abbreviation of one, consumes its value, so `-S -s` and `--suf -s` are
+    suffixes rather than the flag. Anything unrecognised reads as a hard link,
+    which keeps the stricter judgement.
+    """
+    i, n = 1, len(tokens)
+    while i < n:
+        tok = tokens[i]
+        if tok == '--':
+            break
+        if tok.startswith('--'):
+            key, inline = split_eq(tok)
+            if len(key) >= 4 and '--symbolic'.startswith(key):
+                return True
+            # GNU takes any unambiguous abbreviation, so `--suf -s` is a suffix.
+            if inline is None and any(
+                    o.startswith(key) for o in
+                    ('--suffix', '--backup', '--target-directory')):
+                i += 1
+        elif tok.startswith('-') and tok != '-':
+            for j, ch in enumerate(tok[1:], 1):
+                if ch == 's':
+                    return True
+                if ch in 'St':
+                    if j == len(tok) - 1:
+                        i += 1
+                    break
+        i += 1
+    return False
+
+
 def classify_ln(tokens):
     """For an `ln ...` command, return `(target_token, link_token_or_None)` for
     the forms whose link path is a token the staging logic can pin down.
@@ -4580,8 +4616,10 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
     # same chain (with or without `-s`). Tracks the resolved abspath of each
     # `LINK` whose target is outside the workspace, so a later `cat link` can
     # be flagged before bash materialises the link and breaks the
-    # lexical-realpath check (Q8 + Q17).
-    staged_outside_paths = set()
+    # lexical-realpath check (Q8 + Q17). Each maps to the target's resolved
+    # path, or None where the target is a token the hook cannot resolve, so a
+    # later WRITE through the link is judged where it lands (Q208).
+    staged_links = {}
 
     def check_file(f, group_cwd, group_cwd_unknown, is_read=False, entry=False):
         """Return `(token, category, detail)` if the file resolves outside the
@@ -4627,7 +4665,12 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
             # checked BEFORE the session-tmp allow so the ln-staging defense
             # (Q8/Q17) can't be bypassed by pointing a link inside the allowed
             # scratch dir.
-            if rp in staged_outside_paths:
+            if rp in staged_links:
+                trp = staged_links[rp]
+                res = None if is_read or trp is None \
+                    else classify_outside(trp, ctx, False)
+                if res is not None:
+                    return (offender_display(cand, rp), res[0], res[1])
                 return (offender_display(cand, rp), 'outside', None)
             # Everything past resolution — the session-tmp allow, read-prefix
             # and sibling-session exemptions, sibling-checkout / host-temp /
@@ -4658,7 +4701,7 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
             return                                # link itself unresolvable;
                                                   # later check_file catches it
                                                   # via $/~/unknown rule
-        staged_outside_paths.add(lrp)
+        staged_links[lrp] = trp if tkind == 'path' else None
 
     # Per-group cwd tracking. A `cd`/`pushd` in an earlier group of the same
     # chain shifts the runtime cwd for later guarded groups; `popd` or an
@@ -4955,22 +4998,46 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
             # the same chain; `ln -s OUTSIDE link` on its own named an outside
             # path and deferred.
             #
-            # Every operand is judged in write context — the same rule `cp`
+            # Sources are judged in write context — the same rule `cp`
             # applies to its sources. A hard link hands the source inode a
             # second name inside the workspace, and a later write through that
             # name resolves to a path the guard reads as in-workspace, so
             # treating the source as a read would let the boundary be crossed
             # once and then never seen again.
+            #
+            # A symbolic link's source is only a string stored in the link, so
+            # it drops to read context where the link itself is blocked (Q208):
+            # the command prompts or denies on the link anyway, and a later
+            # write through it is judged where it lands — by realpath once the
+            # link exists, by `staged_links` before. That needs a link this
+            # hook stages, so the source keeps the write judgement under
+            # `-t DIR`, the multi-source form, and a destination that is an
+            # existing directory (the link lands at `DIR/basename(SRC)`, or
+            # `-n` replaces the entry rather than writing into it). The link is
+            # judged as an entry, so `-n` over an in-workspace link to an
+            # outside directory counts as in-workspace.
             guarded = True
             sources, dest, _ = lnop
-            for f in sources + ([dest] if dest is not None else []):
-                o = check_file(f, cmd_cwd, cmd_cwd_unknown)
+            dest_o = None if dest is None \
+                else check_file(dest, cmd_cwd, cmd_cwd_unknown)
+            ln = classify_ln(g)
+            src_read = False
+            if dest_o is not None and ln is not None and ln[1] is not None \
+                    and ln_is_symbolic(g):
+                lkind, lrp = resolve_token(ln[1], cmd_cwd, cmd_cwd_unknown,
+                                           True)
+                src_read = lkind == 'path' and not os.path.isdir(lrp) \
+                    and check_file(ln[1], cmd_cwd, cmd_cwd_unknown,
+                                   entry=True) is not None
+            for f in sources:
+                o = check_file(f, cmd_cwd, cmd_cwd_unknown, is_read=src_read)
                 if o is not None:
                     outside.append(o)
+            if dest_o is not None:
+                outside.append(dest_o)
             # Staged after the checks: staging records the link's resolved path
-            # in `staged_outside_paths`, and checking the destination against a
+            # in `staged_links`, and checking the destination against a
             # set it had just been added to would report the same link twice.
-            ln = classify_ln(g)
             if ln is not None:
                 stage_ln(ln[0], ln[1], cmd_cwd, cmd_cwd_unknown)
             continue
@@ -5465,6 +5532,22 @@ PS_SPEC = {
 PS_NEW_ITEM_LINK_SPEC = _ps_row(
     {'path': 'write', 'literalpath': 'write',
      'value': 'write', 'target': 'write'},
+    consume=('itemtype', 'type', 'name', 'credential'),
+    switches=('force',),
+    positional=('path',))
+
+# A symbolic link's target is a string stored in the link rather than an inode
+# it shares, so Q80's argument does not reach it: this row binds the target as a
+# read, and `ps_analyze_segment` keeps it only where the link's own path is
+# already blocked and the `New-Item` is the whole string
+# (`ps_symlink_target_is_read`, Q208). Everywhere else the target goes back to
+# write context: with no staging, a later write through the link would be
+# judged at the link's path rather than where it lands. The two
+# roles differing also leaves `-Path` unbound by `-Target`, which is how
+# PowerShell binds them.
+PS_NEW_ITEM_SYMLINK_SPEC = _ps_row(
+    {'path': 'write', 'literalpath': 'write',
+     'value': 'read', 'target': 'read'},
     consume=('itemtype', 'type', 'name', 'credential'),
     switches=('force',),
     positional=('path',))
@@ -5968,6 +6051,56 @@ def ps_new_item_makes_link(args, spec):
     return False
 
 
+def ps_new_item_is_symlink(args, spec):
+    """True when `-ItemType` resolves unambiguously to `SymbolicLink`: a prefix
+    of it and of no other item type. An unreadable or absent type is False, as
+    is `Junction`, so both keep the link row's write judgement (Q208)."""
+    types = PS_NEW_ITEM_CONTENT_TYPES + PS_NEW_ITEM_LINK_TYPES
+    for i, (_, val, exp, _quoted) in enumerate(args):
+        if val == '--%':
+            break
+        if not _ps_is_param(val, exp):
+            continue
+        name, attached = val[1:], None
+        if ':' in name:
+            name, attached = name.split(':', 1)
+        if ps_resolve_param(name.lower(), spec) not in ('itemtype', 'type'):
+            continue
+        if attached is None:
+            if i + 1 >= len(args) or args[i + 1][2]:
+                return False
+            attached = args[i + 1][1]
+        v = attached.lower()
+        return bool(v) and [t for t in types if t.startswith(v)] \
+            == ['symboliclink']
+    return False
+
+
+def ps_symlink_target_is_read(args, spec, bound, ctx, cwd, cwd_unknown):
+    """True when a `New-Item -ItemType SymbolicLink`'s target may be judged as
+    a read: the link's own path is blocked, so the command prompts on it
+    anyway (Q208). Not where `-Name` puts the link under `-Path`, or where
+    `-Path` is an existing directory, since the hook then has no path for the
+    link. The caller also requires the segment to be the whole string,
+    because this frontend has no staging to catch a later write through it.
+    """
+    for _, val, exp, _quoted in args:
+        if _ps_is_param(val, exp) and ps_resolve_param(
+                val[1:].split(':', 1)[0].lower(), spec) == 'name':
+            return False
+    links = [b for b in bound if b[3] == 'write']
+    if not links:
+        return False
+    for tok, exp, quoted, _role, _entry in links:
+        if exp or cwd_unknown:
+            return False
+        for part in ps_path_parts(tok, quoted):
+            if os.path.isdir(ps_entry_realpath(ps_expand_tilde(part), cwd)):
+                return False
+    return bool(ps_file_offenders(
+        [b[:4] + (True,) for b in links], ctx, cwd, cwd_unknown))
+
+
 def ps_bind_args(args, spec):
     """Bind a segment's argument tokens to file roles.
 
@@ -6260,7 +6393,7 @@ def ps_taskkill_offenders(words, tk, ctx):
               'pattern': ' '.join(words[i][1] for i in idx) or None})]
 
 
-def ps_analyze_segment(tokens, ctx, cwd, cwd_unknown):
+def ps_analyze_segment(tokens, ctx, cwd, cwd_unknown, alone=False):
     """Analyze one pipeline segment. Returns `(offenders, guarded, signal, cwd,
     cwd_unknown)` — the trailing pair carries location tracking to the next
     segment in the chain, and `signal` withholds `allow` for the whole string
@@ -6298,8 +6431,15 @@ def ps_analyze_segment(tokens, ctx, cwd, cwd_unknown):
                 if name == 'new-item' \
                         and ps_new_item_makes_link(words[1:], spec):
                     spec = PS_NEW_ITEM_LINK_SPEC
+                    if ps_new_item_is_symlink(words[1:], spec):
+                        spec = PS_NEW_ITEM_SYMLINK_SPEC
                 guarded = True
-                files.extend(ps_bind_args(words[1:], spec))
+                bound = ps_bind_args(words[1:], spec)
+                if spec is PS_NEW_ITEM_SYMLINK_SPEC and not (
+                        alone and ps_symlink_target_is_read(
+                            words[1:], spec, bound, ctx, cwd, cwd_unknown)):
+                    bound = [b[:3] + ('write',) + b[4:] for b in bound]
+                files.extend(bound)
 
     signal = None
     if words:
@@ -6452,6 +6592,10 @@ def _ps_analyze_command(cmd, ctx, base_cwd, depth=0, base_cwd_unknown=False):
 
     offenders, guarded, signal = [], False, None
     cwd, cwd_unknown, seg, stmt = base_cwd, base_cwd_unknown, [], []
+    # One segment and nothing nested: the only shape where no later write can
+    # go through a link this string creates (Q208).
+    alone = depth == 0 and not bodies \
+        and not any(t[0] == 'op' for t in toks)
     for at, tok in enumerate(toks + [('op', ';', False, False)]):
         if tok[0] == 'op':
             if seg:
@@ -6463,7 +6607,7 @@ def _ps_analyze_command(cmd, ctx, base_cwd, depth=0, base_cwd_unknown=False):
                     if b < len(sub_cwd):
                         sub_cwd[b] = (cwd, cwd_unknown)
                 off, g, sig, cwd, cwd_unknown = ps_analyze_segment(
-                    seg, ctx, cwd, cwd_unknown)
+                    seg, ctx, cwd, cwd_unknown, alone)
                 moved = moved or (cwd, cwd_unknown) != (base_cwd,
                                                         base_cwd_unknown)
                 offenders.extend(off)

@@ -229,6 +229,9 @@ different repository's scratch still asks entirely.
 | `cat $f /etc/hosts` (also names an outside path) | **deny** |
 | `rm -rf <sibling-worktree>` (the whole checkout) | **deny** |
 | `rm ~/.claude/skills/x` (a symlink into a sibling) | **ask** |
+| `ln -s <sibling-checkout>/x ~/.claude/skills/x` (link outside) | **ask** |
+| `ln -s <sibling-checkout>/x ./link` (link in-workspace) | **deny** |
+| `ln -s <sibling-checkout>/x ~/out/` (link at `DIR/basename`) | **deny** |
 | `rm <link-to-sibling>/main.go` (real file inside) | **deny** |
 | `pkill -f ginkgo` · `pkill -f "make check"` | **deny** |
 | `pkill -f "<sibling-worktree>/bin/x"` | **deny** |
@@ -371,7 +374,10 @@ its `-Target` alias — as the path the link will point at. So the link's own pa
 and its target are both checked, both as writes, which is the rule `ln` gets on
 the bash side: a hard link hands the source inode a second name inside the
 workspace, and a later write through that name resolves to a path that reads as
-in-workspace. An `-ItemType` the hook cannot expand is read as a link, since
+in-workspace. A `SymbolicLink`'s target drops to a read only where the
+`New-Item` is the whole command, its `-Path` is the link itself (no `-Name`, not
+an existing directory), and that path is already blocked. With no staging, any
+other segment could write through the new link. An `-ItemType` the hook cannot expand is read as a link, since
 that costs a prompt on content rather than losing a target. Unlike `ln`, the new
 link's resolved path is **not** staged, so a read *through* it later in the same
 string is not yet caught.
@@ -977,7 +983,15 @@ through the same boundary rules and produce the same reasons. Symlink staging
 7. **Check and stage** `ln`. Its own operands — every source, plus the link or
    the `-t DIR` the links land in — are checked like any other file argument,
    in write context, so an `ln` that names a path outside the root answers for
-   it whether or not anything later reads through the link. On top of that,
+   it whether or not anything later reads through the link. The one exception
+   is `ln -s SRC LINK` where `LINK` is itself blocked and is not an existing
+   directory: its source is only a string stored in the link, so it is judged
+   as a read, and installing a link outside the root that points into a
+   sibling checkout asks on the link rather than denying as a sibling write.
+   That link is staged, so a later write through it is still judged where it
+   lands. The `-t DIR` and multi-source forms, and a `LINK` that is a
+   directory, put the link at `DIR/basename(SRC)`, which is never staged, so
+   their sources stay writes. On top of that,
    symlinks *and* hard links created by an earlier `ln OUTSIDE LINK` in the
    chain (with or without `-s`) are **staged**: `LINK`'s resolved path is
    recorded so a later `cat LINK` is flagged too — bash hasn't materialised the
@@ -1076,7 +1090,8 @@ through the same boundary rules and produce the same reasons. Symlink staging
    the boundary this hook guards. Write commands (`cp`, `mv`, `tee`, `rm`,
    `unlink`) are **not** exempt — they must still pass the workspace check,
    and neither do `ln`'s operands, which are judged in write context for the
-   same reason `cp`'s sources are. Nor is a read command invoked with a
+   same reason `cp`'s sources are — bar a symbolic link's source when the
+   link is blocked anyway (step 7). Nor is a read command invoked with a
    write-mode flag (`sed -i` /
    `--in-place`, gawk `-i` / `--include`, `yq -i` / `--inplace`, `sort -o`
    / `--output`, BSD `base64 -o`): any of these flips the whole invocation into
@@ -1491,7 +1506,8 @@ A set of path prefixes are always allowed for **read-only** guarded commands
 (`cat`, `head`, `tail`, `grep`, `rg`, `sed`, `awk`, `jq`, `yq`, `diff`,
 `sort`, `wc`, `file`, `hexdump`, `cut`, `base64`, and their aliases). Write
 commands (`cp`,
-`mv`, `tee`, `rm`, `unlink`), every operand of `ln`, redirect targets, read
+`mv`, `tee`, `rm`, `unlink`), every operand of `ln` (bar a symbolic link's source
+where the link is blocked anyway), redirect targets, read
 commands carrying a
 write-mode flag (`sed -i`, gawk `-i inplace`, `yq -i`, `sort -o`, BSD
 `base64 -o`), and the
@@ -1944,7 +1960,8 @@ final output.
   unguarded (Q276).
 - The sibling-checkout `deny` classifies *write-context* file arguments — the
   same set the read-prefix exemption treats as writes: redirect targets, `dd`
-  operands, every operand of `cp`/`mv`/`tee`/`rm`/`unlink`/`ln`, every operand
+  operands, every operand of `cp`/`mv`/`tee`/`rm`/`unlink`/`ln` (a symbolic
+  link's source only while the link itself passes), every operand
   of a read
   command carrying a write-mode flag (`sed -i`, gawk `-i inplace`, `yq -i`,
   `sort -o`, BSD `base64 -o`), and the positional output file of
