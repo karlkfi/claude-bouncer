@@ -3652,11 +3652,15 @@ def escalate_suppression(signal, mode, override=None, prefixable=True):
     both can — name the files, run `kill <pid>` on its own — so those deny
     in every escalating mode, and a person is never asked a question whose
     answer is already written in the reason (Q310, reversing Q74's ask for
-    these two). A
-    `sh -c` body under a container or remote wrapper has no plain-command
-    rewrite, and neither does interpreter code, so those split on who is at the
-    prompt: `ask` in `auto` and `acceptEdits`, `deny` under
-    `bypassPermissions`, where an `ask` blocks and strands the agent.
+    these two). An
+    unreachable `sh -c` body can too: the escalation fires only when the body
+    shares a string with a guarded command, and the call holding the body,
+    run on its own, defers and runs anyway, so the split is the fix and an
+    `ask` on the joined string protected nothing the split does not also
+    release. Interpreter code splits on who is at the
+    prompt instead, since an operator opts into it to watch it: `ask` in
+    `auto` and `acceptEdits`, `deny` under `bypassPermissions`, where an
+    `ask` blocks and strands the agent.
 
     ``override`` is the way through for a deny the caller really needs as
     written. It downgrades one to `ask`, the way it does for the cross-workspace
@@ -3672,7 +3676,9 @@ def escalate_suppression(signal, mode, override=None, prefixable=True):
     if signal == 'sh -c':
         what = ("a shell `-c` body it could not reach (a container or remote "
                 "wrapper, or an untracked cwd)")
-        fix = "Fix: run the body as a plain command so its paths are checked"
+        fix = ("Fix: run the command holding the `-c` body (the `docker exec`, "
+               "`kubectl run`, `ssh`) as its own call, so the rest of the "
+               "string can be vouched for")
     elif signal == INTERPRETER_SIGNAL:
         what = "interpreter code it cannot read (an inline body, a heredoc, -m)"
         fix = ("Fix: move the code into a file inside the project root and run "
@@ -3698,7 +3704,7 @@ def escalate_suppression(signal, mode, override=None, prefixable=True):
         fix = ("Fix: signal the literal pid with `kill <pid>` as its own call, "
                "so the rest of the string can be vouched for (`pgrep -fl` finds "
                "the pid)")
-    rewritable = signal not in ('sh -c', INTERPRETER_SIGNAL)
+    rewritable = signal != INTERPRETER_SIGNAL
     lead = ""
     if mode == 'bypassPermissions':
         decision = 'deny'
