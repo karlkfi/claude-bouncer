@@ -122,6 +122,12 @@ CASES = [
      False, True, ''),
     ('|& pipes stderr too', 'make check |& tail -5', False, True, ''),
     ('time-wrapped gate piped', 'time make check | tail -5', False, True, ''),
+    ('time -p gate piped', 'time -p make check | tail -5', False, True, ''),
+    ('time -- gate piped', 'time -- make check | tail -5', False, True, ''),
+    ('time -p -- gate piped', 'time -p -- make check | tail -5',
+     False, True, ''),
+    # bash 5.3.15 runs a program named `-p` here, never the gate.
+    ('time -- -p runs -p', 'time -- -p make check | tail -5', False, False, ''),
     ('sudo-wrapped gate piped', 'sudo make install | tail -5', False, True, ''),
 
     # --- PIPESTATUS is not portable across shells ----------------------------

@@ -79,8 +79,8 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 from bouncer_parse import (                                    # noqa: E402
     ASSIGN_APPEND, ASSIGN_SUBSCRIPT, ASSIGNMENT_RE, PUNCT_CHARS, QuotedStr,
-    QuoteTrackingLexer, command_substitutions, is_assignment, is_reserved_word,
-    split_assignment, strip_comments, strip_heredoc_bodies, strip_sh_keywords,
+    QuoteTrackingLexer, command_substitutions, is_assignment, split_assignment,
+    strip_comments, strip_heredoc_bodies, strip_sh_keywords,
 )
 from bouncer_grants import grants_path, load_grants, record_grants  # noqa: E402
 from bouncer_wrappers import (                                 # noqa: E402
@@ -751,15 +751,13 @@ def strip_keywords(group):
     `{`, `if`, `then`, `!`, `do` and the rest stand in command position ahead
     of the command bash runs, and left in place one becomes the head that no
     evaluator covers, so the segment defers (Q300). `function NAME` drops the
-    name too. A `time` goes back to the wrapper walk, which reads its `-p` and
-    `--` where the shared strip does not (Q241)."""
+    name too, and the shared strip takes `time`'s `-p` and `--` with it, so an
+    assignment behind them is peeled as one at the head would be (Q241)."""
     body = strip_sh_keywords(group)
     if len(body) < len(group) and group[len(group) - len(body) - 1] == 'function' \
             and body:
         body = strip_sh_keywords(body[1:])
     cut = len(group) - len(body)
-    if cut and group[cut - 1] == 'time' and is_reserved_word(group[cut - 1]):
-        cut -= 1
     return group[:cut], group[cut:]
 
 

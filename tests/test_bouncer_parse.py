@@ -644,6 +644,27 @@ class CommandHeadTests(unittest.TestCase):
     def test_a_plain_keyword_is_still_peeled(self):
         self.assertEqual(['cmd'], bp.strip_sh_keywords(bp.lex('if cmd')))
 
+    def test_time_takes_its_own_options(self):
+        # bash 5.3.15 runs `cmd` for each of these (Q241).
+        for c in ('time -p cmd', 'time -- cmd', 'time -p -- cmd',
+                  '! time -p cmd', 'time -p ! cmd', 'time -p time -- cmd',
+                  'if time -p cmd'):
+            with self.subTest(c=c):
+                self.assertEqual(['cmd'], bp.strip_sh_keywords(bp.lex(c)))
+        self.assertEqual(['A=1', 'cmd'],
+                         bp.strip_sh_keywords(bp.lex('time -p A=1 cmd')))
+
+    def test_time_options_out_of_place_are_the_command(self):
+        # Each of these runs a program named `-p` or `--` on bash 5.3.15.
+        for c, head in (('time -- -p cmd', '-p'), ('time -p -p cmd', '-p'),
+                        ("time '-p' cmd", '-p'), ('time -- -- cmd', '--'),
+                        ('time -pp cmd', '-pp')):
+            with self.subTest(c=c):
+                self.assertEqual(head, bp.strip_sh_keywords(bp.lex(c))[0])
+        # Only after `time`: `if -p` names a program too.
+        self.assertEqual(['-p', 'cmd'],
+                         bp.strip_sh_keywords(bp.lex('if -p cmd')))
+
 
 class SplitAssignmentTests(unittest.TestCase):
     """The `+` and a subscript sit on the name's side of the `=`, so a name
