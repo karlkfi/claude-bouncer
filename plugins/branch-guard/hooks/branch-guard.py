@@ -877,8 +877,8 @@ def command_segments(tokens, tail=None):
     `marks`: the separators and reserved words consumed since the previous
     segment, in source order, which `compound_layout` reads to scope a `cd`; a
     `tail` list, where given, takes the marks after the last segment. `function
-    NAME` drops the name too. A `time` stays, for `peel_wrappers` to read its
-    `-p`.
+    NAME` drops the name too. A bare `time` stays, for `peel_wrappers`; one
+    with its own `-p` or `--` goes with them in the shared strip (Q241).
     """
     segments, cur, writes, marks, i = [], [], False, [], 0
 

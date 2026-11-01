@@ -1847,10 +1847,20 @@ def strip_sh_keywords(tokens):
     this peels a word bash executes, so the caller finds whatever follows and
     treats it as the command -- a `cd` that never runs, or an override
     assignment bash never made.
+
+    `time` takes options of its own: one `-p`, then one `--`, in that order
+    and unquoted (Q241). Measured on bash 5.3: `time -p cat f`, `time -- cat f`
+    and `time -p -- cat f` all run `cat`, while `time -- -p cat f`,
+    `time -p -p cat f` and `time "-p" cat f` each run a program named `-p`.
     """
     i = 0
     while i < len(tokens) and is_reserved_word(tokens[i]):
         i += 1
+        if tokens[i - 1] == 'time':
+            for opt in ('-p', '--'):
+                if i < len(tokens) and tokens[i] == opt \
+                        and getattr(tokens[i], 'quoted_from', None) is None:
+                    i += 1
     return tokens[i:]
 
 

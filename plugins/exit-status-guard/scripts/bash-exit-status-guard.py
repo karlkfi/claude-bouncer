@@ -25,9 +25,10 @@ and the session cannot set a variable in the hook's own environment).
 
 Gate patterns are matched against the HEAD of a shell segment, after leading
 `VAR=val` assignments and `bash`/`sudo`/`time`-style wrappers are peeled, along
-with the options of a command wrapper such as `sudo` -- never against the raw
-command string. A raw-string match also fires on every `git show`, `grep`, and
-commit message that merely NAMES the command.
+with the options of a command wrapper such as `sudo` and the `-p` and `--` of
+the `time` keyword -- never against the raw command string. A raw-string
+match also fires on every `git show`, `grep`, and commit message that merely
+NAMES the command.
 
 The shell analysis here -- heredoc bodies, comments, quote state, command
 substitution, operator runs -- is ported from claude-workspace-guard's

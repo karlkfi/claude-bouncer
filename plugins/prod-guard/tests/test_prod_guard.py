@@ -3550,6 +3550,14 @@ class SpecialCaseTests(unittest.TestCase):
                       "while true; do %s; done", "until false; do %s; done",
                       "for i in 1; do %s; done", "select x in a; do %s; done",
                       "case x in x) %s;; esac", "! time -p %s",
+                      # Q241: `time`'s own options, and an assignment behind
+                      # it, which bash 5.3.15 makes before running the command.
+                      "time -p %s", "time -- %s", "time -p -- %s",
+                      "time -p ! %s", "time FOO=x %s", "time -p FOO=x %s",
+                      "time -p FOO[a;b]=x %s",
+                      # bash runs `-p` here, but `bash --posix` and dash run
+                      # /usr/bin/time, which runs the command.
+                      "time -p -p %s", 'time "-p" %s',
                       "{ bash -c '%s'; }", "if true; then eval '%s'; fi",
                       "f() { %s; }", "f() { %s; }; f", "function f { %s; }",
                       "function f() { %s; }; f"):
@@ -3615,11 +3623,16 @@ class SpecialCaseTests(unittest.TestCase):
             with self.subTest(mid=mid):
                 self.assertIsNone(run_hook(pre + mid + use, home=home)[0])
 
-    def test_strip_keywords_hands_time_to_the_wrapper_walk(self):
+    def test_strip_keywords_takes_time_and_its_options(self):
+        # `time`'s `-p` and `--` go with it, so an assignment behind them is
+        # left at the head for the prefix peel (Q241).
         for group, words, rest in (
                 (["{", "kubectl"], ["{"], ["kubectl"]),
-                (["!", "time", "-p", "kubectl"], ["!"],
-                 ["time", "-p", "kubectl"]),
+                (["!", "time", "-p", "kubectl"], ["!", "time", "-p"],
+                 ["kubectl"]),
+                (["time", "FOO=x", "kubectl"], ["time"], ["FOO=x", "kubectl"]),
+                (["!", "time", "-p", "-p", "kubectl"], ["!"],
+                 ["time", "-p", "-p", "kubectl"]),
                 (["function", "f", "{", "kubectl"], ["function", "f", "{"],
                  ["kubectl"]),
                 (["then", "C=x"], ["then"], ["C=x"])):

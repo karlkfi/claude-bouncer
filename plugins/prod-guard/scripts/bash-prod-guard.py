@@ -751,15 +751,24 @@ def strip_keywords(group):
     `{`, `if`, `then`, `!`, `do` and the rest stand in command position ahead
     of the command bash runs, and left in place one becomes the head that no
     evaluator covers, so the segment defers (Q300). `function NAME` drops the
-    name too. A `time` goes back to the wrapper walk, which reads its `-p` and
-    `--` where the shared strip does not (Q241)."""
+    name too, and the shared strip takes `time`'s `-p` and `--` with it, so an
+    assignment behind them is peeled as one at the head would be (Q241).
+
+    Where the strip stops on a word after `time` that starts with `-`, `time`
+    goes back to the wrapper walk instead. bash reads `time -p -p cmd` as the
+    keyword running `-p`, but under `--posix` and in dash `time` before an
+    option is `/usr/bin/time`, which runs `cmd`."""
     body = strip_sh_keywords(group)
     if len(body) < len(group) and group[len(group) - len(body) - 1] == 'function' \
             and body:
         body = strip_sh_keywords(body[1:])
     cut = len(group) - len(body)
-    if cut and group[cut - 1] == 'time' and is_reserved_word(group[cut - 1]):
-        cut -= 1
+    if body and str(body[0]).startswith('-'):
+        j = cut
+        while j and group[j - 1] in ('-p', '--'):
+            j -= 1
+        if j and group[j - 1] == 'time' and is_reserved_word(group[j - 1]):
+            cut = j - 1
     return group[:cut], group[cut:]
 
 
