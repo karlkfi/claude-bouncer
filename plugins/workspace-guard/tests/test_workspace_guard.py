@@ -6748,6 +6748,97 @@ class SiblingCheckoutTests(unittest.TestCase):
         out = self._bash(f"grep x {sh(os.path.join(self.other, 'root.txt'))}")
         self.assertEqual(self._decision(out), "ask")
 
+    # --- Q208: a symbolic link's target is named, not written ---------------
+    # `ln -s TARGET LINK` writes only at LINK. Installing a link outside every
+    # checkout that points into the primary is the documented skills layout,
+    # and it was denied as a sibling-checkout write.
+
+    def _symlink_into_main(self):
+        return sh(os.path.join(self.main, "root.txt"))
+
+    def test_bash_symlink_outside_into_sibling_asks_on_the_link(self):
+        link = os.path.join(self.links, "new")
+        out = self._bash(f"ln -s {self._symlink_into_main()} {sh(link)}")
+        self.assertEqual(self._decision(out), "ask")
+        r = self._reason(out)
+        self.assertNotIn("Sibling-checkout", r)
+        self.assertIn(link, r)
+
+    def test_bash_symlink_spellings_all_relax(self):
+        link = sh(os.path.join(self.links, "new"))
+        for flags in ("-sf", "-fns", "--symbolic", "--sym", "-s -t"):
+            if flags.endswith("-t"):
+                cmd = f"ln {flags} {sh(self.links)} {self._symlink_into_main()}"
+            else:
+                cmd = f"ln {flags} {self._symlink_into_main()} {link}"
+            with self.subTest(cmd=cmd):
+                out = self._bash(cmd)
+                self.assertEqual(self._decision(out), "ask")
+                self.assertNotIn("Sibling-checkout", self._reason(out))
+
+    def test_bash_cp_into_sibling_still_denies_beside_it(self):
+        # The pair the row asks for: a genuine write into the sibling.
+        out = self._bash(f"cp root.txt {sh(os.path.join(self.main, 'c.txt'))}")
+        self.assertEqual(self._decision(out), "deny")
+
+    def test_bash_hard_link_into_sibling_still_denies(self):
+        # Q80's inode argument stands for a hard link.
+        link = sh(os.path.join(self.links, "hard"))
+        for flags in ("", "-f", "-S -s", "--suffix -s"):
+            cmd = f"ln {flags} {self._symlink_into_main()} {link}"
+            with self.subTest(cmd=cmd):
+                out = self._bash(cmd)
+                self.assertEqual(self._decision(out), "deny")
+                self.assertIn("Sibling-checkout", self._reason(out))
+
+    def test_bash_symlink_landing_in_workspace_still_denies(self):
+        # No prompt on the link to fall back on, and a `-t` link is never
+        # staged, so a later write through it in the same command would pass.
+        os.mkdir(os.path.join(self.wt, "sub"))
+        for cmd in (f"ln -s {self._symlink_into_main()} ./newlink",
+                    f"ln -s -t ./sub {self._symlink_into_main()}",
+                    f"ln -s {self._symlink_into_main()}"):
+            with self.subTest(cmd=cmd):
+                out = self._bash(cmd)
+                self.assertEqual(self._decision(out), "deny")
+                self.assertIn("Sibling-checkout", self._reason(out))
+
+    def test_bash_write_through_a_staged_symlink_denies_as_sibling(self):
+        # The link does not exist yet when the hook runs, so realpath cannot
+        # follow it; staging carries the target's write judgement instead.
+        link = sh(os.path.join(self.links, "new"))
+        out = self._bash(
+            f"ln -s {self._symlink_into_main()} {link} && echo hi > {link}")
+        self.assertEqual(self._decision(out), "deny")
+        self.assertIn("Sibling-checkout", self._reason(out))
+
+    def _ps_new_item(self, item_type, path, target):
+        return self._run({"tool_name": "PowerShell", "tool_input": {
+            "command": f"New-Item -ItemType {item_type} "
+                       f"-Path {ps(path)} -Target {ps(target)}"}})
+
+    def test_ps_symlink_outside_into_sibling_asks_on_the_link(self):
+        link = os.path.join(self.links, "new")
+        out = self._ps_new_item("SymbolicLink", link,
+                                os.path.join(self.main, "root.txt"))
+        self.assertEqual(self._decision(out), "ask")
+        self.assertNotIn("Sibling-checkout", self._reason(out))
+
+    def test_ps_symlink_landing_in_workspace_still_denies(self):
+        out = self._ps_new_item("SymbolicLink", "newlink",
+                                os.path.join(self.main, "root.txt"))
+        self.assertEqual(self._decision(out), "deny")
+        self.assertIn("Sibling-checkout", self._reason(out))
+
+    def test_ps_hard_link_and_junction_into_sibling_still_deny(self):
+        for item_type in ("HardLink", "Junction", "$t"):
+            with self.subTest(item_type=item_type):
+                out = self._ps_new_item(item_type,
+                                        os.path.join(self.links, "new"),
+                                        os.path.join(self.main, "root.txt"))
+                self.assertEqual(self._decision(out), "deny")
+                self.assertIn("Sibling-checkout", self._reason(out))
+
     # --- Bash: override downgrades to ask -----------------------------------
 
     def test_bash_override_downgrades_deny_to_ask(self):
@@ -12061,7 +12152,9 @@ class PowerShellNewItemTests(unittest.TestCase):
 
     The bash counterpart is Q80's `ln_operands` half -- sources and destination
     both checked, both in write context, because a hard link hands the source
-    inode a second name inside the workspace. `New-Item` needs the same two
+    inode a second name inside the workspace. A symbolic link's target drops to
+    a read where its link path is blocked anyway (Q208), which
+    `SiblingCheckoutTests` asserts for both frontends. `New-Item` needs the same two
     halves plus one the bash side does not: `-Value` is the new file's content
     for every item type but a link, where the FileSystem provider takes it (and
     its `-Target` alias) as the path the link points at. So the role of one
