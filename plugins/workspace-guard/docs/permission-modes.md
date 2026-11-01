@@ -58,9 +58,9 @@ the fallback is the pre-approval the suppression was trying to withhold.
 
 Q74 closed that for the two suppressions naming a construct this guard already
 judges. A `sh -c` body it could not reach, and a kill it could not scope, now
-**escalate** in those three modes rather than deferring — `ask` in `auto` and
-`acceptEdits`, where a prompt reaches somebody, and `deny` under
-`bypassPermissions`, where it would not. The interpreter suppression stays
+**escalate** in those three modes rather than deferring. Q74 had them `ask` in
+`auto` and `acceptEdits`, where a prompt reaches somebody, and `deny` under
+`bypassPermissions`, where it would not; both now deny in all three, below. The interpreter suppression stays
 inert by default and is the one this paragraph still describes unchanged:
 escalating it costs 4.67% of all commands against 0.09% for the other two
 (measured 2026-09-09 over 89,133 corpus commands), and an interpreter's own
@@ -78,16 +78,24 @@ Q310 moved the wrapper and kill signals to `deny` in all three modes. Each one's
 reason already carried a rewrite the agent can apply — name the files on the
 command itself, run `kill <pid>` as its own call — so the `ask` in `auto` and
 `acceptEdits` spent a person on a question whose answer was in the prompt.
-`WORKSPACE_GUARD_OVERRIDE=<reason>` downgrades either deny to `ask` for a
-command needed as written, and clears neither; under `bypassPermissions` it
+The `sh -c` signal followed for the same reason. It fires only when an
+unreachable body shares a string with a guarded command, and the call holding
+the body, run on its own, has nothing to withhold an `allow` from, so it defers
+and runs: splitting it out is the rewrite, and an `ask` on the joined string
+protected nothing the split does not release. All 61 of those asks this machine
+emitted from 2026-10-02 to 2026-11-01 were container or remote calls.
+`WORKSPACE_GUARD_OVERRIDE=<reason>` downgrades any of these denies to `ask` for
+a command needed as written, and clears none; under `bypassPermissions` it
 changes nothing (Q210).
 
 **Do not read the escalation as a reason to treat the three modes alike.** They
 share one property — a defer runs — and differ on the one that picks the
 verdict for a construct with no rewrite: `auto` and `acceptEdits` have a person
-at the prompt and `bypassPermissions` does not. Denying a `sh -c` body in a mode
-where somebody was there to say yes removes the human rather than protecting
-them, since the refusal has no fix to hand back instead.
+at the prompt and `bypassPermissions` does not. Denying such a construct in a
+mode where somebody was there to say yes removes the human rather than
+protecting them, since the refusal has no fix to hand back instead. Interpreter
+code under `WORKSPACE_GUARD_ESCALATE=all` is the one escalation still treated
+that way.
 
 This also qualifies a claim in [`design.md`](design.md): defer is described as
 net-neutral, leaving the operator "no worse off than without the hook." True —

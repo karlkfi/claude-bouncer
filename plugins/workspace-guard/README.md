@@ -1618,18 +1618,25 @@ whether the refusal can carry a rewrite the agent applies itself:
 | --- | --- | --- |
 | A wrapper hiding operands (`xargs`, an unreadable wrapper flag) | `deny`, naming the files on the command itself | `deny` |
 | A kill (`kill`, `pkill`, `taskkill`, `Stop-Process`) | `deny`, naming the split: `kill <pid>` as its own call | `deny` |
-| A `sh -c` body under a container or remote wrapper | `ask` | `deny` |
+| A `sh -c` body under a container or remote wrapper, or an untracked cwd | `deny`, naming the split: the `-c` call as its own call | `deny` |
 | Interpreter code (only under `WORKSPACE_GUARD_ESCALATE=all`) | `ask` | `deny` |
 
-The first two have a mechanical fix, so asking a person would spend their
-attention on a question whose answer is already in the reason. The last two have
-no plain-command rewrite, so they ask where somebody can answer. Under
+The first three have a mechanical fix, so asking a person would spend their
+attention on a question whose answer is already in the reason. For a `sh -c`
+body the fix is the split itself: the escalation fires only when the body shares
+a string with a guarded command, and the `docker exec` or `ssh` call on its own
+defers and runs, so an `ask` on the joined string protected nothing the split
+does not also release. Over 2026-10-02 to 2026-11-01 this machine's transcripts
+held 61 of those asks, every one a container or remote call (`docker run`,
+`docker exec`, `kubectl run`/`exec`) and none an untracked cwd. Interpreter code
+is opt-in for an operator who wants to watch it, so it asks where somebody can
+answer. Under
 `bypassPermissions` everything denies, because an `ask` there blocks and strands
 the agent while a `deny` blocks and hands back the rewrite. The other three
 modes are untouched: a defer already stops the command there, so escalating
 would buy a prompt and no protection.
 
-When the agent really needs a wrapper or kill command as written,
+When the agent really needs a wrapper, kill or `sh -c` command as written,
 `WORKSPACE_GUARD_OVERRIDE=<reason>` downgrades the deny to `ask`, as it does for
 the [cross-workspace denies](#cross-workspace-denies). It never clears one,
 since allowing would run operands the hook has just said it cannot see, and it
@@ -2018,7 +2025,9 @@ final output.
   once the hook has lost track of the cwd (after a `cd -` or a `cd "$VAR"`),
   where a relative path in it would resolve against a stale directory. In all
   those cases the string still *defers* — a body never earns the blanket `allow`,
-  analyzed or not.
+  analyzed or not — except in `auto`, `acceptEdits` and `bypassPermissions`,
+  where a guarded command sharing the string turns it into a `deny` naming the
+  split ([suppression escalation](#suppression-escalation-in-pre-approving-modes)).
 - **A command wrapper is read through when the hook knows its grammar.** `env`,
   `nice`, `nohup`, `timeout`, `stdbuf`, `setsid`, `ionice`, `time`, `xargs`,
   `exec`, `command`, `builtin`, `sudo`, `doas`, `caffeinate`, `chrt`, `taskset`
