@@ -619,7 +619,8 @@ def segment_layout(tokens):
     (the segment, its reserved words, the command behind them, the blocks
     those words open or close, whether the command runs apart from the shell
     -- a pipeline stage or a backgrounded list -- so nothing it assigns
-    reaches the commands after it (Q300), and how many `( … )` it sits in.
+    reaches the commands after it (Q300), and the `( … )` it sits in,
+    outermost first, each named by where it opens.
     A subshell's assignments reach the commands inside it and stop at its
     `)`, so the caller scopes them by that depth (Q323).
 
@@ -663,12 +664,15 @@ def segment_layout(tokens):
         return op in _PIPE_OPS or op == '&'
 
     # Pair openers with closers and track parentheses, in one walk.
-    stripped, opens, closes, depth = [], {}, {}, []
-    stack, parens, case_parens = [], [u for u in ops if u == '('], []
+    # Each open `(` is named by where it stands, so two sibling subshells at
+    # one depth are told apart.
+    stripped, opens, closes, nest = [], {}, {}, []
+    stack, case_parens = [], []
+    parens = [(-1, k) for k, u in enumerate(ops) if u == '(']
     for i, (group, units) in enumerate(segs):
         words, body = strip_keywords(group)
         stripped.append((words, body))
-        depth.append(len(parens))
+        nest.append(tuple(parens))
         for w in words:
             if w in BLOCK_CLOSERS or w == '}':
                 if stack:
@@ -685,9 +689,9 @@ def segment_layout(tokens):
                 and getattr(body[0], 'quoted_from', None) is None:
             stack.append((i, 'for'))
             opens.setdefault(i, []).append('for')
-        for u in units:
+        for k, u in enumerate(units):
             if u == '(':
-                parens.append(i)
+                parens.append((i, k))
             elif u == ')':
                 # A `case` pattern's `)` opened nothing, so it closes nothing.
                 if parens and not (case_parens
@@ -719,7 +723,7 @@ def segment_layout(tokens):
                 and getattr(body[0], 'quoted_from', None) is None:
             last = ends.pop() if ends else len(segs) - 1
             blocks.append(('push', 'apart' if apart(i, last) else 'maybe'))
-        layout.append((group, words, body, blocks, apart(i, i), depth[i]))
+        layout.append((group, words, body, blocks, apart(i, i), nest[i]))
     return layout
 
 
@@ -3072,14 +3076,20 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
     # nothing the later segments see. Inside `( … )` the scopes are copies, so
     # an assignment there reaches the rest of that subshell and nothing past
     # its `)` (Q323).
-    blocks, functions, outer = [], {}, []
-    for whole, words, group, changes, seg_apart, depth in \
+    blocks, functions, outer, inside = [], {}, [], ()
+    for whole, words, group, changes, seg_apart, subshells in \
             segment_layout(tokens):
-        while len(outer) < depth:
-            outer.append((shell_env, exported))
+        keep = 0
+        while keep < min(len(inside), len(subshells)) \
+                and inside[keep] == subshells[keep]:
+            keep += 1
+        while len(outer) > keep:
+            shell_env, exported, functions = outer.pop()
+        while len(outer) < len(subshells):
+            outer.append((shell_env, exported, functions))
             shell_env, exported = dict(shell_env), dict(exported)
-        while len(outer) > depth:
-            shell_env, exported = outer.pop()
+            functions = {k: set(v) for k, v in functions.items()}
+        inside = subshells
         for change in changes:
             if change[0] == 'pop':
                 if blocks:
@@ -3231,7 +3241,7 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
         # own environment for a name it lacks.
         findings += evaluator(argv, child, ctx)
     if outer:
-        shell_env, exported = outer[0]
+        shell_env, exported, functions = outer[0]
     if out is not None:
         out.update(shell=shell_env, exported=exported)
     return findings, override, session_reason
