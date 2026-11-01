@@ -71,6 +71,25 @@ class WrapperOptionTests(unittest.TestCase):
         self.assertEqual(self.walk('--c', 'x'), (1, None, None))
         self.assertEqual(self.walk('--', 'x'), (1, None, None))
 
+    def test_exact_flag_wins_over_a_value_option_it_prefixes(self):
+        # sudo 1.9.17p2 runs `sudo --login cmd` as `-i`, and answers
+        # `option '--log' is ambiguous` and the same for `--logi` and `--pr`,
+        # each of which prefixes a flag and one value option (Q306).
+        self.assertEqual(self.walk('--login', 'git', 'push'), (1, None, None))
+        self.assertEqual(self.walk('--login-class', 'c', 'git'),
+                         (2, '--login-class', 'c'))
+        self.assertEqual(self.walk('--login-c', 'c', 'git'),
+                         (2, '--login-class', 'c'))
+        for word in ('--log', '--logi', '--pr'):
+            with self.subTest(word=word):
+                self.assertEqual(self.walk(word, 'x', 'git'), (1, None, None))
+
+    def test_plain_set_reads_its_own_long_spellings(self):
+        walk = wrappers.wrapper_option
+        self.assertEqual(walk(['--us', 'root'], frozenset({'--user'})),
+                         (2, '--user', 'root'))
+        self.assertEqual(walk(['--us', 'root'], frozenset()), (1, None, None))
+
     def test_value_missing_at_the_end(self):
         self.assertEqual(self.walk('-u'), (2, '-u', None))
 

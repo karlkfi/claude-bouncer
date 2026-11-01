@@ -2919,7 +2919,8 @@ for w in 'env' 'env -i' 'env -' 'env FOO=1' 'env -u FOO' 'env -uFOO' \
          'exec -a x' 'sudo' 'sudo -u root' 'sudo -uroot' 'sudo -nu root' \
          'sudo -r role -t type' 'sudo --us root' 'sudo FOO=1' \
          'sudo -u x env A=1 timeout 5 nohup' 'sudo A=1 -u root' \
-         'sudo A=1 -u root B=2 -n' 'sudo -i' 'sudo -iu root'; do
+         'sudo A=1 -u root B=2 -n' 'sudo -i' 'sudo -iu root' 'sudo --login' \
+         'sudo --login-c cls'; do
   check "[wrap] $w git push --force origin main -> ask" ask \
     "$(decision_for "$(bash_payload "$w git push --force origin main")" "$WRAP")"
 done
@@ -3067,7 +3068,7 @@ for w in 'env -C .' 'env --chdir=.' 'sudo -D .'; do
   check "[wrap] $w reset --hard on an irrecoverable tip -> deny" deny \
     "$(decision_for "$(bash_payload "$w git reset --hard HEAD~1")" "$WRAP")"
 done
-for w in 'env -C "$X"' 'sudo -R .' 'sudo -i' 'sudo -iu root'; do
+for w in 'env -C "$X"' 'sudo -R .' 'sudo -i' 'sudo -iu root' 'sudo --login'; do
   check "[wrap] $w reset --hard on an irrecoverable tip -> ask" ask \
     "$(decision_for "$(bash_payload "$w git reset --hard HEAD~1")" "$WRAP")"
 done

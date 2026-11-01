@@ -3549,6 +3549,7 @@ class SpecialCaseTests(unittest.TestCase):
                     "sudo -k kubectl delete ns foo",
                     "sudo -u root kubectl delete ns foo",
                     "sudo -i kubectl delete ns foo",
+                    "sudo --login kubectl delete ns foo",
                     "sudo -- kubectl delete ns foo",
                     "sudo -p prompt kubectl delete ns foo",
                     "sudo -p -l kubectl delete ns foo"):

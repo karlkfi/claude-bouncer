@@ -863,6 +863,12 @@ class PollConfigTests(unittest.TestCase):
                 d, _ = run_hook(raw)
                 self.assertEqual("deny", d)
 
+    def test_sudo_login_is_a_flag_not_login_class(self):
+        # sudo takes `--login` whole, as `-i`, though it prefixes the
+        # value-taking `--login-class` (Q306).
+        d, _ = run_hook("sudo --login gh run watch 123")
+        self.assertEqual("deny", d)
+
     def test_sudo_runs_an_operand_it_cannot_assign(self):
         # The control: sudo runs a word starting with `=` or `/` as the
         # command, so nothing behind it is watched.
