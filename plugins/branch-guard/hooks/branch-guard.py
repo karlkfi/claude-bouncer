@@ -163,6 +163,153 @@ GIT_VALUE_OPTS = {
 }
 # gh global options that consume a following value token.
 GH_VALUE_OPTS = {'-R', '--repo'}
+# Every long option a subcommand's parser accepts, `--no-` forms included, for
+# the subcommands whose rules read one. git expands any unambiguous prefix of
+# these (`git branch --forc` is `--force`), and uniqueness is per subcommand:
+# `--forc` is ambiguous to `git switch`, which also has `--force-create`.
+# `spell_out_long_opts` expands against this list before any rule reads a flag.
+# Taken from `git <sub> --git-completion-helper-all` on git 2.55, where every
+# prefix of every entry resolved, or was refused, as the expansion reads it
+# (Q285). cherry-pick and revert are absent because they expand nothing:
+# `--abort` runs and `--abo` prints usage. A git with options this one lacks
+# can find a prefix ambiguous that the list resolves, and then runs nothing.
+GIT_LONG_OPTS = {sub: frozenset('--' + o for o in names.split())
+                 for sub, names in {
+    'branch': (
+        'abbrev all color column contains copy create-reflog delete '
+        'edit-description force format ignore-case list merged move '
+        'no-abbrev no-color no-column no-contains no-copy no-create-reflog '
+        'no-delete no-edit-description no-force no-format no-ignore-case '
+        'no-list no-merged no-move no-omit-empty no-points-at no-quiet '
+        'no-recurse-submodules no-set-upstream no-set-upstream-to '
+        'no-show-current no-sort no-track no-unset-upstream no-verbose '
+        'omit-empty points-at quiet recurse-submodules remotes set-upstream '
+        'set-upstream-to show-current sort track unset-upstream verbose '
+        'with without '
+    ),
+    'switch': (
+        'conflict create detach discard-changes force force-create guess '
+        'ignore-other-worktrees merge no-conflict no-create no-detach '
+        'no-discard-changes no-force no-force-create no-guess '
+        'no-ignore-other-worktrees no-merge no-orphan no-overwrite-ignore '
+        'no-progress no-quiet no-recurse-submodules no-track orphan '
+        'overwrite-ignore progress quiet recurse-submodules track '
+    ),
+    'restore': (
+        'conflict ignore-skip-worktree-bits ignore-unmerged '
+        'inter-hunk-context merge no-conflict no-ignore-skip-worktree-bits '
+        'no-ignore-unmerged no-merge no-overlay no-patch '
+        'no-pathspec-file-nul no-pathspec-from-file no-progress no-quiet '
+        'no-recurse-submodules no-source no-staged no-worktree ours overlay '
+        'patch pathspec-file-nul pathspec-from-file progress quiet '
+        'recurse-submodules source staged theirs unified worktree '
+    ),
+    'tag': (
+        'annotate cleanup color column contains create-reflog delete edit '
+        'file force format ignore-case list local-user merged message '
+        'no-annotate no-cleanup no-color no-column no-contains '
+        'no-create-reflog no-edit no-file no-force no-format no-ignore-case '
+        'no-local-user no-merged no-omit-empty no-points-at no-sign no-sort '
+        'no-trailer omit-empty points-at sign sort trailer verify with '
+        'without '
+    ),
+    'push': (
+        'all atomic branches delete dry-run exec follow-tags force '
+        'force-if-includes force-with-lease ipv4 ipv6 mirror no-all '
+        'no-atomic no-branches no-delete no-dry-run no-exec no-follow-tags '
+        'no-force no-force-if-includes no-force-with-lease no-mirror '
+        'no-porcelain no-progress no-prune no-push-option no-quiet '
+        'no-receive-pack no-recurse-submodules no-repo no-set-upstream '
+        'no-signed no-tags no-thin no-verbose no-verify porcelain progress '
+        'prune push-option quiet receive-pack recurse-submodules repo '
+        'set-upstream signed tags thin verbose verify '
+    ),
+    'pull': (
+        'all allow-unrelated-histories append autostash cleanup commit '
+        'compact-summary deepen depth dry-run edit ff ff-only force '
+        'gpg-sign ipv4 ipv6 jobs keep log negotiation-include '
+        'negotiation-restrict negotiation-tip no-all '
+        'no-allow-unrelated-histories no-append no-autostash no-cleanup '
+        'no-commit no-compact-summary no-deepen no-depth no-dry-run no-edit '
+        'no-ff no-force no-gpg-sign no-ipv4 no-ipv6 no-jobs no-keep no-log '
+        'no-negotiation-include no-negotiation-restrict no-negotiation-tip '
+        'no-progress no-prune no-quiet no-rebase no-recurse-submodules '
+        'no-server-option no-set-upstream no-shallow-exclude '
+        'no-shallow-since no-show-forced-updates no-signoff no-squash '
+        'no-stat no-strategy no-strategy-option no-summary no-tags '
+        'no-update-shallow no-upload-pack no-verbose no-verify '
+        'no-verify-signatures progress prune quiet rebase '
+        'recurse-submodules refmap server-option set-upstream '
+        'shallow-exclude shallow-since show-forced-updates signoff squash '
+        'stat strategy strategy-option summary tags unshallow '
+        'update-shallow upload-pack verbose verify verify-signatures '
+    ),
+    'reset': (
+        'auto-advance hard intent-to-add inter-hunk-context keep merge '
+        'mixed no-auto-advance no-intent-to-add no-patch '
+        'no-pathspec-file-nul no-pathspec-from-file no-quiet '
+        'no-recurse-submodules no-refresh patch pathspec-file-nul '
+        'pathspec-from-file quiet recurse-submodules refresh soft unified '
+    ),
+    'clean': (
+        'dry-run exclude force interactive no-dry-run no-force '
+        'no-interactive no-quiet quiet '
+    ),
+    'merge': (
+        'abort allow-unrelated-histories autostash cleanup commit '
+        'compact-summary continue edit ff ff-only file gpg-sign into-name '
+        'log message no-abort no-allow-unrelated-histories no-autostash '
+        'no-cleanup no-commit no-compact-summary no-continue no-edit no-ff '
+        'no-gpg-sign no-into-name no-log no-message no-overwrite-ignore '
+        'no-progress no-quiet no-quit no-rerere-autoupdate no-signoff '
+        'no-squash no-stat no-strategy no-strategy-option no-summary '
+        'no-verbose no-verify no-verify-signatures overwrite-ignore '
+        'progress quiet quit rerere-autoupdate signoff squash stat strategy '
+        'strategy-option summary verbose verify verify-signatures '
+    ),
+    'rebase': (
+        'abort allow-empty-message apply autosquash autostash '
+        'committer-date-is-author-date continue edit-todo empty exec ff '
+        'force-rebase fork-point gpg-sign ignore-date ignore-whitespace '
+        'interactive keep-base keep-empty merge no-allow-empty-message '
+        'no-autosquash no-autostash no-committer-date-is-author-date '
+        'no-exec no-ff no-force-rebase no-fork-point no-gpg-sign '
+        'no-ignore-date no-ignore-whitespace no-keep-base no-keep-empty '
+        'no-onto no-preserve-merges no-quiet no-reapply-cherry-picks '
+        'no-rebase-merges no-rerere-autoupdate no-reschedule-failed-exec '
+        'no-reset-author-date no-root no-signoff no-stat no-strategy '
+        'no-strategy-option no-trailer no-update-refs no-verbose no-verify '
+        'no-whitespace onto preserve-merges quiet quit reapply-cherry-picks '
+        'rebase-merges rerere-autoupdate reschedule-failed-exec '
+        'reset-author-date root show-current-patch signoff skip stat '
+        'strategy strategy-option trailer update-refs verbose verify '
+        'whitespace '
+    ),
+    'am': (
+        '3way abort allow-empty binary committer-date-is-author-date '
+        'continue directory empty exclude gpg-sign ignore-date '
+        'ignore-space-change ignore-whitespace include interactive keep '
+        'keep-cr keep-non-patch message-id no-3way no-binary '
+        'no-committer-date-is-author-date no-directory no-exclude '
+        'no-gpg-sign no-ignore-date no-ignore-space-change '
+        'no-ignore-whitespace no-include no-interactive no-keep no-keep-cr '
+        'no-keep-non-patch no-message-id no-patch-format no-quiet '
+        'no-rebasing no-reject no-rerere-autoupdate no-resolvemsg '
+        'no-scissors no-signoff no-utf8 no-verify no-whitespace '
+        'patch-format quiet quit quoted-cr rebasing reject '
+        'rerere-autoupdate resolved resolvemsg retry scissors '
+        'show-current-patch signoff skip utf8 verify whitespace '
+    ),
+    'worktree add': (
+        'checkout detach force guess-remote lock no-checkout no-detach '
+        'no-force no-guess-remote no-lock no-orphan no-quiet no-reason '
+        'no-relative-paths no-track orphan quiet reason relative-paths '
+        'track '
+    ),
+    'worktree remove': (
+        'force no-force '
+    ),
+}.items()}
 
 # Programs that run the command behind them, keyed to their options that take
 # a SEPARATE value (Q223). `peel_wrappers` drops them before the git/gh lookup,
@@ -397,11 +544,12 @@ NO_FORCE_WITH_LEASE = '--no-force-with-lease'
 # behavior from config where the hook can't see it — see README "Limitations".
 PUSH_TAG_FLAGS = {'--tags'}
 
-# Long options the push walk reads exactly. git also accepts any unambiguous
-# abbreviation (`--force-w=` is `--force-with-lease=`), which the walk does
-# not expand, so an owned-branch push or a queue-id claim carrying any other
-# long option asks: measured on git 2.55, an abbreviated lease ahead of the
-# create-only one overwrote an existing claim.
+# Long options the push walk reads exactly. An abbreviation git accepts
+# (`--force-w=` is `--force-with-lease=`) reaches the walk written out by
+# `spell_out_long_opts`, so what is left unread is a spelling outside
+# `GIT_LONG_OPTS`, and an owned-branch push or a queue-id claim carrying one
+# asks: measured on git 2.55, an abbreviated lease ahead of the create-only one
+# overwrote an existing claim while the walk read abbreviations as unknown.
 PUSH_READ_LONG_OPTS = frozenset({
     FORCE_WITH_LEASE, NO_FORCE_WITH_LEASE, '--force', '--delete',
     '--set-upstream', '--quiet', '--verbose', '--dry-run', '--no-verify',
@@ -1205,6 +1353,31 @@ def peel_wrappers(argv, assigned=None):
     return argv, chdir
 
 
+def spell_out_long_opts(sub, args):
+    """`args` with each abbreviated long option written in full, as git's
+    option parser reads it: an exact spelling stands, a unique prefix among
+    the subcommand's `GIT_LONG_OPTS` becomes that option (`--forc=x` is
+    `--force=x`), and anything else is left as typed, since git refuses it
+    and runs nothing. `--n` and `--no` never expand, as git calls both
+    unknown. `git worktree <cmd>` reads the list for its own subcommand."""
+    if sub == 'worktree':
+        sub = 'worktree ' + next((a for a in args if not a.startswith('-')), '')
+    names = GIT_LONG_OPTS.get(sub)
+    if not names:
+        return args
+    out = []
+    for i, a in enumerate(args):
+        if a == '--':
+            return out + args[i:]
+        name, eq, value = a.partition('=')
+        if a.startswith('--') and name not in names and name not in ('--n', '--no'):
+            matches = [o for o in names if o.startswith(name)]
+            if len(matches) == 1:
+                a = matches[0] + eq + value
+        out.append(a)
+    return out
+
+
 def parse_invocation(tokens):
     """If a segment is a `git` or `gh` invocation, return
     {'prog', 'sub', 'args', 'globals', 'wrapped', 'chdir', 'env'}; otherwise
@@ -1242,6 +1415,8 @@ def parse_invocation(tokens):
         i += 2 if t in value_opts else 1
     sub = tokens[i] if i < len(tokens) else None
     args = tokens[i + 1:] if i < len(tokens) else []
+    if prog == 'git':
+        args = spell_out_long_opts(sub, args)
     return {'prog': prog, 'sub': sub, 'args': args, 'globals': tokens[start:i],
             'wrapped': wrapped, 'chdir': chdir, 'env': env}
 
@@ -1918,8 +2093,8 @@ def force_create_name(args, letter, value_letters, long_opt=None):
     """The branch a force-create option names, '' when the option is present
     with no value, or None when it is absent. Reads the option the way git's
     parser does: `-C name`, `-Cname`, a bundle ending in it (`-qC name`), and
-    `--force-create[=]name` or any unambiguous prefix of it down to
-    `--force-`, which git expands. A bundle stops at the first letter that
+    `--force-create[=]name`, which `spell_out_long_opts` has already written
+    out from any prefix git accepts. A bundle stops at the first letter that
     takes a value, since the rest of the token is that letter's value."""
     for i, a in enumerate(args):
         if a == '--':
@@ -1927,7 +2102,7 @@ def force_create_name(args, letter, value_letters, long_opt=None):
         nxt = args[i + 1] if i + 1 < len(args) else ''
         if a.startswith('--'):
             opt, eq, val = a.partition('=')
-            if long_opt and len(opt) >= len('--force-') and long_opt.startswith(opt):
+            if opt == long_opt:
                 return val if eq else nxt
             continue
         if len(a) > 1 and a[0] == '-':

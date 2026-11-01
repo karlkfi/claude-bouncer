@@ -8070,7 +8070,8 @@ class SuppressionEscalationTests(unittest.TestCase):
     they get splits inside it: `bypassPermissions` has nobody at a prompt, so an
     `ask` would block and strand the agent where a `deny` blocks and hands back
     the rewrite, while `auto` and `acceptEdits` do reach a person and get the
-    `ask` their own rules would have raised.
+    `ask` their own rules would have raised -- unless the reason carries a
+    rewrite, which denies there too (Q310).
 
     Targets are synthetic (repo rule); nothing here is ever executed.
     """
@@ -8122,11 +8123,11 @@ class SuppressionEscalationTests(unittest.TestCase):
     )
 
     def test_scoped_signals_escalate_where_defer_runs(self):
-        # A `sh -c` body splits on who is at the prompt; a kill has a rewrite
-        # the reason can carry, so it denies in every escalating mode (Q310).
-        for mode, expected in self.ESCALATING:
-            self._decision(self.SCOPED[0], expected, permission_mode=mode)
-            self._decision(self.SCOPED[1], "deny", permission_mode=mode)
+        # Both have a rewrite the reason can carry -- run the `-c` call or the
+        # kill as its own call -- so both deny in every escalating mode (Q310).
+        for mode, _ in self.ESCALATING:
+            for cmd in self.SCOPED:
+                self._decision(cmd, "deny", permission_mode=mode)
 
     def test_scoped_signals_keep_deferring_where_defer_blocks(self):
         # The other half of the mode condition. Escalating here would spend a
@@ -8140,13 +8141,14 @@ class SuppressionEscalationTests(unittest.TestCase):
         # future mode-set edit that collapses them fails here by name. An `ask`
         # under `auto` reaches somebody who can answer it; under
         # `bypassPermissions` nobody can, so a deny is what teaches the agent.
-        cmd = self.SCOPED[0]
+        cmd = self.INTERPRETED
         self.assertEqual(
             "ask",
-            self._run(cmd, "auto")["hookSpecificOutput"]["permissionDecision"])
+            self._run(cmd, "auto", "all")
+            ["hookSpecificOutput"]["permissionDecision"])
         self.assertEqual(
             "deny",
-            self._run(cmd, "bypassPermissions")
+            self._run(cmd, "bypassPermissions", "all")
             ["hookSpecificOutput"]["permissionDecision"])
 
     # --- the interpreter signal is opt-in ------------------------------------
@@ -8183,7 +8185,7 @@ class SuppressionEscalationTests(unittest.TestCase):
         # Secure-by-default: a typo must not switch the escalation off, and
         # must not switch the interpreter half on either.
         for bad in ("", "  ", "yes", "al l", "scoped-ish"):
-            self._decision(self.SCOPED[0], "ask", permission_mode="auto",
+            self._decision(self.SCOPED[0], "deny", permission_mode="auto",
                            scope=bad)
             self._decision(self.INTERPRETED, "defer", permission_mode="auto",
                            scope=bad)
@@ -8227,7 +8229,7 @@ class SuppressionEscalationTests(unittest.TestCase):
     # --- what the reason has to carry ----------------------------------------
 
     def test_the_reason_names_the_plugin_the_mode_and_a_fix(self):
-        reason = self._decision(self.SCOPED[0], "ask", permission_mode="auto")
+        reason = self._decision(self.SCOPED[0], "deny", permission_mode="auto")
         self.assertTrue(reason.startswith("workspace-guard: "), reason)
         self.assertIn("auto", reason)
         self.assertIn("Fix:", reason)
@@ -8265,6 +8267,7 @@ class SuppressionEscalationTests(unittest.TestCase):
     REWRITABLE = (
         "git ls-files | xargs grep foo",                            # wrapper
         "cat in.txt; grep foo in.txt | xargs kill",                 # kill
+        "cat in.txt; docker exec c sh -c 'cat /q74-fake-target'",   # sh -c
     )
     OVERRIDE = "WORKSPACE_GUARD_OVERRIDE=q310 "
 
@@ -8301,11 +8304,9 @@ class SuppressionEscalationTests(unittest.TestCase):
             self._decision(self.OVERRIDE + cmd, "deny",
                            permission_mode="bypassPermissions")
 
-    def test_the_override_moves_nothing_for_an_unrewritable_body(self):
-        # `sh -c` and interpreter code already ask where a person is present.
+    def test_the_override_moves_nothing_for_interpreter_code(self):
+        # Interpreter code already asks where a person is present.
         for mode in ("auto", "acceptEdits"):
-            self._decision(self.OVERRIDE + self.SCOPED[0], "ask",
-                           permission_mode=mode)
             self._decision(self.OVERRIDE + self.INTERPRETED, "ask",
                            permission_mode=mode, scope="all")
 
@@ -8342,7 +8343,8 @@ class SuppressionEscalationTests(unittest.TestCase):
 
     def test_an_ask_keeps_approval_and_the_knob_for_the_person(self):
         # An ask's reason reaches the person at the prompt, who can do both.
-        for cmd in (self.SCOPED[0], self.OVERRIDE + self.REWRITABLE[0]):
+        for cmd in (self.OVERRIDE + self.SCOPED[0],
+                    self.OVERRIDE + self.REWRITABLE[0]):
             reason = self._decision(cmd, "ask", permission_mode="auto")
             self.assertIn("or approve this one.", reason)
             self.assertIn("Set WORKSPACE_GUARD_ESCALATE=off to restore the "
@@ -8393,9 +8395,23 @@ class ShellCEscalationReadsOnlyUnreachableBodiesTests(unittest.TestCase):
             out = self._run(cmd, "auto")
             self.assertIsNotNone(out, cmd)
             self.assertEqual(
-                "ask", out["hookSpecificOutput"]["permissionDecision"], cmd)
-            self.assertIn("could not reach",
-                          out["hookSpecificOutput"]["permissionDecisionReason"])
+                "deny", out["hookSpecificOutput"]["permissionDecision"], cmd)
+            reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+            self.assertIn("could not reach", reason)
+            self.assertIn("as its own call", reason)
+
+    def test_the_split_the_reason_names_clears(self):
+        # The rewrite has to be one the hook then accepts, or the deny hands
+        # back a command it refuses again. Each half on its own: the `-c` call
+        # has no guarded command to withhold an `allow` from, so it defers,
+        # and the rest is a clean guarded command.
+        self.assertIsNone(self._run("docker exec c sh -c 'cat /q211-fake-target'",
+                                    "auto"))
+        self.assertIsNone(self._run("ssh host sh -c 'cat /q211-fake-target'",
+                                    "auto"))
+        out = self._run("cat in.txt", "auto")
+        self.assertEqual("allow",
+                         out["hookSpecificOutput"]["permissionDecision"])
 
     def test_the_readable_body_still_withholds_allow(self):
         # Q60's guarantee is untouched: the `allow` is withheld, by
