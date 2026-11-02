@@ -3658,7 +3658,7 @@ class SpecialCaseTests(unittest.TestCase):
                     run_hook(pre + mid + use, home=home)[0], "deny")
         for mid in ("{ C=kind-ci; } > /dev/null;", "{ C=kind-ci; } <<< x;",
                     "{ C=kind-ci; true | true; };", "! { C=kind-ci; };",
-                    "true && { C=kind-ci; };", "{ C=kind-ci; }\n",
+                    "{ C=kind-ci; } && true;", "{ C=kind-ci; }\n",
                     "x=$(C=a) C=kind-ci;", "C=kind-ci; x=$(true);",
                     "C=kind-ci; x=$(C=gke_acme_prod-us);"):
             with self.subTest(mid=mid):
@@ -3723,6 +3723,49 @@ class SpecialCaseTests(unittest.TestCase):
                 self.assertEqual(run_hook(
                     pre + "kubectl --context $C delete ns x", home=home)[0],
                     "ask")
+
+    def test_an_assignment_after_and_or_keeps_both_readings(self):
+        # bash may skip the right side of `&&` or `||`, so the name holds its
+        # old value or the new one, and a production value on either side
+        # denies. bash 5.3.15 prints the old value for `$C` after
+        # `C=prod; false && C=kind` and after `true || C=kind && echo` (Q301).
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        k = "kubectl --context $C delete pod x"
+        p, n = "C=gke_acme_prod-us; ", "C=kind-ci; "
+        for cmd in (p + "false && C=kind-ci; " + k,
+                    p + "true || C=kind-ci; " + k,
+                    n + "true && C=gke_acme_prod-us; " + k,
+                    n + "false || C=gke_acme_prod-us; " + k,
+                    p + "false && { C=kind-ci; }; " + k,
+                    p + "false && export C=kind-ci; " + k,
+                    p + "false && eval C=kind-ci; " + k,
+                    p + "false && C=kind-ci || " + k,
+                    p + "true || C=kind-ci && " + k,
+                    p + "false && D=$(true) C=kind-ci; " + k,
+                    p + "false && C=kind-ci; D=$C; "
+                    "kubectl --context $D delete pod x",
+                    p + "eval 'false && C=kind-ci'; " + k,
+                    p + "false && export C=kind-ci; "
+                    "bash -c 'kubectl --context \"$C\" delete pod x'",
+                    p + "if true; then false && C=kind-ci; fi; " + k,
+                    # A subshell after the list sees both too (#307 review).
+                    p + "true || C=kind-ci && (" + k + ")",
+                    p + "true || C=kind-ci; (" + k + ")",
+                    p + "false && C=kind-ci; echo $(" + k + ")",
+                    p + "false && C=kind-ci; x=`" + k + "`"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(run_hook(cmd, home=home)[0], "deny")
+        # Where a later `&&` can run only after the assignment, the value
+        # stands; so does one before the list.
+        for cmd in (p + "false && C=kind-ci && " + k,
+                    p + "false && { C=kind-ci; " + k + "; }",
+                    p + "false && (C=kind-ci; " + k + ")",
+                    p + "false && C=kind-ci && (" + k + ")",
+                    p + "cd x && export C=kind-ci && " + k,
+                    n + "true && C=kind-ci; " + k,
+                    n + "C=kind-ci && true; " + k):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(run_hook(cmd, home=home)[0])
 
     def test_a_name_set_with_no_value_to_read_is_unknown(self):
         # bash 5.3.15 runs each of these with `$C` reassigned or unset, so the
