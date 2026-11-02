@@ -84,11 +84,15 @@ lib-test:
 	$(PYTHON) -m unittest discover tests
 
 # branch-guard drives its hook through a shell harness rather than unittest.
+# A plugin with scripts/run-tests.py runs through it, as CI does: serially the
+# workspace-guard suite took 180s of a 436s check, sharded 27s.
 plugin-tests:
 	@set -e; for p in $(PLUGINS); do \
 	  echo "--- $$p"; \
 	  if [ -f plugins/$$p/test/run.sh ]; then \
 	    ( cd plugins/$$p && bash test/run.sh ); \
+	  elif [ -f plugins/$$p/scripts/run-tests.py ]; then \
+	    ( cd plugins/$$p && $(PYTHON) scripts/run-tests.py ); \
 	  else \
 	    ( cd plugins/$$p && $(PYTHON) -m unittest discover tests ); \
 	  fi; \
