@@ -107,7 +107,13 @@ the real status where it can be read.
 make check; git push            # denied — the push runs either way
 npm test; npm publish           # denied
 git add .; git commit -m wip    # denied — a failed add commits nothing new
+make check; gh api -X PUT repos/o/r/pulls/1/merge   # denied — the same merge
 ```
+
+A `gh api` call is a state change when it writes: a method other than GET, or,
+with none named, a field or `--input`. A GraphQL call writes only when its query
+is a `mutation`, and `POST /markdown` renders and stores nothing, so neither a
+GraphQL read nor a render is denied after a check.
 
 Here the status is read correctly and then ignored. `&&` is the fix, and is
 never denied. A subshell is a statement like any other, so `(make check); git
