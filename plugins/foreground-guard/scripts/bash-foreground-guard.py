@@ -289,20 +289,24 @@ def exempt_matchers(cfg):
 # ---------------------------------------------------------------------------
 
 PUNCT_CHARS = frozenset(';()<>|&')
+# A backtick no odd run of backslashes escapes (Q322).
+LIVE_BACKTICK = re.compile(r'(?<!\\)((?:\\\\)*)`')
 
 
 def tokenize(raw):
     """shlex-tokenize with POSIX quoting and punctuation grouping. Backticks
     and newlines are rewritten to `;` first so multi-line commands split into
     their own segments; a substitution `mask_substitutions` could not pair
-    still splits off that way, the fail-safe direction. Returns None on
+    still splits off that way, the fail-safe direction. An escaped backtick
+    is left for the lexer, which drops its backslash where bash does (Q322).
+    Returns None on
     unbalanced quotes (caller defers: fail-open on parse errors). Comments
     go by bash's rule: shlex's own handling swallows the newline that ends
     one, merging the next line into it unjudged (Q267). A glued operator
     run is split back into its operators, so `&` before a rewritten newline
     or a `)` is still the `&` that backgrounds (Q239), and the `;` a trailing
     newline leaves is dropped so a trailing `&` stays the last token."""
-    raw = strip_comments(raw).replace('`', ';').replace('\n', ';')
+    raw = LIVE_BACKTICK.sub(r'\1;', strip_comments(raw)).replace('\n', ';')
     lex = QuoteTrackingLexer(raw, posix=True, punctuation_chars=';()<>|&')
     lex.commenters = ''
     lex.whitespace_split = True

@@ -382,6 +382,10 @@ def _unescape(m):
     return '' if m.group(1) == '\n' else m.group(1)
 
 
+# A backtick no odd run of backslashes escapes (Q322).
+_LIVE_BACKTICK = re.compile(r'(?<!\\)((?:\\\\)*)`')
+
+
 def tokenize(raw):
     """shlex-tokenize with POSIX quoting and punctuation grouping. Newlines
     are rewritten to `;` first, because shlex treats a newline as plain
@@ -398,7 +402,9 @@ def tokenize(raw):
     (Q196). Single quotes keep a substitution literal, so it is left alone.
     The word that held it keeps its original text, so `--context="$(x)"`
     still reads as unresolved. A backtick the scan could not pair is still
-    rewritten to `;`, the fail-safe direction.
+    rewritten to `;`, the fail-safe direction. An escaped one is left for the
+    lexer, which drops the backslash as bash does: inside double quotes it
+    reaches a `bash -c` body as the substitution the child runs (Q322).
 
     Returns None on unbalanced quotes (caller defers: fail-open on parse
     errors)."""
@@ -408,7 +414,7 @@ def tokenize(raw):
     bodies = command_substitutions(raw, spans=spans)[:_SUBST_MAX]
     sentinels = _subst_sentinels(raw)
     masked = _mask_substitutions(raw, spans[:len(bodies)], sentinels)
-    masked = masked.replace('`', ';').replace('\n', ';')
+    masked = _LIVE_BACKTICK.sub(r'\1;', masked).replace('\n', ';')
     try:
         tokens = _hoist_substitutions(_lex_semicolons(masked), raw, spans,
                                       bodies, sentinels)

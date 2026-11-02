@@ -3435,6 +3435,30 @@ class SpecialCaseTests(unittest.TestCase):
         self.assertEqual(
             run_hook("PROD_GUARD_OVERRIDE=why $X " + k, home=home)[0], "ask")
 
+    # --- Q322: bash drops `\` before `$` and a backtick in double quotes ----
+
+    def test_an_escaped_dollar_or_backtick_in_a_double_quoted_body_is_live(self):
+        # The child runs what the escape hid from the parent.
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        d = "kubectl --context gke_acme_prod-us delete ns x"
+        e = "kubectl --context=gke_acme_prod-us delete pod x"
+        for cmd in ('bash -c "echo \\`%s\\`"' % d, 'eval "echo \\`%s\\`"' % d,
+                    'bash -c "\\$X %s"' % e, 'eval "\\$X %s"' % e,
+                    'bash -c "echo \\"\\$(%s)\\""' % d,
+                    # The single-quoted forms deny on main already.
+                    "bash -c 'echo `%s`'" % d, "bash -c '$X %s'" % e):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(run_hook(cmd, home=home)[0], "deny")
+
+    def test_an_escape_bash_keeps_still_hides_the_command(self):
+        # The parent prints these; the child of the last gets `\`` back.
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        d = "kubectl --context gke_acme_prod-us delete ns x"
+        for cmd in ('echo "\\$(%s)"' % d, 'echo "\\`%s\\`"' % d,
+                    'bash -c "echo \\\\\\`%s\\\\\\`"' % d):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(run_hook(cmd, home=home)[0])
+
     # --- Q269: what `env` hands the child reaches its `sh -c` body ----------
 
     def test_env_operands_reach_a_single_quoted_body(self):
