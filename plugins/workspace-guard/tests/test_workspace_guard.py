@@ -1695,11 +1695,12 @@ class HookEndToEndTests(unittest.TestCase):
 
     def _sed_keeps_its_ask(self, cmd, token, expected="ask"):
         # Since Q328 the reason can also name the script's own `w`/`r` file,
-        # so the token is one entry of the list rather than all of it.
+        # so the token is one entry of the list rather than all of it. Windows
+        # shows each entry as `token -> resolved`.
         out = self._decision(cmd, expected)
         reason = out["hookSpecificOutput"]["permissionDecisionReason"]
         listed = reason.split("Outside-workspace path(s): ", 1)[1].split(". Fix:")[0]
-        self.assertIn(token, listed.split(", "))
+        self.assertIn(token, [e.split(" -> ", 1)[0] for e in listed.split(", ")])
 
     def test_sed_address_script_after_empty_suffix_keeps_its_ask(self):
         self._sed_keeps_its_ask("sed -i '' '/^#/d' in.txt", "/^#/d")
