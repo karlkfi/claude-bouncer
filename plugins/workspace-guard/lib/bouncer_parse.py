@@ -116,7 +116,6 @@ _CMD_POS_KEYWORDS = frozenset({
 })
 
 _WORD_RE = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
-_DBRACKET_END_RE = re.compile(r'[ \t\n]\]\](?=[ \t\n;&|)]|$)')
 
 # The same, for the lexer deciding whether an assignment word can follow.
 _ASSIGN_POS_KEYWORDS = _CMD_POS_KEYWORDS | {'!', '{'}
@@ -1141,6 +1140,8 @@ def command_substitutions(text, quotes=True, spans=None):
     quiet = 0             # no comment starts before this index
     parens = []           # one per open `(`: True for a `<(` or `>(`
     pending = []          # heredoc delimiters armed, awaiting their bodies
+    dbracket = False      # inside `[[ … ]]`
+    regex = None          # a `=~` operand: None, 'op', 'next', paren depth
     while i < n:
         c = text[i]
         if in_single:
@@ -1148,6 +1149,14 @@ def command_substitutions(text, quotes=True, spans=None):
                 in_single = False
             i += 1
             continue
+        if regex is not None and quotes and not in_double and i >= quiet:
+            if regex == 'op':                      # ahead of the quote and
+                regex = 'next' if c in ' \t\n' else 'op'   # substitution steps,
+            elif c not in ' \t\n':                 # which also start an operand
+                depth = 0 if regex == 'next' else regex
+                regex = depth + (c == '(') - (c == ')' and depth > 0)
+            elif regex == 0:
+                regex = None
         if c == '\\':                              # escapes next char (not in '')
             brk = brk and text[i+1:i+2] == '\n'    # a continuation joins words
             i += 2
@@ -1191,7 +1200,18 @@ def command_substitutions(text, quotes=True, spans=None):
             i = end
             continue
         if quotes and not in_double:
-            if c == '#' and brk and i >= quiet:
+            if i >= quiet:                         # strip_comments' `[[` rule
+                if brk and text[i+2:i+3] in ('', ' ', '\t', '\n'):
+                    if text.startswith('[[', i):
+                        dbracket = True
+                    elif dbracket and text.startswith('=~', i):
+                        regex = 'op'
+                if dbracket and regex is None and brk \
+                        and text.startswith(']]', i) and text[i+2:i+3] in (
+                            '', ' ', '\t', '\n', ';', '&', '|', ')'):
+                    dbracket = False
+            if c == '#' and brk and i >= quiet and not (
+                    isinstance(regex, int) and text[i-1] not in ' \t\n'):
                 while i < n and text[i] != '\n':   # keep the newline itself
                     i += 1
                 continue
@@ -1232,11 +1252,12 @@ def _comment_free_end(text, i, brk):
     bash reads a `#` as text inside a `${…}` expansion, a `$[…]` or `((…))`
     arithmetic, and an assignment's subscript (`FOO[a #b]=x`, Q217), so
     :func:`command_substitutions` opens no comment there (Q258). Nor does it
-    inside an extglob group or a `[[ … ]]`, where a `(` or `|` starts no word:
-    bash parses extglob syntax in `[[ … ]]` always and elsewhere once
-    `shopt -s extglob` has run, which a raw string cannot tell. The scan
-    still walks the span, since a `$(…)` inside one runs. Unterminated, the
-    span runs to the end, which is the reading before comments were known.
+    inside an extglob group, where a `(` or `|` starts no word: bash parses
+    extglob syntax in `[[ … ]]` always and elsewhere once `shopt -s extglob`
+    has run, which a raw string cannot tell. A `[[ … ]]` is not held whole,
+    since a `#` after a blank there starts a comment (Q320). The scan still
+    walks the span, since a `$(…)` inside one runs. Unterminated, the span
+    runs to the end, which is the reading before comments were known.
     Returns ``i`` when no such construct starts at ``i``.
     """
     if text.startswith('${', i):
@@ -1249,9 +1270,6 @@ def _comment_free_end(text, i, brk):
         return _skip_balanced_parens(text, i)
     if text.startswith('(', i) and i > 0 and text[i-1] in '?*+@!':
         return _skip_balanced_parens(text, i)      # an extglob group
-    if brk and text.startswith('[[', i) and text[i+2:i+3] in (' ', '\t', '\n'):
-        m = _DBRACKET_END_RE.search(text, i + 2)
-        return m.end() if m else len(text)
     m = _WORD_RE.match(text, i) if brk else None
     if m and text.startswith('[', m.end()):
         end = _subscript_end(text, m.end())
