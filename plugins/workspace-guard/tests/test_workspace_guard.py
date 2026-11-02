@@ -6966,6 +6966,49 @@ class SiblingCheckoutTests(unittest.TestCase):
                 self.assertEqual(self._decision(out), "deny")
                 self.assertIn("Sibling-checkout", self._reason(out))
 
+    # --- Q326: a relative symlink target resolves from the link's directory --
+
+    def test_bash_relative_symlink_target_resolves_from_the_link(self):
+        # From `wt-a/a/b`, `../main/root.txt` is in-workspace; from the link's
+        # directory, `wt-a`, it is the sibling's file, and that is the one the
+        # write reaches.
+        os.makedirs(os.path.join(self.wt, "a", "b"))
+        os.mkdir(os.path.join(self.wt, "sub"))
+        for cmd, cwd in (
+                ("ln -s ../main/root.txt ../../rel && echo hi > ../../rel",
+                 os.path.join(self.wt, "a", "b")),
+                ("ln -s ../main/root.txt ../../rel",
+                 os.path.join(self.wt, "a", "b")),
+                ("ln -s -t sub ../../main/root.txt", self.wt)):
+            with self.subTest(cmd=cmd):
+                out = self._bash(cmd, cwd=cwd)
+                self.assertEqual(self._decision(out), "deny")
+                self.assertIn("Sibling-checkout", self._reason(out))
+
+    def test_bash_relative_symlink_target_inside_from_the_link_allows(self):
+        # `../x` from `wt-a` is outside every checkout, from `wt-a/sub` it is
+        # `wt-a/x`.
+        os.mkdir(os.path.join(self.wt, "sub"))
+        self.assertEqual(self._decision(self._bash("ln -s ../x ./sub/link")),
+                         "allow")
+
+    def test_bash_relative_hard_link_source_stays_cwd_relative(self):
+        os.makedirs(os.path.join(self.wt, "a", "b"))
+        out = self._bash("ln ../../root.txt ../../hl",
+                         cwd=os.path.join(self.wt, "a", "b"))
+        self.assertEqual(self._decision(out), "allow")
+
+    def test_bash_relative_symlink_over_a_directory_link_judges_both(self):
+        # `-n` replaces `dl` itself, so the target reads from `wt-a`; without
+        # it the link lands inside `dl`'s directory. Only the first reaches
+        # the sibling.
+        deep = os.path.join(self.wt, "sub", "deep")
+        os.makedirs(deep)
+        os.symlink(deep, os.path.join(self.wt, "dl"))
+        out = self._bash("ln -sfn ../main/root.txt dl")
+        self.assertEqual(self._decision(out), "deny")
+        self.assertIn("Sibling-checkout", self._reason(out))
+
     def _ps_deny_as_sibling(self, cmd):
         out = self._run({"tool_name": "PowerShell",
                          "tool_input": {"command": cmd}})

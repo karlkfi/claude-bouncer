@@ -235,6 +235,7 @@ different repository's scratch still asks entirely.
 | `ln -s <sibling-checkout>/x ~/.claude/skills/x` (link outside) | **ask** |
 | `ln -s <sibling-checkout>/x ./link` (link in-workspace) | **deny** |
 | `ln -s <sibling-checkout>/x ~/out/` (link at `DIR/basename`) | **deny** |
+| `cd a/b && ln -s ../<sibling-checkout>/x ../../link` (relative target, read from the link's directory) | **deny** |
 | `rm <link-to-sibling>/main.go` (real file inside) | **deny** |
 | `pkill -f ginkgo` · `pkill -f "make check"` | **deny** |
 | `pkill -f "<sibling-worktree>/bin/x"` | **deny** |
@@ -1003,7 +1004,11 @@ through the same boundary rules and produce the same reasons. Symlink staging
    That link is staged, so a later write through it is still judged where it
    lands. The `-t DIR` and multi-source forms, and a `LINK` that is a
    directory, put the link at `DIR/basename(SRC)`, which is never staged, so
-   their sources stay writes. On top of that,
+   their sources stay writes. A relative source of `ln -s` is resolved from
+   the directory the link lands in, as the kernel reads it, not from the cwd;
+   where `LINK` is a link to a directory, from both the directory it points
+   at and the one it sits in, since `-n` decides which. A hard link's source
+   stays relative to the cwd. On top of that,
    symlinks *and* hard links created by an earlier `ln OUTSIDE LINK` in the
    chain (with or without `-s`) are **staged**: `LINK`'s resolved path is
    recorded so a later `cat LINK` is flagged too — bash hasn't materialised the
