@@ -1247,6 +1247,15 @@ git -C "$WORK" checkout -q claude/x
 # 16. Inline-config escape hatch blocks auto-allow but not a protective ask.
 check "git -c pager log -> none (defer, not allow)" none \
   "$(decision_for "$(bash_cmd 'git -c core.pager=cat log')" "$WORK")"
+#     The same config set from the environment, which git reads the way it
+#     reads `-c` (Q305), beside a variable git never reads.
+for e in 'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0=cat' \
+         "GIT_CONFIG_PARAMETERS='core.pager=cat'"; do
+  check "$e git log -> none (defer, not allow)" none \
+    "$(decision_for "$(bash_payload "$e git log")" "$WORK")"
+done
+check "FOO=1 git log -> allow" allow \
+  "$(decision_for "$(bash_cmd 'FOO=1 git log')" "$WORK")"
 git -C "$WORK" checkout -q main
 check "git -c k=v commit on main -> ask (still gated)" ask \
   "$(decision_for "$(bash_cmd 'git -c user.name=x commit -m y')" "$WORK")"
@@ -2165,6 +2174,21 @@ check "override with a -c escape hatch -> ask" ask \
   "$(decision_for "$(bash_payload "$OVR git -c core.pager=x clean -fd")" "$WORK")"
 check "override aimed at another repo -> ask" ask \
   "$(decision_for "$(bash_payload "$OVR git -C /somewhere/else clean -fd")" "$WORK")"
+#     The last two in their environment spelling, as a prefix and as an `env`
+#     or `sudo` operand (Q305). A variable git does not read leaves the lift
+#     alone, and so do the two spellings that set no GIT_DIR: `env` exports
+#     `GIT_DIR+` under that literal name, and bash refuses a subscript prefix.
+for e in 'GIT_DIR=/elsewhere/.git' 'GIT_WORK_TREE=/elsewhere' \
+         'GIT_INDEX_FILE=/elsewhere/index' 'env GIT_DIR=/elsewhere/.git' \
+         'sudo GIT_DIR=/elsewhere/.git' 'GIT_CONFIG_COUNT=1' \
+         "GIT_CONFIG_PARAMETERS='core.pager=x'"; do
+  check "override with $e -> ask" ask \
+    "$(decision_for "$(bash_payload "$e $OVR git clean -fd")" "$WORK")"
+done
+for e in 'FOO=1' "env 'GIT_DIR+=/elsewhere'" 'GIT_DIR[0]=/elsewhere'; do
+  check "override with $e -> allow" allow \
+    "$(decision_for "$(bash_payload "$e $OVR git clean -fd")" "$WORK")"
+done
 
 #     26g. The all-segments rule holds identically for an overridden allow: a
 #     command is lifted only when every other segment is recognized-safe, so
@@ -3159,6 +3183,12 @@ done
 for w in 'env -C "$X"' 'sudo -R .' 'sudo -i' 'sudo -iu root' 'sudo --login'; do
   check "[wrap] $w reset --hard on an irrecoverable tip -> ask" ask \
     "$(decision_for "$(bash_payload "$w git reset --hard HEAD~1")" "$WRAP")"
+done
+#     A repository variable stands the probe down the way `--git-dir` does,
+#     since the hook's own git does not inherit it (Q305).
+for e in 'GIT_DIR=.git' 'env GIT_WORK_TREE=.' 'sudo GIT_DIR=.git'; do
+  check "[env] $e reset --hard on an irrecoverable tip -> ask" ask \
+    "$(decision_for "$(bash_payload "$e git reset --hard HEAD~1")" "$WRAP")"
 done
 #     The break-glass lifts the wrapped deny in an interactive mode too, as it
 #     lifts the bare one, and the deny names it. A leading `cd .` stays in the
