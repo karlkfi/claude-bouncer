@@ -626,8 +626,8 @@ def segment_layout(tokens):
 
     Each block is `('pop',)` or `('push', kind)`, in word order. A `{ …; }`
     pushes 'runs', a conditional or loop 'maybe', a function body
-    ('fn', name), and any of them run apart -- piped or backgrounded --
-    'apart', which is how exit-status-guard scopes them (Q263)."""
+    ('fn', name, the tokens between its braces), and any of them run apart --
+    piped or backgrounded -- 'apart', which is how exit-status-guard scopes them (Q263)."""
     segs, cur, ops = [], [], []
     for t in tokens:
         if _is_operator_token(t):
@@ -713,7 +713,15 @@ def segment_layout(tokens):
             elif w in BLOCK_OPENERS or w == '{':
                 last = ends.pop() if ends else len(segs) - 1
                 if w == '{' and function_defined(tokens, group, words):
-                    kind = ('fn', function_defined(tokens, group, words))
+                    # Its `}` is the closer in `last` that pairs with it.
+                    shut = closes.get(last, [])
+                    closers = [x for x in stripped[last][0]
+                               if x in BLOCK_CLOSERS or x == '}']
+                    start = _index_of(tokens, w) + 1
+                    end = _index_of(tokens, closers[shut.index(i)]) \
+                        if i in shut else len(tokens)
+                    kind = ('fn', function_defined(tokens, group, words),
+                            tokens[start:end])
                 elif apart(i, last):
                     kind = 'apart'
                 else:
@@ -746,10 +754,22 @@ def _assign(values, defining, maybe, functions, *scopes, unknown=()):
 def _forget(names, *scopes):
     """Drop `names` from every scope: assigned where bash may not have run the
     assignment, the value is unknown, so the target prompts rather than
-    resolving to a value the command may never see."""
+    resolving to a value the command may never see. `EVERY_NAME` drops all
+    of them."""
     for scope in scopes:
+        if EVERY_NAME in names:
+            scope.clear()
         for name in names:
             scope.pop(name, None)
+
+
+def _unset(names, defining, maybe, functions, *scopes):
+    """`_assign` for names set to a value the guard cannot read: forgotten
+    wherever the command may run, and at each call inside a function body."""
+    if defining is not None:
+        functions[defining].update(names)
+    elif maybe != 'apart':
+        _forget(names, *scopes)
 
 
 def strip_keywords(group):
@@ -777,6 +797,10 @@ def strip_keywords(group):
         if j and group[j - 1] == 'time' and is_reserved_word(group[j - 1]):
             cut = j - 1
     return group[:cut], group[cut:]
+
+
+def _index_of(tokens, t):
+    return next(i for i, u in enumerate(tokens) if u is t)
 
 
 def function_defined(tokens, group, words):
@@ -862,6 +886,56 @@ def expand_vars(value, env):
 
 # Builtins that carry persisting `NAME=val` operands (`export FOO=bar`).
 ASSIGN_BUILTINS = frozenset({'export', 'declare', 'typeset', 'readonly', 'local'})
+
+# Builtins that set or unset the names they are handed, with no `=val` to read
+# the value from (Q299): the options that take a value, the ones of those whose
+# value is a name set, whether every operand is a name set or only the one at
+# an index, and the names set when none is given.
+REASSIGN_BUILTINS = {
+    'read': ('adinNptu', 'a', all, ('REPLY',)),
+    'mapfile': ('CcdnOu', '', 0, ('MAPFILE',)),
+    'readarray': ('CcdnOu', '', 0, ('MAPFILE',)),
+    'printf': ('v', 'v', None, ()),
+    'getopts': ('', '', 1, ('OPTARG', 'OPTIND')),
+    'unset': ('', '', all, ()),
+}
+# `source`/`.` and a `BASH_ENV` file run a script the guard cannot read, which
+# can set any name.
+SOURCE_BUILTINS = frozenset({'source', '.'})
+EVERY_NAME = '*'
+_NAME_RE = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
+
+
+def reassigned_names(tool, args):
+    """The names `tool` may set or unset, read off its options and operands
+    the way the builtin parses them. Over-reading is the safe direction: a
+    name read wrongly only becomes unknown, so its target prompts."""
+    valued, naming, operands, names = REASSIGN_BUILTINS[tool]
+    picked, rest, i = [], [], 0
+    while i < len(args):
+        a = args[i]
+        i += 1
+        if a == '--' or not a.startswith('-') or a == '-':
+            rest = args[i:] if a == '--' else args[i - 1:]
+            break
+        for k, letter in enumerate(a[1:], 1):
+            if letter in valued:
+                value = a[k + 1:]
+                if not value and i < len(args):
+                    value, i = args[i], i + 1
+                if letter in naming:
+                    picked.append(value)
+                break
+    if operands is all:
+        picked += rest
+    elif operands is not None:
+        picked += rest[operands:operands + 1]
+    names = set(names)
+    for a in picked:
+        m = _NAME_RE.match(a)
+        if m:
+            names.add(m.group(0))
+    return names
 
 
 class MayVanish(str):
@@ -3026,7 +3100,7 @@ def _runs_in_one_shell(raw):
 
 
 def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
-                            out=None):
+                            out=None, tokens=None):
     """Findings for a full command string: tokenize, split into simple
     commands, evaluate each. Recurses (bounded) into `sh -c '...'` and
     `eval ...` bodies so a quoted nested command can't ride past the guard.
@@ -3043,7 +3117,8 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
     session_reason = None
     if depth > 3:
         return findings, override, session_reason
-    tokens = tokenize(raw)
+    if tokens is None:
+        tokens = tokenize(raw)
     if tokens is None:
         return findings, override, session_reason  # unparseable: fail-open
     # Two scopes, both seeded from what this shell inherited (os.environ at the
@@ -3076,7 +3151,7 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
     # nothing the later segments see. Inside `( … )` the scopes are copies, so
     # an assignment there reaches the rest of that subshell and nothing past
     # its `)` (Q323).
-    blocks, functions, outer, inside = [], {}, [], ()
+    blocks, functions, outer, inside, bodies = [], {}, [], (), {}
     for whole, words, group, changes, seg_apart, subshells in \
             segment_layout(tokens):
         keep = 0
@@ -3098,6 +3173,7 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
                 blocks.append(change[1])
                 if isinstance(change[1], tuple):
                     functions.setdefault(change[1][1], set())
+                    bodies[change[1][1]] = change[1][2]
         defining = next((b[1] for b in reversed(blocks)
                          if isinstance(b, tuple)), None)
         maybe = 'maybe' in blocks
@@ -3151,6 +3227,20 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
                     unknown=(exported,))
             continue
         tool = os.path.basename(argv[0])
+        if tool in REASSIGN_BUILTINS or tool in SOURCE_BUILTINS:
+            # `read C`, `unset C`, `source x.sh`: the value is no longer the
+            # one the guard holds (Q299).
+            _unset(reassigned_names(tool, argv[1:])
+                   if tool in REASSIGN_BUILTINS else {EVERY_NAME},
+                   defining, maybe, functions, shell_env, exported)
+            continue
+        if tool in ('for', 'select') and group[0] == tool \
+                and getattr(group[0], 'quoted_from', None) is None:
+            # The loop variable takes each word in turn, in the body and
+            # after it.
+            _unset({str(t) for t in group[1:2]}, defining, maybe, functions,
+                   shell_env, exported)
+            continue
         if tool in ASSIGN_BUILTINS:
             # `export NAME=val …`: operands persist and are exported. argv is
             # already expanded, so the values are resolved.
@@ -3195,8 +3285,11 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
                         == len(body)):
                     body_env = {k: v for k, v in child.items()
                                 if child_env.get(k) == v}
+                # bash runs a `BASH_ENV` file before the body, which can set
+                # any name the body reads (Q299).
                 sub_f, sub_o, sub_s = evaluate_command_string(
-                    body, ctx, depth + 1, body_env)
+                    body, ctx, depth + 1, body_env,
+                    {} if tool == 'bash' and child.get('BASH_ENV') else None)
                 findings += sub_f
                 override = override or sub_o
                 session_reason = session_reason if session_reason is not None else sub_s
@@ -3215,17 +3308,37 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
             # And what the body assigns stays assigned (Q165), where it
             # certainly ran here. A prefix on `eval` itself does not persist,
             # even when the body reassigns that name.
-            if left and _runs_in_one_shell(raw):
-                for scope, start, end in ((shell_env, same_shell, left['shell']),
-                                          (exported, child_env, left['exported'])):
+            # Where it may not have, what it changed is unknown, and so is a
+            # name it unset or read in (Q299).
+            if left:
+                one_shell = _runs_in_one_shell(raw)
+                for scope, start, end in (
+                        (shell_env, same_shell, left['shell']),
+                        (exported, child_env, left['exported'])):
                     changed = {k: v for k, v in end.items()
                                if k not in seg_inline and start.get(k) != v}
-                    _assign(changed, defining, maybe, functions, scope)
+                    gone = {k for k in start
+                            if k not in end and k not in seg_inline}
+                    if one_shell:
+                        _assign(changed, defining, maybe, functions, scope)
+                    else:
+                        gone.update(changed)
+                    _unset(gone, defining, maybe, functions, scope)
             continue
-        if tool in functions and defining is None and maybe != 'apart':
-            # A call runs the body, so what it assigns is no longer known --
-            # unless the call itself runs apart, where it reaches nothing.
-            _forget(functions[tool], shell_env, exported)
+        if tool in functions:
+            # The body runs here, with the values in scope at the call and
+            # the call's own prefix, so it is judged again against them
+            # (Q299).
+            sub_f, sub_o, sub_s = evaluate_command_string(
+                None, ctx, depth + 1, child_env, same_shell,
+                tokens=bodies[tool])
+            findings += sub_f
+            override = override or sub_o
+            session_reason = session_reason if session_reason is not None else sub_s
+            # And what it assigns is no longer known -- unless the call itself
+            # runs apart, where it reaches nothing.
+            if defining is None and maybe != 'apart':
+                _forget(functions[tool], shell_env, exported)
         evaluator = EVALUATORS.get(tool)
         if evaluator is None:
             continue  # uncovered tool: defer
