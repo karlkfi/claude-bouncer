@@ -576,12 +576,18 @@ class CommentInSubstitutionTests(unittest.TestCase):
         self.assertEqual(['echo ")"'], bp.command_substitutions(
             'echo "$(echo ")")" ; cat /etc/passwd'))
 
-    def test_deep_double_quoted_nesting_does_not_exhaust_the_stack(self):
-        cmd = 'cat /etc/passwd'
-        for _ in range(1000):
-            cmd = 'echo "$(%s)"' % cmd
-        self.assertEqual(1, len(bp.command_substitutions(cmd)))
-        bp.strip_comments(cmd)
+    def test_deep_double_quoted_nesting_holds_its_quotes_at_any_depth(self):
+        # Depth 26 is past MAX_SUBST_DEPTH, where a capped recursion read
+        # flat again and closed the outer body before the `cat`.
+        for depth in (1, 25, 26, 27, 1000):
+            body = 'echo ")"'
+            for _ in range(depth):
+                body = 'echo "$(%s)"' % body
+            body += ' ; cat /etc/passwd'
+            with self.subTest(depth=depth):
+                self.assertEqual([body], bp.command_substitutions(
+                    'echo "$(%s)" T' % body))
+                bp.strip_comments('echo "$(%s)"' % body)
 
 
 class CommentOutsideSubstitutionTests(unittest.TestCase):

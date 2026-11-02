@@ -775,7 +775,7 @@ def _scan_case_pattern(text, start):
     return None
 
 
-def _scan_dollar_paren(text, start, depth=0):
+def _scan_dollar_paren(text, start):
     """Scan a ``$(`` body from ``start`` (just past ``$(``) to its matching ``)``.
 
     Returns ``(body, end)`` — the inner substring and the index just past the
@@ -831,12 +831,12 @@ def _scan_dollar_paren(text, start, depth=0):
     ``#`` in one as text, or ends its comment at the closing backtick, and a
     ``)`` in one closes nothing: ``"$(echo ${y:- #}; cmd)"`` and
     ``"$(echo `echo )`; cmd)"`` both run ``cmd``. A nested ``$(…)`` in double
-    quotes is stepped over the same way (Q325), so the ``"`` in
-    ``"$(echo "$(echo ")")" ; cmd)"`` closes nothing -- to ``MAX_SUBST_DEPTH``
-    levels, past which the reading is flat again so deep nesting cannot
-    exhaust the stack. A ``$((…))`` there is not stepped over: a paren in
-    double quotes closes nothing anyway, and counting its parens flat would
-    miscount a quoted one in a ``$(…)`` inside it.
+    quotes is scanned as a body of its own (Q325), so the ``"`` in
+    ``"$(echo "$(echo ")")" ; cmd)"`` closes nothing. Its state is pushed on
+    ``frames`` rather than recursed into, because any depth cap leaves a
+    reading past it that misplaces the close. A ``$((…))`` there is not
+    stepped over: a paren in double quotes closes nothing anyway, and counting
+    its parens flat would miscount a quoted one in a ``$(…)`` inside it.
     """
     i, n = start, len(text)
     in_single = in_double = False
@@ -846,6 +846,7 @@ def _scan_dollar_paren(text, start, depth=0):
     parens = []           # one per open `(`: True for a `$(`, `<(` or `>(`
     brk = True            # a `#` here would start a word, so a comment
     dollar = -2           # index of the last unquoted, unescaped `$`
+    frames = []           # the state around each open double-quoted `$(`
     while i < n:
         c = text[i]
         if in_single:
@@ -859,9 +860,14 @@ def _scan_dollar_paren(text, start, depth=0):
                 continue
             if c == '"':
                 in_double = False
-            end = (_dq_expansion_end(text, i, depth + 1)
-                   if depth < MAX_SUBST_DEPTH else -1)
-            i = max(end, i + 1)
+            elif text.startswith('$(', i) and not text.startswith('$((', i):
+                frames.append((cmd_pos, clauses, pending, parens, brk, dollar))
+                in_double = False
+                cmd_pos = brk = True
+                clauses, pending, parens, dollar = [], [], [], -2
+                i += 2
+                continue
+            i = max(_dq_expansion_end(text, i), i + 1)
             continue
         if c in ' \t\n':
             i += 1
@@ -959,6 +965,11 @@ def _scan_dollar_paren(text, start, depth=0):
             i += 1
             continue
         if c == ')':
+            if not parens and frames:
+                cmd_pos, clauses, pending, parens, brk, dollar = frames.pop()
+                in_double = True
+                i += 1
+                continue
             if not parens:
                 return (text[start:i], i + 1)
             brk = not parens.pop()                # `$(a)#b` is one word too
@@ -1040,7 +1051,7 @@ def _brace_end(text, i):
         i = end
     return -1
 
-def _dq_expansion_end(text, i, depth=0):
+def _dq_expansion_end(text, i):
     """The index just past the ``$(…)``, backtick span or ``${…}`` opening at
     ``text[i]`` inside double quotes, or -1 when none opens or closes there.
 
@@ -1050,7 +1061,7 @@ def _dq_expansion_end(text, i, depth=0):
     if text.startswith('$((', i):
         return -1
     if text.startswith('$(', i):
-        end = _scan_dollar_paren(text, i + 2, depth)[1]
+        end = _scan_dollar_paren(text, i + 2)[1]
         return end if end > i + 2 else -1
     if text.startswith('${', i):
         return _brace_end(text, i)
