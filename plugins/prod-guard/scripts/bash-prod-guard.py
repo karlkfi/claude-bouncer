@@ -3272,6 +3272,14 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
             segment_layout(tokens):
         for f in [f for f in frames if f['sub'] != subshells[:len(f['sub'])]]:
             frames.remove(f)    # its subshell has ended, and its scopes with it
+        # Settle before a subshell copies the scopes, so it sees both
+        # readings.
+        level = len(subshells) - up
+        here = [f for f in frames
+                if f['sub'] == subshells[:level] and f['blocks'] == len(blocks)]
+        if lead in _LIST_OPS - _PIPE_OPS and here \
+                and not (lead == '&&' and here[-1]['kind'] == '&&'):
+            settle(here[-1])
         keep = 0
         while keep < min(len(inside), len(subshells)) \
                 and inside[keep] == subshells[keep]:
@@ -3283,18 +3291,12 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
             shell_env, exported = dict(shell_env), dict(exported)
             functions = {k: set(v) for k, v in functions.items()}
         inside = subshells
-        level = len(subshells) - up
-        here = [f for f in frames
-                if f['sub'] == subshells[:level] and f['blocks'] == len(blocks)]
-        if lead in _LIST_OPS - _PIPE_OPS:
-            if here and not (lead == '&&' and here[-1]['kind'] == '&&'):
-                settle(here[-1])
-            if lead in ('&&', '||') and not (here and here[-1] in frames):
-                scopes = (shell_env, exported) if level == len(outer) \
-                    else outer[level][:2]
-                frames.append({'sub': subshells[:level], 'blocks': len(blocks),
-                               'kind': lead, 'scopes': scopes,
-                               'snap': tuple(dict(x) for x in scopes)})
+        if lead in ('&&', '||') and not (here and here[-1] in frames):
+            scopes = (shell_env, exported) if level == len(outer) \
+                else outer[level][:2]
+            frames.append({'sub': subshells[:level], 'blocks': len(blocks),
+                           'kind': lead, 'scopes': scopes,
+                           'snap': tuple(dict(x) for x in scopes)})
         low = len(blocks)
         for change in changes:
             if change[0] == 'pop':

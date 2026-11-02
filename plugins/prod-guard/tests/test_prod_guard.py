@@ -3747,7 +3747,12 @@ class SpecialCaseTests(unittest.TestCase):
                     p + "eval 'false && C=kind-ci'; " + k,
                     p + "false && export C=kind-ci; "
                     "bash -c 'kubectl --context \"$C\" delete pod x'",
-                    p + "if true; then false && C=kind-ci; fi; " + k):
+                    p + "if true; then false && C=kind-ci; fi; " + k,
+                    # A subshell after the list sees both too (#307 review).
+                    p + "true || C=kind-ci && (" + k + ")",
+                    p + "true || C=kind-ci; (" + k + ")",
+                    p + "false && C=kind-ci; echo $(" + k + ")",
+                    p + "false && C=kind-ci; x=`" + k + "`"):
             with self.subTest(cmd=cmd):
                 self.assertEqual(run_hook(cmd, home=home)[0], "deny")
         # Where a later `&&` can run only after the assignment, the value
@@ -3755,6 +3760,7 @@ class SpecialCaseTests(unittest.TestCase):
         for cmd in (p + "false && C=kind-ci && " + k,
                     p + "false && { C=kind-ci; " + k + "; }",
                     p + "false && (C=kind-ci; " + k + ")",
+                    p + "false && C=kind-ci && (" + k + ")",
                     p + "cd x && export C=kind-ci && " + k,
                     n + "true && C=kind-ci; " + k,
                     n + "C=kind-ci && true; " + k):
