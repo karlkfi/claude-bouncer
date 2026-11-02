@@ -66,7 +66,7 @@ maintainer cuts. `make check`, the per-plugin CI jobs, and the
 
 ## Re-taking the readings
 
-    python3 ~/.claude/skills/session-orchestrator/scripts/merge-posture.py \
+    python3 ~/.claude/skills/session-review-mode/scripts/merge-posture.py \
       karlkfi/claude-bouncer
 
 It reports branch protection, CODEOWNERS, distinct authors, merge velocity, and
