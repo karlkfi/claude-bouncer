@@ -1654,40 +1654,29 @@ class HookEndToEndTests(unittest.TestCase):
         self._decision("sed 's/a/b/' in.txt", "allow")
 
     # --- Q232: the token after `sed -i ''` -----------------------------------
-
-    def _sed_script_deny(self, cmd, token, *, only=True):
-        out = self._decision(cmd, "deny")
-        reason = out["hookSpecificOutput"]["permissionDecisionReason"]
-        self.assertIn(f"sed script read as a path: {token}.", reason)
-        self.assertIn("sed -i '' -e SCRIPT FILE", reason)
-        if only:
-            self.assertNotIn("Outside-workspace", reason)
-        return reason
-
-    def test_sed_bsd_address_script_denies_with_the_e_rewrite(self):
-        # The row's measurement: macOS reads `/^#/d` as the script, the hook
-        # as an absolute path, and the prompt asked about a "path".
-        self._sed_script_deny("sed -i '' '/^#/d' in.txt", "/^#/d")
-        self._sed_script_deny("sed -ni '' '/^#/p' in.txt", "/^#/p")
-
-    def test_sed_bsd_e_form_allows(self):
-        self._decision("sed -i '' -e '/^#/d' in.txt", "allow")
-
-    def test_sed_relative_token_after_empty_suffix_is_unchanged(self):
-        # Resolves inside the root, so nothing blocks and the verdict is
-        # today's allow.
-        self._decision("sed -i '' 's/a/b/' in.txt", "allow")
+    # BSD sed reads it as the script and GNU sed as a file, so it keeps the
+    # outside ask. These pin that ask against a relaxation that reads the token
+    # as a script without a real sed parser: each shape below got past one.
 
     def _sed_keeps_its_ask(self, cmd, token):
         out = self._decision(cmd, "ask")
         reason = out["hookSpecificOutput"]["permissionDecisionReason"]
         self.assertIn(f"Outside-workspace path(s): {token}", reason)
-        self.assertNotIn("sed script read as a path", reason)
+
+    def test_sed_address_script_after_empty_suffix_keeps_its_ask(self):
+        self._sed_keeps_its_ask("sed -i '' '/^#/d' in.txt", "/^#/d")
+        self._sed_keeps_its_ask("sed -ni '' '/^#/p' in.txt", "/^#/p")
+
+    def test_sed_bsd_e_form_allows(self):
+        self._decision("sed -i '' -e '/^#/d' in.txt", "allow")
+
+    def test_sed_relative_token_after_empty_suffix_is_unchanged(self):
+        # Resolves inside the root, so nothing blocks and the verdict is allow.
+        self._decision("sed -i '' 's/a/b/' in.txt", "allow")
 
     def test_sed_script_that_names_a_file_keeps_its_ask(self):
-        # The hook reads no filename inside an `-e` script, so handing back
-        # the rewrite for a `w`/`r` command would allow the write it steers
-        # to (review of #296). These keep the ask they had.
+        # The hook reads no filename inside an `-e` script (Q328), so a rule
+        # steering these to the `-e` form would allow the write.
         for script in ("/x/w /q232-fake/leak", "/x/r /q232-fake/secret",
                        "/x/W /q232-fake/leak", "/x/R /q232-fake/secret"):
             with self.subTest(script=script):
@@ -1695,39 +1684,19 @@ class HookEndToEndTests(unittest.TestCase):
 
     def test_sed_s_command_writing_a_file_keeps_its_ask(self):
         # Stripping `/…/` pairs left to right mis-pairs an `s` command's
-        # delimiters: `/x/s/a/b/w ../l` became `sbl`, losing the `w` flag
-        # (second review of #296). The filenames hold no w/r/e of their own.
+        # delimiters: `/x/s/a/b/w ../l` became `sbl`, losing the `w` flag.
         for script in ("/x/s/a/b/w ../l", "/x/{s/a/b/w ../m\n}", "/x/s/a/b/;w ../l",
                        "/x/{s/a/b/;w ../l\n}", "/x/s/a/b/gw ../l"):
             with self.subTest(script=script):
                 self._sed_keeps_its_ask(f"sed -i '' '{script}' in.txt", script)
 
     def test_sed_gnu_reading_of_a_path_keeps_its_ask(self):
-        # `target` holds `r` and `e`, which as a script could be a read or a
-        # command, so the token keeps today's outside ask.
         self._sed_keeps_its_ask("sed -i '' /q232-fake/target", "/q232-fake/target")
-
-    def test_sed_host_temp_token_keeps_its_own_reason(self):
-        # Only an outside ask is reclassified; host temp keeps its category.
-        # The token holds no w/r/e, so only the category check keeps it.
-        out = run_hook("sed -i '' /tmp/q232", self.workspace)
-        reason = out["hookSpecificOutput"]["permissionDecisionReason"]
-        self.assertIn("Host-wide temp", reason)
-        self.assertNotIn("sed script read as a path", reason)
-
-    def test_sed_only_the_slot_after_the_suffix_changes(self):
-        # A genuinely outside file later in the argv keeps its own bucket.
-        reason = self._sed_script_deny(
-            "sed -i '' '/^#/d' in.txt /q232-fake/target", "/^#/d", only=False)
-        # Not followed by `.`: on Windows the token is shown with its
-        # resolved path (`/q232-fake/target -> C:\\...`).
-        self.assertIn("Outside-workspace path(s): /q232-fake/target", reason)
 
     def test_sed_unexpandable_token_after_suffix_keeps_its_reason(self):
         out = self._decision('sed -i \'\' "$f" in.txt', "deny")
         reason = out["hookSpecificOutput"]["permissionDecisionReason"]
         self.assertIn("Runtime-expanded", reason)
-        self.assertNotIn("sed script read as a path", reason)
 
     def test_jq_program_only_workspace_allow(self):
         self._decision("jq '.a/.b' in.txt", "allow")

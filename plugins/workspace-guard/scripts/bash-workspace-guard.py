@@ -3009,46 +3009,6 @@ def sed_detached_empty_suffix(tokens):
     return False
 
 
-def sed_script_slot(tokens):
-    """Index into `files_in_command(tokens)` of the token after a detached `''`
-    that BSD sed reads as the script and GNU sed as the first file, or None.
-
-    None too where `files_in_command` has already dropped that token as an
-    `s`/`y` script holding an expansion. The caller judges the token as a path
-    as before and, where it would ask as an outside path and is inert as a
-    script (`sed_script_is_inert`), denies with the `-e` rewrite instead
-    (Q232): `/^#/d` is an absolute path to the hook and a script to macOS sed.
-    """
-    name = os.path.basename(tokens[0])
-    if ALIASES.get(name, name) != 'sed' or not sed_detached_empty_suffix(tokens):
-        return None
-    spec = SPEC['sed']
-    files, flags_seen, positionals = _split_args(tokens, spec)
-    if any(f in flags_seen for f in spec.get('prog_suppressed_by', [])):
-        return None
-    prog = spec.get('prog', 0)
-    if len(positionals) <= prog:
-        return None
-    first = positionals[prog]
-    if EXPANSION_RE.search(first) and SED_SUBST_RE.match(first):
-        return None
-    return len(files)
-
-
-def sed_script_is_inert(script):
-    """True when `script`, read as a sed script, names no file and runs nothing.
-
-    It holds none of `w`/`W`/`r`/`R` (write or read a file, including `s///w`)
-    or GNU's `e` (run a command) anywhere, regexes included: stripping `/…/`
-    pairs mis-pairs an `s` command's delimiters, so `/x/s/a/b/w F` loses its
-    `w`. A letter in any other role, such as `/here/d`, keeps the token's own
-    verdict. The `-e` rewrite Q232 hands back is only safe for an inert
-    script: the hook does not read a filename inside an `-e` script, so
-    steering a `w` command there would allow the write.
-    """
-    return not re.search(r'[wWrRe]', script)
-
-
 def files_in_command(tokens):
     """Return list of file-arg tokens for a simple command, or None if unguarded."""
     name = ALIASES.get(os.path.basename(tokens[0]), os.path.basename(tokens[0]))
@@ -3294,14 +3254,11 @@ def build_reason(offenders, scratch_hint='', override=None, prefixable=False):
                       hook can't see where it lands, so it may in fact be
                       in-root and fixable by writing a literal path.
       * 'untracked' — a relative path after a `cd` the hook couldn't follow.
-      * 'sedscript' — the token after `sed -i ''`, which BSD sed reads as the
-                      script and GNU sed as a file (Q232).
 
     Categories are emitted in a stable order; tokens within each are sorted and
     de-duplicated.
     """
-    buckets = {'hosttemp': [], 'outside': [], 'expand': [], 'untracked': [],
-               'sedscript': []}
+    buckets = {'hosttemp': [], 'outside': [], 'expand': [], 'untracked': []}
     siblings, kills, crosses = [], [], []
     for item in offenders:
         tok, cat = item[0], item[1]
@@ -3353,16 +3310,6 @@ def build_reason(offenders, scratch_hint='', override=None, prefixable=False):
             "or use the Read/Grep tools. A record-separator byte (0x1E) "
             "anywhere in the command drops it for every substitution after a "
             "cd, so remove one if the command carries it.")
-    if buckets['sedscript']:
-        hints.append(
-            "sed script read as a path: "
-            + ", ".join(sorted(set(buckets['sedscript'])))
-            + ". Fix: after `sed -i ''`, macOS (BSD) sed takes the next "
-            "argument as the script, while GNU sed takes it as a file, so the "
-            "hook cannot tell which. Pass the script with -e: "
-            "`sed -i '' -e SCRIPT FILE` is the same edit on macOS sed. GNU sed "
-            "makes the edit too but then exits 2 on the empty '' operand; "
-            "there, write `sed -i -e SCRIPT FILE`.")
     return " ".join(hints)
 
 
@@ -3660,12 +3607,7 @@ ATTRIBUTION = 'workspace-guard: '
 # own loop, and a literal that then lands outside the root comes back as an
 # 'outside' ask on a path a person can actually judge. That moves the boundary
 # question to where it can be answered rather than removing it.
-#
-# 'sedscript' joins them for the same reason (Q232): the token after `sed -i ''`
-# is a script to BSD sed and a file to GNU sed, the hook cannot see which sed
-# runs, and the person at the prompt is being asked about a "path" that is
-# usually a script. The `-e` rewrite settles the reading either way.
-UNPARSED_CATS = frozenset({'expand', 'untracked', 'sedscript'})
+UNPARSED_CATS = frozenset({'expand', 'untracked'})
 
 
 # Modes where a defer RUNS the command (`docs/permission-modes.md`). A
@@ -5172,14 +5114,10 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
         entry_mask = entry_operand_mask(g)
         if len(entry_mask) != len(fs):
             entry_mask = [False] * len(fs)
-        script_at = sed_script_slot(g)
         for i, f in enumerate(fs):
             f_is_read = is_read and (out_from is None or i < out_from)
             o = check_file(f, cmd_cwd, cmd_cwd_unknown, is_read=f_is_read,
                            entry=entry_mask[i])
-            if o is not None and i == script_at and o[1] == 'outside' \
-                    and sed_script_is_inert(f):
-                o = (f, 'sedscript', None)
             if o is not None:
                 outside.append(o)
     track_stable()                                # state after the last group

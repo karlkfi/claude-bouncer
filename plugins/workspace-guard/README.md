@@ -196,9 +196,9 @@ different repository's scratch still asks entirely.
 | `ln /etc/passwd link && cat link`    | **ask**  |
 | `cp x /tmp/claude-501/<this-project>/<sibling>/…` (sibling write) | **ask** |
 | `cat /tmp/claude-501/<other-project>/…` (cross-project read) | **ask** |
+| `sed -i '' '/^#/d' notes.md` (script or path?) | **ask** |
 | `cat /tmp/out` · `cat /var/tmp/x`    | **deny** |
 | `sed -f /tmp/evil.sed notes.md`      | **deny** |
-| `sed -i '' '/^#/d' notes.md` (script or path?) | **deny** |
 | `grep foo data.txt > /tmp/out.txt`   | **deny** |
 | `sort -o /tmp/out.txt data.txt`      | **deny** |
 | `base64 -o /tmp/out.b64 data.bin` (BSD) | **deny** |
@@ -1784,20 +1784,15 @@ final output.
   `''` as a file, so a GNU file is still caught, with one exception: an `s` or
   `y` command holding a `$` expansion (`sed -i '' "s/x/$v/" f`) is taken as the
   script and allowed instead of denied as unexpandable. Any other script there
-  is still read as a path. Where it would ask as an outside path and, read as a
-  script, names no file and runs nothing — none of `w`, `W`, `r`, `R` or `e`
-  anywhere in it — the command denies with the `-e` rewrite instead:
-  `'/^#/d'` is an absolute path to the hook and a delete to macOS sed. A script
-  that does name a file (`'/x/w /out/leak'`, `'/x/s/a/b/w ../l'`) keeps the
-  ask, because the hook reads no filename inside an `-e` script and the
-  rewrite would allow the write; so does any script or path holding those
-  letters, regexes included (`'/here/d'`, `sed -i '' /outside/target`). An unexpandable token (`"${n}d"`) keeps its
-  own deny, host temp and a sibling checkout keep theirs, and a token resolving
-  inside the root stays allowed. The deny is not one `WORKSPACE_GUARD_OVERRIDE`
-  downgrades, as for the other unparsed tokens. Use
-  `sed -i '' -e SCRIPT FILE`: macOS sed makes the edit, and GNU sed makes it
-  too and then exits 2 on the empty `''` operand (GNU sed 4.9, measured in a
-  `debian:stable-slim` container on 2026-10-04).
+  is still read as a path: one starting with an address (`'/^#/d'`) asks as an
+  absolute path, and one with an expansion in another shape (`"${n}d"`) is
+  denied. Reading the address as a script instead would need a real sed
+  parser: a script can write or read a file (`'/x/w F'`, `'/x/s/a/b/gw F'`), and
+  the hook reads no filename inside an `-e` script, so a rule that steered
+  those to the `-e` form would allow the write. Use `sed -i '' -e SCRIPT FILE`:
+  macOS sed makes the edit, and GNU sed makes it too and then exits 2 on the
+  empty `''` operand (GNU sed 4.9, measured in a `debian:stable-slim`
+  container on 2026-10-04).
 - Heredoc body lines are dropped from the raw command string before parsing, so
   path-like body content (`</div>`, `/title`), prose, or an unbalanced quote in
   the body is never mistaken for a file argument and never aborts the parse (a

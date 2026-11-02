@@ -94,14 +94,6 @@ class CategorizeTests(unittest.TestCase):
                  {'kill': []})):
             self.assertEqual(fr.categorize(reason), expected)
 
-    def test_sed_script_reason_buckets_by_name(self):
-        # Q232's deny. Its token is a sed script, so it must not land in
-        # 'outside' and be ranked as a path someone reached for.
-        reason = ("workspace-guard: sed script read as a path: /^#/d. Fix: "
-                  "after `sed -i ''`, macOS (BSD) sed takes the next argument "
-                  "as the script.")
-        self.assertEqual(fr.categorize(reason), {'sedscript': ['/^#/d']})
-
     def test_unrecognized_reason_buckets_as_other(self):
         self.assertEqual(fr.categorize("Guarded commands target workspace/pipe only"),
                          {'other': []})
