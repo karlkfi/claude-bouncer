@@ -685,6 +685,19 @@ class CommentOutsideSubstitutionTests(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertIn(self.P, bp.command_substitutions(cmd))
 
+    def test_a_comment_inside_double_brackets_hides_no_later_substitution(self):
+        # Inside `[[ … ]]` a `#` after a blank or a grouping `(` starts a
+        # comment, so the `'` in one opens no quote (Q320). A `#` glued into a
+        # `=~` operand stays text, and a `$(…)` there still runs.
+        for cmd in ("[[ -n x #it's\n]] && echo \"$(P)\"",
+                    "[[ (#it's\n-n x) ]] && echo $(P)",
+                    "[[ x =~ ( #it's\n) ]] || $(P)",
+                    "[[ x =~ \"a\" ]] #it's\n$(P)",
+                    '[[ x =~ (a|#$(P)) ]]', '[[ x =~ a(#$(P)) ]]'):
+            cmd = cmd.replace('P', self.P)
+            with self.subTest(cmd=cmd):
+                self.assertIn(self.P, bp.command_substitutions(cmd))
+
 
 class OwnLevelHeredocStripTests(unittest.TestCase):
     """`own_level_only` drops the top level's bodies and copies the rest (Q119).
