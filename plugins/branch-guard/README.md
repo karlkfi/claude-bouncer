@@ -141,6 +141,7 @@ the default `strict` [push policy](#push-guard).
 | `gh api -X DELETE …/labels/bug` *(deletes a label)* | **ask** |
 | `gh api -X DELETE repos/o/r` *(deletes a repository — exact `repos/{o}/{r}` path)* | **ask** |
 | `git restore file.txt` *(discards working changes)* | **ask** |
+| `git checkout -f -b x` / `git switch -f -c x <start>` *(creates a branch and discards working changes)* | **ask** |
 | `git worktree remove --force ../wt` *(deletes a worktree holding modified or untracked files, anywhere but this session's scratchpad)* | **ask** |
 | `git config --global user.name x` | **ask** |
 | `BRANCH_GUARD_OVERRIDE=<reason> git restore file.txt` *(break-glass on a local-loss ask — see below)* | allow |
@@ -181,9 +182,11 @@ file and keep allowing (`git fetch 2>/dev/null` stays auto-approved).
 `git checkout file.txt` **defers** because `checkout` is ambiguous — it could
 switch branches or discard a file's changes — and the hook defers on ambiguity
 rather than guess. Only the unambiguous branch-create form (`git checkout -b`)
-auto-approves. Its force form, `git checkout -B`, resets a branch that already
-exists, so it is judged with `git switch -C` and `git worktree add -B` as the
-`git branch -f` it amounts to — see the next section.
+auto-approves, and not with `-f`, which discards working changes on the way
+as `git switch -f` onto another commit does. Its force-create form,
+`git checkout -B`, resets a branch that already exists, so it is judged with
+`git switch -C` and `git worktree add -B` as the `git branch -f` it amounts
+to — see the next section.
 
 ### `git branch`: what the session owns, not how the verb looks
 
