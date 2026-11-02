@@ -874,7 +874,7 @@ def piped_gate(segs, reg, initial=False):
     return ''
 
 
-def carries_status(chain, reg):
+def carries_status(chain, reg, pipefail=False):
     """Whether a failing gate could still surface as this statement's status.
 
     ``chain`` alternates segments and the operators between them. Anything
@@ -884,14 +884,15 @@ def carries_status(chain, reg):
     Evaluated left to right, which is the association bash uses: in
     `a && b || c` the `||` sees `(a && b)` as its left side. `&&` lets either
     side be the last to run, so either can carry a failure out; `||` and `|`
-    yield only their right side's status.
+    yield only their right side's status, and `|` under ``pipefail`` either.
     """
     if not chain:
         return True
     acc = _seg_carries(chain[0], reg)
     for i in range(1, len(chain) - 1, 2):
         rhs = _seg_carries(chain[i + 1], reg)
-        acc = (acc or rhs) if chain[i] == '&&' else rhs
+        either = chain[i] == '&&' or (pipefail and chain[i] in PIPE_OPS)
+        acc = (acc or rhs) if either else rhs
     return acc
 
 
@@ -1237,6 +1238,47 @@ def procsub_gate(bodies, segs, reg):
     return ''
 
 
+# What stands in for the `$(…)` or backtick substitution numbered after it, so
+# the command around one segments with the substitution as a single word.
+SUBST_WORD = '$SUBSTITUTION'
+SUBST_RE = re.compile(re.escape(SUBST_WORD) + r'(\d+)_')
+
+
+def operand_gate(cleaned, spans, bodies, states, reg):
+    """The head of a gate whose `$(…)` is an operand of a command, or ''.
+
+    A substitution's status is the command's only where the command is
+    assignments alone, and then only the last one's: `x=$(make check)`
+    returns make's, while `echo "$(make check)"`, `local x=$(make check)`
+    and `$(make check) cmd` return the status of what runs around it (Q291).
+    ``states`` is whether pipefail is on at each span. A body that reads `$?`
+    hands the status on in its output, as it does for `procsub_gate`.
+    """
+    for k in range(len(spans) - 1, -1, -1):
+        start, end = spans[k]
+        cleaned = '%s%s%d_%s' % (cleaned[:start], SUBST_WORD, k, cleaned[end:])
+    tokens = tokenize(cleaned)[0]
+    segs = split_segments(tokens) if tokens is not None else None
+    for seg in segs or ():
+        words = strip_sh_keywords(seg.tokens)
+        held = [int(k) for w in words for k in SUBST_RE.findall(w)]
+        if held and all(is_assignment(w) for w in words):
+            held.pop()
+        for k in held:
+            if '$?' in bodies[k]:
+                continue
+            inner_tokens = tokenize(bodies[k])[0]
+            inner = split_segments(inner_tokens) if inner_tokens is not None else None
+            if not inner:
+                continue
+            chain = last_statement(inner)[0]
+            gate = first_gate(chain[::2], reg)
+            if gate and carries_status(chain, reg,
+                                       pipefail_walk(inner, states[k])[1]):
+                return gate
+    return ''
+
+
 # --- Reasons ----------------------------------------------------------------
 
 # Each suggested rewrite names a log file, and a suggestion that does not run is
@@ -1368,6 +1410,15 @@ PROCSUB_REASON = (
     'read <LOG> in a separate call: <MKDIR>cmd > <LOG> 2>&1; echo "EXIT=$?".'
     + OVERRIDE_HINT)
 
+SUBST_REASON = (
+    " runs in a command substitution that is an argument of another command, "
+    "so this call's exit status is that command's, not the gate's -- "
+    "`echo \"$(make check)\"` exits 0 on a failed check. Assign the "
+    "substitution on its own, where its status survives, and use the value "
+    "after it: out=$(cmd); rc=$?; echo \"$out\"; echo \"EXIT=$rc\". For a "
+    "substitution that builds a command prefix: p=$(cmd) && $p ..."
+    + OVERRIDE_HINT)
+
 SEQUENCED_REASON_HEAD = "` is sequenced before `"
 _SEQUENCED_RUNS = (
     " runs the second whatever the first returned -- the status is read "
@@ -1485,6 +1536,10 @@ def decide(cmd, background, reg, scratch='', depth=0, pipefail=False):
             found = command_substitutions(body, quotes=False)
             bodies.extend(found)
             states.extend([False] * len(found))
+        gate = operand_gate(cleaned, spans, bodies, states, reg)
+        if gate:
+            return with_log_path(
+                '`' + truncate(gate) + '`' + SUBST_REASON, scratch)
         for body, state in zip(bodies, states):
             reason = decide(body, False, reg, scratch, depth + 1, state)
             if reason:

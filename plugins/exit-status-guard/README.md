@@ -45,7 +45,7 @@ rewrite rather than in a permission prompt you have to answer.
 
 ## What it does
 
-Four ways a status disappears, all of which turn a failure into a false green.
+Five ways a status disappears, all of which turn a failure into a false green.
 
 ### 1. Piped into a filter
 
@@ -178,6 +178,20 @@ The command around a `<(…)` or `>(…)` reads a stream, and the shell reports 
 body's status nowhere: under bash 5, `tail <(false); echo $?` prints 0. Run the
 gate on its own, redirected, and read the log. A body that prints `$?` into the
 stream, or a `wait $!` that collects the status (bash 5.1+), is not denied.
+
+### 5. A command substitution as an argument
+
+```bash
+echo "$(make check)"                    # denied — echo's status, not make's
+local out=$(go test ./...)              # denied — local returns 0
+$(scripts/prefix.sh) go test ./...      # denied — go test's status
+out=$(make check)                       # fine — the status survives
+```
+
+A `$(…)` returns its status only when the command around it is assignments
+alone, and then only the last one's: under bash 5, `x=$(false)` exits 1 while
+`echo "$(false)"` and `export x=$(false)` exit 0. Assign the substitution on its
+own and use the value after it.
 
 ## What it does not deny
 
