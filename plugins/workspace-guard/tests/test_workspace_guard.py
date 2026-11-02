@@ -8589,6 +8589,16 @@ class PowerShellSuppressionEscalationTests(unittest.TestCase):
         self.assertIn("Get-Process", reason)
         self.assertNotIn("pgrep", reason)
 
+    def test_the_kill_reason_names_the_operators_override(self):
+        # The Bash re-issue the reason used to name defers, and runs in `auto`
+        # without the prompt the override promised (Q315).
+        reason = self._decision(self.KILL, "deny", permission_mode="auto")
+        self.assertIn("the override is the operator's", reason)
+        self.assertNotIn("re-issue this through the Bash tool", reason)
+        self.assertIsNone(run_hook(
+            'WORKSPACE_GUARD_OVERRIDE=r pwsh -c "%s"' % self.KILL.replace("\\", "/"),
+            self.workspace, project_dir=self.workspace, permission_mode="auto"))
+
     def test_a_literal_pid_stop_process_is_told_to_split(self):
         reason = self._decision(self.KILL, "deny", permission_mode="auto")
         self.assertIn("`Stop-Process -Id <pid>` as its own call", reason)
@@ -12010,9 +12020,22 @@ class PowerShellUnanchoredKillEndToEndTests(PowerShellKillFixture,
         # can take rather than a prefix that has nowhere to sit (Q156).
         r = self._decision(
             "$env:WORKSPACE_GUARD_OVERRIDE='r'; Stop-Process -Name node", "deny")
-        self.assertIn("re-issue this through the Bash tool prefixed with "
-                      "WORKSPACE_GUARD_OVERRIDE", r)
+        self.assertIn("the override is the operator's", r)
         self.assertNotIn("prefix the command with", r)
+
+    def test_reason_never_routes_through_the_bash_tool(self):
+        # A Bash re-issue of the cmdlet, bare or in a `pwsh -c` body, defers:
+        # the Bash handler judges neither, and in `auto` a defer runs (Q315).
+        # So the reason names the operator's route and warns off that one.
+        r = self._decision("Stop-Process -Name node", "deny")
+        self.assertNotIn("re-issue this through the Bash tool", r)
+        self.assertIn("Do not re-issue it through the Bash tool", r)
+        for cmd in ("WORKSPACE_GUARD_OVERRIDE=r Stop-Process -Name node",
+                    'WORKSPACE_GUARD_OVERRIDE=r pwsh -c "Stop-Process -Name node"'):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(run_hook(cmd, self.workspace,
+                                           project_dir=self.workspace,
+                                           permission_mode="auto"))
 
     def test_override_downgrades_to_ask(self):
         out = self._out("Stop-Process -Name node",

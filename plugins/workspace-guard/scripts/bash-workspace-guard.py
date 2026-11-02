@@ -3066,7 +3066,19 @@ def override_hint(what, prefixable):
     which an `Edit`, a `Write` or a `NotebookEdit` does not have. Naming it
     there sent the caller at a route their own tool could not take, so those
     are pointed at the one that works instead (Q156).
+
+    None is the PowerShell tool: a command string the hook reads no prefix
+    from. A Bash re-issue does not help there — the Bash handler judges no
+    cmdlet and reads no `pwsh -c` body, so it defers, and in `auto` a defer
+    runs — so the only route is the operator's environment (Q315).
     """
+    if prefixable is None:
+        return (" For %s, the override is the operator's: "
+                "WORKSPACE_GUARD_OVERRIDE=<reason> in the shell Claude Code is "
+                "launched from, or a settings.json `env` block, downgrades it to "
+                "a prompt for sessions started after. Do not re-issue it through "
+                "the Bash tool: that tool does not judge a cmdlet, so it would "
+                "skip this check rather than prompt." % what)
     if prefixable:
         return (" For %s, prefix the command with "
                 "WORKSPACE_GUARD_OVERRIDE=<reason> to downgrade this to a "
@@ -3475,7 +3487,8 @@ def build_context(data, cmd=None):
         absent for the native file tools, which have none.
       * ``prefixable`` — whether this invocation HAS a command string, so a
         deny can name the inline prefix rather than a route the caller cannot
-        take from an ``Edit`` or a ``Write``.
+        take from an ``Edit`` or a ``Write``. The PowerShell handler sets None
+        (see :func:`override_hint`).
       * ``kill_anchor`` — compiled regex a ``pkill``/``killall`` pattern must
         match to count as scoped to this workspace (issue 125).
     """
@@ -6677,10 +6690,10 @@ def handle_powershell(data):
         return
     # `cmd` is deliberately NOT passed: PowerShell has no `NAME=value cmd`
     # prefix form, so reading one off this string would grant an override on a
-    # token that is a positional there. `prefixable` stays False with it, which
-    # is what points these denies at the Bash form instead of a prefix that has
-    # nowhere to sit.
-    ctx = build_context(data)
+    # token that is a positional there. `prefixable` is None rather than the
+    # file tools' False: a Bash re-issue of a cmdlet defers, so these denies
+    # name the operator's route instead (Q315).
+    ctx = build_context(data)._replace(prefixable=None)
     suppressed = []
     outside, guarded = ps_analyze_command(cmd, ctx, ctx.cwd,
                                           suppressed=suppressed)
