@@ -560,6 +560,29 @@ class CommentInSubstitutionTests(unittest.TestCase):
                 self.assertEqual([body], bp.command_substitutions(
                     'echo "$(%s)" T' % body))
 
+    def test_a_nested_substitution_in_double_quotes_holds_its_quotes(self):
+        # bash runs the `cat` in each (Q325): a `"` inside the nested `$(…)`,
+        # in `$((…))` or not, closes nothing in the outer body.
+        for body in ('echo "$(echo ")")" ; cat /etc/passwd',
+                     'echo "$(echo "#)")" ; cat /etc/passwd',
+                     'echo "$(( $(echo "(" | wc -c) ))" ; cat /etc/passwd',
+                     'echo "$(( "1" + 2 ))" ; cat /etc/passwd'):
+            with self.subTest(body=body):
+                self.assertEqual([body], bp.command_substitutions(
+                    'echo "$(%s)" T' % body))
+                self.assertEqual([body], bp.command_substitutions(
+                    'x=$(%s) T' % body))
+        # The nested body still comes back when the outer one is scanned.
+        self.assertEqual(['echo ")"'], bp.command_substitutions(
+            'echo "$(echo ")")" ; cat /etc/passwd'))
+
+    def test_deep_double_quoted_nesting_does_not_exhaust_the_stack(self):
+        cmd = 'cat /etc/passwd'
+        for _ in range(1000):
+            cmd = 'echo "$(%s)"' % cmd
+        self.assertEqual(1, len(bp.command_substitutions(cmd)))
+        bp.strip_comments(cmd)
+
 
 class CommentOutsideSubstitutionTests(unittest.TestCase):
     """A top-level comment opens no substitution and no quote (Q258).
