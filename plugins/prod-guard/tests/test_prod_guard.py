@@ -3736,7 +3736,13 @@ class SpecialCaseTests(unittest.TestCase):
                     "unset -v C", "if false; then source x.sh; fi",
                     "f() { read C; }; f", "eval 'read C'",
                     "eval C=gke_acme_prod-us; (true)",
-                    "for C in a b; do :; done"):
+                    "for C in a b; do :; done",
+                    # A name operand the guard cannot read may be any name
+                    # (#300 review).
+                    'read "$(echo C)" < f', "read `echo C` < f",
+                    'read -a "$(echo C)" < f', 'mapfile -t "$(echo C)" < f',
+                    'printf -v "$(echo C)" %s y', 'unset "$(echo C)"',
+                    "read C[0]"):
             with self.subTest(mid=mid):
                 self.assertEqual(run_hook(
                     "C=kind-ci; %s; %s" % (mid, k), home=home)[0], "ask")
@@ -3767,11 +3773,16 @@ class SpecialCaseTests(unittest.TestCase):
         for cmd in (f + "C=gke_acme_prod-us f",
                     "C=kind-ci; " + f + "C=gke_acme_prod-us f",
                     "C=kind-ci; " + f + "C=gke_acme_prod-us; f",
-                    "C=kind-ci; " + f + "if true; then C=gke_acme_prod-us f; fi"):
+                    "C=kind-ci; " + f + "if true; then C=gke_acme_prod-us f; fi",
+                    # And a call from another body or from `eval` (#300 review).
+                    "C=kind-ci; " + f + "g() { f; }; C=gke_acme_prod-us g",
+                    "C=kind-ci; " + f + "g() { f; }; C=gke_acme_prod-us; g",
+                    "C=kind-ci; " + f + "eval 'C=gke_acme_prod-us f'"):
             with self.subTest(cmd=cmd):
                 self.assertEqual(run_hook(cmd, home=home)[0], "deny")
         for cmd in ("C=kind-ci; " + f + "f", "C=kind-ci; " + f + "C=kind-ci f",
-                    "C=kind-ci; " + f + "(C=gke_acme_prod-us); f"):
+                    "C=kind-ci; " + f + "(C=gke_acme_prod-us); f",
+                    "C=kind-ci; " + f + "g() { f; }; g"):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(run_hook(cmd, home=home)[0])
 

@@ -909,7 +909,8 @@ _NAME_RE = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
 def reassigned_names(tool, args):
     """The names `tool` may set or unset, read off its options and operands
     the way the builtin parses them. Over-reading is the safe direction: a
-    name read wrongly only becomes unknown, so its target prompts."""
+    name read wrongly only becomes unknown, so its target prompts. A name
+    operand the guard cannot read, such as `"$(echo C)"`, may be any name."""
     valued, naming, operands, names = REASSIGN_BUILTINS[tool]
     picked, rest, i = [], [], 0
     while i < len(args):
@@ -933,8 +934,9 @@ def reassigned_names(tool, args):
     names = set(names)
     for a in picked:
         m = _NAME_RE.match(a)
-        if m:
-            names.add(m.group(0))
+        if not m or a[m.end():] and not a[m.end():].startswith('['):
+            return {EVERY_NAME}
+        names.add(m.group(0))
     return names
 
 
@@ -3100,7 +3102,7 @@ def _runs_in_one_shell(raw):
 
 
 def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
-                            out=None, tokens=None):
+                            out=None, tokens=None, known=None):
     """Findings for a full command string: tokenize, split into simple
     commands, evaluate each. Recurses (bounded) into `sh -c '...'` and
     `eval ...` bodies so a quoted nested command can't ride past the guard.
@@ -3151,7 +3153,10 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
     # nothing the later segments see. Inside `( … )` the scopes are copies, so
     # an assignment there reaches the rest of that subshell and nothing past
     # its `)` (Q323).
-    blocks, functions, outer, inside, bodies = [], {}, [], (), {}
+    # `known` carries the caller's functions into a body it judges (Q299).
+    functions, bodies = ({k: set(v) for k, v in known[0].items()},
+                         dict(known[1])) if known else ({}, {})
+    blocks, outer, inside = [], [], ()
     for whole, words, group, changes, seg_apart, subshells in \
             segment_layout(tokens):
         keep = 0
@@ -3301,7 +3306,7 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
             left = {}
             sub_f, sub_o, sub_s = evaluate_command_string(
                 ' '.join(argv_raw[1:]), ctx, depth + 1, child_env, same_shell,
-                left)
+                left, known=(functions, bodies))
             findings += sub_f
             override = override or sub_o
             session_reason = session_reason if session_reason is not None else sub_s
@@ -3331,7 +3336,7 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
             # (Q299).
             sub_f, sub_o, sub_s = evaluate_command_string(
                 None, ctx, depth + 1, child_env, same_shell,
-                tokens=bodies[tool])
+                tokens=bodies[tool], known=(functions, bodies))
             findings += sub_f
             override = override or sub_o
             session_reason = session_reason if session_reason is not None else sub_s
