@@ -62,8 +62,19 @@ from bouncer_wrappers import WRAPPER_VALUE_OPTS, wrapper_option  # noqa: E402
 # layer produces -- flat list bookkeeping, no raw-text scanning.
 
 # Words that precede a real command without changing whose status is at stake.
+# `time` here is the program -- `/usr/bin/time`, or a quoted `"time"` -- since
+# the reserved word is stripped before a wrapper is looked for. `xargs` and
+# `flock` are absent: neither runs a gate as its one child (Q318).
 WRAPPERS = frozenset({'sudo', 'nohup', 'command', 'exec', 'bash', 'sh', 'zsh',
-                      'env', 'stdbuf', 'setsid'})
+                      'env', 'stdbuf', 'setsid', 'timeout', 'nice', 'time',
+                      'ionice', 'chrt', 'taskset', 'doas', 'caffeinate'})
+
+# Wrappers that take one operand between their options and the command:
+# timeout's duration, chrt's priority, taskset's CPU mask.
+OPERAND_WRAPPERS = frozenset({'timeout', 'chrt', 'taskset'})
+
+# chrt's priority is optional for the policies that take none.
+PRIORITY_RE = re.compile(r'^[+-]?\d+$')
 
 # Wrappers that take `NAME=v` OPERANDS and assign from them. They receive their
 # arguments after the shell has removed the quotes, so `env 'A=1' make` really
@@ -103,6 +114,8 @@ RUN_NOTHING = {
     'sudo': (frozenset('lveKUV'),
              frozenset({'--list', '--validate', '--edit', '--remove-timestamp',
                         '--other-user', '--version'})),
+    # `doas -C config cmd` reports whether a rule permits cmd; `-L` clears.
+    'doas': (frozenset('CL'), frozenset()),
 }
 
 # Shells take options that mean something else (`-e`, `-o pipefail`, `-c`), so
@@ -332,9 +345,14 @@ def peel_wrappers(tokens, assigned=None):
     """Strip reserved words, inline assignments, and wrapper commands with
     their options, in the order bash resolves them, until the real command
     word is first. The operands `env` and `sudo` assign from are appended to
-    ``assigned`` when one is passed."""
+    ``assigned`` when one is passed.
+
+    Reserved words are stripped in command position only: behind a wrapper
+    `time` is the program, so `command time -o log make` writes `log` and
+    runs make."""
+    tokens = strip_sh_keywords(tokens)
     while True:
-        tokens = strip_env_prefix(strip_sh_keywords(tokens))
+        tokens = strip_env_prefix(tokens)
         if tokens and os.path.basename(tokens[0]) in WRAPPERS:
             wrapper = os.path.basename(tokens[0])
             whole, ended = tokens, []
@@ -342,6 +360,9 @@ def peel_wrappers(tokens, assigned=None):
             if rest is None:
                 return tokens
             tokens = rest
+            if wrapper in OPERAND_WRAPPERS and tokens and (
+                    wrapper != 'chrt' or PRIORITY_RE.match(tokens[0])):
+                tokens = tokens[1:]
             if wrapper in ASSIGN_WRAPPERS:
                 # Operand position, not command position: see ASSIGN_WRAPPERS.
                 # sudo goes back to its options after each operand, so the two
