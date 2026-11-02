@@ -359,6 +359,11 @@ GIT_REPO_ENV = frozenset({'GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR',
                           'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY',
                           'GIT_ALTERNATE_OBJECT_DIRECTORIES'})
 
+# The ones that move where git reads HEAD. The rest re-aim the work tree,
+# index or objects, and the branch a commit lands on stays the one found
+# from the directory.
+GIT_HEAD_ENV = frozenset({'GIT_DIR', 'GIT_COMMON_DIR'})
+
 # Refs whose reachability makes a branch tip RECOVERABLE: any remote-tracking
 # branch, or a local integration branch. If one of these contains the tip, the
 # commits survive the branch being deleted or force-moved and the worst case is
@@ -2006,12 +2011,18 @@ def skips_base(flags, short):
     return bool(flags & PUSH_OVERLAP_SKIP_FLAGS or short & PUSH_OVERLAP_SKIP_LETTERS)
 
 
-def _feature(branch, reason=None):
+UNNAMED_REPO = ("This command acts on a repository this guard can't name "
+                "(`--git-dir`, `GIT_DIR`, or a directory only the shell can "
+                "compute), so it can't check which branch it lands on")
+
+
+def _feature(branch, reason=None, probe=True):
     """Verdict for a mutation that's routine on a feature branch but should be
     confirmed on a protected one: allow on non-protected, ask on protected,
-    defer when the branch can't be resolved."""
+    defer when the branch can't be resolved — unless `probe` is false, where
+    the hook could not name the repository at all and the branch may be any."""
     if branch is None:
-        return ('defer', None)
+        return ('defer', None) if probe else ('ask', UNNAMED_REPO)
     if is_protected(branch):
         return ('ask-shared', reason or f"Targets protected branch '{branch}'")
     return ('allow', None)
@@ -2338,10 +2349,12 @@ def classify_git(sub, args, branch, policy, cwd, probe, mode='',
     if sub in READONLY_GIT:
         return ('allow', None)
     if sub == 'commit':
-        return _feature(branch)
+        return _feature(branch, probe=probe)
     if sub == 'push':
-        if policy == 'off' or branch is None:
+        if policy == 'off':
             return ('defer', None)
+        if branch is None:
+            return ('defer', None) if probe else ('ask', UNNAMED_REPO)
         off_branch = []
         decision, reason = push_decision(
             args, branch, policy,
@@ -2476,11 +2489,11 @@ def classify_git(sub, args, branch, policy, cwd, probe, mode='',
     if sub in ('merge', 'cherry-pick', 'revert', 'am'):
         if flags & {'--abort', '--continue', '--skip', '--quit'}:
             return ('allow', None)        # control ops are safe
-        return _feature(branch, f"`git {sub}` onto a protected branch")
+        return _feature(branch, f"`git {sub}` onto a protected branch", probe)
     if sub == 'rebase':
         if flags & {'--abort', '--continue', '--skip', '--quit', '--edit-todo'}:
             return ('allow', None)
-        return _feature(branch, "`git rebase` on a protected branch")
+        return _feature(branch, "`git rebase` on a protected branch", probe)
     if sub == 'pull':
         if '--ff-only' in flags:
             return ('allow', None)        # advances the branch; adds no local work
@@ -2490,7 +2503,7 @@ def classify_git(sub, args, branch, policy, cwd, probe, mode='',
         # depends on. On a protected branch it lands a merge (or rewrites
         # history) and asks, like `merge`/`rebase` do.
         return _feature(branch, f"`git pull` may merge or rebase onto protected "
-                                f"branch '{branch}'")
+                                f"branch '{branch}'", probe)
     if sub == 'reset':
         if flags & {'--hard', '--merge', '--keep'}:
             return classify_reset(branch, cwd, probe)
@@ -2643,7 +2656,7 @@ def env_configures(inv):
     return any(n.startswith('GIT_CONFIG') for n in inv['env'])
 
 
-def git_cwd(cwd, globals_):
+def git_cwd(cwd, globals_, head_only=False):
     """The directory a git invocation runs in: `cwd` walked through every `-C`
     in its global options, or None when the hook can't follow it.
 
@@ -2651,7 +2664,10 @@ def git_cwd(cwd, globals_):
     the last. `--git-dir`/`--work-tree` name a repository without naming a
     working directory to probe from, and a non-literal `-C` names one only the
     shell can compute — both give up, and the caller stands the probes down
-    rather than measuring the tree the command is not acting on."""
+    rather than measuring the tree the command is not acting on.
+
+    `head_only` asks the narrower question of where git reads HEAD, which a
+    `--work-tree` alone does not move."""
     i = 0
     while i < len(globals_):
         g = globals_[i]
@@ -2662,26 +2678,29 @@ def git_cwd(cwd, globals_):
             cwd = resolve_path(cwd, nxt)
             i += 2
             continue
-        if targets_other_repo([g]):
+        if head_only and (g == '--work-tree' or g.startswith('--work-tree=')):
+            pass
+        elif targets_other_repo([g]):
             return None
         i += 2 if g in GIT_VALUE_OPTS else 1
     return cwd
 
 
-def invocation_cwd(cwd, inv):
+def invocation_cwd(cwd, inv, head_only=False):
     """The directory an invocation runs in: `cwd` walked through each
     wrapper's chdir (`env -C`, `sudo -D`), then through git's own `-C` — the
     order the shell and git apply them in — or None when the hook can't follow
     one. A non-literal directory and a chroot give up outright, as `git_cwd`
     does on a `-C` only the shell can compute, and so does a repository
-    variable, as `git_cwd` does on a `--git-dir`."""
-    if env_redirects(inv):
+    variable, as `git_cwd` does on a `--git-dir`. `head_only` is `git_cwd`'s,
+    and keeps only the variables in GIT_HEAD_ENV as redirects."""
+    if inv['env'] & (GIT_HEAD_ENV if head_only else GIT_REPO_ENV):
         return None
     for hop in inv['chdir']:
         if hop is None or not is_literal_path(hop):
             return None
         cwd = resolve_path(cwd, hop)
-    return git_cwd(cwd, inv['globals'])
+    return git_cwd(cwd, inv['globals'], head_only)
 
 
 def override_reason(segments):
@@ -3282,7 +3301,12 @@ def main():
                                else dest)
             else:
                 inv_cwd = invocation_cwd(seg_cwd, inv)
-                seg_branch = branch_in(inv_cwd or cwd, branches)
+                # The session's own branch is no answer for a repository the
+                # invocation re-aims and the hook can't name: None, which the
+                # branch-sensitive verbs ask on. A `cd` it couldn't follow still
+                # reads the session's branch.
+                head_cwd = inv_cwd or invocation_cwd(seg_cwd or cwd, inv, True)
+                seg_branch = branch_in(head_cwd, branches) if head_cwd else None
                 seen.add(seg_branch)
                 verdict, reason = classify_segment(
                     inv, seg_branch, policy, inv_cwd or cwd,
