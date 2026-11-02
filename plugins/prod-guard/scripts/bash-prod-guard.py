@@ -67,6 +67,7 @@ cluster call.
 Reads the hook JSON on stdin, emits a PreToolUse decision on stdout.
 """
 import hashlib
+import itertools
 import json
 import os
 import re
@@ -510,6 +511,14 @@ def _strip_comments(raw, quotes=True):
                       strip_comments(_mask_substitutions(raw, spans, sentinels)))
 
 
+class _HoistSep(str):
+    """The `;` after a hoisted substitution body: bash wrote no list there,
+    so it does not end one (Q301)."""
+
+
+_HOISTED = _HoistSep(';')
+
+
 def _hoist_substitutions(tokens, raw, spans, bodies, sentinels):
     """Restore every masked word and insert each substitution body it held,
     tokenized, ahead of the simple command the word belongs to. A marker
@@ -532,7 +541,8 @@ def _hoist_substitutions(tokens, raw, spans, bodies, sentinels):
             for m in marker.finditer(t):
                 sub_tokens = tokenize(bodies[ord(m.group(1)) - _SUBST_BASE])
                 if sub_tokens:
-                    out[seg_start:seg_start] = ['('] + sub_tokens + [')', ';']
+                    out[seg_start:seg_start] = ['('] + sub_tokens + [')',
+                                                                      _HOISTED]
                     seg_start += len(sub_tokens) + 3
             restored = QuotedStr(marker.sub(
                 lambda m: raw[slice(*spans[ord(m.group(1)) - _SUBST_BASE])], t))
@@ -627,8 +637,13 @@ def segment_layout(tokens):
     Each block is `('pop',)` or `('push', kind)`, in word order. A `{ …; }`
     pushes 'runs', a conditional or loop 'maybe', a function body
     ('fn', name, the tokens between its braces), and any of them run apart --
-    piped or backgrounded -- 'apart', which is how exit-status-guard scopes them (Q263)."""
-    segs, cur, ops = [], [], []
+    piped or backgrounded -- 'apart', which is how exit-status-guard scopes
+    them (Q263).
+
+    Last, (the list operator ahead of the segment, the `(` count after it):
+    `'hoisted'` for the `;` a hoisted substitution body ends with, which bash
+    never wrote (Q301)."""
+    segs, cur, ops, hoisted = [], [], [], set()
     for t in tokens:
         if _is_operator_token(t):
             if cur:
@@ -636,6 +651,8 @@ def segment_layout(tokens):
                 cur = []
             if segs:
                 segs[-1][1].extend(_op_units(str(t)))
+                if t is _HOISTED:
+                    hoisted.add(len(segs) - 1)
             else:
                 ops.extend(_op_units(str(t)))
         else:
@@ -731,7 +748,18 @@ def segment_layout(tokens):
                 and getattr(body[0], 'quoted_from', None) is None:
             last = ends.pop() if ends else len(segs) - 1
             blocks.append(('push', 'apart' if apart(i, last) else 'maybe'))
-        layout.append((group, words, body, blocks, apart(i, i), nest[i]))
+        # The list operator ahead of the segment, and how many `(` open
+        # after it: an operator ahead of a subshell joins it to the list
+        # outside (Q301).
+        before = segs[i - 1][1] if i else ops
+        at = next((k for k in range(len(before) - 1, -1, -1)
+                   if before[k] in _LIST_OPS), None)
+        lead = None if at is None else before[at]
+        if lead == ';' and i - 1 in hoisted:
+            lead = 'hoisted'
+        up = 0 if at is None else before[at + 1:].count('(')
+        layout.append((group, words, body, blocks, apart(i, i), nest[i],
+                       (lead, up)))
     return layout
 
 
@@ -878,10 +906,21 @@ def expand_vars(value, env):
     and still prompts — expansion only ever makes classification *more*
     specific, never silently allows. `env` values are assumed already resolved
     (extract_env_prefix folds them left-to-right), so one pass suffices."""
-    def repl(m):
-        name = m.group(1) or m.group(2)
-        return env[name] if name in env else m.group(0)
-    return VAR_REF_RE.sub(repl, value)
+    def sub(env):
+        def repl(m):
+            name = m.group(1) or m.group(2)
+            return env[name] if name in env else m.group(0)
+        return VAR_REF_RE.sub(repl, value)
+    out = sub(env)
+    # A name with several readings gives a value with several (Q301).
+    forked = sorted({m.group(1) or m.group(2) for m in VAR_REF_RE.finditer(value)
+                     if isinstance(env.get(m.group(1) or m.group(2)), Readings)})
+    if not forked:
+        return out
+    alts = _alternatives(env, forked)
+    if alts is None:
+        return sub({k: v for k, v in env.items() if k not in forked})
+    return Readings.of(out, {sub(a) for a in alts})
 
 
 # Builtins that carry persisting `NAME=val` operands (`export FOO=bar`).
@@ -938,6 +977,61 @@ def reassigned_names(tool, args):
             return {EVERY_NAME}
         names.add(m.group(0))
     return names
+
+
+class Readings(str):
+    """A value bash may or may not have assigned: the str is one reading and
+    `others` the rest, with None for unset. An assignment after `&&` or `||`
+    leaves its name holding both, and each later command is judged under every
+    reading, so a production value on either side still denies (Q301)."""
+
+    @classmethod
+    def of(cls, value, others):
+        """`value` with `others`, flattened; a plain str when they agree."""
+        choices = set(_choices(value))
+        for o in others:
+            choices |= _choices(o)
+        choices.discard(str(value))
+        if not choices:
+            return str(value)
+        r = cls(value)
+        r.others = frozenset(choices)
+        return r
+
+
+def _choices(value):
+    if value is None:
+        return {None}
+    return {str(value)} | set(getattr(value, 'others', ()))
+
+
+# Readings past this many are not judged one by one: the names are dropped,
+# so their targets prompt.
+_READINGS_MAX = 8
+
+
+def _alternatives(env, names):
+    """Each copy of `env` that picks another reading for one or more of
+    `names`, every value flattened to a plain str, or None when there are too
+    many to judge."""
+    per = [sorted(_choices(env[n]), key=lambda v: (v is None, v or ''))
+           for n in names]
+    combos = list(itertools.product(*per))
+    if len(combos) > _READINGS_MAX + 1:
+        return None
+    base = {k: str(v) for k, v in env.items()}
+    out = []
+    for combo in combos:
+        if all(c == str(env[n]) for c, n in zip(combo, names)):
+            continue
+        alt = dict(base)
+        for c, n in zip(combo, names):
+            if c is None:
+                alt.pop(n, None)
+            else:
+                alt[n] = c
+        out.append(alt)
+    return out
 
 
 class MayVanish(str):
@@ -3158,9 +3252,26 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
     # `known` carries the caller's functions into a body it judges (Q299).
     functions, bodies = ({k: set(v) for k, v in known[0].items()},
                          dict(known[1])) if known else ({}, {})
-    blocks, outer, inside = [], [], ()
-    for whole, words, group, changes, seg_apart, subshells in \
+    # An and-or list after `&&` or `||` may not run, so a frame holds what the
+    # scopes were before it. Inside the list a later `&&` runs only where the
+    # assignment did, so the value stands there; where the list ends the
+    # scopes keep both readings (Q301).
+    blocks, outer, inside, frames = [], [], (), []
+
+    def settle(frame):
+        frames.remove(frame)
+        for scope, was in zip(frame['scopes'], frame['snap']):
+            for name in set(scope) | set(was):
+                now, then = scope.get(name), was.get(name)
+                if now is then:
+                    continue
+                kept = now if now is not None else then
+                scope[name] = Readings.of(kept, {then, now})
+
+    for whole, words, group, changes, seg_apart, subshells, (lead, up) in \
             segment_layout(tokens):
+        for f in [f for f in frames if f['sub'] != subshells[:len(f['sub'])]]:
+            frames.remove(f)    # its subshell has ended, and its scopes with it
         keep = 0
         while keep < min(len(inside), len(subshells)) \
                 and inside[keep] == subshells[keep]:
@@ -3172,15 +3283,32 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
             shell_env, exported = dict(shell_env), dict(exported)
             functions = {k: set(v) for k, v in functions.items()}
         inside = subshells
+        level = len(subshells) - up
+        here = [f for f in frames
+                if f['sub'] == subshells[:level] and f['blocks'] == len(blocks)]
+        if lead in _LIST_OPS - _PIPE_OPS:
+            if here and not (lead == '&&' and here[-1]['kind'] == '&&'):
+                settle(here[-1])
+            if lead in ('&&', '||') and not (here and here[-1] in frames):
+                scopes = (shell_env, exported) if level == len(outer) \
+                    else outer[level][:2]
+                frames.append({'sub': subshells[:level], 'blocks': len(blocks),
+                               'kind': lead, 'scopes': scopes,
+                               'snap': tuple(dict(x) for x in scopes)})
+        low = len(blocks)
         for change in changes:
             if change[0] == 'pop':
                 if blocks:
                     blocks.pop()
+                    low = min(low, len(blocks))
             else:
                 blocks.append(change[1])
                 if isinstance(change[1], tuple):
                     functions.setdefault(change[1][1], set())
                     bodies[change[1][1]] = change[1][2]
+        for f in [f for f in frames
+                  if f['sub'] == subshells and f['blocks'] > low]:
+            settle(f)
         defining = next((b[1] for b in reversed(blocks)
                          if isinstance(b, tuple)), None)
         maybe = 'maybe' in blocks
@@ -3188,6 +3316,21 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
             maybe, defining = 'apart', None
         if not group:
             continue
+        forked = sorted(n for n in set(shell_env) | set(exported)
+                        if isinstance(shell_env.get(n, exported.get(n)), Readings))
+        if forked:
+            # Judge the command once more under each other reading (Q301).
+            view = {**exported, **shell_env}
+            alts = _alternatives(view, forked)
+            if alts is None:
+                _forget(forked, shell_env, exported)
+            for alt in alts or ():
+                alt_shell = {k: alt[k] for k in shell_env if k in alt}
+                alt_exported = {k: alt[k] if k in forked else str(v)
+                                for k, v in exported.items() if k in alt}
+                findings += evaluate_command_string(
+                    None, ctx, depth, alt_exported, alt_shell,
+                    tokens=list(group), known=(functions, bodies))[0]
         seg_env, argv_raw = extract_env_prefix(group, shell_env)
         # This segment's inline `A=x cmd` assignments, already resolved. They
         # export to this command's own children but do not persist to the
@@ -3366,6 +3509,8 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
         # drops what `env -i`/`-u` removed; a reader falls back to the hook's
         # own environment for a name it lacks.
         findings += evaluator(argv, child, ctx)
+    for f in [f for f in frames if not f['sub']]:
+        settle(f)
     if outer:
         shell_env, exported, functions = outer[0]
     if out is not None:
