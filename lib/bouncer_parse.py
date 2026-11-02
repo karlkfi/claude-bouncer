@@ -863,7 +863,10 @@ def _scan_dollar_paren(text, start):
                 clauses, pending, parens, dollar = [], [], [], -2
                 i += 2
                 continue
-            i = max(_dq_expansion_end(text, i), i + 1)
+            end = _brace_end(text, i) if text.startswith('${', i) else -1
+            if end < 0 and c == '`':
+                end = _scan_backticks(text, i + 1)[1]
+            i = max(end, i + 1)
             continue
         if c in ' \t\n':
             i += 1

@@ -589,6 +589,16 @@ class CommentInSubstitutionTests(unittest.TestCase):
                     'echo "$(%s)" T' % body))
                 bp.strip_comments('echo "$(%s)"' % body)
 
+    def test_a_brace_span_in_double_quotes_adds_no_recursion(self):
+        # `${…}` alternating with `$(` still recurses through `_brace_end`
+        # (Q337); stepping over it here must not deepen that per level.
+        body = 'echo ")"'
+        for _ in range(400):
+            body = 'echo "${x:-$(%s)}"' % body
+        body += ' ; cat /etc/passwd'
+        self.assertEqual([body], bp.command_substitutions(
+            'echo "$(%s)" T' % body))
+
 
 class CommentOutsideSubstitutionTests(unittest.TestCase):
     """A top-level comment opens no substitution and no quote (Q258).
