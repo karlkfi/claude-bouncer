@@ -129,6 +129,7 @@ different repository's scratch still asks entirely.
 | `jq '.a/.b' data.json`               | allow    |
 | `yq .foo data.yaml`                  | allow    |
 | `sed 's/a/b/g' notes.md`             | allow    |
+| `sed -i '' -e '/^#/d' notes.md` (BSD in-place) | allow |
 | `wc -l data.txt`                     | allow    |
 | `sort -o sorted.txt data.txt`        | allow    |
 | `cut -d / -f1 data.txt` (`/` is the delimiter) | allow |
@@ -195,6 +196,7 @@ different repository's scratch still asks entirely.
 | `ln /etc/passwd link && cat link`    | **ask**  |
 | `cp x /tmp/claude-501/<this-project>/<sibling>/…` (sibling write) | **ask** |
 | `cat /tmp/claude-501/<other-project>/…` (cross-project read) | **ask** |
+| `sed -i '' '/^#/d' notes.md` (script or path?) | **ask** |
 | `cat /tmp/out` · `cat /var/tmp/x`    | **deny** |
 | `sed -f /tmp/evil.sed notes.md`      | **deny** |
 | `grep foo data.txt > /tmp/out.txt`   | **deny** |
@@ -1784,7 +1786,13 @@ final output.
   script and allowed instead of denied as unexpandable. Any other script there
   is still read as a path: one starting with an address (`'/^#/d'`) asks as an
   absolute path, and one with an expansion in another shape (`"${n}d"`) is
-  denied. Use `-i '' -e SCRIPT`, which both seds read the same way.
+  denied. Reading the address as a script instead would need a real sed
+  parser: a script can write or read a file (`'/x/w F'`, `'/x/s/a/b/gw F'`), and
+  the hook reads no filename inside an `-e` script, so a rule that steered
+  those to the `-e` form would allow the write. Use `sed -i '' -e SCRIPT FILE`:
+  macOS sed makes the edit, and GNU sed makes it too and then exits 2 on the
+  empty `''` operand (GNU sed 4.9, measured in a `debian:stable-slim`
+  container on 2026-10-04).
 - Heredoc body lines are dropped from the raw command string before parsing, so
   path-like body content (`</div>`, `/title`), prose, or an unbalanced quote in
   the body is never mistaken for a file argument and never aborts the parse (a

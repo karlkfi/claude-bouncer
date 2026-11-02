@@ -1653,6 +1653,51 @@ class HookEndToEndTests(unittest.TestCase):
     def test_sed_workspace_file_allow(self):
         self._decision("sed 's/a/b/' in.txt", "allow")
 
+    # --- Q232: the token after `sed -i ''` -----------------------------------
+    # BSD sed reads it as the script and GNU sed as a file, so it keeps the
+    # outside ask. These pin that ask against a relaxation that reads the token
+    # as a script without a real sed parser: each shape below got past one.
+
+    def _sed_keeps_its_ask(self, cmd, token):
+        out = self._decision(cmd, "ask")
+        reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn(f"Outside-workspace path(s): {token}", reason)
+
+    def test_sed_address_script_after_empty_suffix_keeps_its_ask(self):
+        self._sed_keeps_its_ask("sed -i '' '/^#/d' in.txt", "/^#/d")
+        self._sed_keeps_its_ask("sed -ni '' '/^#/p' in.txt", "/^#/p")
+
+    def test_sed_bsd_e_form_allows(self):
+        self._decision("sed -i '' -e '/^#/d' in.txt", "allow")
+
+    def test_sed_relative_token_after_empty_suffix_is_unchanged(self):
+        # Resolves inside the root, so nothing blocks and the verdict is allow.
+        self._decision("sed -i '' 's/a/b/' in.txt", "allow")
+
+    def test_sed_script_that_names_a_file_keeps_its_ask(self):
+        # The hook reads no filename inside an `-e` script (Q328), so a rule
+        # steering these to the `-e` form would allow the write.
+        for script in ("/x/w /q232-fake/leak", "/x/r /q232-fake/secret",
+                       "/x/W /q232-fake/leak", "/x/R /q232-fake/secret"):
+            with self.subTest(script=script):
+                self._sed_keeps_its_ask(f"sed -i '' '{script}' in.txt", script)
+
+    def test_sed_s_command_writing_a_file_keeps_its_ask(self):
+        # Stripping `/…/` pairs left to right mis-pairs an `s` command's
+        # delimiters: `/x/s/a/b/w ../l` became `sbl`, losing the `w` flag.
+        for script in ("/x/s/a/b/w ../l", "/x/{s/a/b/w ../m\n}", "/x/s/a/b/;w ../l",
+                       "/x/{s/a/b/;w ../l\n}", "/x/s/a/b/gw ../l"):
+            with self.subTest(script=script):
+                self._sed_keeps_its_ask(f"sed -i '' '{script}' in.txt", script)
+
+    def test_sed_gnu_reading_of_a_path_keeps_its_ask(self):
+        self._sed_keeps_its_ask("sed -i '' /q232-fake/target", "/q232-fake/target")
+
+    def test_sed_unexpandable_token_after_suffix_keeps_its_reason(self):
+        out = self._decision('sed -i \'\' "$f" in.txt', "deny")
+        reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("Runtime-expanded", reason)
+
     def test_jq_program_only_workspace_allow(self):
         self._decision("jq '.a/.b' in.txt", "allow")
 
