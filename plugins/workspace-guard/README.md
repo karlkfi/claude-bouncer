@@ -197,6 +197,7 @@ different repository's scratch still asks entirely.
 | `cp x /tmp/claude-501/<this-project>/<sibling>/…` (sibling write) | **ask** |
 | `cat /tmp/claude-501/<other-project>/…` (cross-project read) | **ask** |
 | `sed -i '' '/^#/d' notes.md` (script or path?) | **ask** |
+| `sed '/x/w /etc/leak' notes.md` (the script writes a file) | **ask** |
 | `cat /tmp/out` · `cat /var/tmp/x`    | **deny** |
 | `sed -f /tmp/evil.sed notes.md`      | **deny** |
 | `grep foo data.txt > /tmp/out.txt`   | **deny** |
@@ -940,7 +941,12 @@ through the same boundary rules and produce the same reasons. Symlink staging
 5. **Classify** each token using a per-command spec table that knows which flags
    take values (`grep -e PAT`), which flag-values are themselves files
    (`grep -f`, `jq --slurpfile`), and how many leading positionals are the
-   program/pattern to skip. `dd` is handled separately because its operands are
+   program/pattern to skip. A `sed` script is read for the files it names
+   itself: `w`/`W` and an `s` command's `w` flag write one and `r`/`R` read
+   one, so `sed '/x/w ../leak' f` is judged like `cp f ../leak`. GNU and BSD sed
+   disagree about which word is the script after `-i` and about whether a
+   `[…]` hides the delimiter, so the script is read every way and the files
+   unioned. `dd` is handled separately because its operands are
    all `KEY=VALUE` pairs — `if=PATH` and `of=PATH` are the file operands; the
    rest (`bs=`, `count=`, `conv=`, `iflag=`, `oflag=`, …) are values, not paths.
    `mktemp` is handled separately too, because its *default* location is host
@@ -1166,7 +1172,8 @@ through the same boundary rules and produce the same reasons. Symlink staging
    token, and even once step 15 has read it the hook has no basis to vouch for a
    construct it reads at one remove. **Interpreter code suppresses it on the same
    grounds** — `python3 -c`, `python3 -m <module>`, `perl -e`, a heredoc fed to
-   `python3`, or a script resolving outside the root, in the Bash tool. A `-m`
+   `python3`, a script resolving outside the root, or GNU sed's `e` command and
+   `s///e` flag, in the Bash tool. A `-m`
    operand is a module name resolved on `sys.path`, so it is code the hook
    cannot read rather than a file beside the cwd. Interpreters are not guarded
    commands and a bare `python3 x.py` still defers to your own permission rules;
@@ -1788,13 +1795,15 @@ final output.
   script and allowed instead of denied as unexpandable. Any other script there
   is still read as a path: one starting with an address (`'/^#/d'`) asks as an
   absolute path, and one with an expansion in another shape (`"${n}d"`) is
-  denied. Reading the address as a script instead would need a real sed
-  parser: a script can write or read a file (`'/x/w F'`, `'/x/s/a/b/gw F'`), and
-  the hook reads no filename inside an `-e` script, so a rule that steered
-  those to the `-e` form would allow the write. Use `sed -i '' -e SCRIPT FILE`:
+  denied. Use `sed -i '' -e SCRIPT FILE`:
   macOS sed makes the edit, and GNU sed makes it too and then exits 2 on the
   empty `''` operand (GNU sed 4.9, measured in a `debian:stable-slim`
   container on 2026-10-04).
+- A `sed` script is read as the text the hook sees. One built at runtime
+  (`sed "s/$a/$b/" f`, `sed "$prog" f`) can gain a `w` command from the value
+  of the expansion, and that file is not judged. Nor is a script loaded with
+  `-f FILE`: FILE is judged as a read, and its contents are not the hook's to
+  read.
 - Heredoc body lines are dropped from the raw command string before parsing, so
   path-like body content (`</div>`, `/title`), prose, or an unbalanced quote in
   the body is never mistaken for a file argument and never aborts the parse (a

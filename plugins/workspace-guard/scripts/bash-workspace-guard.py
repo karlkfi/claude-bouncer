@@ -3009,6 +3009,230 @@ def sed_detached_empty_suffix(tokens):
     return False
 
 
+# sed commands by what follows the letter, GNU's and BSD's sets together.
+SED_FILE_CMDS = {'r': True, 'R': True, 'w': False, 'W': False}    # -> is_read
+SED_TEXT_CMDS = frozenset('aic')          # text to end of line, `\`+newline continues
+SED_LABEL_CMDS = frozenset(':btTv')       # a label (or `v`'s version) to `;`/newline
+SED_PLAIN_CMDS = frozenset('=dDgGhHlLnNpPqQxzF')  # at most a number follows
+SED_S_FLAGS = frozenset('gpiImMe0123456789 \t')
+
+
+def _sed_bracket_end(text, i):
+    """Index past the `]` closing the bracket expression opening at `i`, or None
+    when it never closes. `[:alpha:]`-style classes are stepped over whole."""
+    j = i + 1
+    if text[j:j + 1] == '^':
+        j += 1
+    if text[j:j + 1] == ']':
+        j += 1
+    while j < len(text):
+        if text[j] == '[' and text[j + 1:j + 2] in (':', '.', '='):
+            k = text.find(text[j + 1] + ']', j + 2)
+            if k < 0:
+                return None
+            j = k + 2
+        elif text[j] == ']':
+            return j + 1
+        else:
+            j += 1
+    return None
+
+
+def _sed_delimited(text, i, delim, brackets):
+    """Index past the `delim` ending the part of an address, `s` or `y` that
+    starts at `i`, or None when the script ends first. `brackets` lets a `[…]`
+    hide the delimiter, which BSD sed does and GNU sed does not."""
+    while i < len(text):
+        c = text[i]
+        if c == '\\':
+            i += 2
+        elif c == delim:
+            return i + 1
+        elif brackets and c == '[' and _sed_bracket_end(text, i) is not None:
+            i = _sed_bracket_end(text, i)
+        else:
+            i += 1
+    return None
+
+
+def _sed_address(text, i, brackets, second=False):
+    """Index past the address at `i` (`i` itself when there is none), or None
+    on one sed would reject."""
+    n = len(text)
+    if i < n and (text[i].isdigit() or (second and text[i] in '+~')):
+        i += 1
+        while i < n and (text[i].isdigit() or text[i] == '~'):
+            i += 1
+    elif i < n and text[i] == '$':
+        i += 1
+    elif i < n and text[i] in '/\\':
+        if text[i] == '\\':
+            if i + 1 >= n or text[i + 1] in '\n\\':
+                return None
+            i += 1
+        i = _sed_delimited(text, i + 1, text[i], brackets)
+        while i is not None and i < n and text[i] in 'IM':
+            i += 1
+    elif second:
+        return None
+    return i
+
+
+def _sed_eol(text, i):
+    j = text.find('\n', i)
+    return len(text) if j < 0 else j
+
+
+def sed_script_reads(text, brackets):
+    """Read a sed script for the files it names and whether it runs a command.
+
+    Returns `(files, runs)`, `files` a list of `(name, is_read)`. Reading stops
+    at the first command sed would reject, keeping the files named before it:
+    sed opens a `w` file as it compiles, so one ahead of the error is still
+    created. Where the two seds' grammars differ the reading takes the one that
+    goes on to read more commands, so a misreading can only add a file.
+    """
+    files, runs, i, n = [], False, 0, len(text)
+    while True:
+        while i < n and text[i] in ' \t\n;':
+            i += 1
+        if i >= n:
+            break
+        if text[i] == '#':
+            i = _sed_eol(text, i)
+            continue
+        start = i
+        i = _sed_address(text, i, brackets)
+        if i is not None and i > start:
+            while i < n and text[i] in ' \t':
+                i += 1
+            if i < n and text[i] == ',':
+                i += 1
+                while i < n and text[i] in ' \t':
+                    i += 1
+                i = _sed_address(text, i, brackets, second=True)
+        if i is None:
+            break
+        while i < n and text[i] in ' \t!':
+            i += 1
+        if i >= n:
+            break
+        c, i = text[i], i + 1
+        if c in '{}':
+            continue
+        if c in SED_FILE_CMDS or c == 'e':
+            while i < n and text[i] in ' \t':
+                i += 1
+            end = _sed_eol(text, i)
+            if c == 'e':
+                runs = True
+            elif end > i:
+                files.append((text[i:end], SED_FILE_CMDS[c]))
+            else:
+                break
+            i = end
+            continue
+        if c in SED_TEXT_CMDS:
+            while i < n and text[i] != '\n':
+                i += 2 if text[i] == '\\' else 1
+            continue
+        if c in SED_LABEL_CMDS:
+            while i < n and text[i] not in ';\n':
+                i += 1
+            continue
+        if c in 'sy':
+            if i >= n or text[i] in '\n\\':
+                break
+            delim = text[i]
+            i = _sed_delimited(text, i + 1, delim, brackets and c == 's')
+            if i is not None:
+                i = _sed_delimited(text, i, delim, False)
+            if i is None:
+                break
+            while c == 's' and i < n and text[i] in SED_S_FLAGS:
+                runs = runs or text[i] == 'e'
+                i += 1
+            if c == 's' and i < n and text[i] == 'w':
+                i += 1
+                while i < n and text[i] in ' \t':
+                    i += 1
+                end = _sed_eol(text, i)
+                if end == i:
+                    break
+                files.append((text[i:end], False))
+                i = end
+                continue
+        elif c in SED_PLAIN_CMDS:
+            while i < n and (text[i].isdigit() or text[i] in ' \t'):
+                i += 1
+        else:
+            break
+        while i < n and text[i] in ' \t':
+            i += 1
+        if i < n and text[i] not in ';\n}#':
+            break
+    return files, runs
+
+
+def _sed_scripts(tokens, bsd):
+    """The script text `sed` runs for `tokens`, under GNU's reading of the argv
+    or (`bsd`) BSD's: there `-i` always takes the next word as its suffix and
+    the first operand ends the options."""
+    exprs, positionals, from_file = [], [], False
+    i, n, end_opts = 1, len(tokens), False
+    while i < n:
+        tok = tokens[i]
+        i += 1
+        if end_opts or tok == '-' or not tok.startswith('-'):
+            positionals.append(tok)
+            end_opts = end_opts or bsd
+            continue
+        if tok == '--':
+            end_opts = True
+            continue
+        if tok.startswith('--'):
+            # GNU takes any unambiguous prefix of a long option.
+            key, val = split_eq(tok)
+            if len(key) < 3 or not any(
+                    o.startswith(key) for o in ('--expression', '--file',
+                                                '--line-length')):
+                continue
+            if val is None and i < n:
+                val, i = tokens[i], i + 1
+            if '--expression'.startswith(key) and val is not None:
+                exprs.append(val)
+            from_file = from_file or '--file'.startswith(key)
+            continue
+        for j, ch in enumerate(tok[1:], 1):
+            if ch in 'ef' or (ch == 'l' and not bsd) or (ch in 'iI' and bsd):
+                val = tok[j + 1:]
+                if not val and i < n:
+                    val, i = tokens[i], i + 1
+                if ch == 'e':
+                    exprs.append(val)
+                from_file = from_file or ch == 'f'
+                break
+            if ch == 'i':
+                break
+    if exprs or from_file:
+        return '\n'.join(exprs)
+    return positionals[0] if positionals else ''
+
+
+def sed_script_files(tokens):
+    """`(files, runs)` for a `sed` command: every file its script names and
+    whether it runs a command, read under both seds' argv and bracket rules and
+    unioned, since the hook cannot see which sed will run. A script read from
+    `-f FILE` is not read; FILE itself is judged as a read like any operand."""
+    files, runs = [], False
+    for bsd in (False, True):
+        for brackets in (False, True):
+            f, r = sed_script_reads(_sed_scripts(tokens, bsd), brackets)
+            files += [x for x in f if x not in files]
+            runs = runs or r
+    return files, runs
+
+
 def files_in_command(tokens):
     """Return list of file-arg tokens for a simple command, or None if unguarded."""
     name = ALIASES.get(os.path.basename(tokens[0]), os.path.basename(tokens[0]))
@@ -5133,6 +5357,16 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
                            entry=entry_mask[i])
             if o is not None:
                 outside.append(o)
+        if cmd_name == 'sed':
+            # A script's `w`/`r` filenames are operands too (Q328), and its `e`
+            # runs a command the hook does not read, like an interpreter's code.
+            sfiles, runs = sed_script_files(g)
+            for f, f_is_read in sfiles:
+                o = check_file(f, cmd_cwd, cmd_cwd_unknown, is_read=f_is_read)
+                if o is not None:
+                    outside.append(o)
+            if runs:
+                signal = signal or 'interpreter'
     track_stable()                                # state after the last group
 
     # A grep's pattern is a pid source only when it filters `ps` output, which is
