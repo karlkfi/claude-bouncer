@@ -1076,6 +1076,12 @@ CASES = [
     ('a gate captured, then echoed', 'out=$(make check); echo "$out"',
      False, False, ''),
     ('a gate assigned in quotes', 'x="$(make check)"', False, False, ''),
+    # `a=($(false))`, `a+=($(false))` and `a=(x $(false) y)` exit 1 too.
+    ('a gate in an array assignment', 'arr=($(make check))', False, False, ''),
+    ('a gate appended to an array', 'arr+=($(make check))', False, False, ''),
+    ('a gate among array elements', 'arr=(x $(make check) y)', False, False, ''),
+    ('a gate in an array assigned for a command',
+     'arr=($(make check)) cmd', False, True, 'command substitution'),
     ('a non-gate echoed', 'echo "$(git log -1)"', False, False, ''),
     ('a gate whose failure is discarded inside',
      'echo "$(make check || true)"', False, False, ''),

@@ -1244,6 +1244,25 @@ SUBST_WORD = '$SUBSTITUTION'
 SUBST_RE = re.compile(re.escape(SUBST_WORD) + r'(\d+)_')
 
 
+def fold_arrays(tokens):
+    """Join each `NAME=(` … `)` compound assignment into one word, whose
+    parens would otherwise split it into segments of their own."""
+    out, i = [], 0
+    while i < len(tokens):
+        t = tokens[i]
+        if (t.endswith('=') and tokens[i + 1:i + 2] == ['(']
+                and is_assignment(t)):
+            j = i + 2
+            while j < len(tokens) and tokens[j] != ')':
+                j += 1
+            out.append('%s(%s)' % (t, ' '.join(tokens[i + 2:j])))
+            i = j + 1
+            continue
+        out.append(t)
+        i += 1
+    return out
+
+
 def operand_gate(cleaned, spans, bodies, states, reg):
     """The head of a gate whose `$(…)` is an operand of a command, or ''.
 
@@ -1258,7 +1277,7 @@ def operand_gate(cleaned, spans, bodies, states, reg):
         start, end = spans[k]
         cleaned = '%s%s%d_%s' % (cleaned[:start], SUBST_WORD, k, cleaned[end:])
     tokens = tokenize(cleaned)[0]
-    segs = split_segments(tokens) if tokens is not None else None
+    segs = split_segments(fold_arrays(tokens)) if tokens is not None else None
     for seg in segs or ():
         words = strip_sh_keywords(seg.tokens)
         held = [int(k) for w in words for k in SUBST_RE.findall(w)]
