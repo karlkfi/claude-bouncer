@@ -1149,6 +1149,14 @@ def command_substitutions(text, quotes=True, spans=None):
                 in_single = False
             i += 1
             continue
+        if regex is not None and quotes and not in_double and i >= quiet:
+            if regex == 'op':                      # ahead of the quote and
+                regex = 'next' if c in ' \t\n' else 'op'   # substitution steps,
+            elif c not in ' \t\n':                 # which also start an operand
+                depth = 0 if regex == 'next' else regex
+                regex = depth + (c == '(') - (c == ')' and depth > 0)
+            elif regex == 0:
+                regex = None
         if c == '\\':                              # escapes next char (not in '')
             brk = brk and text[i+1:i+2] == '\n'    # a continuation joins words
             i += 2
@@ -1193,13 +1201,6 @@ def command_substitutions(text, quotes=True, spans=None):
             continue
         if quotes and not in_double:
             if i >= quiet:                         # strip_comments' `[[` rule
-                if regex == 'op':
-                    regex = 'next' if c in ' \t\n' else 'op'
-                elif regex is not None and c not in ' \t\n':
-                    depth = 0 if regex == 'next' else regex
-                    regex = depth + (c == '(') - (c == ')' and depth > 0)
-                elif regex == 0:
-                    regex = None
                 if brk and text[i+2:i+3] in ('', ' ', '\t', '\n'):
                     if text.startswith('[[', i):
                         dbracket = True

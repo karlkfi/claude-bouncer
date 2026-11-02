@@ -693,6 +693,8 @@ class CommentOutsideSubstitutionTests(unittest.TestCase):
                     "[[ (#it's\n-n x) ]] && echo $(P)",
                     "[[ x =~ ( #it's\n) ]] || $(P)",
                     "[[ x =~ \"a\" ]] #it's\n$(P)",
+                    "[[ x =~ \"a\" ]];#it's\n$(P)", "[[ x =~ \\a ]];#it's\n$(P)",
+                    "[[ x =~ $(true) ]];#it's\n$(P)",
                     '[[ x =~ (a|#$(P)) ]]', '[[ x =~ a(#$(P)) ]]'):
             cmd = cmd.replace('P', self.P)
             with self.subTest(cmd=cmd):
