@@ -782,9 +782,10 @@ def _scan_dollar_paren(text, start):
     close — or ``(None, start)`` if no balanced terminator is found. Paren
     nesting, single/double quotes, and backslash escapes inside the body are
     tracked so a ``)`` inside a quoted string or a nested ``(…)``/``$(…)`` does
-    not close early. Quote tracking is flat (it does not recurse into nested
-    substitutions); on the exotic input where that mis-locates the close, the
-    body handed to shlex is unbalanced and analysis defers for it — fail-safe.
+    not close early. Outside double quotes, quote tracking is flat (it does not
+    recurse into nested substitutions); on the exotic input where that
+    mis-locates the close, the body handed to shlex is unbalanced and analysis
+    defers for it — fail-safe.
 
     A ``case`` clause is tracked too, because its pattern's ``)`` needs no
     opener: in ``$(case $x in a) cmd;; esac)`` the first ``)`` ends the pattern
@@ -829,7 +830,13 @@ def _scan_dollar_paren(text, start):
     quotes too, where a quote inside one nests. bash reads a
     ``#`` in one as text, or ends its comment at the closing backtick, and a
     ``)`` in one closes nothing: ``"$(echo ${y:- #}; cmd)"`` and
-    ``"$(echo `echo )`; cmd)"`` both run ``cmd``.
+    ``"$(echo `echo )`; cmd)"`` both run ``cmd``. A nested ``$(…)`` in double
+    quotes is scanned as a body of its own (Q325), so the ``"`` in
+    ``"$(echo "$(echo ")")" ; cmd)"`` closes nothing. Its state is pushed on
+    ``frames`` rather than recursed into, because any depth cap leaves a
+    reading past it that misplaces the close. A ``$((…))`` there is not
+    stepped over: a paren in double quotes closes nothing anyway, and counting
+    its parens flat would miscount a quoted one in a ``$(…)`` inside it.
     """
     i, n = start, len(text)
     in_single = in_double = False
@@ -839,6 +846,7 @@ def _scan_dollar_paren(text, start):
     parens = []           # one per open `(`: True for a `$(`, `<(` or `>(`
     brk = True            # a `#` here would start a word, so a comment
     dollar = -2           # index of the last unquoted, unescaped `$`
+    frames = []           # the state around each open double-quoted `$(`
     while i < n:
         c = text[i]
         if in_single:
@@ -852,6 +860,13 @@ def _scan_dollar_paren(text, start):
                 continue
             if c == '"':
                 in_double = False
+            elif text.startswith('$(', i) and not text.startswith('$((', i):
+                frames.append((cmd_pos, clauses, pending, parens, brk, dollar))
+                in_double = False
+                cmd_pos = brk = True
+                clauses, pending, parens, dollar = [], [], [], -2
+                i += 2
+                continue
             end = _brace_end(text, i) if text.startswith('${', i) else -1
             if end < 0 and c == '`':
                 end = _scan_backticks(text, i + 1)[1]
@@ -953,6 +968,11 @@ def _scan_dollar_paren(text, start):
             i += 1
             continue
         if c == ')':
+            if not parens and frames:
+                cmd_pos, clauses, pending, parens, brk, dollar = frames.pop()
+                in_double = True
+                i += 1
+                continue
             if not parens:
                 return (text[start:i], i + 1)
             brk = not parens.pop()                # `$(a)#b` is one word too

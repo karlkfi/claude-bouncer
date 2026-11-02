@@ -560,6 +560,45 @@ class CommentInSubstitutionTests(unittest.TestCase):
                 self.assertEqual([body], bp.command_substitutions(
                     'echo "$(%s)" T' % body))
 
+    def test_a_nested_substitution_in_double_quotes_holds_its_quotes(self):
+        # bash runs the `cat` in each (Q325): a `"` inside the nested `$(…)`,
+        # in `$((…))` or not, closes nothing in the outer body.
+        for body in ('echo "$(echo ")")" ; cat /etc/passwd',
+                     'echo "$(echo "#)")" ; cat /etc/passwd',
+                     'echo "$(( $(echo "(" | wc -c) ))" ; cat /etc/passwd',
+                     'echo "$(( "1" + 2 ))" ; cat /etc/passwd'):
+            with self.subTest(body=body):
+                self.assertEqual([body], bp.command_substitutions(
+                    'echo "$(%s)" T' % body))
+                self.assertEqual([body], bp.command_substitutions(
+                    'x=$(%s) T' % body))
+        # The nested body still comes back when the outer one is scanned.
+        self.assertEqual(['echo ")"'], bp.command_substitutions(
+            'echo "$(echo ")")" ; cat /etc/passwd'))
+
+    def test_deep_double_quoted_nesting_holds_its_quotes_at_any_depth(self):
+        # Depth 26 is past MAX_SUBST_DEPTH, where a capped recursion read
+        # flat again and closed the outer body before the `cat`.
+        for depth in (1, 25, 26, 27, 1000):
+            body = 'echo ")"'
+            for _ in range(depth):
+                body = 'echo "$(%s)"' % body
+            body += ' ; cat /etc/passwd'
+            with self.subTest(depth=depth):
+                self.assertEqual([body], bp.command_substitutions(
+                    'echo "$(%s)" T' % body))
+                bp.strip_comments('echo "$(%s)"' % body)
+
+    def test_a_brace_span_in_double_quotes_adds_no_recursion(self):
+        # `${…}` alternating with `$(` still recurses through `_brace_end`
+        # (Q337); stepping over it here must not deepen that per level.
+        body = 'echo ")"'
+        for _ in range(400):
+            body = 'echo "${x:-$(%s)}"' % body
+        body += ' ; cat /etc/passwd'
+        self.assertEqual([body], bp.command_substitutions(
+            'echo "$(%s)" T' % body))
+
 
 class CommentOutsideSubstitutionTests(unittest.TestCase):
     """A top-level comment opens no substitution and no quote (Q258).
