@@ -187,6 +187,17 @@ GIT_LONG_OPTS = {sub: frozenset('--' + o for o in names.split())
         'set-upstream-to show-current sort track unset-upstream verbose '
         'with without '
     ),
+    'checkout': (
+        'auto-advance conflict detach force guess ignore-other-worktrees '
+        'ignore-skip-worktree-bits inter-hunk-context merge no-auto-advance '
+        'no-conflict no-detach no-force no-guess no-ignore-other-worktrees '
+        'no-ignore-skip-worktree-bits no-merge no-orphan no-overlay '
+        'no-overwrite-ignore no-patch no-pathspec-file-nul '
+        'no-pathspec-from-file no-progress no-quiet no-recurse-submodules '
+        'no-track orphan ours overlay overwrite-ignore patch '
+        'pathspec-file-nul pathspec-from-file progress quiet '
+        'recurse-submodules theirs track unified '
+    ),
     'switch': (
         'conflict create detach discard-changes force force-create guess '
         'ignore-other-worktrees merge no-conflict no-create no-detach '
@@ -2006,13 +2017,25 @@ def _feature(branch, reason=None):
     return ('allow', None)
 
 
-def short_flag_letters(args):
+def short_flag_letters(args, value_letters=''):
     """Letters from combined short-flag tokens (`-fd` -> {'f','d'}), so a
-    bundled flag is recognized the same as if it were written separately."""
-    letters = set()
+    bundled flag is recognized the same as if it were written separately.
+    Given `value_letters`, a bundle stops at the first of them, as git reads
+    it: the rest of the token, or the next argument when the token ends
+    there, is that option's value (`checkout -bf n` creates `f`)."""
+    letters, value_next = set(), False
     for a in args:
+        if value_next:
+            value_next = False
+            continue
+        if a == '--' and value_letters:
+            break
         if len(a) > 1 and a[0] == '-' and a[1] != '-':
-            letters |= set(a[1:])
+            for j, c in enumerate(a[1:], 1):
+                letters.add(c)
+                if c in value_letters:
+                    value_next = j == len(a) - 1
+                    break
     return letters
 
 
@@ -2365,6 +2388,11 @@ def classify_git(sub, args, branch, policy, cwd, probe, mode='',
             return force_create_verdict(name, '`git switch -C`', cwd, probe)
         return ('allow', None)            # create (-c) or plain switch; git refuses if unsafe
     if sub == 'checkout':
+        # Only the create forms are ruled on here, so a force that rides one
+        # asks as `switch -f` does; a bare `checkout -f` keeps its defer below.
+        letters = short_flag_letters(args, 'bB')
+        if letters & {'b', 'B'} and ('f' in letters or '--force' in flags):
+            return ('ask', "`git checkout -f` would discard changes")
         name = force_create_name(args, 'B', {'b', 'B'})
         if name is not None:
             return force_create_verdict(name, '`git checkout -B`', cwd, probe)

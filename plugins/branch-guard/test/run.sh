@@ -874,6 +874,23 @@ check "git switch -c new -> allow" allow \
   "$(decision_for "$(bash_cmd 'git switch -c newbranch')" "$WORK")"
 check "git checkout -b new -> allow" allow \
   "$(decision_for "$(bash_cmd 'git checkout -b newbranch')" "$WORK")"
+# A force on the create discards edits to tracked files, as `switch -f` does
+# (Q329). `--forc` and `--f` are git's own prefixes of `--force`. In `-bf` and
+# `-Bf` the `f` is the branch name, and after `--` it is a path, so neither
+# forces anything; a bare `checkout -f` names no create and keeps its defer.
+for c in "git checkout -f -b newbranch" "git checkout -fb newbranch" \
+         "git checkout -b newbranch -f" "git checkout --force -b newbranch" \
+         "git checkout --forc -b newbranch" "git checkout --f -b newbranch" \
+         "git checkout -f -B newbranch" "git checkout -fB newbranch" \
+         "git switch -f -c newbranch"; do
+  check "forced create: $c -> ask" ask "$(decision_for "$(bash_cmd "$c")" "$WORK")"
+done
+for c in "git checkout -bf newbranch" "git checkout -Bf newbranch" \
+         "git checkout -b newbranch -- -f"; do
+  check "unforced create: $c -> allow" allow "$(decision_for "$(bash_cmd "$c")" "$WORK")"
+done
+check "git checkout -f (no create) -> none (defer)" none \
+  "$(decision_for "$(bash_cmd 'git checkout -f')" "$WORK")"
 check "git worktree add -> allow" allow \
   "$(decision_for "$(bash_cmd 'git worktree add ../wt feature')" "$WORK")"
 
