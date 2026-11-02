@@ -1265,17 +1265,41 @@ git -C "$WORK" checkout -q claude/x
 check "git -c pager log -> none (defer, not allow)" none \
   "$(decision_for "$(bash_cmd 'git -c core.pager=cat log')" "$WORK")"
 #     The same config set from the environment, which git reads the way it
-#     reads `-c` (Q305), beside a variable git never reads.
+#     reads `-c` (Q305).
 for e in 'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0=cat' \
          "GIT_CONFIG_PARAMETERS='core.pager=cat'"; do
   check "$e git log -> none (defer, not allow)" none \
     "$(decision_for "$(bash_payload "$e git log")" "$WORK")"
 done
-check "FOO=1 git log -> allow" allow \
-  "$(decision_for "$(bash_cmd 'FOO=1 git log')" "$WORK")"
+#     Any variable outside the data git and gh only read withdraws the allow
+#     the same way (Q332): it may name a program git runs, and those have no
+#     end, so the safe set is the one named and `FOO=1` defers with the rest.
+for e in "GIT_EXTERNAL_DIFF='echo x'" "GIT_SSH_COMMAND='echo x'" 'GIT_SSH=x' \
+         'GIT_ASKPASS=x' "GIT_PAGER='echo x'" "PAGER='echo x'" \
+         "GIT_SEQUENCE_EDITOR='sed -i x'" 'GIT_EDITOR+=true' 'GIT_EXEC_PATH=/x' \
+         'PATH=/x' 'HOME=/x' 'XDG_CONFIG_HOME=/x' 'LD_PRELOAD=/x.so' \
+         'DYLD_INSERT_LIBRARIES=/x.dylib' 'FOO=1' 'env GIT_EXTERNAL_DIFF=x' \
+         'sudo GIT_SSH_COMMAND=x'; do
+  check "$e git log -> none (defer, not allow)" none \
+    "$(decision_for "$(bash_payload "$e git log")" "$WORK")"
+done
+check "GH_PAGER='echo x' gh pr view 1 -> none" none \
+  "$(decision_for "$(bash_payload "GH_PAGER='echo x' gh pr view 1")" "$WORK")"
+#     The data git reads, a guard's own override, and an editor or pager set
+#     to a no-op keep the allow; the last is the idiom sessions actually set.
+for c in 'TZ=UTC git log' 'LC_ALL=C git log' 'LANG=C git log' \
+         'GIT_AUTHOR_DATE=2026-01-01 git commit -m x' 'GIT_PAGER=cat git log' \
+         'EXIT_STATUS_GUARD_OVERRIDE=why git log' \
+         'GIT_EDITOR=true git commit --amend' \
+         'GIT_SEQUENCE_EDITOR=: git rebase -i HEAD~1' 'GH_PAGER=cat gh pr view 1' \
+         'GH_HOST=github.com gh pr view 1'; do
+  check "$c -> allow" allow "$(decision_for "$(bash_payload "$c")" "$WORK")"
+done
 git -C "$WORK" checkout -q main
 check "git -c k=v commit on main -> ask (still gated)" ask \
   "$(decision_for "$(bash_cmd 'git -c user.name=x commit -m y')" "$WORK")"
+check "GIT_EXTERNAL_DIFF=x git commit on main -> ask (still gated)" ask \
+  "$(decision_for "$(bash_cmd 'GIT_EXTERNAL_DIFF=x git commit -m y')" "$WORK")"
 git -C "$WORK" checkout -q claude/x
 
 # 17. Read-only gh allowlist; gh mutations defer to the normal flow.
@@ -2192,17 +2216,19 @@ check "override with a -c escape hatch -> ask" ask \
 check "override aimed at another repo -> ask" ask \
   "$(decision_for "$(bash_payload "$OVR git -C /somewhere/else clean -fd")" "$WORK")"
 #     The last two in their environment spelling, as a prefix and as an `env`
-#     or `sudo` operand (Q305). A variable git does not read leaves the lift
-#     alone, and so do the two spellings that set no GIT_DIR: `env` exports
-#     `GIT_DIR+` under that literal name, and bash refuses a subscript prefix.
+#     or `sudo` operand (Q305), and any variable outside the safe set (Q332),
+#     `GIT_DIR+` among them, which `env` exports under that literal name. A
+#     safe variable leaves the lift alone, and so does a subscript prefix,
+#     which bash refuses.
 for e in 'GIT_DIR=/elsewhere/.git' 'GIT_WORK_TREE=/elsewhere' \
          'GIT_INDEX_FILE=/elsewhere/index' 'env GIT_DIR=/elsewhere/.git' \
          'sudo GIT_DIR=/elsewhere/.git' 'GIT_CONFIG_COUNT=1' \
-         "GIT_CONFIG_PARAMETERS='core.pager=x'"; do
+         "GIT_CONFIG_PARAMETERS='core.pager=x'" 'FOO=1' \
+         "env 'GIT_DIR+=/elsewhere'" "GIT_SSH_COMMAND='echo x'"; do
   check "override with $e -> ask" ask \
     "$(decision_for "$(bash_payload "$e $OVR git clean -fd")" "$WORK")"
 done
-for e in 'FOO=1' "env 'GIT_DIR+=/elsewhere'" 'GIT_DIR[0]=/elsewhere'; do
+for e in 'TZ=UTC' 'GIT_DIR[0]=/elsewhere'; do
   check "override with $e -> allow" allow \
     "$(decision_for "$(bash_payload "$e $OVR git clean -fd")" "$WORK")"
 done
@@ -3104,18 +3130,18 @@ done
 printf 'dirty\n' >> "$WRAP/file.txt"
 check "[wrap][dontAsk] control: override on reset --hard, dirty -> allow" allow \
   "$(decision_for "$(bash_mode "$OVR git reset --hard" dontAsk)" "$WRAP")"
-for w in 'timeout 5' 'env' 'env -i' 'env FOO=1' 'nice' 'nohup' 'command' \
+for w in 'timeout 5' 'env' 'env -i' 'env TZ=UTC' 'nice' 'nohup' 'command' \
          'stdbuf -o0' 'setsid' 'time' 'exec' 'sudo' 'sudo -u root' \
          'timeout 5 sudo -n'; do
   check "[wrap][dontAsk] override on $w reset --hard, dirty -> allow" allow \
     "$(decision_for "$(bash_mode "$OVR $w git reset --hard" dontAsk)" "$WRAP")"
 done
 for w in 'env BRANCH_GUARD_OVERRIDE=why' 'env -i BRANCH_GUARD_OVERRIDE=why' \
-         "env 'BRANCH_GUARD_OVERRIDE=why'" 'env FOO=1 BRANCH_GUARD_OVERRIDE=why' \
+         "env 'BRANCH_GUARD_OVERRIDE=why'" 'env TZ=UTC BRANCH_GUARD_OVERRIDE=why' \
          'timeout 5 env BRANCH_GUARD_OVERRIDE=why' \
          'sudo BRANCH_GUARD_OVERRIDE=why' 'sudo -u root BRANCH_GUARD_OVERRIDE=why' \
          'sudo BRANCH_GUARD_OVERRIDE=why -u root' \
-         'sudo A=1 -n BRANCH_GUARD_OVERRIDE=why'; do
+         'sudo TZ=UTC -n BRANCH_GUARD_OVERRIDE=why'; do
   check "[wrap][dontAsk] $w git reset --hard, dirty -> allow" allow \
     "$(decision_for "$(bash_mode "$w git reset --hard" dontAsk)" "$WRAP")"
 done

@@ -112,7 +112,7 @@ import sys, os, json, re, shlex, subprocess, fnmatch
 # copy under this plugin's `lib/` is vendored; see scripts/sync-lib.py.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 from bouncer_parse import (                                   # noqa: E402
-    ASSIGN_SUBSCRIPT, PUNCT_CHARS, is_assignment, lex, note_discarded_writes,
+    ASSIGN_PLAIN, ASSIGN_SUBSCRIPT, PUNCT_CHARS, is_assignment, lex, note_discarded_writes,
     split_assignment, split_operator_runs, strip_sh_keywords,
 )
 from bouncer_grants import load_grants, record_grants         # noqa: E402
@@ -363,6 +363,22 @@ GIT_REPO_ENV = frozenset({'GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR',
 # index or objects, and the branch a commit lands on stays the one found
 # from the directory.
 GIT_HEAD_ENV = frozenset({'GIT_DIR', 'GIT_COMMON_DIR'})
+
+# Variables a prefix may set beside an allow: data git and gh read and never
+# run (Q332). Every other name can run a program (`GIT_EXTERNAL_DIFF`,
+# `GIT_SSH_COMMAND`, `PATH`, `LD_PRELOAD`) or point at config that does
+# (`HOME`, `GIT_CONFIG*`), and that list has no end, so the safe one is named.
+SAFE_ENV = GIT_REPO_ENV | frozenset({
+    'GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_AUTHOR_DATE',
+    'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL', 'GIT_COMMITTER_DATE',
+    'GIT_TERMINAL_PROMPT', 'GIT_OPTIONAL_LOCKS', 'TZ', 'LANG', 'NO_COLOR',
+    'GH_HOST', 'GH_REPO', 'GH_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_TOKEN',
+})
+# An editor or pager names a program, and the idiom that sets one beside an
+# allow (`GIT_EDITOR=true git rebase --continue`) names one that does nothing.
+NOOP_PROGRAM_ENV = frozenset({'GIT_EDITOR', 'GIT_SEQUENCE_EDITOR', 'EDITOR',
+                              'VISUAL', 'GIT_PAGER', 'PAGER', 'GH_PAGER'})
+NOOP_PROGRAMS = frozenset({'true', ':', 'cat'})
 
 # Refs whose reachability makes a branch tip RECOVERABLE: any remote-tracking
 # branch, or a local integration branch. If one of these contains the tip, the
@@ -1401,17 +1417,20 @@ def parse_invocation(tokens):
     and program global options so `FOO=bar git -C path -c k=v commit -m x` ->
     {'prog': 'git', 'sub': 'commit', 'args': ['-m','x'],
      'globals': ['-C','path','-c','k=v'], 'wrapped': False, 'chdir': [],
-     'env': {'FOO'}}. `env` names every variable the command sets for git,
-    from the prefix and from an `env` or `sudo` operand."""
-    i, env = 0, set()
+     'env': {'FOO': 'bar'}}. `env` maps every variable the command sets for
+    git, from the prefix and from an `env` or `sudo` operand, to its value —
+    None for `NAME+=v`, whose result depends on what was already set."""
+    i, env = 0, {}
     while i < len(tokens) and is_assignment(tokens[i]):
-        name, form, _ = split_assignment(tokens[i])
+        name, form, value = split_assignment(tokens[i])
         if form != ASSIGN_SUBSCRIPT:
-            env.add(name)
+            env[name] = value if form == ASSIGN_PLAIN else None
         i += 1
     operands = []
     peeled, chdir = peel_wrappers(tokens[i:], operands)
-    env.update(split_assignment(t, append_is_operator=False)[0] for t in operands)
+    for t in operands:
+        name, _, value = split_assignment(t, append_is_operator=False)
+        env[name] = value
     if not peeled:
         return None
     wrapped = tokens[i].rsplit('/', 1)[-1] in WRAPPER_VALUE_OPTS
@@ -2647,13 +2666,22 @@ def targets_other_repo(globals_):
 def env_redirects(inv):
     """True when the command sets a variable that aims git at another
     repository, index or object store, as `--git-dir` does."""
-    return bool(inv['env'] & GIT_REPO_ENV)
+    return bool(inv['env'].keys() & GIT_REPO_ENV)
 
 
-def env_configures(inv):
-    """True when the command sets a variable git reads config from, as `-c`
-    does."""
-    return any(n.startswith('GIT_CONFIG') for n in inv['env'])
+def env_runs(inv):
+    """True when the command sets a variable outside SAFE_ENV, which may run a
+    program the classifier never saw, as `-c` can. A guard's own
+    `*_OVERRIDE` is read by hooks alone, and an editor or pager set to a no-op
+    runs nothing."""
+    for name, value in inv['env'].items():
+        if name in SAFE_ENV or name.startswith('LC_') \
+                or name.endswith('_OVERRIDE'):
+            continue
+        if name in NOOP_PROGRAM_ENV and value in NOOP_PROGRAMS:
+            continue
+        return True
+    return False
 
 
 def git_cwd(cwd, globals_, head_only=False):
@@ -2694,7 +2722,7 @@ def invocation_cwd(cwd, inv, head_only=False):
     does on a `-C` only the shell can compute, and so does a repository
     variable, as `git_cwd` does on a `--git-dir`. `head_only` is `git_cwd`'s,
     and keeps only the variables in GIT_HEAD_ENV as redirects."""
-    if inv['env'] & (GIT_HEAD_ENV if head_only else GIT_REPO_ENV):
+    if inv['env'].keys() & (GIT_HEAD_ENV if head_only else GIT_REPO_ENV):
         return None
     for hop in inv['chdir']:
         if hop is None or not is_literal_path(hop):
@@ -2766,12 +2794,13 @@ def is_overridable(inv, verdict, writes):
     session may not own — the one thing "damage stops at this machine" has to
     rule out; and a `git -c`/`--config-env` escape hatch can run arbitrary code
     (`-c core.pager='!sh …'`). Both of the last two count in their environment
-    spelling as well, `GIT_DIR=…` and `GIT_CONFIG_COUNT=…`. Any other wrapper runs the same git on the same
+    spelling as well, `GIT_DIR=…` and any variable `env_runs` reads as able to
+    run a program, `GIT_CONFIG_COUNT=…` among them. Any other wrapper runs the same git on the same
     checkout, so the loss it lifts is the one the classifier measured."""
     if inv is None or writes or inv['chdir'] or inv['prog'] != 'git':
         return False
     if set(inv['globals']) & GIT_ESCAPE_HATCHES or targets_other_repo(inv['globals']) \
-            or env_redirects(inv) or env_configures(inv):
+            or env_redirects(inv) or env_runs(inv):
         return False
     if verdict == 'deny-rebase':
         return inv['sub'] == 'push'
@@ -2808,7 +2837,7 @@ def classify_segment(inv, branch, policy, cwd, probe, mode='', session_id=''):
     # does the same: it is peeled to find the protective verdicts (Q223), and
     # what it adds -- another user, a cleared or extra environment -- is
     # nothing the classifier read, so it approves nothing.
-    if verdict == 'allow' and (inv['wrapped'] or env_configures(inv)
+    if verdict == 'allow' and (inv['wrapped'] or env_runs(inv)
                                or set(inv['globals']) & GIT_ESCAPE_HATCHES):
         return ('defer', None)
     return (verdict, reason)

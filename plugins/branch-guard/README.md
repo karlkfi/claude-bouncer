@@ -161,6 +161,8 @@ the default `strict` [push policy](#push-guard).
 | `git checkout file.txt` *(ambiguous: branch vs. file)* | defer |
 | `git -c core.pager=cat log` *(inline-config escape hatch)* | defer |
 | `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager … git log` / `GIT_CONFIG_PARAMETERS=… git log` *(the same hatch from the environment)* | defer |
+| `GIT_EXTERNAL_DIFF=x git diff` / `GIT_SSH_COMMAND=x git fetch` / `PATH=… git status` / `FOO=1 git log` *(any prefix variable outside the data git reads: it may name a program to run)* | defer |
+| `GIT_EDITOR=true git rebase --continue` / `GIT_PAGER=cat git log` / `TZ=UTC git log` *(an editor or pager set to `true`, `:` or `cat`, author and committer data, `TZ`, `LANG`, `LC_*`)* | allow |
 | `gh pr create` / `gh pr merge 5` / `gh pr merge 5 --delete-branch` / `gh run rerun` *(gh mutation; the merge lands the work before the branch is deleted)* | defer |
 | `gh api -X POST …` / `gh api … -f k=v` *(a write: non-GET method or a request body)* | defer |
 | `gh api -X DELETE user/following/x` / `gh api -X DELETE repos/o/r/issues/comments/1` *(non-repo API delete — not a recognized destructive endpoint)* | defer |
@@ -497,10 +499,10 @@ already approved — see the exception below.
   (which can run arbitrary code), and a `git -C`/`--git-dir` aimed at another
   repository all keep the ask, as does a wrapper that changes directory
   (`env -C`, `sudo -D`, `sudo -i`). The last two count in their environment
-  spelling too, whether set as a prefix or as an `env` or `sudo` operand: any
-  `GIT_CONFIG*` variable, and `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`,
-  `GIT_INDEX_FILE` or an object-directory variable. Any other wrapper or
-  variable is lifted with it.
+  spelling too, whether set as a prefix or as an `env` or `sudo` operand:
+  `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, `GIT_INDEX_FILE` or an
+  object-directory variable, and any variable that defers an allow (a
+  `GIT_CONFIG*` variable among them). Any other wrapper is lifted with it.
 - **A command carrying anything unrecognized.** The all-segments rule applies
   unchanged, so `BRANCH_GUARD_OVERRIDE=… git clean -fd && rm -rf junk` still asks.
   A safe segment alongside is fine: `… git status && git clean -fd` is lifted,
@@ -941,7 +943,10 @@ update step and restart.
    downgrade a would-be `allow` to defer
    without ever weakening a protective `ask`: an inline-config escape hatch
    (`git -c core.pager='!sh …' log`, or a `GIT_CONFIG*` variable carrying the
-   same config), and a hidden command/process substitution
+   same config) or any prefix variable outside the short list of data git and
+   gh only read (`GIT_EXTERNAL_DIFF`, `GIT_SSH_COMMAND`, `PATH`, `HOME`,
+   `LD_PRELOAD`, an editor or pager set to anything but `true`, `:` or `cat`),
+   and a hidden command/process substitution
    in the raw token stream (`` `…` ``, `$(…)`, `<(…)`/`>(…)`, or an unrecognized
    operator run like `<>`) — checked over the raw tokens, before redirect targets
    are dropped, so `` git diff > `evil` `` is caught too. A small registry of
