@@ -429,7 +429,7 @@ def strip_comments(cmd):
             if cmd[i+1] == '\n':                   # continuation -> one logical line
                 i += 2
                 continue
-            out.append(c); out.append(cmd[i+1]); i += 2
+            out.append(cmd[i:i+2]); i += 2         # `\ ` opens no word (Q324)
             continue
         if in_double:
             end = _dq_expansion_end(cmd, i)
@@ -641,7 +641,9 @@ def strip_heredoc_bodies(cmd, expanded=None, unterminated=None,
             i += 1
             continue
         if c == '\\' and i + 1 < n:               # escapes, quoted or not
-            out.append(c); out.append(cmd[i+1]); last = cmd[i+1]; i += 2
+            out.append(c); out.append(cmd[i+1]); i += 2
+            if cmd[i-1] != '\n':                  # a continuation joins words
+                last = c                          # `\ ` opens no word (Q324)
             continue
         # A substitution body is parsed in its own quote context, so these two
         # openers are recognised whether or not a `"` is still open.
