@@ -279,9 +279,13 @@ Compound commands are split and each segment evaluated: `&&`, `||`, `|`,
 `nohup`, `time`, `nice`, `ionice`, `setsid`, `chrt`, `taskset`). So are
 the bodies of `{ …; }`, `if`/`then`/`else`, `while`/`until`/`for`/`select`
 loops, `case` arms, a command behind `!`, and a function body, which is
-judged where it is written. An assignment in a body bash may not run (a
+judged where it is written and again at each call, against the values in
+scope there. A call or `eval` nested deeper than the guard reads asks. An assignment in a body bash may not run (a
 conditional, a loop, a function until it is called) leaves the name's value
-unknown, so a target that reads it prompts. A guard
+unknown, so a target that reads it prompts. So does a name set with no value
+the guard can read: by `read`, `printf -v`, `mapfile`, `getopts`, `unset` or a
+`for` loop, and every name after `source`, `.`, or a `bash -c` that a
+`BASH_ENV` file runs ahead of. A guard
 that only inspected the first token would be trivially bypassed by
 `echo hi && kubectl --context prod delete ns x`. A substitution is split out
 inside double quotes and unquoted heredoc bodies too, where bash still runs

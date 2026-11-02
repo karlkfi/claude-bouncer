@@ -3724,6 +3724,79 @@ class SpecialCaseTests(unittest.TestCase):
                     pre + "kubectl --context $C delete ns x", home=home)[0],
                     "ask")
 
+    def test_a_name_set_with_no_value_to_read_is_unknown(self):
+        # bash 5.3.15 runs each of these with `$C` reassigned or unset, so the
+        # earlier kind-ci no longer stands and the mutation asks (Q299).
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        k = "kubectl --context $C delete ns x"
+        for mid in ("source x.sh", ". x.sh", "read C", "read -r A C",
+                    "read -raC", "IFS=, read C", "builtin read C",
+                    "printf -v C %s y", "printf -vC %s y", "mapfile C < f",
+                    "readarray -t C < f", "getopts a C", "unset C",
+                    "unset -v C", "if false; then source x.sh; fi",
+                    "f() { read C; }; f", "eval 'read C'",
+                    "eval C=gke_acme_prod-us; (true)",
+                    "for C in a b; do :; done",
+                    # A name operand the guard cannot read may be any name
+                    # (#300 review).
+                    'read "$(echo C)" < f', "read `echo C` < f",
+                    'read -a "$(echo C)" < f', 'mapfile -t "$(echo C)" < f',
+                    'printf -v "$(echo C)" %s y', 'unset "$(echo C)"',
+                    "read C[0]"):
+            with self.subTest(mid=mid):
+                self.assertEqual(run_hook(
+                    "C=kind-ci; %s; %s" % (mid, k), home=home)[0], "ask")
+        for cmd in ("C=kind-ci; for C in a b; do %s; done" % k,
+                    "while read C; do %s; done < f" % k,
+                    "C=kind-ci BASH_ENV=x.sh bash -c '%s'" % k,
+                    "env C=kind-ci BASH_ENV=x.sh bash -c '%s'" % k,
+                    "env C=kind-ci bash -c 'read C; %s'" % k,
+                    "env C=kind-ci bash -c 'source x; %s'" % k):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(run_hook(cmd, home=home)[0], "ask")
+        # A name the builtin does not set keeps its value, and one set apart
+        # dies there.
+        for mid in ("read X", "read -p C X", "printf %s C", "(read C)",
+                    "read C | true", "f() { read C; }"):
+            with self.subTest(mid=mid):
+                self.assertIsNone(run_hook(
+                    "C=kind-ci; %s; %s" % (mid, k), home=home)[0])
+        self.assertIsNone(run_hook(
+            "C=kind-ci bash -c '%s'" % k, home=home)[0])
+
+    def test_a_function_body_is_judged_again_where_it_is_called(self):
+        # The call's prefix, and a value assigned after the definition, are
+        # what the body runs with: bash 5.3.15 prints `in-body [y]` for
+        # `C=kind-ci; f() { echo "in-body [$C]"; }; C=y f` (Q299).
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        f = "f() { kubectl --context $C delete pod x; }; "
+        for cmd in (f + "C=gke_acme_prod-us f",
+                    "C=kind-ci; " + f + "C=gke_acme_prod-us f",
+                    "C=kind-ci; " + f + "C=gke_acme_prod-us; f",
+                    "C=kind-ci; " + f + "if true; then C=gke_acme_prod-us f; fi",
+                    # And a call from another body or from `eval` (#300 review).
+                    "C=kind-ci; " + f + "g() { f; }; C=gke_acme_prod-us g",
+                    "C=kind-ci; " + f + "g() { f; }; C=gke_acme_prod-us; g",
+                    "C=kind-ci; " + f + "eval 'C=gke_acme_prod-us f'"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(run_hook(cmd, home=home)[0], "deny")
+        # A body holding `eval` is judged like any other (#300 review), and a
+        # chain deeper than the guard reads asks rather than passing.
+        with self.subTest(cmd="g() { eval true; }; g"):
+            self.assertEqual(run_hook(
+                "g() { eval true; }; g; kubectl --context gke_acme_prod-us "
+                "delete pod x", home=home)[0], "deny")
+        chain = "C=kind-ci; " + f + "g() { f; }; h() { g; }; "
+        for cmd in (chain + "i() { h; }; C=gke_acme_prod-us i",
+                    chain + "C=gke_acme_prod-us eval h"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(run_hook(cmd, home=home)[0], "ask")
+        for cmd in ("C=kind-ci; " + f + "f", "C=kind-ci; " + f + "C=kind-ci f",
+                    "C=kind-ci; " + f + "(C=gke_acme_prod-us); f",
+                    "C=kind-ci; " + f + "g() { f; }; g"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(run_hook(cmd, home=home)[0])
+
     def test_strip_keywords_takes_time_and_its_options(self):
         # `time`'s `-p` and `--` go with it, so an assignment behind them is
         # left at the head for the prefix peel (Q241).
