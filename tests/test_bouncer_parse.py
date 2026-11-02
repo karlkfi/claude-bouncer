@@ -42,6 +42,17 @@ class StripCommentsTests(unittest.TestCase):
         # bash starts a comment only at the start of a word; shlex does not.
         self.assertEqual('echo file#1', bp.strip_comments('echo file#1'))
 
+    def test_a_hash_after_an_escaped_blank_is_text(self):
+        # bash reads `\ ` as a space inside the word and runs `id` in each
+        # (Q324); an escaped backslash leaves the blank unescaped, so there the
+        # `#` does start a comment.
+        for cmd in ('echo a\\ #b ; id', '[[ x =~ a\\ #b ]] || id',
+                    'echo a\\\t#b ; id'):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(cmd, bp.strip_comments(cmd))
+        self.assertEqual('echo a\\\\ ', bp.strip_comments('echo a\\\\ #b ; id'))
+        self.assertEqual('echo a ', bp.strip_comments('echo a \\\n#b ; id'))
+
     def test_continuation_is_folded(self):
         # Came from exit-status-guard. Left in place, `tokenize` makes the
         # newline a command boundary and an `&&` chain written across two lines
@@ -163,6 +174,26 @@ class StripHeredocBodiesTests(unittest.TestCase):
     def test_arithmetic_shift_is_not_a_heredoc(self):
         self.assertEqual('echo $((1<<3))', bp.strip_heredoc_bodies('echo $((1<<3))'))
         self.assertEqual('((a<<b)); echo hi', bp.strip_heredoc_bodies('((a<<b)); echo hi'))
+
+    def test_a_heredoc_after_an_escaped_blank_and_hash_is_one(self):
+        # bash 5.3.15 reads the `#` in the first two as text, so `<<EOF` opens
+        # a body; in the last two it is a comment and `id` runs (Q324).
+        self.assertEqual('cat a\\ #<<EOF\n',
+                         bp.strip_heredoc_bodies('cat a\\ #<<EOF\nid\nEOF'))
+        self.assertEqual('echo a\\\n#<<EOF\n',
+                         bp.strip_heredoc_bodies('echo a\\\n#<<EOF\nid\nEOF'))
+        for cmd in ('cat a\\\\ #<<EOF\nid\nEOF', 'echo a \\\n#<<EOF\nid\nEOF'):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(cmd, bp.strip_heredoc_bodies(cmd))
+
+    def test_a_backtick_body_keeps_the_line_after_an_escaped_blank(self):
+        # bash halves a backtick body's `\\` before parsing it, so 3 or 7
+        # backslashes there leave an even run, the `#` is a comment, and `id`
+        # runs. Inside backticks the body is kept whatever the count.
+        for k in (1, 3, 7):
+            cmd = 'echo `cat a%s #<<EOF\nid\nEOF\n`' % ('\\' * k)
+            with self.subTest(k=k):
+                self.assertEqual(cmd, bp.strip_heredoc_bodies(cmd))
 
     def test_here_string_is_a_different_operator(self):
         self.assertEqual('grep x <<< "$v"', bp.strip_heredoc_bodies('grep x <<< "$v"'))
