@@ -1680,6 +1680,13 @@ def ln_is_symbolic(tokens):
     suffixes rather than the flag. Anything unrecognised reads as a hard link,
     which keeps the stricter judgement.
     """
+    return ln_has_flag(tokens, 's', '--symbolic')
+
+
+def ln_has_flag(tokens, short, long=None):
+    """True when `ln`'s options carry the short flag `short`, or `long` or an
+    abbreviation of it down to four characters, read as `ln_is_symbolic`
+    describes."""
     i, n = 1, len(tokens)
     while i < n:
         tok = tokens[i]
@@ -1687,7 +1694,7 @@ def ln_is_symbolic(tokens):
             break
         if tok.startswith('--'):
             key, inline = split_eq(tok)
-            if len(key) >= 4 and '--symbolic'.startswith(key):
+            if long and len(key) >= 4 and long.startswith(key):
                 return True
             # GNU takes any unambiguous abbreviation, so `--suf -s` is a suffix.
             if inline is None and any(
@@ -1696,7 +1703,7 @@ def ln_is_symbolic(tokens):
                 i += 1
         elif tok.startswith('-') and tok != '-':
             for j, ch in enumerate(tok[1:], 1):
-                if ch == 's':
+                if ch == short:
                     return True
                 if ch in 'St':
                     if j == len(tok) - 1:
@@ -4974,12 +4981,16 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
                 return (offender_display(cand, rp), res[0], res[1])
         return None
 
-    def stage_ln(target, link, group_cwd, group_cwd_unknown):
+    def stage_ln(target, link, group_cwd, group_cwd_unknown, bases):
         """If `ln TARGET LINK` (symbolic or hard) points outside, record
         LINK's resolved path. LINK may be None (omitted) — then the link name
         is `basename(TARGET)` in the current group cwd, matching POSIX `ln`
-        semantics."""
-        tkind, trp = resolve_token(target, group_cwd, group_cwd_unknown)
+        semantics. TARGET resolves from each of `bases` (see `link_bases`), and
+        the first that lands outside is the one recorded."""
+        for tcwd, tunknown in bases:
+            tkind, trp = resolve_token(target, tcwd, tunknown)
+            if tkind != 'path' or is_outside(trp):
+                break
         if tkind == 'skip':
             return
         if tkind == 'path' and not is_outside(trp):
@@ -4993,6 +5004,25 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
                                                   # later check_file catches it
                                                   # via $/~/unknown rule
         staged_links[lrp] = trp if tkind == 'path' else None
+
+    def link_bases(g, dest, dest_is_link, group_cwd, group_cwd_unknown):
+        """The `(dir, unknown)` pairs an `ln` source resolves from. A hard
+        link's source is a path from the cwd; a symbolic link stores a string
+        the kernel reads from the link's own directory (Q326). Where the
+        destination is a link to a directory, `-n`/`-T` put the new link beside
+        it and the default puts it inside, and BSD's `-F` deletes a real
+        directory to put the link in its place, so both are returned."""
+        if dest is None or not ln_is_symbolic(g):
+            return [(group_cwd, group_cwd_unknown)]
+        kind, rp = resolve_token(dest, group_cwd, group_cwd_unknown, True)
+        if kind != 'path':
+            return [(group_cwd, True)]
+        if not os.path.isdir(rp):
+            return [(os.path.dirname(rp), False)]
+        bases = [(os.path.realpath(rp), False)]
+        if dest_is_link and (os.path.islink(rp) or ln_has_flag(g, 'F')):
+            bases.append((os.path.dirname(rp), False))
+        return bases
 
     # Per-group cwd tracking. A `cd`/`pushd` in an earlier group of the same
     # chain shifts the runtime cwd for later guarded groups; `popd` or an
@@ -5308,7 +5338,8 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
             # judged as an entry, so `-n` over an in-workspace link to an
             # outside directory counts as in-workspace.
             guarded = True
-            sources, dest, _ = lnop
+            sources, dest, dest_is_link = lnop
+            bases = link_bases(g, dest, dest_is_link, cmd_cwd, cmd_cwd_unknown)
             dest_o = None if dest is None \
                 else check_file(dest, cmd_cwd, cmd_cwd_unknown)
             ln = classify_ln(g)
@@ -5321,16 +5352,18 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
                     and check_file(ln[1], cmd_cwd, cmd_cwd_unknown,
                                    entry=True) is not None
             for f in sources:
-                o = check_file(f, cmd_cwd, cmd_cwd_unknown, is_read=src_read)
-                if o is not None:
-                    outside.append(o)
+                for bcwd, bunknown in bases:
+                    o = check_file(f, bcwd, bunknown, is_read=src_read)
+                    if o is not None:
+                        outside.append(o)
+                        break
             if dest_o is not None:
                 outside.append(dest_o)
             # Staged after the checks: staging records the link's resolved path
             # in `staged_links`, and checking the destination against a
             # set it had just been added to would report the same link twice.
             if ln is not None:
-                stage_ln(ln[0], ln[1], cmd_cwd, cmd_cwd_unknown)
+                stage_ln(ln[0], ln[1], cmd_cwd, cmd_cwd_unknown, bases)
             continue
         dd = classify_dd(g)
         if dd is not None:
