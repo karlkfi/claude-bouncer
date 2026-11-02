@@ -1653,15 +1653,54 @@ class HookEndToEndTests(unittest.TestCase):
     def test_sed_workspace_file_allow(self):
         self._decision("sed 's/a/b/' in.txt", "allow")
 
+    # --- Q328: files a sed script names --------------------------------------
+
+    def test_sed_script_file_commands_ask(self):
+        for cmd, path in (
+                ("sed '/x/w /q328-fake/leak' in.txt", "/q328-fake/leak"),
+                ("sed -e '/x/w /q328-fake/leak' in.txt", "/q328-fake/leak"),
+                ("sed -i '' 's/x/y/w /q328-fake/leak' in.txt", "/q328-fake/leak"),
+                ("sed -i '' -e '/x/r /q328-fake/secret' in.txt", "/q328-fake/secret"),
+                ("sed -n '/x/W /q328-fake/leak' in.txt", "/q328-fake/leak"),
+                ("sed '1R /q328-fake/secret' in.txt", "/q328-fake/secret"),
+                ("sed -ne 's/a/b/' -e '1{s/x/y/gpw /q328-fake/leak\n}' in.txt",
+                 "/q328-fake/leak"),
+                ("sed --expr='$r /q328-fake/secret' in.txt", "/q328-fake/secret"),
+                # BSD sed lets a bracket expression hide the delimiter.
+                ("sed -n 's/[/]/X/w /q328-fake/leak' in.txt", "/q328-fake/leak"),
+                # BSD's `-i` takes the next word as its suffix, so this is the script.
+                ("sed -i -e '/x/w /q328-fake/leak' in.txt", "/q328-fake/leak")):
+            with self.subTest(cmd=cmd):
+                out = self._decision(cmd, "ask")
+                self.assertIn(path, out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_sed_script_without_a_file_command_allows(self):
+        for cmd in ("sed 's/a/b/' in.txt", "sed -n '/w/p' in.txt",
+                    "sed -n '$p' in.txt", "sed ':a;N;$!ba;s/\\n/ /g' in.txt",
+                    "sed 'y/rw/wr/' in.txt", "sed -i 's/a/b/' in.txt",
+                    "sed -i .bak 's/a/b/' in.txt", "sed '1a\\\nw /q328-fake/no' in.txt",
+                    "sed -n 's/x/y/w out.txt' in.txt"):
+            with self.subTest(cmd=cmd):
+                self._decision(cmd, "allow")
+
+    def test_sed_execute_command_withholds_the_allow(self):
+        for cmd in ("sed '1e date' in.txt", "sed 's/x/date/e' in.txt"):
+            with self.subTest(cmd=cmd):
+                self._defer(cmd)
+
     # --- Q232: the token after `sed -i ''` -----------------------------------
     # BSD sed reads it as the script and GNU sed as a file, so it keeps the
     # outside ask. These pin that ask against a relaxation that reads the token
     # as a script without a real sed parser: each shape below got past one.
 
-    def _sed_keeps_its_ask(self, cmd, token):
-        out = self._decision(cmd, "ask")
+    def _sed_keeps_its_ask(self, cmd, token, expected="ask"):
+        # Since Q328 the reason can also name the script's own `w`/`r` file,
+        # so the token is one entry of the list rather than all of it. Windows
+        # shows each entry as `token -> resolved`.
+        out = self._decision(cmd, expected)
         reason = out["hookSpecificOutput"]["permissionDecisionReason"]
-        self.assertIn(f"Outside-workspace path(s): {token}", reason)
+        listed = reason.split("Outside-workspace path(s): ", 1)[1].split(". Fix:")[0]
+        self.assertIn(token, [e.split(" -> ", 1)[0] for e in listed.split(", ")])
 
     def test_sed_address_script_after_empty_suffix_keeps_its_ask(self):
         self._sed_keeps_its_ask("sed -i '' '/^#/d' in.txt", "/^#/d")
@@ -1675,8 +1714,8 @@ class HookEndToEndTests(unittest.TestCase):
         self._decision("sed -i '' 's/a/b/' in.txt", "allow")
 
     def test_sed_script_that_names_a_file_keeps_its_ask(self):
-        # The hook reads no filename inside an `-e` script (Q328), so a rule
-        # steering these to the `-e` form would allow the write.
+        # Before Q328 the hook read no filename inside an `-e` script, so a rule
+        # steering these to the `-e` form would have allowed the write.
         for script in ("/x/w /q232-fake/leak", "/x/r /q232-fake/secret",
                        "/x/W /q232-fake/leak", "/x/R /q232-fake/secret"):
             with self.subTest(script=script):
@@ -1685,10 +1724,13 @@ class HookEndToEndTests(unittest.TestCase):
     def test_sed_s_command_writing_a_file_keeps_its_ask(self):
         # Stripping `/…/` pairs left to right mis-pairs an `s` command's
         # delimiters: `/x/s/a/b/w ../l` became `sbl`, losing the `w` flag.
+        # The `w ../l` itself is judged since Q328, and from the test workspace
+        # it lands in host temp, which denies.
         for script in ("/x/s/a/b/w ../l", "/x/{s/a/b/w ../m\n}", "/x/s/a/b/;w ../l",
                        "/x/{s/a/b/;w ../l\n}", "/x/s/a/b/gw ../l"):
             with self.subTest(script=script):
-                self._sed_keeps_its_ask(f"sed -i '' '{script}' in.txt", script)
+                self._sed_keeps_its_ask(f"sed -i '' '{script}' in.txt", script,
+                                        "deny")
 
     def test_sed_gnu_reading_of_a_path_keeps_its_ask(self):
         self._sed_keeps_its_ask("sed -i '' /q232-fake/target", "/q232-fake/target")
