@@ -116,6 +116,7 @@ the default `strict` [push policy](#push-guard).
 | `git reset --hard origin/main` *(clean worktree, a branch whose rebase is already published — every unshared commit has a patch-equivalent on a remote)* | allow |
 | `git stash` / `git stash pop` *(any branch — adds no commit, rewrites no history, recoverable by design)* | allow |
 | `git commit -m "fix"` *(on `main`)* | **ask** |
+| `git --git-dir=../x/.git commit` / `GIT_DIR=../x/.git git merge y` / `git -C "$X" push` *(any branch: a commit, merge, rebase, pull or push into a repository the hook can't name, whose branch it can't read)* | **ask** |
 | editing a file whose repo is on `main` *(Edit/Write/MultiEdit/NotebookEdit)* | **ask** |
 | editing a symlink in a gitignored dir that points at a tracked file, on `main` *(the write lands on branch contents)* | **ask** |
 | writing a new file into a directory that doesn't exist yet, on `main` *(`src/newdir/f.py`)* | **ask** |

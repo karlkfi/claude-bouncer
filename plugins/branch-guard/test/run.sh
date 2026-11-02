@@ -2570,13 +2570,14 @@ check "[overlap] an ignore glob matching nothing changes nothing -> deny" deny \
 # 27l. A redirect the hook cannot resolve to a working directory stands the
 #      probe down rather than measuring a tree the command is not acting on.
 #      `--git-dir` names a repository without naming a tree to probe from, and a
-#      `-C` the shell has to compute names one only the shell knows. The push
-#      keeps the verdict it already had. 27o is the other half: a redirect that
-#      DOES resolve gets probed, in the tree it names.
+#      `-C` the shell has to compute names one only the shell knows. Neither
+#      names the branch either, so the push asks (Q331) instead of denying on
+#      the overlap. 27o is the other half: a redirect that DOES resolve gets
+#      probed, in the tree it names.
 make_overlap_repo claude/x file.txt 10 file.txt 10
-check "[overlap] an unresolvable --git-dir skips the probe -> allow" allow \
+check "[overlap] an unresolvable --git-dir skips the probe -> ask" ask \
   "$(decision_for "$(bash_payload "git --git-dir='$(nat "$OVL")/.git' push")" "$OVL")"
-check "[overlap] a non-literal -C skips the probe -> allow" allow \
+check "[overlap] a non-literal -C skips the probe -> ask" ask \
   "$(decision_for "$(bash_payload 'git -C "$SOMEWHERE" push')" "$OVL")"
 
 # 27m. A removed line that itself begins with `--` comes out of a unified diff as
@@ -3168,15 +3169,20 @@ for w in "env -C $SIB" "env -C$SIB" "env --chdir=$SIB" "env --chdir $SIB" \
 done
 check "[wrap] env -C .. git -C <main sibling> commit -> ask" ask \
   "$(decision_for "$(bash_payload "env -C .. git -C $(basename "$WRAP_MAIN") commit -m x")" "$WRAP")"
-#     A directory only the shell can compute, and a chroot, name no tree here:
-#     the commit is judged against the session's own checkout, as before Q251.
-#     From the feature branch that is the wrapped defer, from `main` the ask.
+#     A directory only the shell can compute, and a chroot, name no tree here,
+#     so the commit asks from either branch (Q331) rather than reading the
+#     session's own. `$(echo ..)` splits before git is reached, so no git
+#     segment is judged at all and the feature-branch side has no decision.
 for w in 'env -C "$X"' 'env -C $(echo ..)' 'env -C ~/x' "sudo -R $SIB"; do
-  check "[wrap] $w git commit from the feature branch -> none" none \
-    "$(decision_for "$(bash_payload "$w git commit -m x")" "$WRAP")"
   check "[wrap] $w git commit from main -> ask" ask \
     "$(decision_for "$(bash_payload "$w git commit -m x")" "$WRAP_MAIN")"
 done
+for w in 'env -C "$X"' 'env -C ~/x' "sudo -R $SIB"; do
+  check "[wrap] $w git commit from the feature branch -> ask" ask \
+    "$(decision_for "$(bash_payload "$w git commit -m x")" "$WRAP")"
+done
+check "[wrap] env -C \$(echo ..) git commit from the feature branch -> none" none \
+  "$(decision_for "$(bash_payload 'env -C $(echo ..) git commit -m x')" "$WRAP")"
 WRAP_FEAT="../$(basename "$WRAP")"
 check "[wrap] control: from main, env git commit -> ask" ask \
   "$(decision_for "$(bash_payload 'env git commit -m x')" "$WRAP_MAIN")"
@@ -3184,6 +3190,52 @@ check "[wrap] control: from main, git -C <feature> commit -> allow" allow \
   "$(decision_for "$(bash_payload "git -C $WRAP_FEAT commit -m x")" "$WRAP_MAIN")"
 check "[wrap] from main, env -C <feature> git commit -> none" none \
   "$(decision_for "$(bash_payload "env -C $WRAP_FEAT git commit -m x")" "$WRAP_MAIN")"
+
+#     29f. A repository named by option or variable is one the hook can't place
+#     (Q331), so the branch-sensitive verbs ask rather than read the session's
+#     own branch -- from the feature branch as from main, and whether the
+#     repository named is the sibling on main or this same feature checkout.
+#     `git -C` is the control: literal, it is followed and judged where it lands.
+GD_MAIN="$(nat "$(git -C "$WRAP_MAIN" rev-parse --absolute-git-dir)")"
+GD_FEAT="$(nat "$(git -C "$WRAP" rev-parse --absolute-git-dir)")"
+for from in "$WRAP" "$WRAP_MAIN"; do
+  for gd in "$GD_MAIN" "$GD_FEAT"; do
+    for r in "git --git-dir='$gd' --work-tree=. commit -m x" \
+             "git --git-dir '$gd' commit -m x" "GIT_DIR='$gd' git commit -m x" \
+             "GIT_COMMON_DIR='$gd' git commit -m x" \
+             "env GIT_DIR='$gd' git commit -m x" "git --git-dir='$gd' merge x" \
+             "GIT_DIR='$gd' git rebase x" "git --git-dir='$gd' pull" \
+             "git --git-dir='$gd' push" "GIT_DIR='$gd' git push origin HEAD"; do
+      check "[repo] $(basename "$from"): $r -> ask" ask \
+        "$(decision_for "$(bash_payload "$r")" "$from")"
+    done
+  done
+  check "[repo] $(basename "$from"): git -C \"\$X\" commit -> ask" ask \
+    "$(decision_for "$(bash_payload 'git -C "$X" commit -m x')" "$from")"
+done
+check_text "[repo] the ask says the repository can't be named" has "can't name" \
+  "$(reason_for "$(bash_payload "GIT_DIR='$GD_MAIN' git commit -m x")" "$WRAP")"
+check "[repo] --git-dir push under the protected policy -> ask" ask \
+  "$(decision_for "$(bash_payload "git --git-dir='$GD_MAIN' push")" "$WRAP" \
+     BRANCH_GUARD_PUSH_POLICY=protected)"
+check "[repo] --git-dir push under the off policy -> none" none \
+  "$(decision_for "$(bash_payload "git --git-dir='$GD_MAIN' push")" "$WRAP" \
+     BRANCH_GUARD_PUSH_POLICY=off)"
+#     A work tree, index or object store moved on its own leaves HEAD where git
+#     finds it from the directory, so the commit is judged on the session's
+#     branch in both directions, and nothing read-only starts asking.
+for r in "git --work-tree=$SIB commit -m x" "GIT_WORK_TREE=$SIB git commit -m x" \
+         "GIT_INDEX_FILE=../idx git commit -m x"; do
+  check "[repo] feature: $r -> allow" allow \
+    "$(decision_for "$(bash_payload "$r")" "$WRAP")"
+done
+check "[repo] main: git --work-tree=<feature> commit -> ask" ask \
+  "$(decision_for "$(bash_payload "git --work-tree=$WRAP_FEAT commit -m x")" "$WRAP_MAIN")"
+for r in "git --git-dir='$GD_MAIN' log -1" "GIT_DIR='$GD_MAIN' git status" \
+         'git -C "$X" diff' "git --git-dir='$GD_MAIN' switch -c q331-new"; do
+  check "[repo] feature: $r -> allow" allow \
+    "$(decision_for "$(bash_payload "$r")" "$WRAP")"
+done
 
 #     The ref probes run in the followed tree, and stand down to the unprobed ask
 #     where the hook can't name one. A tip nothing else reaches denies when probed.
