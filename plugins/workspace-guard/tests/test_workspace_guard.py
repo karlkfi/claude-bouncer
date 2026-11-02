@@ -7009,6 +7009,26 @@ class SiblingCheckoutTests(unittest.TestCase):
         self.assertEqual(self._decision(out), "deny")
         self.assertIn("Sibling-checkout", self._reason(out))
 
+    def test_bash_relative_symlink_replacing_a_directory_judges_both(self):
+        # BSD's `-F` deletes the empty directory `d` and puts the link in its
+        # place, so the target reads from `d`'s parent (review of #311).
+        os.mkdir(os.path.join(self.wt, "d"))
+        os.makedirs(os.path.join(self.wt, "a", "d"))
+        for cmd, cwd in (
+                ("ln -sF ../main/root.txt d", self.wt),
+                ("ln -sF ../main/root.txt d && echo hi > d", self.wt),
+                ("ln -sfF ../main/root.txt d && echo hi > d", self.wt),
+                ("ln -sF ../../main/root.txt d && echo hi > d",
+                 os.path.join(self.wt, "a"))):
+            with self.subTest(cmd=cmd):
+                out = self._bash(cmd, cwd=cwd)
+                self.assertEqual(self._decision(out), "deny")
+                self.assertIn("Sibling-checkout", self._reason(out))
+        # Without `-F` the link lands inside `d`, where `../x` is `wt-a/x`.
+        for cmd in ("ln -s ../x d", "ln -s ../x d/"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self._decision(self._bash(cmd)), "allow")
+
     def _ps_deny_as_sibling(self, cmd):
         out = self._run({"tool_name": "PowerShell",
                          "tool_input": {"command": cmd}})

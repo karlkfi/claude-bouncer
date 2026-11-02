@@ -1680,6 +1680,13 @@ def ln_is_symbolic(tokens):
     suffixes rather than the flag. Anything unrecognised reads as a hard link,
     which keeps the stricter judgement.
     """
+    return ln_has_flag(tokens, 's', '--symbolic')
+
+
+def ln_has_flag(tokens, short, long=None):
+    """True when `ln`'s options carry the short flag `short`, or `long` or an
+    abbreviation of it down to four characters, read as `ln_is_symbolic`
+    describes."""
     i, n = 1, len(tokens)
     while i < n:
         tok = tokens[i]
@@ -1687,7 +1694,7 @@ def ln_is_symbolic(tokens):
             break
         if tok.startswith('--'):
             key, inline = split_eq(tok)
-            if len(key) >= 4 and '--symbolic'.startswith(key):
+            if long and len(key) >= 4 and long.startswith(key):
                 return True
             # GNU takes any unambiguous abbreviation, so `--suf -s` is a suffix.
             if inline is None and any(
@@ -1696,7 +1703,7 @@ def ln_is_symbolic(tokens):
                 i += 1
         elif tok.startswith('-') and tok != '-':
             for j, ch in enumerate(tok[1:], 1):
-                if ch == 's':
+                if ch == short:
                     return True
                 if ch in 'St':
                     if j == len(tok) - 1:
@@ -5003,7 +5010,8 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
         link's source is a path from the cwd; a symbolic link stores a string
         the kernel reads from the link's own directory (Q326). Where the
         destination is a link to a directory, `-n`/`-T` put the new link beside
-        it and the default puts it inside, so both are returned."""
+        it and the default puts it inside, and BSD's `-F` deletes a real
+        directory to put the link in its place, so both are returned."""
         if dest is None or not ln_is_symbolic(g):
             return [(group_cwd, group_cwd_unknown)]
         kind, rp = resolve_token(dest, group_cwd, group_cwd_unknown, True)
@@ -5012,7 +5020,7 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
         if not os.path.isdir(rp):
             return [(os.path.dirname(rp), False)]
         bases = [(os.path.realpath(rp), False)]
-        if dest_is_link and os.path.islink(rp):
+        if dest_is_link and (os.path.islink(rp) or ln_has_flag(g, 'F')):
             bases.append((os.path.dirname(rp), False))
         return bases
 

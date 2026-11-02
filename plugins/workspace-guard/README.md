@@ -1006,8 +1006,9 @@ through the same boundary rules and produce the same reasons. Symlink staging
    directory, put the link at `DIR/basename(SRC)`, which is never staged, so
    their sources stay writes. A relative source of `ln -s` is resolved from
    the directory the link lands in, as the kernel reads it, not from the cwd;
-   where `LINK` is a link to a directory, from both the directory it points
-   at and the one it sits in, since `-n` decides which. A hard link's source
+   where `LINK` is a link to a directory, or a directory under BSD's `-F`,
+   from both the directory it points at and the one it sits in, since `-n`
+   and `-F` decide which. A hard link's source
    stays relative to the cwd. On top of that,
    symlinks *and* hard links created by an earlier `ln OUTSIDE LINK` in the
    chain (with or without `-s`) are **staged**: `LINK`'s resolved path is
