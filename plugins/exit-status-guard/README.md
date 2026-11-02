@@ -113,7 +113,12 @@ make check; gh api -X PUT repos/o/r/pulls/1/merge   # denied — the same merge
 A `gh api` call is a state change when it writes: a method other than GET, or,
 with none named, a field or `--input`. A GraphQL call writes only when its query
 is a `mutation`, and `POST /markdown` renders and stores nothing, so neither a
-GraphQL read nor a render is denied after a check.
+GraphQL read nor a render is denied after a check. Two edges follow from
+reading the command rather than the request. A mutation the guard cannot see —
+in a file (`-F query=@m.graphql`, `--input m.json`), behind a leading `#`
+comment, or in a `$(…)` — is not denied. And a read sent with an explicit
+method (`gh api -X POST graphql -f query='query { … }'`) is denied, since the
+method alone names it a write.
 
 Here the status is read correctly and then ignored. `&&` is the fix, and is
 never denied. A subshell is a statement like any other, so `(make check); git
