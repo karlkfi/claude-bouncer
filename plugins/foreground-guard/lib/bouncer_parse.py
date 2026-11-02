@@ -642,7 +642,9 @@ def strip_heredoc_bodies(cmd, expanded=None, unterminated=None,
             continue
         if c == '\\' and i + 1 < n:               # escapes, quoted or not
             out.append(c); out.append(cmd[i+1]); i += 2
-            if cmd[i-1] != '\n':                  # a continuation joins words
+            if any(t == '`' for t, *_ in stack):  # bash halves `\\` there first
+                last = cmd[i-1]
+            elif cmd[i-1] != '\n':                # a continuation joins words
                 last = c                          # `\ ` opens no word (Q324)
             continue
         # A substitution body is parsed in its own quote context, so these two

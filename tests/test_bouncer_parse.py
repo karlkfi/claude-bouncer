@@ -186,6 +186,15 @@ class StripHeredocBodiesTests(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertEqual(cmd, bp.strip_heredoc_bodies(cmd))
 
+    def test_a_backtick_body_keeps_the_line_after_an_escaped_blank(self):
+        # bash halves a backtick body's `\\` before parsing it, so 3 or 7
+        # backslashes there leave an even run, the `#` is a comment, and `id`
+        # runs. Inside backticks the body is kept whatever the count.
+        for k in (1, 3, 7):
+            cmd = 'echo `cat a%s #<<EOF\nid\nEOF\n`' % ('\\' * k)
+            with self.subTest(k=k):
+                self.assertEqual(cmd, bp.strip_heredoc_bodies(cmd))
+
     def test_here_string_is_a_different_operator(self):
         self.assertEqual('grep x <<< "$v"', bp.strip_heredoc_bodies('grep x <<< "$v"'))
 
