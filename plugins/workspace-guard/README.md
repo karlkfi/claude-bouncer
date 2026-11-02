@@ -196,10 +196,10 @@ different repository's scratch still asks entirely.
 | `ln /etc/passwd link && cat link`    | **ask**  |
 | `cp x /tmp/claude-501/<this-project>/<sibling>/…` (sibling write) | **ask** |
 | `cat /tmp/claude-501/<other-project>/…` (cross-project read) | **ask** |
-| `sed -i '' '/^#/d' notes.md` (script or path?) | **ask** |
 | `sed '/x/w /etc/leak' notes.md` (the script writes a file) | **ask** |
 | `cat /tmp/out` · `cat /var/tmp/x`    | **deny** |
 | `sed -f /tmp/evil.sed notes.md`      | **deny** |
+| `sed -i '' '/^#/d' notes.md` (script or path?) | **deny** |
 | `grep foo data.txt > /tmp/out.txt`   | **deny** |
 | `sort -o /tmp/out.txt data.txt`      | **deny** |
 | `base64 -o /tmp/out.b64 data.bin` (BSD) | **deny** |
@@ -282,7 +282,7 @@ of which positions are programs, which are files, and which flags take values.
 A naive string match would either miss real file arguments or false-positive on
 program syntax.
 
-The **deny** rows are **host-wide temp** paths — at or under `/tmp`, `/var/tmp`,
+The **deny** rows bar one are **host-wide temp** paths — at or under `/tmp`, `/var/tmp`,
 `$TMPDIR`, or the platform's own temp dir (`%TMP%` on Windows) after symlink
 resolution. They're classified from the *same*
 resolved paths the hook already extracts, so `/tmp` appearing only as text (a
@@ -294,6 +294,10 @@ shapes reach host temp and are covered: a **redirect** target from *any* command
 (a bare `mktemp`, `mktemp -d`, or `mktemp -t`/`-p /tmp` all write there) — an
 explicit in-workspace target (`mktemp -p ./scratch …`) is allowed like any other
 in-root write.
+
+The one that is not, `sed -i '' '/^#/d'`, is a token macOS sed reads as the
+script and GNU sed as a file; it denies with the `-e` rewrite, which both seds
+read the same way (see [Limitations](#limitations)).
 
 The **ask** rows are the ones that ask a *person* something: this path resolves
 outside the root — is that intended? The rows that deny on an unreadable
@@ -1793,9 +1797,14 @@ final output.
   `''` as a file, so a GNU file is still caught, with one exception: an `s` or
   `y` command holding a `$` expansion (`sed -i '' "s/x/$v/" f`) is taken as the
   script and allowed instead of denied as unexpandable. Any other script there
-  is still read as a path: one starting with an address (`'/^#/d'`) asks as an
-  absolute path, and one with an expansion in another shape (`"${n}d"`) is
-  denied. Use `sed -i '' -e SCRIPT FILE`:
+  is still read as a path. Where that path is outside the root and the token
+  also reads as a sed script that names no file and runs no command
+  (`'/^#/d'`), the command denies with the `-e` rewrite rather than asking
+  about a "path"; a script that writes, reads or runs something keeps the
+  outside ask, and an expansion in another shape (`"${n}d"`) is denied as
+  unexpandable. The same deny reaches GNU's reading, `sed -i '' /outside/file`,
+  which runs an empty script over the file and changes nothing. Use
+  `sed -i '' -e SCRIPT FILE`:
   macOS sed makes the edit, and GNU sed makes it too and then exits 2 on the
   empty `''` operand (GNU sed 4.9, measured in a `debian:stable-slim`
   container on 2026-10-04).
