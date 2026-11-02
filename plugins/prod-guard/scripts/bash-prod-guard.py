@@ -3123,6 +3123,8 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
         tokens = tokenize(raw)
     if tokens is None:
         return findings, override, session_reason  # unparseable: fail-open
+    if raw is None:
+        raw = ' '.join(tokens)
     # Two scopes, both seeded from what this shell inherited (os.environ at the
     # top level, the invoking segment's exported env for a nested `sh -c` body
     # and its same-shell env for an `eval` one):
@@ -3299,6 +3301,12 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
                 override = override or sub_o
                 session_reason = session_reason if session_reason is not None else sub_s
             continue
+        if tool in ('eval', *functions) and depth >= 3 and len(argv) > (
+                tool == 'eval'):
+            # A body this deep is not read, so what it runs is unknown (Q299).
+            findings.append((ASK, 'prod-guard: `%s` runs a body nested deeper '
+                             'than the guard reads, so what it runs is unknown. '
+                             'Confirm it is safe.' % tool, None))
         if tool == 'eval':
             # No child, so the body expands in this shell under either quoting:
             # single quotes stop only the PARENT, and `eval` expands the same

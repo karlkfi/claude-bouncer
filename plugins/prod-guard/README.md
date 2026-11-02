@@ -280,7 +280,7 @@ Compound commands are split and each segment evaluated: `&&`, `||`, `|`,
 the bodies of `{ …; }`, `if`/`then`/`else`, `while`/`until`/`for`/`select`
 loops, `case` arms, a command behind `!`, and a function body, which is
 judged where it is written and again at each call, against the values in
-scope there. An assignment in a body bash may not run (a
+scope there. A call or `eval` nested deeper than the guard reads asks. An assignment in a body bash may not run (a
 conditional, a loop, a function until it is called) leaves the name's value
 unknown, so a target that reads it prompts. So does a name set with no value
 the guard can read: by `read`, `printf -v`, `mapfile`, `getopts`, `unset` or a

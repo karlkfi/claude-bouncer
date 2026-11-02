@@ -3780,6 +3780,17 @@ class SpecialCaseTests(unittest.TestCase):
                     "C=kind-ci; " + f + "eval 'C=gke_acme_prod-us f'"):
             with self.subTest(cmd=cmd):
                 self.assertEqual(run_hook(cmd, home=home)[0], "deny")
+        # A body holding `eval` is judged like any other (#300 review), and a
+        # chain deeper than the guard reads asks rather than passing.
+        with self.subTest(cmd="g() { eval true; }; g"):
+            self.assertEqual(run_hook(
+                "g() { eval true; }; g; kubectl --context gke_acme_prod-us "
+                "delete pod x", home=home)[0], "deny")
+        chain = "C=kind-ci; " + f + "g() { f; }; h() { g; }; "
+        for cmd in (chain + "i() { h; }; C=gke_acme_prod-us i",
+                    chain + "C=gke_acme_prod-us eval h"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(run_hook(cmd, home=home)[0], "ask")
         for cmd in ("C=kind-ci; " + f + "f", "C=kind-ci; " + f + "C=kind-ci f",
                     "C=kind-ci; " + f + "(C=gke_acme_prod-us); f",
                     "C=kind-ci; " + f + "g() { f; }; g"):
