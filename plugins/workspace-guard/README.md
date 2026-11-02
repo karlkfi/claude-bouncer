@@ -1597,9 +1597,11 @@ everywhere it is merely mentioned — quoted in a commit message, echoed into a
 pipe, or passed as a `grep` pattern — and an empty value (`WORKSPACE_GUARD_OVERRIDE=`)
 is not an override at all, because the point of the prefix is that you say why.
 
-`Edit`, `Write`, `MultiEdit`, `NotebookEdit` and the `PowerShell` tool have no
-command string to carry a prefix. Their denies say so and point at the Bash form;
-the environment route below covers them for a whole session.
+`Edit`, `Write`, `MultiEdit` and `NotebookEdit` have no command string to carry a
+prefix. Their denies say so and point at the Bash form; the environment route
+below covers them for a whole session. The `PowerShell` tool's denies name only
+the environment route: the Bash handler judges no cmdlet and reads no `pwsh -c`
+body, so a Bash re-issue would run without a prompt rather than ask.
 
 ### Suppression escalation in pre-approving modes
 
