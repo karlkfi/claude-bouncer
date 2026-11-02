@@ -226,6 +226,11 @@ def requote(text, commenters=''):
     in ``commenters`` at a word start skips to the newline, the way the
     caller's lexer will.
 
+    Inside double quotes bash drops the backslash before `$`, a backtick and a
+    newline, and the newline with it; POSIX shlex keeps all three, so a
+    `bash -c "\\$X …"` body reached a guard as `\\$X …` and an escaped
+    backtick substitution in one as text (Q322). They are dropped here.
+
     Inside double quotes bash parses a `$(…)`, backtick or `${…}` on its own,
     so a `"` inside one does not close the outer string. POSIX quoting closes
     it there, and on `"$(echo '"')"` the real closing `"` is then unbalanced
@@ -278,7 +283,11 @@ def _requote(text, commenters, hold):
     while i < n:
         c = text[i]
         if c == '\\':
-            out.append(text[i:i + 2]); i += 2
+            if in_double and text[i+1:i+2] in ('$', '`', '\n'):
+                out.append(text[i+1].strip('\n'))   # bash drops the `\` (Q322)
+            else:
+                out.append(text[i:i + 2])
+            i += 2
             continue
         if in_double:
             end = _dq_expansion_end(text, i) if hold else -1

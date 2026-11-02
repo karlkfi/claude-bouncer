@@ -595,6 +595,14 @@ class LoopAndSleepTests(unittest.TestCase):
         d, _ = run_hook("eval sleep 600")
         self.assertEqual(d, "deny")
 
+    def test_an_escaped_backtick_in_a_double_quoted_body_is_live(self):
+        # bash drops the `\`, so the child runs the substitution (Q322).
+        for cmd in ('bash -c "echo \\`tail -f x.log\\`"',
+                    'eval "echo \\`tail -f x.log\\`"'):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(run_hook(cmd)[0], "deny")
+        self.assertIsNone(run_hook('echo "\\`tail -f x.log\\`"')[0])
+
 
 # ---------------------------------------------------------------------------
 # Class A end-to-end: exemptions

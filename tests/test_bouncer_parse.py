@@ -228,6 +228,16 @@ class LexTests(unittest.TestCase):
     def test_newline_is_a_boundary_not_whitespace(self):
         self.assertEqual(['a', '\n', 'b'], self.lex('a\nb'))
 
+    def test_double_quotes_drop_the_backslashes_bash_drops(self):
+        # Inside double quotes bash removes `\` before `$`, a backtick, `"`,
+        # `\` and a newline, and only those (Q322).
+        for cmd, word in (('"\\$X k"', '$X k'), ('"echo \\`k\\`"', 'echo `k`'),
+                          ('"a\\\nb"', 'ab'), ('"a\\\\b"', 'a\\b'),
+                          ('"\\"q"', '"q'), ('"\\a"', '\\a'),
+                          ("'\\$X'", '\\$X'), ('"\\\\\\$X"', '\\$X')):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(['echo', word], bp.lex('echo ' + cmd))
+
     def test_unbalanced_quote_raises_so_callers_defer(self):
         with self.assertRaises(ValueError):
             bp.lex('echo "unclosed')
