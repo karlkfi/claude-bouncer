@@ -1038,6 +1038,58 @@ CASES = [
     ('a quoted <(…) is text', 'echo "<(make check)"', False, False, ''),
     ('the override reaches a process substitution',
      'EXIT_STATUS_GUARD_OVERRIDE=why tail <(make check)', False, False, ''),
+
+    # --- A gate's $(…) as an operand of a command (Q291) ----------------------
+    # Only a command of assignments alone returns a substitution's status, and
+    # only the last one's. Under bash 5.3.15: `x=$(false)` and
+    # `x=$(true) y=$(false)` exit 1, while `echo "$(false)"`, `export
+    # x=$(false)`, `x=$(false) true`, `x=$(false) y=$(true)` and `$(false) true`
+    # exit 0. `[ "$(false)" ]` exits 1 only because the output is empty.
+    ('a gate echoed', 'echo "$(make check)"', False, True, 'command substitution'),
+    ('a gate printed', 'printf %s "$(make check)"', False, True,
+     'command substitution'),
+    ('a gate echoed unquoted', 'echo $(make check)', False, True,
+     'command substitution'),
+    ('a gate echoed in backticks', 'echo `make check`', False, True,
+     'command substitution'),
+    ('a gate in a local', 'local x=$(make check)', False, True,
+     'command substitution'),
+    ('a gate in an export', 'export x=$(make check)', False, True,
+     'command substitution'),
+    ('a gate assigned for a command', 'x=$(make check) cmd', False, True,
+     'command substitution'),
+    ('a gate assigned before another substitution',
+     'x=$(make check) y=$(date)', False, True, 'command substitution'),
+    ('a gate as a command prefix', '$(make check) go test ./...', False, True,
+     'command substitution'),
+    ('a gate tested by [', '[ -n "$(make check)" ]', False, True,
+     'command substitution'),
+    ('a gate after cd, echoed', 'echo "$(cd x && make check)"', False, True,
+     'command substitution'),
+    # With pipefail on, the body's pipe carries the failure to the substitution,
+    # and echo then discards it (Q259 made this shape silent).
+    ('a piped gate echoed under pipefail',
+     'set -o pipefail; echo "$(make check | tail)"', False, True,
+     'command substitution'),
+    ('a gate assigned alone', 'x=$(make check)', False, False, ''),
+    ('a gate assigned last', 'y=$(date) x=$(make check)', False, False, ''),
+    ('a gate captured, then echoed', 'out=$(make check); echo "$out"',
+     False, False, ''),
+    ('a gate assigned in quotes', 'x="$(make check)"', False, False, ''),
+    # `a=($(false))`, `a+=($(false))` and `a=(x $(false) y)` exit 1 too.
+    ('a gate in an array assignment', 'arr=($(make check))', False, False, ''),
+    ('a gate appended to an array', 'arr+=($(make check))', False, False, ''),
+    ('a gate among array elements', 'arr=(x $(make check) y)', False, False, ''),
+    ('a gate in an array assigned for a command',
+     'arr=($(make check)) cmd', False, True, 'command substitution'),
+    ('a non-gate echoed', 'echo "$(git log -1)"', False, False, ''),
+    ('a gate whose failure is discarded inside',
+     'echo "$(make check || true)"', False, False, ''),
+    ('a body that echoes the status', 'echo "$(make check; echo $?)"',
+     False, False, ''),
+    ('a quoted substitution is text', "echo '$(make check)'", False, False, ''),
+    ('the override reaches an echoed gate',
+     'EXIT_STATUS_GUARD_OVERRIDE=why echo "$(make check)"', False, False, ''),
     ('sequence named in a commit message',
      'git commit -m "docs: never write make check; git push"', False, False, ''),
 

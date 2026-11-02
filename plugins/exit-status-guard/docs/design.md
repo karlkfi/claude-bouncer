@@ -196,6 +196,12 @@ a gate there is lost whatever surrounds it. That makes it the one place a gate
 is denied without reading an operator: `procsub_gate()` only asks whether the
 body holds one.
 
+**A command substitution carries only through an assignment.** Its status is
+the command's when every word of that command is an assignment, and then only
+the last substitution's. Anywhere else the command around it supplies the
+status, so `operand_gate()` masks each `$(…)` with one word, segments the
+result, and denies a gate whose substitution sits beside a command word.
+
 **`&&` lets either side carry; `||` and `|` carry only the right.** A statement
 is evaluated left to right, matching bash's association: in `a && b || c` the
 `||` sees `(a && b)` as its left side. `mkdir -p tmp && make check > log` keeps
