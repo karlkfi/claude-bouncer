@@ -144,16 +144,17 @@ no recorded decisions at all: those are real answers of zero.
   an attachment with empty stdout, but silent runs aren't recorded at all, so in
   practice it stays at zero.
 - **By category** — `outside` / `expand` / `untracked` / `hosttemp` /
-  `sibling` / `crosssession` / `kill`, the buckets `build_reason()` emits in
+  `sibling` / `crosssession` / `kill` / `sedscript`, the buckets `build_reason()` emits in
   `scripts/bash-workspace-guard.py`, plus `other` for any prompt whose reason
-  matches none of them. The last four are denies in the default configuration,
+  matches none of them. The last five are denies in the default configuration,
   so they appear only once the denies above are counted; `sibling`,
   `crosssession` and `kill` carry their targets inline rather than as a token
   list, so they add no rows to the path ranking. Under `--plugin all` `other` is where the companion guards'
   prompts land, so the table still sums to the friction count in the header (a
   reason can match more than one bucket, so the sum can exceed it).
-- **Top offending paths** — only `outside`/`expand`/`untracked` reasons carry
-  path tokens, so this ranking is workspace-guard-only even under
+- **Top offending paths** — only `outside`/`expand`/`untracked`/`sedscript`
+  reasons carry path tokens (a `sedscript` token is a sed script the hook read
+  as a path), so this ranking is workspace-guard-only even under
   `--plugin all`, where its heading says so (`--json` carries the same signal in
   `paths_scope`). Normalized by default so per-session temp paths (e.g.
   `/private/tmp/claude-NNN/...`) collapse into one row; `--raw` to see exact
