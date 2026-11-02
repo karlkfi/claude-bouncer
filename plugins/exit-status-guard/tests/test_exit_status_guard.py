@@ -794,6 +794,17 @@ CASES = [
      False, ''),
     ('a gate before a fielded markdown render',
      'make check; gh api markdown -f text=x', False, False, ''),
+    # The endpoint is read only ahead of the first field flag, so the same
+    # words inside a field's value do not switch the write off.
+    ('a gate before a comment naming markdown',
+     "make check; gh api repos/o/r/issues/1/comments -f body='fix the markdown lint'",
+     False, True, 'is sequenced before'),
+    ('a gate before a contents PUT naming markdown',
+     "make check; gh api -X PUT repos/o/r/contents/x.md -f message='docs: markdown tweaks'",
+     False, True, 'is sequenced before'),
+    ('a gate before a comment naming graphql',
+     "make check; gh api repos/o/r/issues/1/comments -f body='about graphql docs'",
+     False, True, 'is sequenced before'),
     ('a gate gating a gh api merge',
      'make check && gh api -X PUT repos/o/r/pulls/1/merge', False, False, ''),
 
