@@ -4496,6 +4496,72 @@ def stage_own(lead, sep, last_close, lastpipe):
     return True
 
 
+def resumes_after_substitution(words):
+    """Whether ``words``, a command up to a substitution's open, runs on past it.
+
+    Only where it names a plain command. A substitution can expand to nothing,
+    so one at the head or behind a wrapper leaves the words after it to run as
+    the command: `$(true) cat f` and `env $(true) cat f` both read `f`. So does
+    one behind `$X`, or a command word it glues to, as in `$(echo /bin)/cat f`,
+    and `eval` runs its words whatever they are. A leading redirect hides which
+    of these it is. Those keep the split, which is what judges the `cat`.
+    """
+    head = strip_env_prefix(strip_sh_keywords(words))
+    if not head or head[0] in REDIR or re.search(r'[$`(]', head[0]):
+        return False
+    name = native_cmd_name(head[0])
+    return name != 'eval' and name not in WRAPPER_GRAMMAR
+
+
+def resume_interrupted_commands(tokens):
+    """Move each substitution's body behind the rest of the command it sits in.
+
+    `$(` and `<(` reach `split_groups` with a `(` the group splits at, which is
+    right for the body and wrong for what follows its `)`: the words of
+    `cat <(echo a) /etc/x` after the close formed a group of their own, so
+    `/etc/x` was a command name and the read got an `allow`, and `echo $(date)
+    cat /etc/x`, which opens nothing, asked. Here the words after the close go
+    in front of the open, so they stay operands of their own command. A `<(`
+    moves with its operator, or that operator would take the next word as a
+    redirect target (Q355).
+    """
+    out, words, bodies, i = [], [], [], 0
+    while i < len(tokens):
+        t = tokens[i]
+        if t == '(' and words and is_operator(t, SEPARATORS):
+            proc = is_operator(words[-1], {'<', '>'})
+            if proc or words[-1].endswith('$('):
+                end = _substitution_close(tokens, i)
+                if end is not None and resumes_after_substitution(words):
+                    if proc:
+                        cut = -2 if words[-2:-1] and words[-2].isdigit() else -1
+                        bodies.extend(words[cut:])
+                        del words[cut:]
+                    bodies.extend(resume_interrupted_commands(tokens[i:end + 1]))
+                    i = end + 1
+                    continue
+        if is_operator(t, SEPARATORS):
+            out.extend(words + bodies + [t])
+            words, bodies = [], []
+        else:
+            words.append(t)
+        i += 1
+    return out + words + bodies
+
+
+def _substitution_close(tokens, start):
+    """The index of the `)` matching the `(` at ``start``, or None."""
+    depth = 0
+    for i in range(start, len(tokens)):
+        if is_operator(tokens[i], {'('}):
+            depth += 1
+        elif is_operator(tokens[i], {')'}):
+            depth -= 1
+            if not depth:
+                return i
+    return None
+
+
 def split_groups(tokens, scopes=None, herestrings=None, lastpipe=False):
     """Split a token list into `(cmd_tokens, redir_targets, persists, pipe,
     heredocs)` groups.
@@ -4847,7 +4913,8 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
         return [], False, KillFacts(None, None, [])   # unbalanced quotes -> defer
 
     scopes = []
-    groups = split_groups(tokens, scopes, lastpipe=seed_lastpipe)
+    groups = split_groups(resume_interrupted_commands(tokens), scopes,
+                          lastpipe=seed_lastpipe)
     cd_funcs = cd_functions(groups, scopes, seed_funcs)
     # Whether `lastpipe` may be on anywhere in the string, for the bodies it
     # runs; a superset, since a body's position is not tracked here.
