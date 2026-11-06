@@ -4569,6 +4569,99 @@ class QuotedSubstBodyEndToEndTests(unittest.TestCase):
         self._defer('echo "$((1 + 2))"')
 
 
+class SubstitutionResumesCommandEndToEndTests(unittest.TestCase):
+    """The words after a substitution's close belong to the command it sits in
+    (Q355). Each row's bash column was driven on 5.3.15 with a planted file."""
+
+    TARGET = "/etc/q355-fake-target"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = os.path.realpath(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _verdict(self, cmd):
+        out = run_hook(cmd.format(self.TARGET), self.workspace,
+                       project_dir=self.workspace)
+        return out and out["hookSpecificOutput"]["permissionDecision"]
+
+    def test_words_after_a_substitution_are_operands_not_a_command(self):
+        # bash opens no file on any of these: they print words.
+        for cmd in ("echo $(date) cat {}", "echo <(date) cat {}",
+                    "echo $((1+1)) cat {}", "echo $(a) b $(c) cat {}",
+                    "if echo $(date) cat {}; then :; fi", "echo <(date) {}",
+                    "echo $(echo $(date) cat {})"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self._verdict(cmd))
+
+    def test_a_read_after_a_substitution_is_judged(self):
+        # bash reads the file; each of these got an `allow` or a defer before.
+        for cmd in ("cat <(echo a) {}", "cat <(echo a) <(echo b) {}",
+                    "diff <(sort a) {}", "cat 2>(cat) <(echo a) {}",
+                    "head -n $(echo 1) {}", "grep -c $(echo x) {}",
+                    "sed -n $(echo 1)p {}",
+                    "find . $(echo) -exec cat {} \\;"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self._verdict(cmd), "ask")
+
+    def test_a_substitution_that_may_expand_to_nothing_keeps_the_split(self):
+        # bash runs the `cat` and reads the file on every row but `$((5))` and
+        # `<(echo a)`, which it runs as a command and fails on. A resume here
+        # would read `cat` as an operand of something that names no command.
+        for cmd in ("$(echo) cat {}", "$(true) $(true) cat {}",
+                    "${{X:-$(true)}} cat {}", "$X $(true) cat {}",
+                    "$(echo /bin)/cat {}", "x=$(date) cat {}",
+                    "x=<(date) cat {}", "x=$((1)) cat {}",
+                    "env $(echo) cat {}", "env FOO=1 $(echo) cat {}",
+                    "nice $(echo /bin)/cat {}", "timeout 5 $(echo) cat {}",
+                    "timeout $((5)) cat {}", "nice -n $((5)) cat {}",
+                    "command $(echo) cat {}", "exec $(echo) cat {}",
+                    "nohup $(echo) cat {}", "xargs $(echo) cat {}",
+                    "eval $(echo) cat {}", "$((5)) cat {}",
+                    "<(echo a) cat {}", "> in.txt $(echo) cat {}",
+                    "> in.txt env $(echo) cat {}"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self._verdict(cmd), "ask")
+
+    def test_the_operand_deny_stands(self):
+        for cmd in ("cat $(echo a) {}", "cat $(echo a) in.txt",
+                    "cat $((1)) {}", "rm $(echo a) {}",
+                    "for f in $(echo a) {}; do cat \"$f\"; done"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self._verdict(cmd), "deny")
+
+    def test_a_list_or_a_pattern_is_no_argv(self):
+        self.assertEqual(
+            self._verdict("case a in $(echo a)) cat {};; esac"), "ask")
+
+    def test_a_process_substitution_keeps_its_redirect_shape(self):
+        # The operator moves with the body, so the file after it is an operand,
+        # and an fd number moves with its operator rather than becoming one.
+        self.assertEqual(
+            guard.resume_interrupted_commands(
+                guard.tokenize_command("tee 2>(cat) f")),
+            ["tee", "f", "2", ">", "(", "cat", ")"])
+        out = run_hook("cat <(echo a) in.txt", self.workspace,
+                       project_dir=self.workspace)
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "allow")
+        for cmd in ("tee >(cat) {}", "echo $(date) > {}"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self._verdict(cmd), "ask")
+
+    def test_a_separator_still_ends_the_command(self):
+        for cmd in ("echo $(date) a; cat {}", "echo $(date) a | cat {}",
+                    "echo $(date) a && cat {}", "(echo $(date) a); cat {}"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self._verdict(cmd), "ask")
+
+    def test_a_cd_inside_a_resumed_substitution_stays_in_its_subshell(self):
+        with open(os.path.join(self.workspace, "in.txt"), "w") as f:
+            f.write("hello\n")
+        self.assertEqual(self._verdict("echo $(cd /) x; cat in.txt"), "allow")
+
+
 class CaseClauseSubstEndToEndTests(unittest.TestCase):
     """Q81: a `case` pattern's `)` must not end the substitution around it.
 

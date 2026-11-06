@@ -1224,6 +1224,13 @@ through the same boundary rules and produce the same reasons. Symlink staging
    because its `(`/`)` split the inner command into its own group.) Nesting is
    followed 25 levels deep; see Limitations for what the bound costs.
 
+   The words after a substitution's close stay with the command it sits in, so
+   `cat <(echo a) /outside/f` is a read and `echo $(date) cat /outside/f`, which
+   opens nothing, is not. That holds only where the command is a plain literal
+   name. A substitution can expand to nothing, so at the head, behind a wrapper
+   or `eval`, or behind `$X`, the words after it are read as a command of their
+   own: `env $(true) cat /outside/f` runs the `cat`, and asks.
+
    A body starts from the enclosing string's propagated literal variables
    (step 4), since bash's substitution inherits them: without that,
    `f=docs/x; grep -c p "$(echo "$f")"` would prompt on an unresolvable `$f`
@@ -1766,6 +1773,15 @@ final output.
 
 ## Limitations
 
+- **A runner this hook does not peel reads as a plain command past a
+  substitution.** `ssh $(host) cat /outside/f`, `docker exec $(id) cat /outside/f`,
+  `watch $(x) cat /outside/f`, `parallel $(x) cat /outside/f` and
+  `busybox $(x) cat /outside/f` defer, the same answer each gets spelled without
+  the substitution. The last three do read the local file.
+- **A process substitution where a reader expects its pattern or program hides
+  the file after it.** `grep -v <(echo x) /outside/f` and
+  `awk <(echo 1) /outside/f` read the file with an `allow`, because the file takes
+  the slot the substitution held.
 - **An interpreter's own file access is invisible to the hook.** `python3`,
   `node`, `perl`, `ruby` and friends are not guarded commands: a `PreToolUse`
   hook on the shell sees the command line, and whatever the interpreter then
