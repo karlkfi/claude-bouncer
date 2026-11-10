@@ -3582,7 +3582,8 @@ def build_reason(offenders, scratch_hint='', override=None, prefixable=False):
             "Relative path(s) after an untracked cd: "
             + ", ".join(sorted(set(buckets['untracked'])))
             + ". Fix: give cd a literal target — bare cd, cd -, cd $HOME, and "
-            "unrecognized $(...) targets drop tracking; pass an absolute path "
+            "unrecognized $(...) targets drop tracking, as do eval, source, a "
+            "trap and a call to a function that runs cd; pass an absolute path "
             "or use the Read/Grep tools. A record-separator byte (0x1E) "
             "anywhere in the command drops it for every substitution after a "
             "cd, so remove one if the command carries it.")
@@ -4385,7 +4386,8 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
                 else classify_cd(wrap.argv)
             if kind is not None:
                 cwd, unknown = apply_cd(kind, arg, cwd, unknown)
-            elif own and calls_cd_function(wrap, funcs):
+            elif own and (calls_cd_function(wrap, funcs)
+                          or runs_in_shell(wrap)):
                 unknown = True
             moved = moved or (cwd, unknown) != fallback
             # Recorded after this group's own `cd`, so a `cd $d` cannot read an
@@ -4457,7 +4459,7 @@ def cd_functions(groups, scopes, known=()):
             if wrap.external or not wrap.argv:
                 continue
             if (classify_cd(wrap.argv)[0] is not None
-                    or wrap.argv[0] in funcs):
+                    or wrap.argv[0] in funcs or runs_in_shell(wrap)):
                 funcs.add(name)
                 grew = True
     return funcs
@@ -4467,6 +4469,36 @@ def calls_cd_function(wrap, funcs):
     """Whether a peeled group runs a function from `cd_functions` (Q265)."""
     return bool(funcs) and not wrap.external and bool(wrap.argv) \
         and wrap.argv[0] in funcs
+
+
+def runs_in_shell(wrap):
+    """Whether a peeled group runs a list in this shell that the string does
+    not spell out -- `eval`, `source`, `.`, a trap that can fire before exit,
+    a `mapfile -C` callback -- so a `cd` in it moves the caller (Q356)."""
+    if wrap.external or not wrap.argv:
+        return False
+    name, args = wrap.argv[0], wrap.argv[1:]
+    if name in POISON_ALL_CMDS:
+        return True
+    if name == 'trap':
+        if args[:1] == ['--']:
+            args = args[1:]
+        if len(args) < 2 or args[0] in ('', '-') or args[0].startswith('-'):
+            return False                          # -p, -l, a reset, an ignore
+        return any(s.upper() not in ('EXIT', 'SIGEXIT', '0') for s in args[1:])
+    if name in ('mapfile', 'readarray'):
+        it = iter(args)
+        for a in it:
+            if a == '--' or a == '-' or not a.startswith('-'):
+                return False
+            for j, ch in enumerate(a[1:], 1):
+                if ch == 'C':
+                    return True
+                if ch in 'dnOsuc':                # the value is the rest or next
+                    if j == len(a) - 1:
+                        next(it, None)
+                    break
+    return False
 
 
 def lastpipe_setting(words):
@@ -5370,8 +5402,9 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
         # A `cd` behind a separate program (`env cd`) moves that program only,
         # and one in a pipeline segment or backgrounded moves its own subshell
         # only (Q173). A call to a function whose body runs a `cd` moves the
-        # cwd somewhere the definition does not say (Q265).
-        if own and calls_cd_function(wrap, cd_funcs):
+        # cwd somewhere the definition does not say (Q265), and so can an
+        # `eval`, `source` or trap.
+        if own and (calls_cd_function(wrap, cd_funcs) or runs_in_shell(wrap)):
             group_cwd_unknown = True
         kind, arg = (None, None) if wrap.external else classify_cd(g)
         if kind is not None:
