@@ -506,6 +506,34 @@ class CasePatternScanTests(unittest.TestCase):
         body = 'if true; then case $x in a) cat /etc/passwd;; esac; fi'
         self.assertEqual([body], bp.command_substitutions('echo "$(%s)" T' % body))
 
+    def test_a_bang_brace_or_closer_reopens_command_position(self):
+        # Each prints `in` under bash 5.3: the pattern's `)` is the clause's.
+        # Read as an operand, `case` let it close the substitution there.
+        clause = 'case a in a) echo in;; esac'
+        for body in (' ! %s ' % clause,
+                     ' time ! ! %s ' % clause,
+                     '{ %s; }' % clause,
+                     ' if { :; } then %s; fi ' % clause,
+                     ' if if :; then :; fi then %s; fi ' % clause,
+                     ' if while false; do :; done then %s; fi ' % clause,
+                     ' if case a in esac then %s; fi ' % clause,
+                     ' if case a in a) :;; esac then %s; fi ' % clause):
+            self.assertEqual([body],
+                             bp.command_substitutions('echo $(%s) T' % body), body)
+
+    def test_a_bang_brace_or_closer_as_an_operand_opens_nothing(self):
+        # bash ends each at the pattern's `)`, so `x` is an argument to it.
+        for body in (' echo ! case a in a', '!case a in a', ' echo { case a in a',
+                     ' echo } case a in a', ' echo fi case a in a',
+                     ' echo done case a in a'):
+            self.assertEqual([body],
+                             bp.command_substitutions('echo $(%s) x' % body), body)
+
+    def test_esac_as_an_operand_ends_no_clause(self):
+        # bash prints `esac x`, so the `b)` is a pattern, not the close.
+        body = 'case a in a) echo esac x;; b) y;; esac'
+        self.assertEqual([body], bp.command_substitutions('echo $(%s)' % body))
+
     def test_a_heredoc_in_a_clause_is_reached(self):
         # The gap this closes: the clause body was never scanned, so a heredoc
         # written there went with it. An odd quote in that body was a second
