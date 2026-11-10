@@ -924,6 +924,7 @@ class SubscriptAssignmentTests(unittest.TestCase):
                     '( FOO[a;b]=x cat f', '2>/dev/null FOO[a;b]=x cat f',
                     '>/dev/null FOO[a;b]=x cat f', 'time FOO[a;b]=x cat f',
                     'time -p FOO[a;b]=x cat f', 'time -- FOO[a;b]=x cat f',
+                    'time -p -- FOO[a;b]=x cat f',
                     'x=$(true) FOO[a;b]=x cat f', '(true) && FOO[a;b]=x cat f',
                     'case x in x) FOO[a;b]=x cat f',
                     'case x in (x) FOO[a;b]=x cat f',
@@ -938,6 +939,15 @@ class SubscriptAssignmentTests(unittest.TestCase):
         # `b]=x` as a second command, and `FOO[a b] cat f` runs `FOO[a b]`.
         self.assertEqual(['echo', 'FOO[a', ';', 'b]=x'],
                          bp.lex('echo FOO[a;b]=x'))
+
+    def test_a_time_option_out_of_place_is_the_command(self):
+        # bash 5.3.15 runs a program named `-p` or `--`, then `b]=x`: `time`
+        # takes one unquoted `-p`, then one `--`, and nothing after either.
+        for cmd in ('time -- -p FOO[a;b]=x cat f', 'time -p -p FOO[a;b]=x cat f',
+                    'time -- -- FOO[a;b]=x cat f', "time '-p' FOO[a;b]=x cat f"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(['FOO[a', ';', 'b]=x', 'cat', 'f'],
+                                 bp.lex(cmd)[-5:])
         self.assertEqual(['cat', 'f', '>', 'x', 'FOO[a', ';', 'b]=x'],
                          bp.lex('cat f >x FOO[a;b]=x'))
         self.assertEqual(['FOO[a b]', 'cat', 'f'], bp.lex('FOO[a b] cat f'))

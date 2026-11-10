@@ -1408,7 +1408,7 @@ class QuoteTrackingLexer(shlex.shlex):
         self._cmd_pos = True      # an assignment word may stand here
         self._redir_target = False
         self._frames = []         # open `(` and `case` constructs
-        self._after_time = False
+        self._after_time = ()
         self._requoted = False
         super().__init__(*args, **kwargs)
 
@@ -1541,15 +1541,16 @@ class QuoteTrackingLexer(shlex.shlex):
                 self._cmd_pos, self._redir_target = True, False
             elif ('<' in tok or '>' in tok) and '(' not in tok:
                 self._redir_target = True
-            self._after_time = False
+            self._after_time = ()
             return
         if self._redir_target:
             self._redir_target = False
             return
         if tok.isdigit() and tok.glued:           # the fd of `2>f`
             return
-        if self._after_time and tok in ('-p', '--'):
-            return                                # `time -p FOO[a;b]=x cmd`
+        if tok in self._after_time and tok.quoted_from is None:
+            self._after_time = ('--',) if tok == '-p' else ()
+            return                                # `time -p -- FOO[a;b]=x cmd`
         if self._cmd_pos and is_reserved_word(tok):
             if tok == 'case':
                 self._frames.append(['case', 'subject', False, 0])
@@ -1559,8 +1560,8 @@ class QuoteTrackingLexer(shlex.shlex):
                 self._frames.pop()
                 self._cmd_pos = False
                 return
-        self._after_time = self._cmd_pos and tok == 'time' \
-            and is_reserved_word(tok)
+        self._after_time = ('-p', '--') if self._cmd_pos and tok == 'time' \
+            and is_reserved_word(tok) else ()
         self._cmd_pos = self._cmd_pos and (
             is_assignment(tok) or (is_reserved_word(tok)
                                    and tok in _ASSIGN_POS_KEYWORDS))
