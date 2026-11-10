@@ -111,6 +111,10 @@ _CMD_POS_KEYWORDS = frozenset({
     'if', 'then', 'elif', 'else', 'while', 'until', 'do', 'time',
 })
 
+# Closers, after which bash still reads a reserved word: `fi then case ...`.
+_CLOSE_KEYWORDS = frozenset({'fi', 'done', 'esac'})
+_PUNCT_KEYWORDS = '!{}'
+
 _WORD_RE = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
 
 # The same, for the lexer deciding whether an assignment word can follow.
@@ -824,7 +828,12 @@ def _scan_dollar_paren(text, start):
     stays an operand -- mistaking one for the keyword would swallow the real
     close and drop a substitution that reads fine today. A ``)`` at depth 0
     still closes whatever the clause state says, which keeps a missed ``esac``
-    costing nothing.
+    costing nothing. ``esac`` likewise, so ``echo esac`` in a clause ends no
+    clause. Command position reopens after ``!`` and ``{`` and after a closer
+    -- ``}``, ``fi``, ``done``, ``esac`` -- as well as after the words in
+    ``_CMD_POS_KEYWORDS``: missed there, the ``case`` in
+    ``$( ! case a in a) cmd;; esac )`` was an operand and its pattern's ``)``
+    closed the substitution before ``cmd``.
 
     A comment is stepped over to its newline, which is kept because it puts
     the next line in command position (Q230). Read as syntax, a ``)`` in the
@@ -901,7 +910,7 @@ def _scan_dollar_paren(text, start):
             m = _WORD_RE.match(text, i)
             if m and m.group(0) == 'esac':        # `case $x in esac` -- no clauses
                 clauses.pop()
-                cmd_pos = False
+                cmd_pos = True
                 i = m.end()
                 continue
             end = _scan_case_pattern(text, i)
@@ -958,11 +967,12 @@ def _scan_dollar_paren(text, start):
                 if word == 'in':
                     clauses[-1] = 'pat'
             elif word == 'esac':
-                if state == 'body':
+                if state == 'body' and cmd_pos:
                     clauses.pop()
             elif word == 'case' and cmd_pos:
                 clauses.append('in')
-            cmd_pos = cmd_pos and word in _CMD_POS_KEYWORDS
+            cmd_pos = cmd_pos and (word in _CMD_POS_KEYWORDS
+                                   or word in _CLOSE_KEYWORDS)
             i = m.end()
             continue
         if c == '(' and i + 1 < n and text[i+1] == '(':
@@ -998,7 +1008,9 @@ def _scan_dollar_paren(text, start):
             continue
         if c == '$':
             dollar = i
-        cmd_pos = c in '&|{'
+        # only standing alone in command position: `echo {` and `!case` are words
+        cmd_pos = c in '&|' or (cmd_pos and c in _PUNCT_KEYWORDS
+                                and text[i+1:i+2] in ('', ' ', '\t', '\n'))
         i += 1
     return (None, start)
 
