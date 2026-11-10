@@ -5374,6 +5374,52 @@ class FunctionCdTests(OutsideParentFixture, unittest.TestCase):
             "f() { cd sub; cat ../in.txt; }"))
 
 
+class InShellCdTests(OutsideParentFixture, unittest.TestCase):
+    """Q356: a word that runs code in this shell leaves the cwd unknown.
+
+    `eval`, `source`, `.`, a trap and a `mapfile -C` callback each run a list
+    the string does not spell out, in the calling shell, so a `cd` there moves
+    every later command. The tracker kept the cwd across them and a relative
+    read of the parent's file earned `allow`. Every shape here was driven under
+    bash 5.3.15 to see which file it reads.
+    """
+
+    def test_an_in_shell_word_leaves_the_cwd_unknown(self):
+        # Pre-fix every one allowed; bash reads the parent's `in.txt` in all
+        # but the ERR and INT rows, whose trap needs its signal to fire first.
+        for cmd in ("eval cd ..; cat in.txt",
+                    "eval 'cd ..'; cat in.txt",
+                    "builtin eval cd ..; cat in.txt",
+                    "source ./up.sh; cat in.txt",
+                    ". ./up.sh; cat in.txt",
+                    "source ./up.sh && cat in.txt",
+                    "trap 'cd ..' DEBUG; cat in.txt",
+                    "trap -- 'cd ..' ERR; cat in.txt",
+                    "trap 'cd ..' EXIT INT; cat in.txt",
+                    "mapfile -C 'cd ..;:' -c 1 a < in.txt; cat in.txt",
+                    "mapfile -tC 'cd ..;:' -c1 a < in.txt; cat in.txt",
+                    "f() { eval cd ..; }; f; cat in.txt",
+                    'echo "$(eval cd ..; cat in.txt)"'):
+            with self.subTest(cmd=cmd):
+                self.assertEqual("deny", self._decision(cmd))
+
+    def test_a_word_that_cannot_move_the_caller_keeps_the_cwd(self):
+        # An EXIT trap fires after the last command, a reset or a listing
+        # sets none, a `C` after `-d` is its delimiter, a piped `eval` runs in
+        # a subshell, and a definition calls nothing.
+        for cmd in ("trap 'cd ..' EXIT; cat in.txt",
+                    "trap - DEBUG; cat in.txt",
+                    "trap -p; cat in.txt",
+                    "trap '' INT; cat in.txt",
+                    "mapfile -t a < in.txt; cat in.txt",
+                    "mapfile -dC a < in.txt; cat in.txt",
+                    "mapfile -d -C a < in.txt; cat in.txt",
+                    "eval cd .. | cat; cat in.txt",
+                    "f() { eval cd ..; }; cat in.txt"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual("allow", self._decision(cmd))
+
+
 class PipedCompoundCdTests(OutsideParentFixture, unittest.TestCase):
     """Q272: a compound command piped or backgrounded as a whole is a subshell.
 
