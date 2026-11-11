@@ -50,12 +50,16 @@ The hook produces one of four outcomes per command:
   [Configuration](#configuration)).
 - **deny** — the command is refused and the reason goes to the model rather than
   to you. Used where the missing input is a fact the session can establish for
-  itself, so the reason carries the check that settles it. Today that is two
+  itself, so the reason carries the check that settles it. Today that is three
   cases: a `git reset --hard` onto a tip the guard has proved nothing else
   reaches and proved to be carrying more than a reproducible merge or a
-  published rebase, and a push
-  onto a base that has moved into this branch's own lines.
-  Asking there would spend your attention on a `gh pr view` or a `git rebase`.
+  published rebase, a push
+  onto a base that has moved into this branch's own lines, and a `gh` write
+  naming a pull request, issue or release while naming no repository.
+  Asking there would spend your attention on a `gh pr view` or a `git rebase` —
+  and on the third it would spend it for nothing, since the prompt shows you a
+  command that reads correctly either way. Which repository `gh` picks is the
+  working directory, and the working directory is not in the command.
 - **defer** — the hook stays silent; your normal permission settings apply.
 
 It guards the `Bash` tool (for `git` and `gh` commands) and the `Edit`, `Write`,
@@ -127,6 +131,7 @@ the default `strict` [push policy](#push-guard).
 | `git push` *(worktree branch, but the base has moved into the same lines this branch edits)* | **deny** |
 | `git reset --hard HEAD~1` *(uncommitted changes to tracked files, or on `main`, or a tip the guard couldn't check)* | **ask** |
 | `git reset --hard HEAD~1` *(clean worktree, feature branch, tip proved to be reachable from nothing else, and its orphaned commits proved neither reproducible nor republished)* | **deny** |
+| `gh pr edit 158 --body-file b.md` / `gh issue close 42` / `gh pr merge 5` / `gh release delete v1` *(names a pull request, issue or release that exists in every repository, while naming no `--repo` — gh reads that from the working directory)* | **deny** |
 | `git clean -fd` | **ask** |
 | `git stash drop` / `git stash clear` *(discards a stash)* | **ask** |
 | `git branch -D old` *(tip reachable from nothing else, and the branch carries commits of its own that no remote has a patch-equivalent of)* | **ask** |
@@ -134,9 +139,9 @@ the default `strict` [push policy](#push-guard).
 | `git branch -d main` / `git branch -D main` / `git branch -m x main` *(protected branch, any spelling)* | **ask** |
 | `git branch -f old main` / `git branch -M x old` *(moves an existing branch off commits nothing else reaches, and that re-running a merge doesn't account for)* | **ask** |
 | `git switch -C main origin/main` / `git checkout -B main …` / `git worktree add -B main …` *(resets a protected branch; on an unprotected one, the `git branch -f` rows above apply)* | **ask** |
-| `gh pr close 5 --delete-branch` / `gh pr close 5 -d` *(deletes a branch whose work was never merged)* | **ask** |
+| `gh pr close 5 --repo o/n --delete-branch` / `gh pr close 5 --repo o/n -d` *(deletes a branch whose work was never merged)* | **ask** |
 | `gh repo delete owner/repo` / `gh label delete bug` *(deletes a resource)* | **ask** |
-| `gh release delete v1` / `gh release delete-asset v1 file.zip` / `gh secret delete X` / `gh variable delete Y` / `gh gist delete abc` / `gh cache delete 1` *(deletes a resource; `secret`/`variable` also via the `remove` alias)* | **ask** |
+| `gh release delete v1 --repo o/n` / `gh release delete-asset v1 file.zip --repo o/n` / `gh secret delete X` / `gh variable delete Y` / `gh gist delete abc` / `gh cache delete 1` *(deletes a resource; `secret`/`variable` also via the `remove` alias)* | **ask** |
 | `gh workflow disable ci.yml` *(disables a workflow)* | **ask** |
 | `gh api -X DELETE …/git/refs/heads/feature-x` *(deletes a branch/tag ref)* | **ask** |
 | `gh api -X DELETE …/labels/bug` *(deletes a label)* | **ask** |
@@ -163,7 +168,7 @@ the default `strict` [push policy](#push-guard).
 | `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager … git log` / `GIT_CONFIG_PARAMETERS=… git log` *(the same hatch from the environment)* | defer |
 | `GIT_EXTERNAL_DIFF=x git diff` / `GIT_SSH_COMMAND=x git fetch` / `PATH=… git status` / `FOO=1 git log` *(any prefix variable outside the data git reads: it may name a program to run)* | defer |
 | `GIT_EDITOR=true git rebase --continue` / `GIT_PAGER=cat git log` / `TZ=UTC git log` *(an editor or pager set to `true`, `:` or `cat`, author and committer data, `TZ`, `LANG`, `LC_*`)* | allow |
-| `gh pr create` / `gh pr merge 5` / `gh pr merge 5 --delete-branch` / `gh run rerun` *(gh mutation; the merge lands the work before the branch is deleted)* | defer |
+| `gh pr create` / `gh pr merge 5 --repo o/n` / `gh pr merge 5 --repo o/n --delete-branch` / `gh run rerun` *(gh mutation, repository named or identifier non-colliding; the merge lands the work before the branch is deleted)* | defer |
 | `gh api -X POST …` / `gh api … -f k=v` *(a write: non-GET method or a request body)* | defer |
 | `gh api -X DELETE user/following/x` / `gh api -X DELETE repos/o/r/issues/comments/1` *(non-repo API delete — not a recognized destructive endpoint)* | defer |
 | `ls -la` *(not a git/gh command)* | defer |
@@ -440,6 +445,36 @@ consults the index, and edits to that file really do land on the branch. The
 probe follows symlinks and asks about the file the write lands on, so a link
 inside an ignored directory pointing at a tracked file still asks — a link to a
 genuinely ignored file stays exempt.
+
+### `gh` writes name their repository
+
+`gh pr edit 158`, `gh issue close 42` and `gh release delete v1` are refused
+unless the command also says `--repo <owner>/<name>` (or `-R`). Adding it is the
+whole fix, and the denial says so.
+
+The reason is that `158` is a valid pull request in almost every repository you
+have checked out, and nothing in the command says which one is meant. `gh`
+answers that from the process's working directory — a directory that persists
+between commands and drifts as work moves between checkouts. So the same command
+text edits a different pull request depending on where the shell happens to be,
+and when it picks the wrong one it does not fail: it succeeds, against someone
+else's repository, and reports success.
+
+That is why this one denies rather than prompting. A prompt would show you the
+command, and the command is not where the mistake is — the directory is, and the
+directory is not in it. There is nothing for you to read that would tell the two
+apart. Naming the repository puts the target back in the text, where both you
+and the model can check it.
+
+Reads are untouched (`gh pr view 158`, `gh pr list`), and so are writes whose
+identifier doesn't collide: a run id is effectively unique to a repository, and
+`gh pr create` needs a branch the wrong repository doesn't have, so both fail
+loudly instead of succeeding against the wrong thing. The rule is about
+identifiers that collide, not about writes in general.
+
+The [break-glass](#break-glass-branch_guard_override) does not lift this one,
+and deliberately: it needs no escape, because `--repo` is always available and
+is exactly what is being asked for.
 
 ## Break-glass: `BRANCH_GUARD_OVERRIDE`
 
@@ -1115,7 +1150,7 @@ protected branch (main/master) or destructive git commands. To keep work flowing
 
 - **Non-interactive modes** — in `dontAsk` and `bypassPermissions` an `ask` is
   automatically emitted as `deny` so the guard fails safe when no human is
-  present. (Two verdicts deny in every mode regardless — see
+  present. (Three verdicts deny in every mode regardless — see
   [What it does](#what-it-does) — and are unaffected by this.) The denial says
   so plainly (see [Behavior](#behavior)): there is no
   confirmation to grant in this mode, so the way through is to run the command
