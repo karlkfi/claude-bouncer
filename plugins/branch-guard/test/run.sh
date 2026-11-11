@@ -1322,8 +1322,13 @@ for c in "gh run watch 123" "gh run watch 123 --exit-status" \
   check "readonly gh: $c -> allow" allow "$(decision_for "$(bash_cmd "$c")" "$WORK")"
 done
 # gh mutations that are NOT in the allowlist still defer (outward-facing writes).
+# The pr forms carry `--repo` because they are in GH_PIN_REQUIRED and would
+# otherwise deny on that account; what this block asserts is the tier BEHIND the
+# pin check, so the pin has to be satisfied for the assertion to mean anything.
+# The unpinned spellings are asserted in their own section below.
 for c in "gh run rerun 123" "gh run cancel 123" "gh workflow run ci.yml" \
-         "gh pr merge 5" "gh pr comment 5 --body hi" "gh secret set X" \
+         "gh pr merge 5 --repo o/n" "gh pr comment 5 --repo o/n --body hi" \
+         "gh secret set X" \
          "gh release download v1"; do
   check "gh mutation: $c -> none (defer)" none "$(decision_for "$(bash_cmd "$c")" "$WORK")"
 done
@@ -1332,8 +1337,8 @@ done
 #      the merge -- and escalating it to `ask` while `gh pr merge` defers
 #      overrode the user's own settings for the safer of the two spellings.
 #      Crossed against `gh pr close`, where the work was never merged, below.
-for c in "gh pr merge 5 --delete-branch" "gh pr merge 5 -d" \
-         "gh pr merge 5 --squash --delete-branch"; do
+for c in "gh pr merge 5 --repo o/n --delete-branch" "gh pr merge 5 --repo o/n -d" \
+         "gh pr merge 5 --repo o/n --squash --delete-branch"; do
   check "gh pr merge + delete: $c -> none (defer)" none \
     "$(decision_for "$(bash_cmd "$c")" "$WORK")"
 done
@@ -1367,15 +1372,15 @@ done
 #      the api, and a repo delete via the api refs/labels/repos endpoints.
 check_text "gh pr close --delete-branch reason says the work was never merged" has \
   "work was never merged" \
-  "$(reason_for "$(bash_cmd 'gh pr close 5 --delete-branch')" "$WORK")"
+  "$(reason_for "$(bash_cmd 'gh pr close 5 --repo o/n --delete-branch')" "$WORK")"
 for c in "gh api -X DELETE repos/o/r/git/refs/heads/feature-x" \
          "gh api -XDELETE repos/o/r/git/refs/heads/main" \
          "gh api --method DELETE repos/o/r/git/refs/tags/v1" \
-         "gh pr close 5 --delete-branch" "gh pr close 5 -d" \
+         "gh pr close 5 --repo o/n --delete-branch" "gh pr close 5 --repo o/n -d" \
          "gh repo delete owner/repo" "gh repo delete owner/repo --yes" \
          "gh label delete bug" "gh label delete bug --yes" \
-         "gh release delete v1" "gh release delete v1 --yes" \
-         "gh release delete-asset v1 file.zip" \
+         "gh release delete v1 --repo o/n" "gh release delete v1 --repo o/n --yes" \
+         "gh release delete-asset v1 file.zip --repo o/n" \
          "gh secret delete TOKEN" "gh secret remove TOKEN" \
          "gh variable delete VAR" "gh variable remove VAR" \
          "gh gist delete abc123" "gh cache delete 42" "gh cache delete --all" \
@@ -1385,6 +1390,87 @@ for c in "gh api -X DELETE repos/o/r/git/refs/heads/feature-x" \
          "gh api -X DELETE repos/o/r" "gh api -XDELETE /repos/o/r"; do
   check "gh destructive delete: $c -> ask" ask "$(decision_for "$(bash_cmd "$c")" "$WORK")"
 done
+
+# 17e. A gh write naming a pull request, issue or release by an identifier that
+#      exists in every repository DENIES without `--repo`/`-R` (GH_PIN_REQUIRED
+#      / 'deny-unpinned'). gh resolves the repository from the process's working
+#      directory, which drifts between calls and which the hook cannot see, so
+#      the wrong target is a silent success against another repository.
+for c in "gh pr edit 158 --body-file b.md" "gh pr merge 5" "gh pr comment 5 --body hi" \
+         "gh pr review 5 --approve" "gh pr close 5" "gh pr reopen 5" "gh pr ready 5" \
+         "gh issue edit 42 --title x" "gh issue close 42" "gh issue comment 42 --body hi" \
+         "gh issue delete 42" "gh issue transfer 42 o/n" \
+         "gh release edit v1 --notes x" "gh release upload v1 a.zip"; do
+  check "gh unpinned: $c -> deny" deny "$(decision_for "$(bash_cmd "$c")" "$WORK")"
+done
+#      All four spellings gh accepts satisfy it, and each has to be listed: the
+#      glued short form is the one a parser written for the long form drops.
+for c in "gh pr edit 158 --repo o/n" "gh pr edit 158 --repo=o/n" \
+         "gh pr edit 158 -R o/n" "gh pr edit 158 -Ro/n"; do
+  check "gh pinned: $c -> none (defer)" none "$(decision_for "$(bash_cmd "$c")" "$WORK")"
+done
+#      An empty value is not a pin -- gh falls back to the directory exactly as
+#      if the flag were absent, so accepting it would be a spelling that turns
+#      the guard off. This is the control that makes the four above mean
+#      "named a repository" rather than "contained the characters --repo".
+check "gh unpinned: --repo= with no value -> deny" deny \
+  "$(decision_for "$(bash_cmd 'gh pr edit 158 --repo=')" "$WORK")"
+check "gh unpinned: bare --repo at end of args -> deny" deny \
+  "$(decision_for "$(bash_cmd 'gh pr edit 158 --repo')" "$WORK")"
+#      Controls on the other side: the pin check must not reach a read, a write
+#      whose identifier does NOT collide across repositories (a run id is
+#      effectively repo-unique; a create needs a branch the other repo lacks, so
+#      both fail loudly in the wrong repo), or a destructive form whose own
+#      subject is a repo-qualified name.
+for c in "gh pr view 158" "gh pr list" "gh pr checks 158" "gh issue view 42"; do
+  check "gh pin check skips reads: $c -> allow" allow \
+    "$(decision_for "$(bash_cmd "$c")" "$WORK")"
+done
+for c in "gh pr create --title x --body y" "gh run rerun 1234567890" \
+         "gh run cancel 1234567890" "gh workflow run ci.yml"; do
+  check "gh pin check skips non-colliding: $c -> none (defer)" none \
+    "$(decision_for "$(bash_cmd "$c")" "$WORK")"
+done
+#      Crossed against the destructive tier, which is the cell the ordering
+#      decides: unpinned denies ON THE PIN even though the form is also
+#      destructive, because "do you mean to delete this" cannot be answered
+#      while which repository it lands in is unknown -- a human approving that
+#      prompt would be approving the wrong thing. Pinned, the same command
+#      reaches the destructive `ask` it had before.
+check "gh unpinned+destructive: release delete -> deny" deny \
+  "$(decision_for "$(bash_cmd 'gh release delete v1')" "$WORK")"
+check "gh pinned+destructive: release delete --repo -> ask" ask \
+  "$(decision_for "$(bash_cmd 'gh release delete v1 --repo o/n')" "$WORK")"
+check_text "gh unpinned+destructive reason names the pin, not the deletion" has \
+  "no \`--repo\` says which one is meant" \
+  "$(reason_for "$(bash_cmd 'gh release delete v1')" "$WORK")"
+#      It denies in every permission mode, interactive included -- that is what
+#      separates a DENY_ROUTES verdict from an `ask` that `confirm()` upgrades.
+#      The `auto` control is the half a suite is likely to skip: without it the
+#      fixtures pass with this as an ordinary ask.
+for m in auto dontAsk bypassPermissions; do
+  check "[$m] gh unpinned pr edit -> deny" deny \
+    "$(decision_for "$(push_mode 'gh pr edit 158 --body x' "$m")" "$WORK")"
+done
+#      The break-glass does NOT lift it, and the denial stays silent about the
+#      prefix -- `--repo` is the fix and is always available, so advertising an
+#      override would route around the one thing being asked for. (`$OVR` is
+#      defined with the override section further down; spelled out here.)
+gh_ovr="BRANCH_GUARD_OVERRIDE='meant this repo' gh pr edit 158 --body x"
+check "override does not lift gh unpinned -> deny" deny \
+  "$(decision_for "$(bash_payload "$gh_ovr")" "$WORK")"
+check_text "gh unpinned deny stays silent about the prefix" lacks \
+  "BRANCH_GUARD_OVERRIDE" \
+  "$(reason_for "$(bash_payload "$gh_ovr")" "$WORK")"
+check_text "gh unpinned deny routes to --repo" has \
+  "re-run it with \`--repo" \
+  "$(reason_for "$(bash_cmd 'gh pr edit 158 --body x')" "$WORK")"
+check_prefix "gh unpinned deny carries the guard prefix" "branch-guard: " \
+  "$(reason_for "$(bash_cmd 'gh pr edit 158 --body x')" "$WORK")"
+#      The all-segments rule holds over it: a deny outranks a plain ask chained
+#      ahead of it, so the pin cannot be smuggled past by pairing.
+check "gh unpinned chained after a git ask -> deny" deny \
+  "$(decision_for "$(bash_cmd 'git log ; gh pr edit 158 --body x')" "$WORK")"
 
 # 18. Shell-substitution bypass guard: a would-be `allow` defers when a raw
 #     token hides a command the classifier never sees (command/process
@@ -2179,7 +2265,7 @@ check "override on a tag publish -> ask" ask \
 check "override on gh repo delete -> ask" ask \
   "$(decision_for "$(bash_payload "$OVR gh repo delete owner/repo")" "$WORK")"
 check "override on gh pr close --delete-branch -> ask" ask \
-  "$(decision_for "$(bash_payload "$OVR gh pr close 1 --delete-branch")" "$WORK")"
+  "$(decision_for "$(bash_payload "$OVR gh pr close 1 --repo o/n --delete-branch")" "$WORK")"
 check "override on gh api DELETE of a ref -> ask" ask \
   "$(decision_for "$(bash_payload "$OVR gh api -X DELETE repos/o/r/git/refs/heads/x")" "$WORK")"
 #     A push's deny must not advertise a prefix that would be refused again.
