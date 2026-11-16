@@ -1105,6 +1105,10 @@ def main():
         data = json.load(sys.stdin)
     except ValueError:
         return  # unparseable input: fail-open
+    # Matched by name so a Monitor arrives as itself and defers here. From
+    # Claude Code 2.1.321 a bare "Bash" matcher also catches Monitor, with
+    # tool_name rewritten to "Bash" and only command and description kept,
+    # so the advised Monitor until-loop read as a foreground poll.
     if data.get('tool_name') != 'Bash':
         return
     tool_input = data.get('tool_input') or {}

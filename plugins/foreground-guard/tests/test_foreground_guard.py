@@ -1599,6 +1599,16 @@ class RobustnessTests(unittest.TestCase):
                                        "tool_input": {"file_path": "/x"}})
         self.assertIsNone(d)
 
+    def test_monitor_poll_loop_defers(self):
+        # A Monitor until-loop is the wait the deny text advises. The matcher
+        # names Monitor so it arrives as itself instead of disguised as Bash.
+        d, _ = run_hook(None, payload={"tool_name": "Monitor", "tool_input": {
+            "command": "until curl -sf -o /dev/null http://localhost:8000/; "
+                       "do sleep 3; done; echo up",
+            "description": "docs-serve on :8000 ready",
+            "timeout_ms": 900000}})
+        self.assertIsNone(d)
+
     def test_empty_command_defers(self):
         d, _ = run_hook("   ")
         self.assertIsNone(d)
@@ -1741,7 +1751,7 @@ class WiringTests(unittest.TestCase):
         with open(REPO / "hooks" / "hooks.json", encoding="utf-8") as f:
             hooks = json.load(f)
         entries = hooks["hooks"]["PreToolUse"]
-        self.assertEqual(entries[0]["matcher"], "Bash")
+        self.assertEqual(entries[0]["matcher"], "Bash|Monitor")
         cmd = entries[0]["hooks"][0]["command"]
         self.assertEqual(
             cmd, '"${CLAUDE_PLUGIN_ROOT}/scripts/run-python-hook.cmd" '

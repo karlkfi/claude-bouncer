@@ -529,6 +529,8 @@ failure directions follow from the guard's job:
 - The guard cannot take the snapshot or arm the Monitor for you — it can only
   teach the fix and let the agent retry. Monitor is a Claude Code tool; on a
   surface that doesn't offer it the other two fixes still stand.
+- A `Monitor` call is never judged: it waits off the main thread, and the
+  hook's matcher names it so Claude Code does not hand it over as `Bash`.
 
 ## Companion plugins
 
