@@ -224,8 +224,9 @@ claude plugin update foreground-guard@claude-bouncer
 
 **Class A — loop and sleep forms:**
 
-- `while`/`until`/`for` loops whose body runs `sleep` (any duration — the
-  loop multiplies it).
+- `while`/`until`/`for` loops whose condition or body runs `sleep` (any
+  duration — the loop multiplies it). A `sleep` after the loop's `done` runs
+  once and is judged by the rules below.
 - Chained repeat-with-sleep: `cmd; sleep N; cmd; ...` — the same command
   on both sides of a sleep is a poll regardless of `N`. A sleep between two
   *different* commands is one wait (a settle after a kill, grace after a

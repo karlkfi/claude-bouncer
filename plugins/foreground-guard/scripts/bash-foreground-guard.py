@@ -435,6 +435,8 @@ def is_operator(t):
 COMPOUND_OPEN = frozenset({'while', 'until', 'for', 'if', 'case', 'select',
                            '{'})
 COMPOUND_CLOSE = frozenset({'done', 'fi', 'esac', '}'})
+CLOSER = {'while': 'done', 'until': 'done', 'for': 'done', 'select': 'done',
+          'if': 'fi', 'case': 'esac', '{': '}'}
 
 
 def backgrounded(tokens):
@@ -514,7 +516,6 @@ def strip_head(argv, state):
     """Peel shell keywords, env-var prefixes, and launcher wrappers off a
     segment so the blocking command underneath is classified, not the
     wrapper. Side effects on `state`:
-      * 'loop'            — a while/until/for keyword led the segment
       * 'override'        — the reason from a FOREGROUND_GUARD_OVERRIDE=<reason>
                             prefix (a str, possibly empty; None when unseen)
       * 'timeout_wrapped' — (per-segment, reset by caller) the segment is
@@ -523,11 +524,7 @@ def strip_head(argv, state):
     reserved = True  # whether argv[0] stands where bash reads a keyword
     while argv:
         head = os.path.basename(argv[0])
-        if head in LOOP_KEYWORDS:
-            state['loop'] = True
-            argv = argv[1:]
-            continue
-        if head in OTHER_KEYWORDS:
+        if head in LOOP_KEYWORDS or head in OTHER_KEYWORDS:
             argv = argv[1:]
             continue
         keyword_time = reserved and argv[0] == 'time'
@@ -792,7 +789,7 @@ def analyze_class_a(raw, cfg, depth=0):
     poll loop can't ride past the guard; `bash some-script.sh` stays opaque
     (no script-file inspection)."""
     findings = []
-    state = {'loop': False, 'override': None}
+    state = {'override': None}
     if depth > 3:
         return findings, None
 
@@ -818,13 +815,36 @@ def analyze_class_a(raw, cfg, depth=0):
 
     # Per-segment classification. kind: 'sleep' | 'cmd' | None (empty/opaque).
     segs = []            # (kind, argv) for the sandwich rule, foreground only
-    loop_sleep = False   # a foreground `sleep` seen anywhere (any duration)
+    loop_sleep = False   # a foreground `sleep` inside a loop (any duration)
     sleep_findings = []
     any_bg = False
     bg_flags = []
+    opened = []          # compound keywords open at this segment, outermost first
     segments = split_segments(tokens, bg_flags)
     for (group, _term), bg in zip(segments, bg_flags):
         any_bg = any_bg or bg
+        # A segment opens or closes compounds only with its leading words, so
+        # a sleep after `done` is outside the loop and judged on its own (Q283).
+        timed = False
+        for t in group:
+            if getattr(t, 'quoted_from', None) is not None:
+                break
+            # The `time` keyword times the compound after it, as strip_head
+            # reads it: `time -p while ...` still opens the loop.
+            if t == 'time' or (timed and t.startswith('-')):
+                timed = True
+                continue
+            timed = False
+            if t in COMPOUND_OPEN:
+                opened.append(t)
+            elif t in COMPOUND_CLOSE:
+                # Only the opener's own closer pops it: a case pattern
+                # `done)` leaves the loop around it open.
+                if opened and CLOSER[opened[-1]] == t:
+                    opened.pop()
+            elif t not in OTHER_KEYWORDS:
+                break
+        in_loop = any(k in LOOP_KEYWORDS for k in opened)
         # A substitution runs where the segment holding it runs: in the
         # background job under `&`, and in the foreground under a `timeout`
         # wrap, because the shell expands it before `timeout` starts.
@@ -840,7 +860,7 @@ def analyze_class_a(raw, cfg, depth=0):
         if head == 'sleep':
             secs = sleep_seconds(argv)
             segs.append(('sleep', argv))
-            loop_sleep = True
+            loop_sleep = loop_sleep or in_loop
             if secs is None or secs >= floor:
                 sleep_findings.append(finding_sleep(cfg, secs))
             continue
@@ -877,7 +897,7 @@ def analyze_class_a(raw, cfg, depth=0):
         for body in heredoc_substitutions(expanded):
             recurse(body)
 
-    if state['loop'] and loop_sleep:
+    if loop_sleep:
         # Loop-with-sleep: the canonical foreground poll. Any sleep duration
         # counts — the loop multiplies it. Subsumes the per-sleep findings.
         findings.append(finding_loop(cfg))
@@ -990,7 +1010,7 @@ def simple_commands(raw, depth=0):
         if sub is None:
             return None
         out += sub
-    state = {'loop': False, 'override': None}
+    state = {'override': None}
     bg_flags = []
     segments = split_segments(tokens, bg_flags)
     for (group, _term), bg in zip(segments, bg_flags):
