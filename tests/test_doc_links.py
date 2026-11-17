@@ -69,16 +69,20 @@ def strip_code(text):
     return re.sub(r'(`+)(?!`).*?\1(?!`)', blank, text, flags=re.S)
 
 
-def links(text):
-    """(line number, target) for every non-external link."""
+def links(text, forms=False):
+    """(line number, target) for every non-external link.
+
+    With `forms`, a third element says the link is a reference definition."""
     found = []
     for pattern in (INLINE, REFDEF):
         for m in pattern.finditer(text):
             target = unquote(m.group(1))
             if SCHEME.match(target):
                 continue
-            found.append((text.count('\n', 0, m.start()) + 1, target))
-    return sorted(found)
+            found.append((text.count('\n', 0, m.start()) + 1, target,
+                          pattern is REFDEF))
+    found.sort()
+    return found if forms else [(n, t) for n, t, _ in found]
 
 
 def slugs(text):
@@ -103,7 +107,9 @@ def slugs(text):
 def broken(paths, exists, read, advisory=lambda path, dest: False):
     """Every link in `paths` that does not resolve, as printable lines.
 
-    A missing file for which `advisory(path, dest)` holds is left out."""
+    A missing file for which `advisory(path, dest)` holds is left out, unless
+    the link is a reference definition: `queue.py` notes inline links only, so
+    a definition pointing at a missing item is reported by nothing else (Q271)."""
     heads, bad = {}, []
     for path in paths:
         # The list comes from the index and the contents from the working
@@ -112,7 +118,7 @@ def broken(paths, exists, read, advisory=lambda path, dest: False):
         # crashing on it here is not.
         if not exists(path):
             continue
-        for line, target in links(strip_code(read(path))):
+        for line, target, is_def in links(strip_code(read(path)), forms=True):
             where = '%s:%d -> %s' % (path, line, target)
             body, _, anchor = target.partition('#')
             dest = path if not body else os.path.normpath(
@@ -122,7 +128,7 @@ def broken(paths, exists, read, advisory=lambda path, dest: False):
                     bad.append(where + '   (climbs out of the repository)')
                     continue
                 if not exists(dest):
-                    if not advisory(path, dest):
+                    if is_def or not advisory(path, dest):
                         bad.append(where + '   (no such file)')
                     continue
             # Only Markdown has headings for an anchor to aim at; a link into
@@ -288,6 +294,19 @@ class DocLinkTests(unittest.TestCase):
         self.assertEqual(3, len(bad), bad)
         self.assertNotIn('Q1.md:1 ', ' '.join(bad))
         self.assertIn('docs/queue/README.md:1 -> Q2.md', ' '.join(bad))
+
+    def test_a_reference_definition_to_a_missing_item_fails(self):
+        """`queue.py`'s ITEM_LINK_RE reads inline links only, so the advisory
+        hand-off does not cover `[r]: Q2.md`; only this test can see it (Q271)."""
+        docs = {
+            'docs/queue/Q1.md': ('[gone](Q2.md)\n'
+                                 '[r]: Q3.md\n'
+                                 '[ok]: Q1.md\n'),
+        }
+        bad = broken(sorted(docs), lambda p: p in docs, docs.__getitem__,
+                     item_to_item)
+        self.assertEqual(1, len(bad), bad)
+        self.assertIn('docs/queue/Q1.md:2 -> Q3.md', bad[0])
 
     def test_a_listed_page_gone_from_the_tree_is_skipped(self):
         """A completed row is deleted in its own commit, after the code, so
