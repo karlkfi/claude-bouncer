@@ -1740,7 +1740,17 @@ class HookEndToEndTests(unittest.TestCase):
                 ("p='w /etc/q335-fake'; sed \"$p\"x in.txt", "$px"),
                 ("p='w /etc/q335-fake'; q=$p; sed \"$q\" in.txt", "$q"),
                 ("declare p='w /etc/q335-fake'; sed \"$p\" in.txt", "$p"),
-                ("printf -v p 'w /etc/q335-fake'; sed \"$p\" in.txt", "$p")):
+                ("printf -v p 'w /etc/q335-fake'; sed \"$p\" in.txt", "$p"),
+                ("p='w /etc/q335-fake'; sed \"$p\"\"x\" in.txt", "$px"),
+                ("for f in *.txt; do sed \"$f\"x in.txt; done", "$fx"),
+                # A substitution that starts the value is not the whole of it,
+                # and `$((…))` arithmetic is never a command's output.
+                ("p=$(true)'w /etc/q335-fake'; sed \"$p\" in.txt", "$p"),
+                ("p=\"$(true)w /etc/q335-fake\"; sed \"$p\" in.txt", "$p"),
+                ("p=`true`'w /etc/q335-fake'; sed \"$p\" in.txt", "$p"),
+                ("p=$((1))'w /etc/q335-fake'; sed \"$p\" in.txt", "$p"),
+                ("p=$(true); printf -v p 'w /etc/q335-fake'; sed \"$p\" in.txt",
+                 "$p")):
             with self.subTest(cmd=cmd):
                 out = self._decision(cmd, "deny")
                 self.assertIn("sed script built from a value the hook cannot "
@@ -1761,7 +1771,13 @@ class HookEndToEndTests(unittest.TestCase):
                     # Limitations), so the commonest of them stays allowed.
                     "a=$(cat in.txt) && sed -i '' \"s/^rank: .*/rank: $a/\" in.txt",
                     "while read v; do sed \"s/x/$v/\" in.txt; done < in.txt",
-                    "p='w x'; sed -n '$p' in.txt"):
+                    "p=\"$(cat in.txt)\"; sed \"s/a/$p/\" in.txt",
+                    "p=`cat in.txt`; sed \"s/a/$p/\" in.txt",
+                    "p='w x'; sed -n '$p' in.txt",
+                    # A longer name that merely starts with a bound one.
+                    "for f in *.txt; do sed -i '' \"s/$from/$to/\" \"$f\"; done",
+                    "for f in in.txt; do sed -i '' \"s/x/$foo/\" \"$f\"; done",
+                    "v=1.2.3; sed -i '' \"s/$v/$ver/\" in.txt"):
             with self.subTest(cmd=cmd):
                 self._decision(cmd, "allow")
 

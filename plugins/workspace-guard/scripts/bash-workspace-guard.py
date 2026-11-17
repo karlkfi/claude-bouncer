@@ -3258,6 +3258,9 @@ def sed_script_words(tokens):
 # the one-character parameters. `$((…))` is arithmetic, a number, and is left out.
 SED_EXPANSION_RE = re.compile(
     r'`|\$\((?!\()|\$\{([^}]*)\}?|\$([A-Za-z_][A-Za-z0-9_]*|[0-9@*_!#?$-])')
+# A `$NAME` the source follows with quotes or a backslash and then more name
+# characters, which quote removal merges into a longer name: `"$p"x`, `$p\x`.
+GLUED_NAME_RE = re.compile(r'\$([A-Za-z_][A-Za-z0-9_]*)(?=["\'\\]+[A-Za-z0-9_])')
 # Names bash fills with no `NAME=` the hook could see in the string.
 SED_IMPLICIT_VARS = frozenset({'_', 'BASH_REMATCH', 'REPLY', 'OPTARG', 'OPTIND',
                                'MAPFILE'})
@@ -3273,20 +3276,26 @@ def sed_expansion_names(text):
     return names
 
 
-def output_assigned(g):
-    """The names assignment group `g` sets to a value that is wholly a command
-    substitution, `NAME=$(cmd)` or `` NAME=`cmd` ``: README, Limitations."""
-    names = set()
-    for t in g:
+def output_assigned(cmd):
+    """The names `cmd` only ever sets to a value that is wholly one command
+    substitution, `NAME=$(cmd)` or `` NAME=`cmd` ``: README, Limitations.
+
+    Read from the marked source, not the tokens, which drop whatever follows an
+    unquoted `$(…)`: `p=$(true)'w x'` reaches a group as `p=$(`, as does the
+    arithmetic `p=$((1))`, which is never marked.
+    """
+    marked, _, texts = mark_substitutions(
+        strip_heredoc_bodies(cmd, own_level_only=True, bodies=[]))
+    tokens = tokenize_command(marked, heredocs=False) if texts is not None else None
+    whole, other = set(), set()
+    for t in tokens or ():
         if is_assignment(t):
             name, _, raw = split_assignment(t)
-            if raw.startswith('`') or (raw.startswith('$(')
-                                       and not raw.startswith('$((')):
-                names.add(name)
-    return names
+            (whole if MARK_RE.fullmatch(raw) else other).add(name)
+    return whole - other
 
 
-def sed_script_hides(word, bound):
+def sed_script_hides(word, bound, glued=frozenset()):
     """True when sed script `word` holds an expansion that takes its text from
     the command in a way the hook does not read (Q335): a `$(…)`, a backtick, a
     `${…}` operator, indirection, a positional parameter, `$_` or a name like
@@ -3295,7 +3304,9 @@ def sed_script_hides(word, bound):
 
     So does a plain `$NAME` or `${NAME}` left in the word when the command
     binds NAME (`bound`): the hook substitutes the literals it can, and a value
-    that reached no map on the way is as unread as an operator's. A plain name
+    that reached no map on the way is as unread as an operator's. Quote removal
+    turns `"$p"x` into `$px`, so a bound prefix of NAME counts too where the
+    source glues text to it that way (`glued`). A plain name
     the command never binds, or binds only by `read` or `$(…)`, is read as
     written (README, Limitations), and so is `$((…))`. A
     word wholly in single quotes expands nothing, so `sed -n '$p'` is sed's
@@ -3310,9 +3321,10 @@ def sed_script_hides(word, bound):
         if name is not None and name in '#?$!-':
             continue                              # a number or the flags
         if name is None or not IDENT_RE.fullmatch(name) \
-                or name in SED_IMPLICIT_VARS \
-                or any(name[:k] in bound for k in range(1, len(name) + 1)):
-            return True                           # `"$p"x` reaches us as `$px`
+                or name in SED_IMPLICIT_VARS or name in bound \
+                or any(name[:k] in bound and name[:k] in glued
+                       for k in range(1, len(name))):
+            return True
     return False
 
 
@@ -5380,6 +5392,7 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
     # any scope, bar a `read` or a value that is wholly a command substitution:
     # a sed script splicing one in that was not substituted is not readable.
     textmap, watch_vars, bound_vars = {}, sed_expansion_names(cmd), set()
+    subst_vars, glued_vars = output_assigned(cmd), set(GLUED_NAME_RE.findall(cmd))
 
     def track_stable():
         """Fold the live `varmap` into `stable_vars`. Called before each group
@@ -5486,7 +5499,7 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
         if propagate:
             assigned = apply_assignment_group(g, varmap, persists, textmap)
             if assigned is not None:
-                bound_vars.update(set(assigned) - output_assigned(g))
+                bound_vars.update(set(assigned) - subst_vars)
                 # A name set as a scalar literal is no longer a loop variable.
                 for nm in assigned:
                     loopmap.pop(nm, None)
@@ -5826,7 +5839,7 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
                 variants = [v[:i] + [a] + v[i + 1:] for v in variants for a in alts]
             outside += [(w, 'sedexpand', None) for v in variants
                         for w in sed_script_words(v)
-                        if sed_script_hides(w, bound_vars)]
+                        if sed_script_hides(w, bound_vars, glued_vars)]
             for v in variants:
                 sfiles, runs = sed_script_files(v)
                 for f, f_is_read in sfiles:
