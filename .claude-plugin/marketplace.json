@@ -58,7 +58,7 @@
     {
       "name": "foreground-guard",
       "description": "Prompt before foreground polling/watching (gh run watch, tail -f, sleep-loops) and before known-slow commands run with an inadequate timeout.",
-      "version": "0.9.0",
+      "version": "0.10.0",
       "author": {
         "name": "Karl Isenberg",
         "url": "https://github.com/karlkfi"
