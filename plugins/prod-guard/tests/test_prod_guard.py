@@ -788,6 +788,14 @@ class CommandSubstitutionDecisionTests(unittest.TestCase):
             with self.subTest(shape=shape):
                 self.assertEqual(self.decide(shape % self.K), "deny")
 
+    def test_a_dollar_double_paren_closed_by_one_paren_is_judged(self):
+        # bash runs `$((echo x) ; cmd)` as a substitution around a subshell,
+        # not arithmetic; the nested double-quoted form deferred (Q338).
+        for shape in ('echo $((echo x) ; %s)', 'x=$((echo x) ; %s)',
+                      'echo "$(echo "$((echo x) ; %s)")"'):
+            with self.subTest(shape=shape):
+                self.assertEqual(self.decide(shape % self.K), "deny")
+
     def test_single_quoted_substitution_stays_literal(self):
         for shape in ("echo '`%s`'", "echo '$(%s)'", "echo '\"$(%s)\"'",
                       'echo "\\$(%s)"', 'echo hi # "$(%s)"'):

@@ -435,6 +435,11 @@ class SubstitutionTests(unittest.TestCase):
         "cat <<EOF\nx = '$(gh run watch 456)'\nEOF",
         "cat <<EOF\ndon't wait: $(gh run watch 456)\nEOF",
         'git commit -m "$(cat <<MSG\nnote $(gh run watch 456)\nMSG\n)"',
+        # A `$((` closed by one paren is a substitution around a subshell
+        # (Q338); the nested double-quoted form deferred.
+        'echo $((echo x) ; tail -f log.txt)',
+        'x=$((echo x) ; tail -f log.txt)',
+        'echo "$(echo "$((echo x) ; tail -f log.txt)")"',
     ]
     DEFERS = [
         "echo '$(gh run watch 456)'",
