@@ -914,7 +914,13 @@ update step and restart.
    `git -C dir` is, so the branch judged is the one checked out there; a
    directory only the shell can compute (`env -C "$DIR"`), a `sudo -R`
    chroot, and a `sudo -i` login shell leave the command judged against the
-   session's own checkout.
+   session's own checkout. A shell run on a `-c` string (`sh -c '…'`,
+   `bash -lc '…'`, and `dash`, `zsh`, `ksh`) has the string judged as a
+   command of its own, from the directory the shell starts in, so
+   `sh -c 'git commit -m x'` on `main` asks as the bare commit does. Like a
+   wrapper's, the body's `ask`s and `deny`s stand and its `allow`s defer, and
+   the break-glass does not reach through the shell. A body that won't lex,
+   or one nested more than four shells deep, defers.
 4. **Classify** each segment as `allow` / `ask` / `deny` / `defer` / non-git:
    read-only git and gh and harmless mutations (`add`, `restore --staged`,
    `switch -c`, `worktree add`, branch/tag create) allow on any branch;
@@ -1165,7 +1171,10 @@ protected branch (main/master) or destructive git commands. To keep work flowing
   `../other`, where bash commits in the current tree.
 - Command wrappers are read from a fixed list. One outside it (`xargs`, whose
   arguments arrive on stdin, or a site-specific launcher) hides the `git`
-  behind it, and the command defers to the normal permission flow.
+  behind it, and the command defers to the normal permission flow. A shell is
+  read only through its `-c` string: a script file, a script on stdin, and a
+  body that runs its own arguments (`sh -c '"$@"' _ git commit`) defer the
+  same way.
 - The push guard parses the command string, so unusual refspecs may not be
   classified (it asks/defers rather than allowing). Auto-approval is a
   convenience layer, not a security boundary — for hard guarantees use a git
