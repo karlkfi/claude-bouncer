@@ -180,7 +180,7 @@ different repository's scratch still asks entirely.
 | `cat ../../etc/passwd`               | **ask**  |
 | `cat ~/.aws/credentials`             | **ask**  |
 | `cd /etc && cat passwd`              | **ask**  |
-| `(cd sub) && cat ../x` · `echo $(cd sub) && cat ../x` (the `cd` stays in the subshell) | **ask** |
+| `(cd sub) && cat ../x` · `echo $(cd sub) && cat ../x` · `true <(cd sub); cat ../x` (the `cd` stays in the subshell) | **ask** |
 | `f() { cd sub; }; cat ../x` (defining `f` runs none of its body) | **ask** |
 | `{ cd sub; } \| cat; cat ../x` (the piped group is a subshell) | **ask** |
 | `echo "$(cat /etc/passwd)"` (quoted subst read) | **ask** |

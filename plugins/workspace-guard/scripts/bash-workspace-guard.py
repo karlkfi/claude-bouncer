@@ -4817,6 +4817,10 @@ def split_groups(tokens, scopes=None, herestrings=None, lastpipe=False):
                     i += 2; continue
                 i += 1; continue
             if i + 1 < len(tokens):
+                # `<(` and `>(` open a subshell, as `$(` does, so a `cd` in the
+                # body stays in it (Q282). The `(` is no redirect target.
+                if t in ('<', '>') and is_operator(tokens[i+1], {'('}):
+                    i += 1; continue
                 # `<<TAG` heredoc delimiter and `<<<STR` here-string content
                 # are not file paths — skip without recording a redirect target.
                 if t in ('<<', '<<<'):
