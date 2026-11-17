@@ -847,12 +847,17 @@ class CommandSubstitutionDecisionTests(unittest.TestCase):
 
     def test_nesting_past_the_cap_asks(self):
         # Unbounded, the recursion raised RecursionError near 500 levels and
-        # the hook deferred (Q342). Past the cap a body is not read, so the
-        # command asks whatever it holds.
+        # the hook deferred (Q342). Past the cap a body is read afresh, so a
+        # production target still denies there, down to the 545 levels the
+        # budget reaches, and everything else past the cap asks (Q396).
         cap = guard.MAX_SUBST_DEPTH
+        reach = (cap + 1) * (guard._DEEP_BODY_BUDGET + 1) - 1
         prod = "kubectl --context gke_acme_prod-us delete ns payments"
+        dev = "kubectl --context kind-ci delete ns payments"
         for k, inner, want in ((1, prod, "deny"), (cap, prod, "deny"),
-                               (cap + 1, prod, "ask"), (500, prod, "ask"),
+                               (cap + 1, prod, "deny"), (500, prod, "deny"),
+                               (reach, prod, "deny"), (reach + 1, prod, "ask"),
+                               (cap + 1, dev, "ask"), (500, dev, "ask"),
                                (cap, "true", None), (cap + 1, "true", "ask")):
             with self.subTest(k=k, inner=inner):
                 decision, reason = run_hook(
@@ -860,6 +865,19 @@ class CommandSubstitutionDecisionTests(unittest.TestCase):
                 self.assertEqual(decision, want)
                 if want == "ask":
                     self.assertIn("nested more than %d levels" % cap, reason)
+
+    def test_alternating_nest_past_the_old_limit_does_not_defer(self):
+        # 1,000 levels alternating `${…}` and `$( )` crashed the unbounded
+        # recursion. The production target 500 substitutions down is read.
+        def alt(inner):
+            for i in range(1000):
+                inner = ('echo ${X:-%s}' if i % 2 else 'echo $(%s)') % inner
+            return inner
+        for inner, want in (
+                ("kubectl --context gke_acme_prod-us delete ns payments", "deny"),
+                ("kubectl --context kind-ci delete ns payments", "ask")):
+            with self.subTest(want=want):
+                self.assertEqual(run_hook(alt(inner))[0], want)
 
     def test_shallow_command_beside_a_deep_nest_is_still_judged(self):
         # The row's trap: the kubectl sits at depth 1, after 500 levels the

@@ -281,7 +281,8 @@ the bodies of `{ …; }`, `if`/`then`/`else`, `while`/`until`/`for`/`select`
 loops, `case` arms, a command behind `!`, and a function body, which is
 judged where it is written and again at each call, against the values in
 scope there. A `sh -c` body, a call or an `eval` nested deeper than the guard reads asks, and so
-does a command substitution nested more than 25 levels deep. An assignment in a body bash may not run (a
+does a command substitution nested more than 25 levels deep, though a
+production target inside one still denies down to 545 levels. An assignment in a body bash may not run (a
 conditional, a loop, a function until it is called) leaves the name's value
 unknown, so a target that reads it prompts. An assignment after `&&` or `||`
 keeps both values, the old one and the new one, and every later command is
