@@ -1121,8 +1121,10 @@ def _arith_end(text, i):
     and followed by anything else the ``((`` was a subshell, or ``$(`` opening
     on one. Driven on bash 5.3.15, ``echo $((echo x))`` is an arithmetic error
     and ``echo $((1)+(2))`` runs ``(1)+(2)`` as a command. A paren in a quote,
-    a backtick span or a nested ``$(…)`` is not counted (Q361), one in a
-    ``${…}`` is, and a ``#`` starts no comment.
+    a backtick span or a nested ``$(…)`` is not counted (Q361), and one in a
+    ``${…}`` is. Unquoted, a ``#`` starts no comment. In double quotes bash
+    does start one, so ``"$(( 1 # ))⏎) ; cmd)"`` runs ``cmd``, and this scan
+    does not model that.
     """
     return _trampoline(_arith_end_steps(text, i))
 
