@@ -905,8 +905,8 @@ class VariableExpansionDecisionTests(unittest.TestCase):
     friction source and closes a hole where a prod target behind a variable
     downgraded from deny to ask."""
 
-    def test_inline_nonprod_var_defers(self):
-        decision, _ = run_hook("CTX=kind-ci kubectl --context $CTX delete ns x")
+    def test_assigned_nonprod_var_defers(self):
+        decision, _ = run_hook("CTX=kind-ci; kubectl --context $CTX delete ns x")
         self.assertIsNone(decision)
 
     def test_inline_prod_var_denies(self):
@@ -925,7 +925,7 @@ class VariableExpansionDecisionTests(unittest.TestCase):
     def test_chained_nested_braces_nonprod_defers(self):
         decision, _ = run_hook(
             "P=acme_dev; Z=z; C=c; "
-            "CTX=gke_${P}_${Z}_${C} kubectl --context $CTX delete ns x")
+            "CTX=gke_${P}_${Z}_${C}; kubectl --context $CTX delete ns x")
         self.assertIsNone(decision)
 
     def test_export_persists_across_segments(self):
@@ -1037,6 +1037,59 @@ class VariableExpansionDecisionTests(unittest.TestCase):
             'X=kind-ci; bash -c "$X kubectl --context=gke_acme_prod-us '
             'delete pod x"')
         self.assertIsNone(decision)
+
+    # --- Q321: a prefix is applied after its command's words expand ---------
+    # bash 5.3.15: `CTX=p /bin/echo "[$CTX]"` prints `[]`, and `[q]` after
+    # `CTX=q`. A double-quoted `bash -c`, `eval` or `env -S` string expands
+    # in the parent the same way; quoted singly, or as `\$CTX`, it gets `p`.
+
+    def test_prefix_does_not_resolve_its_own_commands_words(self):
+        decision, _ = run_hook(
+            'CTX=kind-dev kubectl --context=$CTX delete pod x')
+        self.assertEqual(decision, "ask")
+
+    def test_prefix_words_take_the_shells_value(self):
+        decision, _ = run_hook(
+            'CTX=gke_acme_prod-us; CTX=kind-dev kubectl --context=$CTX '
+            'delete pod x')
+        self.assertEqual(decision, "deny")
+
+    def test_prefix_reading_still_prompts_beside_a_resolved_shell_value(self):
+        decision, _ = run_hook(
+            'CTX=kind-dev; CTX=$UNSET kubectl --context=$CTX delete pod x')
+        self.assertEqual(decision, "ask")
+
+    def test_prefix_does_not_resolve_a_double_quoted_child_body(self):
+        decision, _ = run_hook(
+            'CTX=kind-dev bash -c "kubectl --context=$CTX delete pod x"')
+        self.assertEqual(decision, "ask")
+
+    def test_prefix_does_not_name_a_double_quoted_child_command(self):
+        # The parent's empty `$X` vanishes, so the child runs kubectl.
+        decision, _ = run_hook(
+            'X=kind-ci bash -c "$X kubectl --context=gke_acme_prod-us '
+            'delete pod x"')
+        self.assertEqual(decision, "deny")
+
+    def test_prefix_does_not_resolve_a_double_quoted_eval_body(self):
+        decision, _ = run_hook(
+            'CTX=kind-dev eval "kubectl --context=$CTX delete pod x"')
+        self.assertEqual(decision, "ask")
+
+    def test_prefix_does_not_resolve_a_double_quoted_env_split_string(self):
+        decision, _ = run_hook(
+            'CTX=kind-dev env -S "kubectl --context=$CTX delete pod x"')
+        self.assertEqual(decision, "ask")
+
+    def test_prefix_still_reaches_what_its_command_expands(self):
+        for command in (
+                "CTX=kind-dev bash -c 'kubectl --context=$CTX delete pod x'",
+                'CTX=kind-dev bash -c "kubectl --context=\\$CTX delete pod x"',
+                "CTX=kind-dev eval 'kubectl --context=$CTX delete pod x'",
+                "CTX=kind-dev env -S 'kubectl --context=${CTX} delete pod x'"):
+            with self.subTest(command=command):
+                decision, _ = run_hook(command)
+                self.assertIsNone(decision)
 
     # --- Q151: an `eval` body runs in the CURRENT shell --------------------
     # `eval` starts no child, so quoting decides nothing: bash expands the body

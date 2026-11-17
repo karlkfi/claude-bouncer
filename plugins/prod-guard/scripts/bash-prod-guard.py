@@ -934,6 +934,18 @@ VAR_REF_RE = re.compile(r'\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9
 _LEFT_DOLLAR_RE = re.compile(r'\\\$|\$"')
 
 
+def _expanded_by_parent(names, words, texts):
+    """The `names` a word not quoted singly references live, as `$NAME` rather
+    than `\\$NAME`. The shell expands those before a prefix assignment applies,
+    so they take its value and not the prefix's (Q321)."""
+    def live(n, s):
+        return re.search(r'(?<!\\)\$(?:\{%s\}|%s(?![A-Za-z0-9_]))' % (n, n), s)
+    return {n for n in names
+            if any(live(n, str(w)) for w in words
+                   if "'" not in getattr(w, 'quotes', frozenset("'")))
+            and any(live(n, s) for s in texts)}
+
+
 def expand_vars(value, env):
     """Expand simple `$NAME` / `${NAME}` references in `value` against `env`.
 
@@ -3232,7 +3244,7 @@ def _runs_in_one_shell(raw):
 
 
 def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
-                            out=None, tokens=None, known=None):
+                            out=None, tokens=None, known=None, reading=None):
     """Findings for a full command string: tokenize, split into simple
     commands, evaluate each. Recurses (bounded) into `sh -c '...'` and
     `eval ...` bodies so a quoted nested command can't ride past the guard.
@@ -3382,6 +3394,17 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
         seg_inline = dict(seg_env)
         same_shell = {**shell_env, **seg_inline}   # for this command's args
         child_env = {**exported, **seg_inline}     # for its `eval` body
+        # bash expands the words before the prefix applies, so a word naming
+        # a prefixed name gets the shell's value. The segment is judged under
+        # that reading too, and the prefix's reading stands (Q321).
+        prefixed = {k for k, v in seg_inline.items() if shell_env.get(k) != v}
+        words_env = shell_env if reading == 'shell' else same_shell
+        if reading is None and _expanded_by_parent(
+                prefixed, argv_raw, (ctx.get('command') or '', raw)):
+            findings += evaluate_command_string(
+                None, ctx, depth, dict(exported), dict(shell_env),
+                tokens=list(group), known=(functions, bodies),
+                reading='shell')[0]
         # What the command behind the wrappers inherits: child_env as `env`
         # and `sudo` reshape it. Not merged into same_shell, which the parent
         # expands the arguments against before `env` runs (Q269).
@@ -3389,7 +3412,7 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
         # Expanded view for classification; raw view (nested-body extraction)
         # is left unexpanded so the child re-expands it against `child`.
         alternates = []
-        argv = strip_wrappers(expand_argv(argv_raw, same_shell), seg_inline,
+        argv = strip_wrappers(expand_argv(argv_raw, words_env), seg_inline,
                               alternates, child)
         argv_raw = strip_wrappers(list(argv_raw), {})
         for alt, alt_env in alternates:
@@ -3399,7 +3422,7 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
             # So it downgrades this reading's denies and reaches nothing else.
             sub_f, sub_o, sub_s = evaluate_command_string(
                 shlex.join(alt), ctx, depth + 1, alt_env,
-                same_shell)
+                words_env)
             if sub_o or sub_s is not None:
                 sub_f = [(ASK if sev == DENY else sev,
                           'prod-guard: override acknowledged in one reading '
@@ -3480,18 +3503,28 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
                                 if child_env.get(k) == v}
                 others = ()
                 if "'" not in quotes:
+                    texts = (ctx.get('command') or '', raw)
                     # `"\$X"` and `"$"X` reach the child as `$X`, which the
                     # lexer cannot tell from a live `"$X"`. Where the command
                     # holds either, a name also takes the value the child
                     # would give it (Q348).
-                    if any(_LEFT_DOLLAR_RE.search(s)
-                           for s in (ctx.get('command') or '', raw)):
+                    word = body
+                    if any(_LEFT_DOLLAR_RE.search(s) for s in texts):
                         body = expand_vars(body, {
                             k: Readings.of(v, {body_env.get(k)})
-                            for k, v in same_shell.items()})
+                            for k, v in words_env.items()})
                         others = getattr(body, 'others', ())
                     else:
-                        body = expand_vars(body, same_shell)
+                        body = expand_vars(body, words_env)
+                    # A live `$X` of a prefix-only name is the parent's value,
+                    # unknown here, which the child must not read as the
+                    # prefix's.
+                    if reading == 'shell':
+                        body_env = {**body_env, **{
+                            k: Readings.of(body_env[k], {None})
+                            for k in _expanded_by_parent(
+                                prefixed - set(shell_env), (word,), texts)
+                            if k in body_env}}
                 # bash runs a `BASH_ENV` file before the body, which can set
                 # any name the body reads (Q299).
                 sub_shell = {} if tool == 'bash' and child.get('BASH_ENV') \
@@ -3517,7 +3550,7 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
             # text itself. `child_env` rides on for a real child inside (Q151).
             left = {}
             sub_f, sub_o, sub_s = evaluate_command_string(
-                ' '.join(argv_raw[1:]), ctx, depth + 1, child_env, same_shell,
+                ' '.join(argv_raw[1:]), ctx, depth + 1, child_env, words_env,
                 left, known=(functions, bodies))
             findings += sub_f
             override = override or sub_o

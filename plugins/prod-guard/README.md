@@ -296,12 +296,15 @@ inside double quotes and unquoted heredoc bodies too, where bash still runs
 it.
 
 Simple shell variables in a resolved target are expanded before
-classification, so the common `CTX=<ctx> kubectl --context $CTX …` /
-`P=…; CTX=gke_${P}_… kubectl --context $CTX …` pattern classifies by the
-context's *value*, not the literal `$CTX`. Expansion resolves inline
-(`A=x cmd`) and `export`/bare (`P=x; …`) assignments left-to-right, following
-shell scope (a bare, unexported var does not expand inside a nested
-`bash -c` body). A body written wholly in single quotes also sees what `env`
+classification, so the common `CTX=<ctx>; kubectl --context $CTX …` /
+`P=…; CTX=gke_${P}_…; kubectl --context $CTX …` pattern classifies by the
+context's *value*, not the literal `$CTX`. Expansion resolves `export`/bare
+(`P=x; …`) assignments left-to-right, following shell scope (a bare,
+unexported var does not expand inside a nested `bash -c` body). An inline
+`A=x cmd` prefix reaches what `cmd` runs, but bash expands `cmd`'s own words
+first, so `CTX=<ctx> kubectl --context $CTX` hands kubectl the shell's `CTX`
+rather than `<ctx>`. The guard judges both readings: a production `<ctx>`
+still denies, and an unknown shell `CTX` prompts. A body written wholly in single quotes also sees what `env`
 or `sudo` hands the child: `env C=<ctx> bash -c '… "$C" …'` reads `<ctx>`, and
 after `env -i` or `env -u C` it reads `C` as empty. A body the parent expands
 does not, since the parent reads its own `C` before `env` runs. It is deliberately conservative: an **undefined** variable is
