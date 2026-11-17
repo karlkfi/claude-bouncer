@@ -815,11 +815,18 @@ def _assign(values, defining, maybe, functions, *scopes, unknown=()):
 def _forget(names, *scopes):
     """Drop `names` from every scope: assigned where bash may not have run the
     assignment, the value is unknown, so the target prompts rather than
-    resolving to a value the command may never see. `EVERY_NAME` drops all
-    of them."""
+    resolving to a value the command may never see. `EVERY_NAME` is a script
+    the guard cannot read, which may have left a name alone: a name the
+    command assigned keeps its value as one reading beside unset, so a
+    production value still denies (Q377), and the inherited ones are
+    dropped."""
     for scope in scopes:
         if EVERY_NAME in names:
-            scope.clear()
+            for name, value in list(scope.items()):
+                if os.environ.get(name) == value:
+                    del scope[name]
+                else:
+                    scope[name] = Readings.of(value, {None})
         for name in names:
             scope.pop(name, None)
 
@@ -929,6 +936,8 @@ def extract_env_prefix(argv, base_env=None):
 # immediately after the name, and positional/special params (`$1`, `$@`, `$$`,
 # `$?`) because the bare branch requires a letter/underscore right after `$`.
 VAR_REF_RE = re.compile(r'\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))')
+# Every name a word may read, over-reading: any `$NAME` or `${NAME`.
+_REFERENCED_RE = re.compile(r'\$\{?([A-Za-z_][A-Za-z0-9_]*)')
 # A `$` the shell leaves as text, which the lexer hands on as a bare `$`: one
 # escaped, or one a closing quote ends (`"$"X`). Driven on bash 5.3.15.
 _LEFT_DOLLAR_RE = re.compile(r'\\\$|\$"')
@@ -3372,7 +3381,11 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
             maybe, defining = 'apart', None
         if not group:
             continue
-        forked = sorted(n for n in set(shell_env) | set(exported)
+        # Only the names this segment can read: the exported ones and those
+        # its words reference. The rest wait for a segment that reads them,
+        # so they do not count toward the cap (Q377).
+        read = set(exported) | set(_REFERENCED_RE.findall(' '.join(group)))
+        forked = sorted(n for n in (set(shell_env) | set(exported)) & read
                         if isinstance(shell_env.get(n, exported.get(n)), Readings))
         if forked:
             # Judge the command once more under each other reading (Q301).
@@ -3469,10 +3482,22 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
             for tok in argv[1:]:
                 if not tok.startswith('-') and ASSIGNMENT_RE.match(tok):
                     name, form, value = split_assignment(tok)
+                    # An operand expanded from a name with several readings
+                    # assigns each of them (Q377). One that splits to another
+                    # name leaves this one unknown.
+                    others = set()
+                    for o in getattr(tok, 'others', ()):
+                        n, _, v = split_assignment(o) if ASSIGNMENT_RE.match(o) \
+                            else (None, None, None)
+                        others.add(v if n == name else None)
                     # `export NAME+=v` appends to the inherited value; unset
                     # gives just `v` (Q174).
                     if form == ASSIGN_APPEND:
-                        value = shell_env.get(name, '') + value
+                        prior = shell_env.get(name, '')
+                        value = prior + value
+                        others = {None if o is None else prior + o
+                                  for o in others}
+                    value = Readings.of(value, others)
                     _assign({name: value}, defining, maybe, functions,
                             shell_env, exported)
             continue
@@ -3531,7 +3556,10 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
                 # bash runs a `BASH_ENV` file before the body, which can set
                 # any name the body reads (Q299) and define any command (Q336).
                 sourced = tool == 'bash' and child.get('BASH_ENV')
-                sub_shell = {} if sourced else None
+                sub_shell = None
+                if sourced:
+                    sub_shell = dict(body_env)
+                    _forget({EVERY_NAME}, sub_shell)
                 sub_known = ({EVERY_NAME: set()}, {}) if sourced else None
                 sub_f, sub_o, sub_s = evaluate_command_string(
                     body, ctx, depth + 1, body_env, sub_shell,
@@ -3572,7 +3600,8 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
                         (shell_env, same_shell, left['shell']),
                         (exported, child_env, left['exported'])):
                     changed = {k: v for k, v in end.items()
-                               if k not in seg_inline and start.get(k) != v}
+                               if k not in seg_inline
+                               and _choices(start.get(k)) != _choices(v)}
                     gone = {k for k in start
                             if k not in end and k not in seg_inline}
                     if one_shell:
