@@ -4642,13 +4642,32 @@ class SubstitutionResumesCommandEndToEndTests(unittest.TestCase):
         self.assertEqual(
             guard.resume_interrupted_commands(
                 guard.tokenize_command("tee 2>(cat) f")),
-            ["tee", "f", "2", ">", "(", "cat", ")"])
+            ["tee", "/dev/fd/63", "f", "2", ">", "(", "cat", ")"])
         out = run_hook("cat <(echo a) in.txt", self.workspace,
                        project_dir=self.workspace)
         self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "allow")
         for cmd in ("tee >(cat) {}", "echo $(date) > {}"):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self._verdict(cmd), "ask")
+
+    def test_a_process_substitution_keeps_its_slot(self):
+        # bash passes `/dev/fd/63` as the pattern or program, so the next word
+        # is a file: bash printed a planted file for the grep and awk rows
+        # (Q354), which got an `allow` while the slot closed up behind the body.
+        for cmd in ("grep -v <(echo x) {}", "awk <(echo '{{print}}') {}",
+                    "sed <(echo p) {}", "grep <(echo x) <(echo y) {}",
+                    "grep -f <(echo x) {}", "cat <(echo a) {}"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self._verdict(cmd), "ask")
+        with open(os.path.join(self.workspace, "in.txt"), "w") as f:
+            f.write("hello\n")
+        for cmd in ("grep -v <(echo x) in.txt", "awk <(echo '{print}') in.txt",
+                    "paste <(cat in.txt) <(cat in.txt)",
+                    "while read l; do :; done < <(cat in.txt)"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(
+                    run_hook(cmd, self.workspace, project_dir=self.workspace)
+                    ["hookSpecificOutput"]["permissionDecision"], "allow")
 
     def test_a_separator_still_ends_the_command(self):
         for cmd in ("echo $(date) a; cat {}", "echo $(date) a | cat {}",

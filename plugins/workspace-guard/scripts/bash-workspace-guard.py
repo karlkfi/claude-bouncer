@@ -4528,6 +4528,11 @@ def stage_own(lead, sep, last_close, lastpipe):
     return True
 
 
+# What bash passes for a `<(…)` or `>(…)`; the fd number varies and no reader
+# cares which. `is_allowed_device` skips it as an operand.
+PROC_SUBST_WORD = '/dev/fd/63'
+
+
 def resumes_after_substitution(words):
     """Whether ``words``, a command up to a substitution's open, runs on past it.
 
@@ -4555,7 +4560,9 @@ def resume_interrupted_commands(tokens):
     cat /etc/x`, which opens nothing, asked. Here the words after the close go
     in front of the open, so they stay operands of their own command. A `<(`
     moves with its operator, or that operator would take the next word as a
-    redirect target (Q355).
+    redirect target (Q355), and leaves behind the word bash puts in its place,
+    or the next word takes its slot: `grep -v <(echo x) f` reads `f` as a file,
+    not as the pattern (Q354).
     """
     out, words, bodies, i = [], [], [], 0
     while i < len(tokens):
@@ -4568,7 +4575,7 @@ def resume_interrupted_commands(tokens):
                     if proc:
                         cut = -2 if words[-2:-1] and words[-2].isdigit() else -1
                         bodies.extend(words[cut:])
-                        del words[cut:]
+                        words[cut:] = [PROC_SUBST_WORD]
                     bodies.extend(resume_interrupted_commands(tokens[i:end + 1]))
                     i = end + 1
                     continue
