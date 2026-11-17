@@ -3259,8 +3259,10 @@ def sed_script_words(tokens):
 SED_EXPANSION_RE = re.compile(
     r'`|\$\((?!\()|\$\{([^}]*)\}?|\$([A-Za-z_][A-Za-z0-9_]*|[0-9@*_!#?$-])')
 # A `$NAME` the source follows with quotes or a backslash and then more name
-# characters, which quote removal merges into a longer name: `"$p"x`, `$p\x`.
-GLUED_NAME_RE = re.compile(r'\$([A-Za-z_][A-Za-z0-9_]*)(?=["\'\\]+[A-Za-z0-9_])')
+# characters, which quote removal merges into a longer name: `"$p"x`, `$p\x`,
+# `"$p"$'x'`.
+GLUED_NAME_RE = re.compile(
+    r'\$([A-Za-z_][A-Za-z0-9_]*)(?=(?:["\'\\]|\$[\'"])+[A-Za-z0-9_])')
 # Names bash fills with no `NAME=` the hook could see in the string.
 SED_IMPLICIT_VARS = frozenset({'_', 'BASH_REMATCH', 'REPLY', 'OPTARG', 'OPTIND',
                                'MAPFILE'})

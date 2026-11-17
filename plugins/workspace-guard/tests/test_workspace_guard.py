@@ -1742,6 +1742,8 @@ class HookEndToEndTests(unittest.TestCase):
                 ("declare p='w /etc/q335-fake'; sed \"$p\" in.txt", "$p"),
                 ("printf -v p 'w /etc/q335-fake'; sed \"$p\" in.txt", "$p"),
                 ("p='w /etc/q335-fake'; sed \"$p\"\"x\" in.txt", "$px"),
+                ("p='w /etc/q335-fake'; sed \"$p\"$'x' in.txt", "$px"),
+                ("p='w /etc/q335-fake'; sed \"$p\"$''x in.txt", "$px"),
                 ("for f in *.txt; do sed \"$f\"x in.txt; done", "$fx"),
                 # A substitution that starts the value is not the whole of it,
                 # and `$((…))` arithmetic is never a command's output.
