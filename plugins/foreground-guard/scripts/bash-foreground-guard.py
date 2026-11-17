@@ -784,14 +784,15 @@ def finding_slow(cfg, what, min_ms, timeout_ms, timeout_was_set):
 # ---------------------------------------------------------------------------
 
 def analyze_class_a(raw, cfg, depth=0):
-    """Class A findings for a command string. Returns (findings, override).
+    """Class A findings for a command string. Returns (findings, override,
+    slept), where `slept` says a foreground `sleep` ran anywhere in it.
     Recurses (bounded) into `bash -c '...'` / `eval ...` bodies so a quoted
     poll loop can't ride past the guard; `bash some-script.sh` stays opaque
     (no script-file inspection)."""
     findings = []
-    state = {'override': None}
+    state = {'override': None, 'slept': False}
     if depth > 3:
-        return findings, None
+        return findings, None, False
 
     expanded = []
     raw = strip_heredoc_bodies(raw, expanded)
@@ -799,15 +800,19 @@ def analyze_class_a(raw, cfg, depth=0):
 
     tokens = tokenize(raw)
     if tokens is None:
-        return findings, None  # unparseable: fail-open, defer
+        return findings, None, False  # unparseable: fail-open, defer
 
-    def recurse(body):
-        # A nested command string: its findings are this command's, and an
-        # override prefix inside it stands the whole call down.
-        sub_f, sub_o = analyze_class_a(body, cfg, depth + 1)
+    def recurse(body, in_loop=False):
+        # A nested command string: its findings are this command's, an
+        # override prefix inside it stands the whole call down, and a sleep
+        # it runs inside this command's loop makes the loop a poll (Q359).
+        nonlocal loop_sleep
+        sub_f, sub_o, sub_slept = analyze_class_a(body, cfg, depth + 1)
         findings.extend(sub_f)
         if state['override'] is None:
             state['override'] = sub_o
+        state['slept'] = state['slept'] or sub_slept
+        loop_sleep = loop_sleep or (sub_slept and in_loop)
 
     matchers = watch_matchers(cfg)
     exempts = exempt_matchers(cfg)
@@ -849,7 +854,7 @@ def analyze_class_a(raw, cfg, depth=0):
         # background job under `&`, and in the foreground under a `timeout`
         # wrap, because the shell expands it before `timeout` starts.
         for body in [] if bg else substitutions_in(group, bodies, marker_re):
-            recurse(body)
+            recurse(body, in_loop)
         state['timeout_wrapped'] = False
         argv = strip_head(list(group), state)
         if not argv:
@@ -860,6 +865,7 @@ def analyze_class_a(raw, cfg, depth=0):
         if head == 'sleep':
             secs = sleep_seconds(argv)
             segs.append(('sleep', argv))
+            state['slept'] = True
             loop_sleep = loop_sleep or in_loop
             if secs is None or secs >= floor:
                 sleep_findings.append(finding_sleep(cfg, secs))
@@ -873,10 +879,10 @@ def analyze_class_a(raw, cfg, depth=0):
                     body = argv[i + 1]
                     break
             if body:
-                recurse(body)
+                recurse(body, in_loop)
             continue
         if head == 'eval':
-            recurse(' '.join(argv[1:]))
+            recurse(' '.join(argv[1:]), in_loop)
             continue
         # Basename the head so `/usr/bin/tail -f` still matches `^tail`.
         seg_str = ' '.join([head] + argv[1:])
@@ -921,7 +927,7 @@ def analyze_class_a(raw, cfg, depth=0):
             findings.append(finding_sandwich(cfg))
         findings += sleep_findings
 
-    return findings, state['override']
+    return findings, state['override'], state['slept']
 
 
 # ---------------------------------------------------------------------------
@@ -1145,7 +1151,7 @@ def main():
     # Class A analysis always runs: it is also the only place the
     # FOREGROUND_GUARD_OVERRIDE=<reason> prefix is parsed, and the override
     # must still clear a Class B block when poll is disabled.
-    findings, override = analyze_class_a(command, cfg)
+    findings, override, _ = analyze_class_a(command, cfg)
     # The agent has asserted the wait is wanted, and a wrong assertion costs
     # waiting and nothing else. Defer rather than route it at a human: an
     # approved prompt would add a context switch and no information. Not an
