@@ -4542,12 +4542,16 @@ def resumes_after_substitution(words):
     one behind `$X`, or a command word it glues to, as in `$(echo /bin)/cat f`,
     and `eval` runs its words whatever they are. A leading redirect hides which
     of these it is. Those keep the split, which is what judges the `cat`.
+    A wrapper is peeled with its grammar first, so `env grep <(…) f` resumes
+    on the `grep` it already named (Q360).
     """
     head = strip_env_prefix(strip_sh_keywords(words))
     if not head or head[0] in REDIR or re.search(r'[$`(]', head[0]):
         return False
     name = native_cmd_name(head[0])
-    return name != 'eval' and name not in WRAPPER_GRAMMAR
+    if name in WRAPPER_GRAMMAR:
+        return resumes_after_substitution(peel_wrappers(head).argv)
+    return name != 'eval'
 
 
 def resume_interrupted_commands(tokens):

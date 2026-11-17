@@ -4621,9 +4621,31 @@ class SubstitutionResumesCommandEndToEndTests(unittest.TestCase):
                     "nohup $(echo) cat {}", "xargs $(echo) cat {}",
                     "eval $(echo) cat {}", "$((5)) cat {}",
                     "<(echo a) cat {}", "> in.txt $(echo) cat {}",
-                    "> in.txt env $(echo) cat {}"):
+                    "> in.txt env $(echo) cat {}", "env -u X $(echo) cat {}",
+                    "nice -n 5 $(echo) cat {}", "sudo -u x $(echo) cat {}",
+                    "env nice $(echo) cat {}"):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self._verdict(cmd), "ask")
+
+    def test_a_wrapper_that_named_its_command_resumes(self):
+        # bash prints the planted file on every row (Q360): the wrapper's own
+        # words are peeled with its grammar, and what is left names the
+        # command the substitution sits in. Each got an `allow` before.
+        for cmd in ("env grep -v <(echo x) {}", "command grep -v <(echo x) {}",
+                    "nice grep -v <(echo x) {}", "env cat <(echo a) {}",
+                    "env grep -v $(echo x) {}", "env -u X grep -v <(echo x) {}",
+                    "nice -n 5 grep -v <(echo x) {}",
+                    "timeout 5 grep -v <(echo x) {}",
+                    "sudo grep -v <(echo x) {}",
+                    "env FOO=1 nice -n 5 grep -v <(echo x) {}"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self._verdict(cmd), "ask")
+        with open(os.path.join(self.workspace, "in.txt"), "w") as f:
+            f.write("hello\n")
+        self.assertEqual(
+            run_hook("env grep -v <(echo x) in.txt", self.workspace,
+                     project_dir=self.workspace)
+            ["hookSpecificOutput"]["permissionDecision"], "allow")
 
     def test_the_operand_deny_stands(self):
         for cmd in ("cat $(echo a) {}", "cat $(echo a) in.txt",
