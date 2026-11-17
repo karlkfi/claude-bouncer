@@ -543,6 +543,8 @@ class LoopAndSleepTests(unittest.TestCase):
         "while x=$(sleep 1); do ls; done",
         "for i in 1 2; do bash -c 'x=$(sleep 1)'; done",
         "while true; do x=$(sleep 30); done",
+        "for i in 1 2; do for j in $(sleep 1; echo a); do :; done; done",
+        "for i in $(sleep 1); do x=$(sleep 1); done",
     )
 
     # The nested sleep is outside the loop, detached, or bounded.
@@ -552,6 +554,10 @@ class LoopAndSleepTests(unittest.TestCase):
         "while true; do x=$(sleep 1) & done",
         "while true; do timeout 5 bash -c 'sleep 1'; done",
         "while true; do bash -c 'sleep 1 &'; done",
+        # A `for` word list is expanded once, before the first iteration.
+        "for i in $(sleep 1; echo a b c); do :; done",
+        "time for i in $(sleep 1); do :; done",
+        "for i in 1; do :; done; for j in $(sleep 1); do :; done",
     )
 
     def test_nested_sleep_in_loop_denies(self):

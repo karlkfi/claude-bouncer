@@ -831,6 +831,7 @@ def analyze_class_a(raw, cfg, depth=0):
         # A segment opens or closes compounds only with its leading words, so
         # a sleep after `done` is outside the loop and judged on its own (Q283).
         timed = False
+        held = len(opened)  # compounds open before this segment
         for t in group:
             if getattr(t, 'quoted_from', None) is not None:
                 break
@@ -847,14 +848,20 @@ def analyze_class_a(raw, cfg, depth=0):
                 # `done)` leaves the loop around it open.
                 if opened and CLOSER[opened[-1]] == t:
                     opened.pop()
+                    held = min(held, len(opened))
             elif t not in OTHER_KEYWORDS:
                 break
         in_loop = any(k in LOOP_KEYWORDS for k in opened)
+        # A `for` this segment opens expands its word list once, where a
+        # `while`/`until` condition re-runs every iteration.
+        subst_in_loop = (any(k in LOOP_KEYWORDS for k in opened[:held])
+                         or any(k in LOOP_KEYWORDS and k != 'for'
+                                for k in opened[held:]))
         # A substitution runs where the segment holding it runs: in the
         # background job under `&`, and in the foreground under a `timeout`
         # wrap, because the shell expands it before `timeout` starts.
         for body in [] if bg else substitutions_in(group, bodies, marker_re):
-            recurse(body, in_loop)
+            recurse(body, subst_in_loop)
         state['timeout_wrapped'] = False
         argv = strip_head(list(group), state)
         if not argv:
