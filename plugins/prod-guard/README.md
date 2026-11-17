@@ -311,7 +311,10 @@ rather than `<ctx>`. The guard judges both readings: a production `<ctx>`
 still denies, and an unknown shell `CTX` prompts. A body written wholly in single quotes also sees what `env`
 or `sudo` hands the child: `env C=<ctx> bash -c '… "$C" …'` reads `<ctx>`, and
 after `env -i` or `env -u C` it reads `C` as empty. A body the parent expands
-does not, since the parent reads its own `C` before `env` runs. It is deliberately conservative: an **undefined** variable is
+does not, since the parent reads its own `C` before `env` runs. A `$C` written
+in single quotes is text, as bash keeps it: `B='$C'` holds the two characters
+`$C`, and so does what `$(echo '$C')` prints, so a child shell that expands
+it again reads its own `C`. It is deliberately conservative: an **undefined** variable is
 left literal (so the target stays unknown and still prompts, never silently
 allowed), and non-trivial `$` forms — command substitution `$(…)`, arithmetic,
 and every `${…}` operator (`${V:-default}`, `${#V}`, …) — are not expanded, so

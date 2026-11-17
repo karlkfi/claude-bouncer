@@ -1046,6 +1046,40 @@ class VariableExpansionDecisionTests(unittest.TestCase):
             'delete pod x"')
         self.assertIsNone(decision)
 
+    # --- Q365: a `$NAME` written in single quotes is text -------------------
+    # bash 5.3.15 with C=p hands the child `$C` for `B='$C'; bash -c "…$B…"`
+    # and for `bash -c "…$(echo '$C')…"`, and the child expands an unexported
+    # C to nothing.
+
+    def test_single_quoted_name_reaches_the_child_unexpanded(self):
+        k = 'bash -c "kubectl --context=%s delete pod x"'
+        for cmd in ("C=kind-ci; B='$C'; " + k % '$B',
+                    "C=kind-ci; export B='$C'; " + k % '$B',
+                    "C=kind-ci; B='$C' bash -c 'kubectl --context=$B "
+                    "delete pod x'",
+                    "C=kind-ci; " + k % "$(echo '$C')",
+                    "C=kind-ci; " + k % "`echo '$C'`",
+                    # Mixed quoting: the guard cannot place the run, so it
+                    # also takes the literal reading.
+                    "C=kind-ci; B=x'$C'; " + k % '$B',
+                    "C=kind-ci; B='$C'\"\"; " + k % '$B',
+                    "C=kind-ci; B=\"$C\"'y'; " + k % '$B',
+                    "C=gke_acme_prod-us; B='$C'; " + k % '$B'):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(run_hook(cmd)[0], "ask")
+
+    def test_quoted_names_the_shell_expands_still_resolve(self):
+        k = 'bash -c "kubectl --context=%s delete pod x"'
+        for cmd in ('C=kind-ci; B="$C"; ' + k % '$B',
+                    "export C=kind-ci; B='$C'; " + k % '$B',
+                    "C=kind-ci; " + k % '$(echo $C)',
+                    # Inside double quotes a `'` is text, so bash expands.
+                    "C=kind-ci; " + k % "'$C'"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(run_hook(cmd)[0])
+        self.assertEqual(run_hook(
+            "C=gke_acme_prod-us; B=\"$C\"; " + k % '$B')[0], "deny")
+
     # --- Q321: a prefix is applied after its command's words expand ---------
     # bash 5.3.15: `CTX=p /bin/echo "[$CTX]"` prints `[]`, and `[q]` after
     # `CTX=q`. A double-quoted `bash -c`, `eval` or `env -S` string expands
