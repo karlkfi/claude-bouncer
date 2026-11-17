@@ -921,9 +921,13 @@ def extract_env_prefix(argv, base_env=None):
             prior = env.get(name)
             if prior is None:
                 prior = base_env.get(name, '')
-            env[name] = prior + expand_vars(value, {**base_env, **env})
+            word = expand_word(argv[i], {**base_env, **env},
+                               len(argv[i]) - len(value))
+            env[name] = Readings.of(prior + word, {
+                prior + o for o in getattr(word, 'others', ())})
         else:
-            env[name] = expand_vars(value, {**base_env, **env})
+            env[name] = expand_word(argv[i], {**base_env, **env},
+                                    len(argv[i]) - len(value))
         i += 1
     return env, argv[i:]
 
@@ -955,6 +959,46 @@ def _expanded_by_parent(names, words, texts):
             and any(live(n, s) for s in texts)}
 
 
+def _single_quoted_in_bodies(value):
+    """The (start, end) spans of `value`'s substitution bodies that the body's
+    own shell reads in single quotes, each from one quote to the other."""
+    if "'" not in value or ('$(' not in value and '`' not in value):
+        return ()
+    spans, held = [], []
+    for body, (start, end) in zip(
+            command_substitutions(value, quotes=False, spans=spans), spans):
+        at = value.find(body, start, end)
+        if at < 0:
+            continue
+        i, double = 0, False
+        while i < len(body):
+            c = body[i]
+            if c == '\\':
+                i += 1
+            elif c == '"':
+                double = not double
+            elif c == "'" and not double:
+                j = body.find("'", i + 1)
+                if j < 0:
+                    break
+                held.append((at + i, at + j))
+                i = j
+            i += 1
+    return held
+
+
+def expand_word(tok, env, start=0):
+    """`expand_vars` for `tok[start:]`, where `tok` is a lexed word. bash
+    leaves a `$NAME` it read in single quotes as text, which a shell that
+    re-reads it may expand to the same value, so the word takes the text as
+    written beside the expanded one (Q365). The lexer records which quotes a
+    word used, not where each run sat, so the whole word is the text."""
+    text = tok[start:]
+    if "'" not in getattr(tok, 'quotes', ()) or not VAR_REF_RE.search(text):
+        return expand_vars(text, env)
+    return Readings.of(expand_vars(text, env), {text})
+
+
 def expand_vars(value, env):
     """Expand simple `$NAME` / `${NAME}` references in `value` against `env`.
 
@@ -962,16 +1006,32 @@ def expand_vars(value, env):
     stays `$CTX`) rather than blanked, so an unresolvable target stays UNKNOWN
     and still prompts — expansion only ever makes classification *more*
     specific, never silently allows. `env` values are assumed already resolved
-    (extract_env_prefix folds them left-to-right), so one pass suffices."""
+    (extract_env_prefix folds them left-to-right), so one pass suffices.
+
+    A reference a substitution body holds in single quotes is that body's
+    text, which the shell running the body may expand again, so the value
+    takes both readings (Q365)."""
+    held = _single_quoted_in_bodies(value)
+    out = _expand(value, env, held)
+    if held:
+        out = Readings.of(out, _choices(_expand(value, env, ())))
+    return out
+
+
+def _expand(value, env, held):
+    def live(m):
+        return not any(a < m.start() < b for a, b in held)
+
     def sub(env):
         def repl(m):
             name = m.group(1) or m.group(2)
-            return env[name] if name in env else m.group(0)
+            return env[name] if name in env and live(m) else m.group(0)
         return VAR_REF_RE.sub(repl, value)
     out = sub(env)
     # A name with several readings gives a value with several (Q301).
     forked = sorted({m.group(1) or m.group(2) for m in VAR_REF_RE.finditer(value)
-                     if isinstance(env.get(m.group(1) or m.group(2)), Readings)})
+                     if live(m) and isinstance(
+                         env.get(m.group(1) or m.group(2)), Readings)})
     if not forked:
         return out
     alts = _alternatives(env, forked)
@@ -1108,7 +1168,10 @@ def expand_argv(argv, env):
     each word that may expand to nothing as a `MayVanish`."""
     out = []
     for tok in argv:
-        word = expand_vars(tok, env)
+        # Only an assignment's value persists for a later word to re-expand;
+        # an `env -S` string relies on the parent having expanded it.
+        word = expand_word(tok, env) if ASSIGNMENT_RE.match(tok) \
+            else expand_vars(tok, env)
         if (tok and getattr(tok, 'quoted_from', None) is None
                 and _VAR_REFS_RE.fullmatch(tok)
                 and _VAR_REFS_RE.fullmatch(word)):
@@ -3541,9 +3604,9 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
                         body = expand_vars(body, {
                             k: Readings.of(v, {body_env.get(k)})
                             for k, v in words_env.items()})
-                        others = getattr(body, 'others', ())
                     else:
                         body = expand_vars(body, words_env)
+                    others = getattr(body, 'others', ())
                     # A live `$X` of a prefix-only name is the parent's value,
                     # unknown here, which the child must not read as the
                     # prefix's.
