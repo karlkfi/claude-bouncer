@@ -9,6 +9,7 @@ Two layers:
   * End-to-end tests run the script as a subprocess, since the CI check and
     the release harvest both consume its exit status, not just its stdout.
 """
+import re
 import subprocess
 import sys
 import unittest
@@ -23,6 +24,10 @@ _spec = util.spec_from_file_location('release_note', SCRIPT)
 release_note = util.module_from_spec(_spec)
 _spec.loader.exec_module(release_note)
 extract = release_note.extract
+
+# The workflow's gating line: a failing script makes the step exit 1.
+GATE_LINE = ('if ! printf \'%s\' "$BODY" | python3 scripts/release-note.py '
+             '--author "$AUTHOR"; then')
 
 # The instruction comment GitHub keeps in the raw body even after an answer.
 COMMENT = '<!--\nWrite a note when a decision moves.\n\n  An example note.\n\nAnswer `None` otherwise.\n-->'
@@ -165,7 +170,17 @@ class TestWorkflowWiring(unittest.TestCase):
         wf = (REPO / '.github' / 'workflows' / 'release-note.yml').read_text()
         self.assertRegex(
             wf, r'AUTHOR: \$\{\{ github\.event\.pull_request\.user\.login \}\}')
-        self.assertIn('python3 scripts/release-note.py --author "$AUTHOR"', wf)
+
+    def test_the_check_fails_closed(self):
+        """The step must fail when the script does (Q243).
+
+        A substring check keeps passing for `... || true; then` and for the
+        call moved into a comment, so the whole line is anchored at both ends.
+        """
+        wf = (REPO / '.github' / 'workflows' / 'release-note.yml').read_text()
+        self.assertRegex(wf, re.compile(
+            r'^[ \t]*' + re.escape(GATE_LINE) + r'[ \t]*$', re.M))
+        self.assertNotRegex(wf, r'(?m)^[ \t]*(?:-[ \t]+)?continue-on-error:')
 
 
 if __name__ == '__main__':
