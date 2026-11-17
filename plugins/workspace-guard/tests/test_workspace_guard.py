@@ -7958,6 +7958,17 @@ class UnanchoredKillEndToEndTests(unittest.TestCase):
             'WORKSPACE_GUARD_OVERRIDE="stuck harness" pkill -f ginkgo', "ask")
         self.assertIn("stuck harness", r)
 
+    def test_a_quoted_override_name_before_a_dollar_paren_disarms_nothing(self):
+        # bash 5.3.15 runs each quoted word as a command, exit 127, so only the
+        # control assigns (Q175).
+        r = self._decision(
+            'WORKSPACE_GUARD_OVERRIDE=$(echo why) pkill -f ginkgo', "ask")
+        self.assertIn("WORKSPACE_GUARD_OVERRIDE is set", r)
+        for name in ("'WORKSPACE_GUARD_OVERRIDE='", "'WORKSPACE_GUARD_OVERRIDE'=",
+                     '"WORKSPACE_GUARD_OVERRIDE"=', 'WORKSPACE_GUARD_OVERRIDE\\='):
+            with self.subTest(name=name):
+                self._decision(name + '$(echo why) pkill -f ginkgo', "deny")
+
     def test_override_name_in_the_pattern_disarms_nothing(self):
         self._decision('pkill -f WORKSPACE_GUARD_OVERRIDE=r', "deny")
 
