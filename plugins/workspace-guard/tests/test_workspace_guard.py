@@ -3569,6 +3569,19 @@ class HookEndToEndTests(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self._decision(cmd, want)
 
+    def test_sed_l_read_both_ways(self):
+        # Q374: BSD `-l` takes no argument, so macOS sed reads the outside file
+        # after `-l p`; GNU's takes N, and the GNU reading still holds.
+        for cmd, want in (("sed -l p /etc/q374-fake", "ask"),
+                          ("/usr/bin/sed -l p /etc/q374-fake", "ask"),
+                          ("sed -l 5 p /etc/q374-fake", "ask"),
+                          ("sed -l 5 p in.txt", "allow"),
+                          ("gsed -l 5 p in.txt", "allow"),
+                          ("sed -l p in.txt", "allow"),
+                          ("""sed -l -i '' "s/x/$v/" in.txt""", "allow")):
+            with self.subTest(cmd=cmd):
+                self._decision(cmd, want)
+
     # --- rg end-to-end ------------------------------------------------------
 
     def test_rg_glob_workspace_allow(self):
