@@ -440,6 +440,11 @@ class SubstitutionTests(unittest.TestCase):
         'echo $((echo x) ; tail -f log.txt)',
         'x=$((echo x) ; tail -f log.txt)',
         'echo "$(echo "$((echo x) ; tail -f log.txt)")"',
+        # bash 5.3's funsub substitutes a list too (Q357), and a heredoc in a
+        # body ends before the commands after it.
+        'echo ${ sleep 600; }',
+        'echo ${ cat <<E\nhi\nE\nsleep 600; }',
+        'echo $( cat <<E\nhi\nE\nsleep 600; )',
     ]
     DEFERS = [
         "echo '$(gh run watch 456)'",

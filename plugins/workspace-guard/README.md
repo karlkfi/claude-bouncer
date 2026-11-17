@@ -980,8 +980,10 @@ through the same boundary rules and produce the same reasons. Symlink staging
    that can fire before the shell exits (any signal but `EXIT`), and a
    `mapfile -C` callback: each runs code in this shell that the string does not
    spell out, and that code can `cd` (`source env.sh; cat x` denies). A bash
-   5.3 `${ …; }` substitution runs in this shell too and is not read yet
-   (Q357). A `{ … }` group, loop or `if` that is piped
+   5.3 `${ …; }` or `${| …; }` substitution runs in this shell too, and its
+   body is read: a `cd` there moves the command it sits in and everything
+   after (`echo ${ cd ..; }; cat x` asks on `../x`), and a function it defines
+   or a name it may assign is handled as `eval`'s are. A `{ … }` group, loop or `if` that is piped
    or backgrounded as a whole runs in a subshell as well, so a `cd` inside it
    moves only the rest of it (`{ cd sub; } | cat; cat ../x` asks). Once
    `shopt -s lastpipe` may be on, bash runs a pipeline's last stage in the

@@ -320,7 +320,7 @@ def tokenize(raw):
     return tokens
 
 
-def mask_substitutions(raw):
+def mask_substitutions(raw, whole=None):
     """(masked, bodies, marker_re) for the command substitutions bash would
     run in `raw`, unquoted or inside double quotes.
 
@@ -331,11 +331,21 @@ def mask_substitutions(raw):
     so the caller can judge the body as its own command string under the
     segment that holds it -- which is what decides whether it runs in the
     background. Single quotes keep a substitution literal, so it is left
-    alone."""
+    alone.
+
+    `raw` has had every heredoc body stripped, a substitution's own included,
+    which leaves that body's `<<WORD` armed with nothing after it to close.
+    Pass the unstripped string as `whole` to take the bodies from it instead;
+    the two scans find the same substitutions in the same order."""
     spans = []
     bodies = command_substitutions(raw, spans=spans)
     if not bodies:
         return raw, [], None
+    if whole is not None:
+        kept = command_substitutions(
+            strip_heredoc_bodies(whole, own_level_only=True))
+        if len(kept) == len(bodies):
+            bodies = kept
     sentinel = next(chr(c) for c in range(0xe000, 0xf900) if chr(c) not in raw)
     out, last = [], 0
     for idx, (start, end) in enumerate(spans):
@@ -795,8 +805,8 @@ def analyze_class_a(raw, cfg, depth=0):
         return findings, None, False
 
     expanded = []
-    raw = strip_heredoc_bodies(raw, expanded)
-    raw, bodies, marker_re = mask_substitutions(raw)
+    raw, bodies, marker_re = mask_substitutions(
+        strip_heredoc_bodies(raw, expanded), raw)
 
     tokens = tokenize(raw)
     if tokens is None:
@@ -1013,7 +1023,7 @@ def simple_commands(raw, depth=0):
         return []
     expanded = []
     masked, bodies, marker_re = mask_substitutions(
-        strip_heredoc_bodies(raw, expanded))
+        strip_heredoc_bodies(raw, expanded), raw)
     tokens = tokenize(masked)
     if tokens is None:
         return None

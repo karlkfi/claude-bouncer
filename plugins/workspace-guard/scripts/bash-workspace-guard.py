@@ -4229,6 +4229,7 @@ def tokenize_command(cmd, heredocs=True):
 # without positions (Q266, in `substitution_bodies`).
 SUBST_MARK = '\x1e'
 MARK_RE = re.compile(SUBST_MARK + r'(\d+)' + SUBST_MARK)
+FUNSUB_MARK_RE = re.compile(r'\$\{' + SUBST_MARK + r'(\d+)' + SUBST_MARK + r'\}')
 
 
 def apply_cd(kind, arg, cwd, unknown):
@@ -4260,6 +4261,30 @@ def all_substitutions(text):
             zip(command_substitutions(text, spans=cs), cs)
             if not any(ps_ <= s < pe for _, (ps_, pe) in procs)]
     return sorted(procs + cmds, key=lambda pair: pair[1][0])
+
+
+def mask_funsubs(text):
+    """Replace each outermost funsub with a ``${…}`` word standing in for it.
+
+    Returns ``(masked, bodies)``, or None when the string holds a funsub and
+    already carries the sentinel. The body is the caller's to run (Q357), not
+    words of the command it sits in, and the stand-in still reads as an
+    expansion, so an operand built from one is unresolvable.
+    """
+    spans, flags = [], []
+    found = command_substitutions(text, spans=spans, funsubs=flags)
+    picked = [(b, sp) for b, sp, f in zip(found, spans, flags) if f]
+    if not picked:
+        return text, []
+    if SUBST_MARK in text:
+        return None
+    out, last = [], 0
+    for k, (_, (start, end)) in enumerate(picked):
+        out.append(text[last:start])
+        out.append('${%s%d%s}' % (SUBST_MARK, k, SUBST_MARK))
+        last = end
+    out.append(text[last:])
+    return ''.join(out), [b for b, _ in picked]
 
 
 def mark_substitutions(text):
@@ -4294,7 +4319,7 @@ def mark_substitutions(text):
 
 
 def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
-                        inherited=None, funcs=(), lastpipe=False):
+                        inherited=None, funcs=(), lastpipe=False, end=None):
     """Every command a substitution in ``cmd`` runs, with the cwd bash runs it in.
 
     Returns ``(body, cwd, cwd_unknown)`` triples. A body whose position the scan
@@ -4329,10 +4354,19 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
     ``funcs`` names the functions an enclosing string defined whose call moves
     the cwd (Q265); a call to one here leaves the cwd unknown. ``lastpipe``
     says an enclosing string may have turned `lastpipe` on (Q272).
+
+    A funsub runs in this shell, so the cwd its body leaves behind is the one
+    every later word and group sees (Q357). Pass a list as ``end`` to receive
+    the ``(cwd, cwd_unknown, funcs)`` the whole string leaves behind, which is
+    how a funsub's own body answers that.
     """
     heredocs = []
     own = strip_heredoc_bodies(cmd, own_level_only=True, bodies=heredocs)
     marked, bodies, texts = mark_substitutions(own)
+    # Unmarked, a funsub's effect has no position either. Only a funsub's
+    # span opens with `${`.
+    blind = texts is None and any(
+        marked.startswith('${', s) for _, (s, _) in all_substitutions(marked))
     fallback = (base_cwd, base_cwd_unknown)
     sub_cwd = [fallback] * len(bodies)
     hd_cwd = [fallback] * len(heredocs)
@@ -4347,7 +4381,15 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
         usable = set(inherited or ())
         scopes, saved_shells, hs = [], [], []
         groups = split_groups(tokens, scopes, hs, lastpipe)
-        funcs = cd_functions(groups, scopes, funcs)
+
+        def funsubs_in(tokens):
+            for tok in tokens if texts is not None else ():
+                for m in MARK_RE.finditer(tok):
+                    idx = int(m.group(1))
+                    if idx < len(bodies) and texts[idx].startswith('${'):
+                        yield bodies[idx]
+        funcs = cd_functions(groups, scopes, funcs, moves=lambda g: any(
+            funsub_moves(b, funcs, lastpipe) for b in funsubs_in(g)))
         left_unknown = False
         for (g, g_redir, _persists, _pipe, nhd), (shells, own), g_hs in zip(
                 groups, scopes, hs):
@@ -4359,11 +4401,20 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
             # substitution is expanded to build the command line the `cd` then
             # runs on, so `cd $(dirname x)` resolves `x` where the string
             # started, not where it lands.
+            here = (cwd, unknown)
             for tok in (g + g_redir + g_hs) if texts is not None else ():
                 for m in MARK_RE.finditer(tok):
                     idx = int(m.group(1))
                     if idx < len(sub_cwd):
-                        sub_cwd[idx] = (cwd, unknown)
+                        sub_cwd[idx] = here
+                        if texts[idx].startswith('${'):
+                            live = {k: v for k, v in (stable_vars or {}).items()
+                                    if k in usable}
+                            c, u, defined = funsub_cwd(
+                                bodies[idx], *here, live, funcs, lastpipe)
+                            here, funcs = (c, u), funcs | defined
+            if own:
+                cwd, unknown = here
             for _ in range(nhd):
                 if hd_i < len(hd_cwd):
                     hd_cwd[hd_i] = (cwd, unknown)
@@ -4409,8 +4460,15 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
                 if is_assignment(tok):
                     usable.add(split_assignment(tok)[0])
 
-    if texts is None and moved:
+    if texts is None and (moved or blind):
         sub_cwd = [(base_cwd, True)] * len(bodies)
+    if end is not None:
+        if tokens is None:
+            end.append((base_cwd, True, set(funcs)))
+        else:
+            if saved_shells:                      # the string ends at top level
+                cwd, unknown = saved_shells[0][1], saved_shells[0][2]
+            end.append((cwd, unknown or left_unknown or blind, funcs))
     out = [(b,) + sub_cwd[i] for i, b in enumerate(bodies)]
     for i, (body, quoted) in enumerate(heredocs):
         if quoted:
@@ -4421,6 +4479,37 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
         out.extend((b,) + hd_cwd[i]
                    for b in command_substitutions(body, quotes=False))
     return out
+
+
+def funsub_cwd(body, cwd, unknown, stable_vars=None, funcs=(), lastpipe=False):
+    """The ``(cwd, unknown, funcs)`` a funsub body leaves its shell with
+    (Q357): ``funcs`` adds the functions it defines whose call moves the cwd."""
+    end = []
+    substitution_bodies(body, cwd, unknown, stable_vars, stable_vars, funcs,
+                        lastpipe, end)
+    return end[0]
+
+
+def funsub_moves(body, funcs=(), lastpipe=False):
+    """Whether a funsub body can leave its shell somewhere else, from any cwd."""
+    probe = os.path.join(os.sep, 'q357-probe')
+    return funsub_cwd(body, probe, False, None, funcs, lastpipe)[:2] \
+        != (probe, False)
+
+
+def funsub_poison(body, varmap):
+    """Drop the names a funsub body may assign from ``varmap`` (Q357), by the
+    rules the group loop applies to its own groups. A nested funsub or a body
+    the tokenizer cannot read drops them all."""
+    tokens = tokenize_command(body)
+    if tokens is None or mask_funsubs(body) != (body, []):
+        varmap.clear()
+        return
+    for g, *_ in split_groups(tokens):
+        for t in g:
+            if is_assignment(t):
+                varmap.pop(split_assignment(t)[0], None)
+        poison_vars(g, varmap)
 
 
 PIPE_OPS = ('|', '|&')
@@ -4442,13 +4531,14 @@ def function_scope(shells):
     return None
 
 
-def cd_functions(groups, scopes, known=()):
+def cd_functions(groups, scopes, known=(), moves=None):
     """Names of the functions a call to which moves the caller's cwd (Q265).
 
     A body runs in the shell that calls it, so a `cd` written at the body's own
     level moves the caller at every call and moves nothing at the definition.
     A body calling one of these moves its caller too. ``known`` names the ones
-    an enclosing string defined, which a substitution inherits.
+    an enclosing string defined, which a substitution inherits. ``moves``, when
+    given, says whether a group holds a funsub that moves the cwd (Q357).
     """
     funcs, grew = set(known), True
     while grew:
@@ -4457,7 +4547,7 @@ def cd_functions(groups, scopes, known=()):
             name = function_scope(shells)
             if name is None or name in funcs or own is False:
                 continue
-            if own is None:                       # a `lastpipe` stage (Q272)
+            if own is None or moves and moves(g):  # Q272, Q357
                 funcs.add(name)
                 grew = True
                 continue
@@ -4961,14 +5051,28 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
     if not cmd.strip():
         return [], False, KillFacts(None, None, [])
 
-    tokens = tokenize_command(cmd)
+    stripped = strip_heredoc_bodies(cmd)
+    masked = mask_funsubs(stripped)
+    # The bodies come from a string that kept their heredocs, which the full
+    # strip above leaves half-armed (Q357); the two scans pair one to one.
+    whole = mask_funsubs(strip_heredoc_bodies(cmd, own_level_only=True))
+    if masked is None or whole is None or len(whole[1]) != len(masked[1]):
+        masked, base_cwd_unknown = (stripped, []), True
+    stripped, fun_bodies = masked[0], whole[1] if masked[1] else []
+    tokens = tokenize_command(stripped, heredocs=False)
     if tokens is None:
         return [], False, KillFacts(None, None, [])   # unbalanced quotes -> defer
+
+    def funsubs_in(toks):
+        return [fun_bodies[int(m.group(1))] for t in toks if fun_bodies
+                for m in FUNSUB_MARK_RE.finditer(t)
+                if int(m.group(1)) < len(fun_bodies)]
 
     scopes = []
     groups = split_groups(resume_interrupted_commands(tokens), scopes,
                           lastpipe=seed_lastpipe)
-    cd_funcs = cd_functions(groups, scopes, seed_funcs)
+    cd_funcs = cd_functions(groups, scopes, seed_funcs, moves=lambda g: any(
+        funsub_moves(b, seed_funcs, seed_lastpipe) for b in funsubs_in(g)))
     # Whether `lastpipe` may be on anywhere in the string, for the bodies it
     # runs; a superset, since a body's position is not tracked here.
     lastpipe = seed_lastpipe or any(lastpipe_setting(g) for g, *_ in groups)
@@ -5222,14 +5326,33 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
     shell_bodies = []
     # The same for the commands a `find` runs, each with its own cwd state.
     find_runs = []
-    saved_shells, left_unknown = [], False
+    saved_shells, left_unknown, restore = [], False, None
     for (g, g_redir, persists, pipe, _nhd), (shells, own) in zip(groups, scopes):
+        if restore is not None:
+            group_cwd, group_cwd_unknown = restore
+            restore = None
         # A `lastpipe` stage before this one left the cwd unknown (Q272).
         group_cwd_unknown = group_cwd_unknown or left_unknown
         left_unknown = own is None
         group_cwd, group_cwd_unknown = enter_shell(
             saved_shells, shells, group_cwd, group_cwd_unknown)
         track_stable()
+        # A funsub's body runs as the words are expanded, so the command and
+        # its redirects see the cwd it left, and only this group does when the
+        # group is a subshell of its own (Q357).
+        fun_here = funsubs_in(g + g_redir)
+        if fun_here:
+            if own is False:
+                restore = (group_cwd, group_cwd_unknown)
+            for body in fun_here:
+                group_cwd, group_cwd_unknown, defined = funsub_cwd(
+                    body, group_cwd, group_cwd_unknown, dict(varmap), cd_funcs,
+                    seed_lastpipe)
+                cd_funcs |= defined
+                funsub_poison(body, varmap)
+                had = set(loopmap)
+                funsub_poison(body, loopmap)
+                blacklist_loops(had - set(loopmap))
         # Substitute known literals for path checking. The pre-substitution
         # tokens are kept for assignment parsing below — bash decides what is
         # an assignment before expansion.
