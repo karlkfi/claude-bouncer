@@ -953,6 +953,22 @@ CASES = [
     ('the same, in a double-quoted substitution',
      'echo "$(echo "$(( $(echo "(" | wc -c) ))" ; make check | tail)"',
      False, True, "exit status is the filter's"),
+    # Q361: one `$((` deeper, the parser's own step over the inner `$((`
+    # counted the quoted `(` and found no close.
+    ('a quoted paren one arithmetic deeper ends nothing either',
+     'echo $(( $(( $(echo "(" | wc -c) )) + 1 )) ; make check | tail',
+     False, True, "exit status is the filter's"),
+    # Q338: a `$((` whose first close is a single `)` is `$( (`, a substitution
+    # around a subshell, and bash runs the commands in it.
+    ('a $(( closed by one paren is a substitution',
+     'echo $((echo x) ; make check | tail)', False, True,
+     "exit status is the filter's"),
+    ('the same, assigned',
+     'x=$((echo x) ; make check | tail)', False, True,
+     "exit status is the filter's"),
+    ('the same, in nested double quotes',
+     'echo "$(echo "$((echo x) ; make check | tail)")"', False, True,
+     "exit status is the filter's"),
 
     # --- A gate sequenced before a state change with `;` ---------------------
     ('check then push', 'make check; git push', False, True,

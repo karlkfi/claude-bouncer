@@ -308,6 +308,89 @@ class CommandSubstitutionTests(unittest.TestCase):
         self.assertEqual([], bp.command_substitutions('echo $((1+2))'))
 
 
+class ArithmeticCloseTests(unittest.TestCase):
+    """Whether bash reads a `((` as arithmetic, and where it ends (Q338, Q361).
+
+    Each command was driven under `env -i /opt/homebrew/bin/bash --norc
+    --noprofile -c` (5.3.15), with the output noted beside it.
+    """
+    QUOTED_PARENS = ('$(( $(echo ")" | wc -c) ))',           # 2
+                     '$(( $(echo "(" | wc -c) ))',           # 2
+                     '$(( $(( $(echo "(" | wc -c) )) + 1 ))')  # 3
+
+    def test_the_delimiter_decides_not_the_text(self):
+        for cmd, bodies in (
+                ('echo $((echo x))', []),             # arithmetic syntax error
+                ('echo $(( 1 ) )', ['( 1 ) ']),       # `1: command not found`
+                ('echo $((echo x) ; echo P)', ['(echo x) ; echo P']),  # x P
+                ('echo $((1)+(2))', ['(1)+(2)']),     # syntax error near `+`
+                ('x=1; echo $(( ${x:-(} ) ))', []),   # arithmetic: `(` counts
+                ('echo ${x:-$((echo x) ; echo ID)}', ['(echo x) ; echo ID'])):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(bodies, bp.command_substitutions(cmd))
+
+    def test_a_quoted_paren_in_arithmetic_closes_nothing(self):
+        # Counted flat, the quoted paren closed the `$((` early or left it open,
+        # and the commands after it were cut from a body or never scanned.
+        for arith in self.QUOTED_PARENS:
+            body = 'echo %s ; cat /etc/passwd' % arith
+            wrapped = '${x:-%s}' % arith
+            with self.subTest(arith=arith):
+                self.assertEqual(['echo ID'], bp.command_substitutions(
+                    'echo %s ; echo $(echo ID)' % arith))
+                self.assertEqual([body], bp.command_substitutions('x=$(%s)' % body))
+                self.assertEqual([body], bp.command_substitutions(
+                    'echo "$(%s)"' % body))
+                self.assertEqual(len(wrapped), bp._brace_end(wrapped, 0))
+                self.assertEqual(['echo RAN'], bp.process_substitutions(
+                    'echo %s <(echo RAN)' % arith))
+                self.assertEqual(len(arith) + 3, bp._subscript_end(
+                    'A[%s]=1' % arith, 1))
+
+    def test_a_subshell_substitution_in_double_quotes_is_scanned(self):
+        for inner in ('$((echo x) ; echo ID)',                # x, ID
+                      '$((echo ")") ; echo ID)'):             # ), ID
+            body = 'echo "%s"' % inner
+            with self.subTest(inner=inner):
+                self.assertEqual([body], bp.command_substitutions(
+                    'echo "$(%s)"' % body))
+                self.assertEqual([inner[2:-1]], bp.command_substitutions(body))
+
+    def test_an_arithmetic_command_holds_no_comment(self):
+        cmd = '(( $(echo "(" | wc -c) #2 )); echo $(echo ID)'  # error, then ID
+        self.assertEqual(cmd, bp.strip_comments(cmd))
+        self.assertEqual(['echo "(" | wc -c', 'echo ID'],
+                         bp.command_substitutions(cmd))
+
+    def test_an_arithmetic_shift_arms_no_heredoc(self):
+        cmd = '(( $(echo "(" | wc -c) << 2 )) ; cat <<EOF\nbody\nEOF\necho ID'
+        self.assertEqual('(( $(echo "(" | wc -c) << 2 )) ; cat <<EOF\necho ID',
+                         bp.strip_heredoc_bodies(cmd))                 # body, ID
+
+    def test_nested_arithmetic_holds_at_any_depth(self):
+        # The close is found through the trampoline and stepped over, so depth
+        # costs neither a Python frame nor a rescan of what it closed.
+        for depth in (1, 1000, 2000):
+            arith = '$(( 1 + ' * depth + '1' + ' ))' * depth
+            with self.subTest(depth=depth):
+                self.assertEqual(['id'], bp.command_substitutions(
+                    'echo %s ; echo $(id)' % arith))
+                self.assertEqual(['echo "%s" ; id' % arith],
+                                 bp.command_substitutions(
+                                     'x=$(echo "%s" ; id)' % arith))
+                self.assertEqual(['(echo x) ; ' + '$((echo x) ; ' * (depth - 1)
+                                  + 'id' + ')' * (depth - 1)],
+                                 bp.command_substitutions(
+                                     'echo ' + '$((echo x) ; ' * depth
+                                     + 'id' + ')' * depth))
+
+    def test_a_subshell_substitution_keeps_its_heredoc(self):
+        # bash ends the substitution at its `)`, so the heredoc there is
+        # unterminated and `hi` and `EOF` run as commands.
+        cmd = 'echo $((cat <<EOF) ; echo ID)\nhi\nEOF\n'
+        self.assertEqual(cmd, bp.strip_heredoc_bodies(cmd))
+
+
 class ProcessSubstitutionTests(unittest.TestCase):
     """`<(…)` and `>(…)` bodies, which command_substitutions never returns (Q277).
 

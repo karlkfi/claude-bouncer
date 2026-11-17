@@ -4580,6 +4580,14 @@ class QuotedSubstBodyEndToEndTests(unittest.TestCase):
     def test_arithmetic_expansion_defers(self):
         self._defer('echo "$((1 + 2))"')
 
+    def test_a_dollar_double_paren_closed_by_one_paren_is_judged(self):
+        # bash runs `$((echo x) ; cmd)` as a substitution around a subshell,
+        # not arithmetic (Q338).
+        for shape in ('echo $((echo x) ; rm %s)', 'x=$((echo x) ; rm %s)',
+                      'echo "$(echo "$((echo x) ; rm %s)")"'):
+            with self.subTest(shape=shape):
+                self._decision(shape % "/etc/q338-fake-target", "ask")
+
 
 class SubstitutionResumesCommandEndToEndTests(unittest.TestCase):
     """The words after a substitution's close belong to the command it sits in

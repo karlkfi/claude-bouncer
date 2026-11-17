@@ -126,8 +126,8 @@ def _skip_balanced_parens(text, start):
     """Step over a run of balanced parens beginning at ``start`` (a ``(``).
 
     Returns the index just past the matching close, or end-of-string on
-    imbalance. Used to skip ``$((…))`` arithmetic expansion, which contains no
-    command to guard.
+    imbalance. Used to skip an extglob group; arithmetic is ``_arith_end``'s,
+    since a quoted paren there counts for nothing.
     """
     i, n, depth = start, len(text), 0
     while i < n:
@@ -466,10 +466,8 @@ def strip_comments(cmd):
                     cmd[i-1] == '!' and _at_command_start(out[:-1])):
                 quiet = _skip_balanced_parens(cmd, i)       # extglob group
                 closes.add(quiet - 1)
-            elif at_word and cmd.startswith('((', i) and \
-                    _skip_balanced_parens(cmd, i + 1) == \
-                    _skip_balanced_parens(cmd, i) - 1:
-                quiet = _skip_balanced_parens(cmd, i)       # `(( … ))`
+            elif at_word and cmd.startswith('((', i) and _arith_end(cmd, i) > 0:
+                quiet = _arith_end(cmd, i)                  # `(( … ))`
             elif regex == 'op':
                 regex = 'next' if c in ' \t\n' else 'op'
             elif regex is not None and c not in ' \t\n':
@@ -657,7 +655,8 @@ def strip_heredoc_bodies(cmd, expanded=None, unterminated=None,
             continue
         # A substitution body is parsed in its own quote context, so these two
         # openers are recognised whether or not a `"` is still open.
-        if c == '$' and i + 2 < n and cmd[i+1] == '(' and cmd[i+2] != '(':
+        if c == '$' and i + 2 < n and cmd[i+1] == '(' and (
+                cmd[i+2] != '(' or _arith_end(cmd, i + 1) < 0):
             stack.append((')', in_double, pending, depth))
             in_double = False; pending = []; depth = 0
             out.append('$('); last = SUBST_OPEN; i += 2
@@ -692,8 +691,8 @@ def strip_heredoc_bodies(cmd, expanded=None, unterminated=None,
                 out.append(cmd[i]); i += 1
             last = ')'                            # arbitrary non-word-start char
             continue
-        if c == '(' and i + 1 < n and cmd[i+1] == '(':
-            end = _skip_balanced_parens(cmd, i)   # `((…))` / `$((…))` arithmetic
+        end = _arith_end(cmd, i) if cmd.startswith('((', i) else -1
+        if end > 0:                               # `((…))` / `$((…))` arithmetic
             out.append(cmd[i:end]); last = ')'; i = end
             continue
         if c == '(':
@@ -874,9 +873,9 @@ def _scan_dollar_paren(text, start):
     quotes is scanned as a body of its own (Q325), so the ``"`` in
     ``"$(echo "$(echo ")")" ; cmd)"`` closes nothing. Its state is pushed on
     ``frames`` rather than recursed into, because any depth cap leaves a
-    reading past it that misplaces the close. A ``$((…))`` there is not
-    stepped over: a paren in double quotes closes nothing anyway, and counting
-    its parens flat would miscount a quoted one in a ``$(…)`` inside it.
+    reading past it that misplaces the close. A ``$((…))`` there is stepped
+    over to the close ``_arith_end`` finds, and one it reads as ``$( (`` is
+    pushed like any ``$(`` (Q338).
     """
     return _trampoline(_scan_dollar_paren_steps(text, start))
 
@@ -901,16 +900,18 @@ def _scan_dollar_paren_steps(text, start):
             if c == '\\':
                 i += 2
                 continue
+            end = -1
             if c == '"':
                 in_double = False
-            elif text.startswith('$(', i) and not text.startswith('$((', i):
+            elif text.startswith('$((', i):
+                end = yield _arith_end_steps(text, i + 1)
+            if end < 0 and text.startswith('$(', i):
                 frames.append((cmd_pos, clauses, pending, parens, brk, dollar))
                 in_double = False
                 cmd_pos = brk = True
                 clauses, pending, parens, dollar = [], [], [], -2
                 i += 2
                 continue
-            end = -1
             if text.startswith('${', i):
                 end = yield _brace_end_steps(text, i)
             if end < 0 and c == '`':
@@ -1004,10 +1005,12 @@ def _scan_dollar_paren_steps(text, start):
             i = m.end()
             continue
         if c == '(' and i + 1 < n and text[i+1] == '(':
-            brk = dollar != i - 1                 # `$((1))#x` is one word
-            i = _skip_balanced_parens(text, i)    # `((…))` / `$((…))` arithmetic
-            cmd_pos = False
-            continue
+            end = yield _arith_end_steps(text, i)
+            if end > 0:                           # `((…))` / `$((…))` arithmetic
+                brk = dollar != i - 1             # `$((1))#x` is one word
+                i = end
+                cmd_pos = False
+                continue
         if c == '(':
             parens.append(dollar == i - 1 or text[i-1:i] in ('<', '>'))
             cmd_pos = True
@@ -1085,11 +1088,13 @@ def _brace_end_steps(text, i):
             pass
         elif c == "'" and not in_double:
             end = text.find("'", i + 1) + 1 or -1
-        elif text.startswith('$((', i):
-            end = _skip_balanced_parens(text, i + 1)
         elif text.startswith('$(', i):
-            end = (yield _scan_dollar_paren_steps(text, i + 2))[1]
-            end = -1 if end == i + 2 else end
+            end = -1
+            if text.startswith('$((', i):
+                end = yield _arith_end_steps(text, i + 1)
+            if end < 0:
+                end = (yield _scan_dollar_paren_steps(text, i + 2))[1]
+                end = -1 if end == i + 2 else end
         elif text.startswith('${', i):
             end = yield _brace_end_steps(text, i)
         elif c == '`':
@@ -1104,6 +1109,68 @@ def _brace_end_steps(text, i):
             return -1
         i = end
     return -1
+
+def _arith_end(text, i):
+    """The index just past the ``))`` closing the ``((`` at ``text[i]``, -1
+    when bash reads the ``((`` as two parens instead, or ``len(text)`` when
+    nothing closes it.
+
+    bash decides by the delimiter, not by whether the text is arithmetic
+    (Q338). It counts parens from past the ``((``, and the first ``)`` with
+    none open to close ends the scan: followed by ``)`` it closes arithmetic,
+    and followed by anything else the ``((`` was a subshell, or ``$(`` opening
+    on one. Driven on bash 5.3.15, ``echo $((echo x))`` is an arithmetic error
+    and ``echo $((1)+(2))`` runs ``(1)+(2)`` as a command. A paren in a quote,
+    a backtick span or a nested ``$(…)`` is not counted (Q361), one in a
+    ``${…}`` is, and a ``#`` starts no comment.
+    """
+    return _trampoline(_arith_end_steps(text, i))
+
+def _arith_end_steps(text, i):
+    i, n = i + 2, len(text)
+    depth, in_double = 0, False
+    while i < n:
+        c = text[i]
+        if c == '\\':
+            i += 2
+            continue
+        if c == '"':
+            in_double = not in_double
+            i += 1
+            continue
+        end = -1 if in_double else _ansi_c_end(text, i)
+        if end > 0:
+            pass
+        elif c == "'" and not in_double:
+            end = text.find("'", i + 1) + 1 or n
+        elif text.startswith('$(', i):
+            end = -1
+            if text.startswith('$((', i):
+                end = yield _arith_end_steps(text, i + 1)
+            if end < 0:
+                end = (yield _scan_dollar_paren_steps(text, i + 2))[1]
+                end = n if end == i + 2 else end
+        elif text.startswith('${', i) and in_double:
+            end = yield _brace_end_steps(text, i)
+            end = n if end < 0 else end
+        elif c == '`':
+            end = _scan_backticks(text, i + 1)[1]
+            end = n if end == i + 1 else end
+        elif in_double or c not in '()':
+            i += 1
+            continue
+        elif c == '(':
+            depth += 1
+            i += 1
+            continue
+        elif depth:
+            depth -= 1
+            i += 1
+            continue
+        else:
+            return i + 2 if text.startswith('))', i) else -1
+        i = end
+    return n
 
 def _dq_expansion_end(text, i):
     """The index just past the ``$(…)``, backtick span or ``${…}`` opening at
@@ -1226,8 +1293,9 @@ def command_substitutions(text, quotes=True, spans=None):
             continue
         if c == '$' and i + 1 < n and text[i + 1] == '(':
             brk = False                            # `$(a)#b` is one word
-            if i + 2 < n and text[i + 2] == '(':
-                i = _skip_balanced_parens(text, i + 1)   # $((…)) arithmetic
+            end = _arith_end(text, i + 1) if text[i+2:i+3] == '(' else -1
+            if end > 0:
+                i = end                            # $((…)) arithmetic
                 continue
             body, end = _scan_dollar_paren(text, i + 2)
             if body is None:
@@ -1315,7 +1383,9 @@ def _comment_free_end(text, i, brk):
         end = _subscript_end(text, i + 1)
         return len(text) if end < 0 else end
     if text.startswith('((', i) and text[i-1:i] != '$':
-        return _skip_balanced_parens(text, i)
+        end = _arith_end(text, i)
+        if end > 0:
+            return end
     if text.startswith('(', i) and i > 0 and text[i-1] in '?*+@!':
         return _skip_balanced_parens(text, i)      # an extglob group
     m = _WORD_RE.match(text, i) if brk else None
@@ -1367,8 +1437,9 @@ def process_substitutions(text, spans=None):
             i += 1
             continue
         if c == '$' and i + 1 < n and text[i + 1] == '(':
-            if i + 2 < n and text[i + 2] == '(':
-                i = _skip_balanced_parens(text, i + 1)
+            end = _arith_end(text, i + 1) if text[i+2:i+3] == '(' else -1
+            if end > 0:
+                i = end
                 continue
             body, end = _scan_dollar_paren(text, i + 2)
             if body is None:
@@ -1700,8 +1771,9 @@ def _skip_quoted(text, i):
                 continue
             i += 1
         return -1
-    if text.startswith('$((', i):
-        return _skip_balanced_parens(text, i + 1)
+    end = _arith_end(text, i + 1) if text.startswith('$((', i) else -1
+    if end > 0:
+        return end
     if text.startswith('$(', i):
         body, end = _scan_dollar_paren(text, i + 2)
         return -1 if body is None else end
