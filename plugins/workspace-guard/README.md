@@ -1235,7 +1235,10 @@ through the same boundary rules and produce the same reasons. Symlink staging
    opens nothing, is not. That holds only where the command is a plain literal
    name. A substitution can expand to nothing, so at the head, behind a wrapper
    or `eval`, or behind `$X`, the words after it are read as a command of their
-   own: `env $(true) cat /outside/f` runs the `cat`, and asks.
+   own: `env $(true) cat /outside/f` runs the `cat`, and asks. A `<(…)` or
+   `>(…)` is read as the `/dev/fd/63` bash passes in its place, so it still
+   fills a pattern or program slot: in `grep -v <(echo x) /outside/f` the file
+   is the file operand, and asks.
 
    A body starts from the enclosing string's propagated literal variables
    (step 4), since bash's substitution inherits them: without that,
@@ -1784,10 +1787,6 @@ final output.
   `watch $(x) cat /outside/f`, `parallel $(x) cat /outside/f` and
   `busybox $(x) cat /outside/f` defer, the same answer each gets spelled without
   the substitution. The last three do read the local file.
-- **A process substitution where a reader expects its pattern or program hides
-  the file after it.** `grep -v <(echo x) /outside/f` and
-  `awk <(echo 1) /outside/f` read the file with an `allow`, because the file takes
-  the slot the substitution held.
 - **An interpreter's own file access is invisible to the hook.** `python3`,
   `node`, `perl`, `ruby` and friends are not guarded commands: a `PreToolUse`
   hook on the shell sees the command line, and whatever the interpreter then
