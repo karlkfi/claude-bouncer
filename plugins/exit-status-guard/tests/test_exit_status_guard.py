@@ -925,6 +925,15 @@ CASES = [
     ('PIPESTATUS read inside arithmetic is still a read',
      'make check | tail; exit $((${PIPESTATUS[0]}|0))', False, True,
      'reads $PIPESTATUS to recover'),
+    # Q339: the mask's end was found by counting every paren, so the quoted
+    # `(` in the substitution left one open and the mask ran to end-of-string,
+    # taking the gated pipeline with it.
+    ('a quoted paren in a substitution inside arithmetic ends nothing',
+     'echo $(( $(echo "(" | wc -c) )) ; make check | tail', False, True,
+     "exit status is the filter's"),
+    ('the same, in a double-quoted substitution',
+     'echo "$(echo "$(( $(echo "(" | wc -c) ))" ; make check | tail)"',
+     False, True, "exit status is the filter's"),
 
     # --- A gate sequenced before a state change with `;` ---------------------
     ('check then push', 'make check; git push', False, True,
@@ -2044,6 +2053,11 @@ class TestSegmentation(unittest.TestCase):
     def test_a_spaced_substitution_is_not_arithmetic(self):
         segs = self.segs('out=$( (make check | tail -1) )')
         self.assertIn('|', [pg.next_op(s.post_ops) for s in segs])
+
+    def test_a_quoted_paren_does_not_extend_the_arithmetic(self):
+        segs = self.segs('echo $(( $(echo "(") )) ; make check')
+        self.assertEqual([['echo', pg.ARITHMETIC_WORD], ['make', 'check']],
+                         [s.tokens for s in segs])
 
     def test_arithmetic_in_single_quotes_is_left_to_shlex(self):
         segs = self.segs("echo '$((a|b))' && git push")

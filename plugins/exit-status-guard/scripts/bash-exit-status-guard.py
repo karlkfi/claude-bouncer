@@ -46,7 +46,7 @@ from bouncer_parse import (                                    # noqa: E402
     MAX_SUBST_DEPTH, PIPE_OPS, PUNCT_CHARS, QuoteTrackingLexer, REDIR,
     SEPARATORS, SH_KEYWORDS, _OPERATORS, is_assignment, is_operator, split_assignment,
     _consume_heredoc_body, _scan_backticks, _scan_dollar_paren,
-    _skip_balanced_parens, command_substitutions, glue_dollar_paren,
+    command_substitutions, glue_dollar_paren,
     process_substitutions,
     note_discarded_writes, split_operator_runs, strip_comments,
     strip_env_prefix, strip_heredoc_bodies, strip_sh_keywords,
@@ -157,6 +157,10 @@ def mask_arithmetic(text):
     text is literal, and shlex keeps it inside its word without help. Only the
     `$((` spelling is masked -- `$( (…) )` is a substitution around a subshell,
     and a gate piped inside one is still a lost status.
+
+    The close is found by `_scan_dollar_paren`, which tracks quotes and nested
+    substitutions. Counted flat, the `"("` in `$(( $(echo "(") ))` left a paren
+    open and the mask ran to end-of-string, hiding every command after it (Q339).
     """
     out = []
     i, n = 0, len(text)
@@ -185,7 +189,8 @@ def mask_arithmetic(text):
             continue
         if text.startswith('$((', i):
             out.append(ARITHMETIC_WORD)
-            i = _skip_balanced_parens(text, i + 1)
+            body, end = _scan_dollar_paren(text, i + 2)
+            i = n if body is None else end
             continue
         out.append(c)
         i += 1
