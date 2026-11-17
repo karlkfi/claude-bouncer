@@ -79,7 +79,8 @@ import sys
 # plugin's `lib/` is vendored from the repository root; see scripts/sync-lib.py.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 from bouncer_parse import (                                    # noqa: E402
-    ASSIGN_APPEND, ASSIGN_SUBSCRIPT, ASSIGNMENT_RE, PUNCT_CHARS, QuotedStr,
+    ASSIGN_APPEND, ASSIGN_SUBSCRIPT, ASSIGNMENT_RE, MAX_SUBST_DEPTH, PUNCT_CHARS,
+    QuotedStr,
     QuoteTrackingLexer, command_substitutions, is_assignment, is_reserved_word,
     split_assignment, strip_comments, strip_heredoc_bodies, strip_sh_keywords,
 )
@@ -386,7 +387,26 @@ def _unescape(m):
 _LIVE_BACKTICK = re.compile(r'(?<!\\)((?:\\\\)*)`')
 
 
-def tokenize(raw):
+class _Tokens(list):
+    """A token stream that records whether a substitution body nested past
+    ``MAX_SUBST_DEPTH`` was left unread (Q342)."""
+    too_deep = False
+
+
+def _tokenize_body(body, depth, deep):
+    """Tokenize a substitution body found at ``depth``, or leave it unread
+    past the cap, noting that in ``deep``. Unbounded, the recursion exhausted
+    Python's stack near 500 levels and the hook deferred (Q342)."""
+    if depth >= MAX_SUBST_DEPTH:
+        deep.append(body)
+        return None
+    tokens = tokenize(body, depth + 1)
+    if getattr(tokens, 'too_deep', False):
+        deep.append(body)
+    return tokens
+
+
+def tokenize(raw, depth=0):
     """shlex-tokenize with POSIX quoting and punctuation grouping. Newlines
     are rewritten to `;` first, because shlex treats a newline as plain
     whitespace, which would merge `true\ncmd` into one segment. Comments are
@@ -406,9 +426,13 @@ def tokenize(raw):
     lexer, which drops the backslash as bash does: inside double quotes it
     reaches a `bash -c` body as the substitution the child runs (Q322).
 
+    A body nested deeper than ``MAX_SUBST_DEPTH`` is not tokenized, and the
+    stream returned says so in ``too_deep``. What sits beside it at a
+    shallower depth is still read.
+
     Returns None on unbalanced quotes (caller defers: fail-open on parse
     errors)."""
-    expanded, unterminated = [], []
+    expanded, unterminated, deep = [], [], []
     raw = _strip_comments(strip_heredoc_bodies(raw, expanded, unterminated))
     spans = []
     bodies = command_substitutions(raw, spans=spans)[:_SUBST_MAX]
@@ -416,8 +440,9 @@ def tokenize(raw):
     masked = _mask_substitutions(raw, spans[:len(bodies)], sentinels)
     masked = _LIVE_BACKTICK.sub(r'\1;', masked).replace('\n', ';')
     try:
-        tokens = _hoist_substitutions(_lex_semicolons(masked), raw, spans,
-                                      bodies, sentinels)
+        tokens = _Tokens(_hoist_substitutions(_lex_semicolons(masked), raw,
+                                              spans, bodies, sentinels, depth,
+                                              deep))
         # Every body is stripped above, so the ones this guard still has to see
         # come back through the out-lists and are appended as their own
         # segments: the ones bash would EXPAND, and the ones whose terminator
@@ -450,7 +475,7 @@ def tokenize(raw):
             if unescape:
                 subs += command_substitutions(text)
             for sub in subs:
-                sub_tokens = tokenize(sub)
+                sub_tokens = _tokenize_body(sub, depth, deep)
                 if sub_tokens:
                     tokens.append(';')
                     tokens.extend(sub_tokens)
@@ -462,6 +487,7 @@ def tokenize(raw):
                 continue
             tokens.append(';')
             tokens.extend(body_tokens)
+        tokens.too_deep = bool(deep)
         return tokens
     except ValueError:
         return None
@@ -525,7 +551,7 @@ class _HoistSep(str):
 _HOISTED = _HoistSep(';')
 
 
-def _hoist_substitutions(tokens, raw, spans, bodies, sentinels):
+def _hoist_substitutions(tokens, raw, spans, bodies, sentinels, depth, deep):
     """Restore every masked word and insert each substitution body it held,
     tokenized, ahead of the simple command the word belongs to. A marker
     inside a comment never reaches a token, so a commented-out substitution
@@ -545,7 +571,8 @@ def _hoist_substitutions(tokens, raw, spans, bodies, sentinels):
             continue
         if sentinels[0] in t:
             for m in marker.finditer(t):
-                sub_tokens = tokenize(bodies[ord(m.group(1)) - _SUBST_BASE])
+                sub_tokens = _tokenize_body(
+                    bodies[ord(m.group(1)) - _SUBST_BASE], depth, deep)
                 if sub_tokens:
                     out[seg_start:seg_start] = ['('] + sub_tokens + [')',
                                                                       _HOISTED]
@@ -3223,6 +3250,12 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
         tokens = tokenize(raw)
     if tokens is None:
         return findings, override, session_reason  # unparseable: fail-open
+    if getattr(tokens, 'too_deep', False):
+        # A body this deep is not read, so what it runs is unknown (Q342).
+        findings.append((ASK, 'prod-guard: a command substitution is nested '
+                         'more than %d levels deep, deeper than the guard '
+                         'reads, so what it runs is unknown. Confirm it is '
+                         'safe.' % MAX_SUBST_DEPTH, None))
     if raw is None:
         raw = ' '.join(tokens)
     # Two scopes, both seeded from what this shell inherited (os.environ at the

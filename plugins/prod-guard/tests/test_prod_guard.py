@@ -830,6 +830,35 @@ class CommandSubstitutionDecisionTests(unittest.TestCase):
         self.assertEqual(guard.split_simple_commands(tokens),
                          [["true"], ["echo", "\ue000x$(true)\ue001"]])
 
+    @staticmethod
+    def nest(k, inner):
+        for _ in range(k):
+            inner = 'echo "$(%s)"' % inner
+        return inner
+
+    def test_nesting_past_the_cap_asks(self):
+        # Unbounded, the recursion raised RecursionError near 500 levels and
+        # the hook deferred (Q342). Past the cap a body is not read, so the
+        # command asks whatever it holds.
+        cap = guard.MAX_SUBST_DEPTH
+        prod = "kubectl --context gke_acme_prod-us delete ns payments"
+        for k, inner, want in ((1, prod, "deny"), (cap, prod, "deny"),
+                               (cap + 1, prod, "ask"), (500, prod, "ask"),
+                               (cap, "true", None), (cap + 1, "true", "ask")):
+            with self.subTest(k=k, inner=inner):
+                decision, reason = run_hook(
+                    self.nest(k, inner), home=make_home(kubeconfig=KUBECONFIG_PROD))
+                self.assertEqual(decision, want)
+                if want == "ask":
+                    self.assertIn("nested more than %d levels" % cap, reason)
+
+    def test_shallow_command_beside_a_deep_nest_is_still_judged(self):
+        # The row's trap: the kubectl sits at depth 1, after 500 levels the
+        # guard stops reading.
+        trap = ('echo "$(' + self.nest(500, 'echo ")"')
+                + ' ; kubectl --context gke_acme_prod-us delete ns payments)"')
+        self.assertEqual(self.decide(trap), "deny")
+
     def test_substitution_is_hoisted_ahead_of_its_command(self):
         tokens = guard.tokenize('a; X=1 echo "x$(%s)y" z && b' % self.K)
         self.assertEqual(guard.split_simple_commands(tokens), [
