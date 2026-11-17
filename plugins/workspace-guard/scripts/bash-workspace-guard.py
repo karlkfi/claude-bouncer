@@ -3263,15 +3263,41 @@ SED_IMPLICIT_VARS = frozenset({'_', 'BASH_REMATCH', 'REPLY', 'OPTARG', 'OPTIND',
                                'MAPFILE'})
 
 
-def sed_script_hides(word):
+def sed_expansion_names(text):
+    """The plain names `text` expands, as `$NAME` or `${NAME}`."""
+    names = set()
+    for m in SED_EXPANSION_RE.finditer(text):
+        name = m.group(1) if m.group(1) is not None else m.group(2)
+        if name and IDENT_RE.fullmatch(name):
+            names.add(name)
+    return names
+
+
+def output_assigned(g):
+    """The names assignment group `g` sets to a value that is wholly a command
+    substitution, `NAME=$(cmd)` or `` NAME=`cmd` ``: README, Limitations."""
+    names = set()
+    for t in g:
+        if is_assignment(t):
+            name, _, raw = split_assignment(t)
+            if raw.startswith('`') or (raw.startswith('$(')
+                                       and not raw.startswith('$((')):
+                names.add(name)
+    return names
+
+
+def sed_script_hides(word, bound):
     """True when sed script `word` holds an expansion that takes its text from
     the command in a way the hook does not read (Q335): a `$(…)`, a backtick, a
     `${…}` operator, indirection, a positional parameter, `$_` or a name like
     `BASH_REMATCH` that bash fills itself. Any of them can add a `w` command or
     end an `s` part early.
 
-    A plain `$NAME`, `${NAME}` or `$((…))` is read as written: its value is a
-    literal the hook substitutes, or one it cannot see (README, Limitations). A
+    So does a plain `$NAME` or `${NAME}` left in the word when the command
+    binds NAME (`bound`): the hook substitutes the literals it can, and a value
+    that reached no map on the way is as unread as an operator's. A plain name
+    the command never binds, or binds only by `read` or `$(…)`, is read as
+    written (README, Limitations), and so is `$((…))`. A
     word wholly in single quotes expands nothing, so `sed -n '$p'` is sed's
     last-line address. A bare `$(` is where an unquoted substitution was split
     off, its body judged on its own; `$((…))` arithmetic arrives the same way.
@@ -3284,8 +3310,9 @@ def sed_script_hides(word):
         if name is not None and name in '#?$!-':
             continue                              # a number or the flags
         if name is None or not IDENT_RE.fullmatch(name) \
-                or name in SED_IMPLICIT_VARS:
-            return True
+                or name in SED_IMPLICIT_VARS \
+                or any(name[:k] in bound for k in range(1, len(name) + 1)):
+            return True                           # `"$p"x` reaches us as `$px`
     return False
 
 
@@ -5348,8 +5375,11 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
     # resolving `$f` to the later, in-workspace literal.
     stable_vars, unstable_vars = {}, set()
     # Values `varmap` turns away that a quoted sed script splices in as text
-    # (Q335); see `apply_assignment_group`.
-    textmap = {}
+    # (Q335); see `apply_assignment_group`. `bound_vars` is every name of
+    # `watch_vars` the string binds before the point reached, by any binder in
+    # any scope, bar a `read` or a value that is wholly a command substitution:
+    # a sed script splicing one in that was not substituted is not readable.
+    textmap, watch_vars, bound_vars = {}, sed_expansion_names(cmd), set()
 
     def track_stable():
         """Fold the live `varmap` into `stable_vars`. Called before each group
@@ -5456,6 +5486,7 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
         if propagate:
             assigned = apply_assignment_group(g, varmap, persists, textmap)
             if assigned is not None:
+                bound_vars.update(set(assigned) - output_assigned(g))
                 # A name set as a scalar literal is no longer a loop variable.
                 for nm in assigned:
                     loopmap.pop(nm, None)
@@ -5473,6 +5504,7 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
                 name, values = forbind
                 varmap.pop(name, None)            # a loop var isn't a scalar
                 textmap.pop(name, None)
+                bound_vars.add(name)
                 if values is None:
                     loopmap.pop(name, None)       # unresolvable list -> poison
                     blacklist_loops([name])
@@ -5486,9 +5518,16 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
                 blacklist_loops(list(stable_loops))
                 propagate = False
                 textmap.clear()
+                bound_vars |= watch_vars
             else:
                 poison_vars(sub_g, varmap)
                 poison_vars(sub_g, textmap)
+                rest = strip_env_prefix(strip_sh_keywords(sub_g))
+                if not rest or os.path.basename(rest[0]) != 'read':
+                    # The same rules name what this group may set, mapped or not.
+                    probe = dict.fromkeys(watch_vars - bound_vars, '')
+                    poison_vars(sub_g, probe)
+                    bound_vars |= watch_vars - bound_vars - probe.keys()
                 had = set(loopmap)
                 poison_vars(sub_g, loopmap)       # same rules invalidate loops
                 blacklist_loops(had - set(loopmap))
@@ -5773,19 +5812,21 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
             # A quoted word takes the literals `textmap` holds, and a loop
             # variable's script is read once per value bash gives it.
             words = sed_script_words(g)
-            outside += [(w, 'sedexpand', None) for w in words
-                        if sed_script_hides(w)]
             variants = [list(g)]
             for i, t in enumerate(g):
                 if t not in words:
                     continue
-                if getattr(t, 'quoted_chars', 0) == len(t):
+                if getattr(t, 'quoted_chars', 0) == len(t) \
+                        and getattr(t, 'quotes', None) != {"'"}:
                     t = substitute_vars(t, textmap)
                 alts = expand_loop_candidates(t, loopmap)
                 if alts is None or len(variants) * len(alts) > MAX_LOOP_CANDIDATES:
                     outside.append((g[i], 'sedexpand', None))
                     continue
                 variants = [v[:i] + [a] + v[i + 1:] for v in variants for a in alts]
+            outside += [(w, 'sedexpand', None) for v in variants
+                        for w in sed_script_words(v)
+                        if sed_script_hides(w, bound_vars)]
             for v in variants:
                 sfiles, runs = sed_script_files(v)
                 for f, f_is_read in sfiles:

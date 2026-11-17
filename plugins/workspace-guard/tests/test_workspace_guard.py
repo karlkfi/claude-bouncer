@@ -1726,6 +1726,27 @@ class HookEndToEndTests(unittest.TestCase):
                               "read: " + word,
                               out["hookSpecificOutput"]["permissionDecisionReason"])
 
+    def test_sed_script_name_bound_but_not_substituted_denies(self):
+        # Review found each of these missing the literal maps by a different
+        # route, and bash 5.3 with macOS sed wrote the file for all but the
+        # GNU-only `--expression=`.
+        for cmd, word in (
+                ("p='w /etc/q335-fake'; sed -e\"$p\" in.txt", "$p"),
+                ("p='w /etc/q335-fake'; sed --expression=\"$p\" in.txt", "$p"),
+                ("for p in w/etc/q335-fake; do sed -e\"$p\" in.txt; done", "$p"),
+                ("{ p='w /etc/q335-fake'; sed \"$p\" in.txt; }", "$p"),
+                ("(p='w /etc/q335-fake'; sed \"$p\" in.txt)", "$p"),
+                ("a=('w /etc/q335-fake'); sed \"$a\" in.txt", "$a"),
+                ("p='w /etc/q335-fake'; sed \"$p\"x in.txt", "$px"),
+                ("p='w /etc/q335-fake'; q=$p; sed \"$q\" in.txt", "$q"),
+                ("declare p='w /etc/q335-fake'; sed \"$p\" in.txt", "$p"),
+                ("printf -v p 'w /etc/q335-fake'; sed \"$p\" in.txt", "$p")):
+            with self.subTest(cmd=cmd):
+                out = self._decision(cmd, "deny")
+                self.assertIn("sed script built from a value the hook cannot "
+                              "read: " + word,
+                              out["hookSpecificOutput"]["permissionDecisionReason"])
+
     def test_sed_script_expansion_it_can_read_allows(self):
         # The commonest seds there are: a name the string never sets, a literal
         # it sets, and a script wholly in single quotes, which expands nothing.
@@ -1736,9 +1757,11 @@ class HookEndToEndTests(unittest.TestCase):
                     "sed \"s|$HOME|~|\" in.txt", "sed \"1,$((n+1))d\" in.txt",
                     "sed -n $((n+1))p in.txt", "sed \"s/a/$$/\" in.txt",
                     "for b in x y; do sed \"s/a/$b/\" in.txt; done",
-                    # A value bound some other way is not read (README,
+                    # A value from `$(…)` or `read` is not read (README,
                     # Limitations), so the commonest of them stays allowed.
-                    "a=$(cat in.txt) && sed -i '' \"s/^rank: .*/rank: $a/\" in.txt"):
+                    "a=$(cat in.txt) && sed -i '' \"s/^rank: .*/rank: $a/\" in.txt",
+                    "while read v; do sed \"s/x/$v/\" in.txt; done < in.txt",
+                    "p='w x'; sed -n '$p' in.txt"):
             with self.subTest(cmd=cmd):
                 self._decision(cmd, "allow")
 

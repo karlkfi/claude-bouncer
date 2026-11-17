@@ -1844,15 +1844,15 @@ final output.
   macOS sed makes the edit, and GNU sed makes it too and then exits 2 on the
   empty `''` operand (GNU sed 4.9, measured in a `debian:stable-slim`
   container on 2026-10-04).
-- A `sed` script reads a plain `$NAME` as written unless the same command
-  assigns NAME a literal. So a value bound any other way — by `$(…)`, `read`,
-  `declare`, `local`, `printf -v`, `mapfile` or a subshell — is not seen, and
-  can give the script a `w` command whose file is not judged:
-  `b=$(cat f); sed "s/a/$b/" g`. Routing a file name through a command's output
-  takes intent, and denying every such value would deny the common
-  `v=$(git rev-parse HEAD); sed "s/OLD/$v/" f`. A value from the operator's
-  environment is read as written too. Nor is a script loaded with `-f FILE`
-  read: FILE is judged as a read, and its contents are not the hook's to read.
+- A `sed` script reads a plain `$NAME` as written when the command binds NAME
+  only as `NAME=$(…)` or with `read`. Such a value is not seen, and can give the
+  script a `w` command whose file is not judged: `b=$(cat f); sed "s/a/$b/" g`.
+  Routing a file name through a command's output takes intent, and denying
+  every such value would deny the common `v=$(git rev-parse HEAD); sed
+  "s/OLD/$v/" f`. A name bound any other way that the hook could not substitute
+  denies, and a value from the operator's environment is read as written. Nor
+  is a script loaded with `-f FILE` read: FILE is judged as a read, and its
+  contents are not the hook's to read.
 - Heredoc body lines are dropped from the raw command string before parsing, so
   path-like body content (`</div>`, `/title`), prose, or an unbalanced quote in
   the body is never mistaken for a file argument and never aborts the parse (a
