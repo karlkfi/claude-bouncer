@@ -143,6 +143,11 @@ CASES = [
      "[[ x =~ $'a' ]];#it's\nmake check | tail -5", False, True, ''),
     ("gate behind a ${ } =~ operand",
      "[[ x =~ ${y:-a} ]];#it's\nmake check | tail -5", False, True, ''),
+    # ... and a test as a named coproc's or a function's body is still one.
+    ('gate after a named coproc test',
+     'coproc NAME { [[ a =~ (#x) ]]; }; make check | tail -5', False, True, ''),
+    ('gate after a function test',
+     'function f [[ a =~ (#x) ]]; make check | tail -5', False, True, ''),
 
     # --- PIPESTATUS is not portable across shells ----------------------------
     ('PIPESTATUS[0] after a gate',

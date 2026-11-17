@@ -507,31 +507,40 @@ def _at_command_start(out):
     text = ''.join(out).rstrip(' \t')
     return not text or text[-1] in ';&|(\n{'
 
-_COMMAND_WORDS = frozenset(
-    ('!', '{', 'do', 'elif', 'else', 'if', 'then', 'time', 'until', 'while'))
+_COMMAND_WORDS = frozenset(('!', '{', 'coproc', 'do', 'elif', 'else', 'if',
+                            'then', 'time', 'until', 'while'))
 
 def _command_position(text, i, closes=()):
     """Whether a word at ``i`` in raw ``text`` is in command position: after a
     separator, a `(`, a `)` that ends a case pattern, or a reserved word that
     is itself in command position, so `if ! [[` opens a test and `echo [[`
-    does not (Q346). ``closes`` holds the index of each `)` that closes a
+    does not (Q346). A name counts before a `{` or `[[` body when `function`
+    or `coproc` leads it. ``closes`` holds the index of each `)` that closes a
     substitution or an extglob group, after which the word is an argument."""
-    timed = False
+    after, need = '[[', None      # the word just passed; what must lead it
     while True:
         j = i
         while j and (text[j-1] in ' \t' or text[j-2:j] == '\\\n'):
             j -= 1 if text[j-1] in ' \t' else 2
         if not j or text[j-1] in ';&|\n(':
-            return not timed
+            return need is None
         if text[j-1] == ')':
-            return not timed and j - 1 not in closes
+            return need is None and j - 1 not in closes
         k = j
         while k and text[k-1] not in ' \t\n;&|()<>':
             k -= 1
         word = text[k:j]
-        if timed and word != 'time' or word not in _COMMAND_WORDS | {'-p'}:
-            return False
-        timed, i = word == '-p', k
+        if need:
+            if word not in need:
+                return False
+            need = None
+        elif word == '-p':
+            need = ('time',)
+        elif word not in _COMMAND_WORDS:
+            if after not in ('{', '[['):
+                return False
+            need = ('function', 'coproc')
+        after, i = word, k
 
 def _regex_step(state, text, i):
     """The `=~` operand state after ``text[i]``, for the `[[` comment rule:

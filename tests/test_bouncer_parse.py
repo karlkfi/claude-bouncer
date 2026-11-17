@@ -133,12 +133,18 @@ class StripCommentsTests(unittest.TestCase):
                     "-p [[ =~ x;#it's\nid"):
             with self.subTest(cmd=cmd):
                 self.assertEqual(cmd.replace("#it's", ''), bp.strip_comments(cmd))
-        # A `[[` after a reserved word is still a test, so a glued `#` is text.
+        # A `[[` after a reserved word, or as the body of a function or a named
+        # coproc, is still a test, so a glued `#` is text.
         for cmd in ('if [[ a =~ (#x) ]]; then id; fi', '! [[ x =~ (a|#b) ]] || id',
                     'while [[ x =~ (#a) ]]; do id; done',
                     'time -p [[ x =~ (a|#b) ]] || id', '{ [[ x =~ (#a) ]] || id; }',
                     'case x in a) [[ x =~ (#a) ]] || id;; esac',
-                    '[[ x =~ "a"#b ]] || id'):
+                    '[[ x =~ "a"#b ]] || id', 'coproc [[ a =~ (#x) ]]; id',
+                    'coproc { [[ a =~ (#x) ]]; }; id',
+                    'coproc NAME { [[ a =~ (#x) ]]; }; id',
+                    'coproc NAME [[ a =~ (#x) ]]; id',
+                    'function f { [[ a =~ (#x) ]]; }; id',
+                    'function f [[ a =~ (#x) ]]; id'):
             with self.subTest(cmd=cmd):
                 self.assertEqual(cmd, bp.strip_comments(cmd))
 
