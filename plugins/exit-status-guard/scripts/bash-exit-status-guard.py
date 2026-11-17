@@ -406,6 +406,12 @@ def head_words(seg):
 # `--version` is the way out of it.
 PROBE_FLAGS = frozenset({'--version', '--help', '-V', '-h', 'version', '--usage'})
 
+# git prints a subcommand's option names for `git <sub> --git-completion-helper`
+# and exits, but only when the helper is the sole argument: `git checkout b
+# --git-completion-helper-all` exits 129, and `git commit -m
+# --git-completion-helper` commits. So it is not a probe flag (Q350).
+GIT_COMPLETION_HELPERS = frozenset({'--git-completion-helper', '--git-completion-helper-all'})
+
 # Sub-subcommands that report state without changing any: their output is the
 # point, so there is no status for a pipe to swallow and nothing for `&&` to
 # gate. Recognised structurally for every gate, the same way probes are --
@@ -507,6 +513,8 @@ class Registry(object):
         # spelled inside a quoted argument stays one word: `git commit -m "bump
         # --version output"` is a commit, and still a gate.
         if any(w in PROBE_FLAGS for w in words[1:]):
+            return False
+        if len(words) == 3 and words[0] == 'git' and words[2] in GIT_COMPLETION_HELPERS:
             return False
         return not is_read(words)
 
