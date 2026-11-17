@@ -989,21 +989,13 @@ def _single_quoted_in_bodies(value):
 
 def expand_word(tok, env, start=0):
     """`expand_vars` for `tok[start:]`, where `tok` is a lexed word. bash
-    leaves a `$NAME` it read in single quotes as text (Q365). The lexer
-    records where quoting began and how much there was, not where each run
-    sat, so a word that ends in one single-quoted run keeps that run as
-    written, and any other single-quoted word takes the literal reading
-    beside the expanded one."""
+    leaves a `$NAME` it read in single quotes as text, which a shell that
+    re-reads it may expand to the same value, so the word takes the text as
+    written beside the expanded one (Q365). The lexer records which quotes a
+    word used, not where each run sat, so the whole word is the text."""
     text = tok[start:]
-    quotes = getattr(tok, 'quotes', frozenset())
-    if "'" not in quotes or not VAR_REF_RE.search(text):
+    if "'" not in getattr(tok, 'quotes', ()) or not VAR_REF_RE.search(text):
         return expand_vars(text, env)
-    at = getattr(tok, 'quoted_from', None)
-    if quotes == {"'"} and at is not None and at >= start \
-            and getattr(tok, 'quoted_chars', 0) == len(tok) - at:
-        head, tail = expand_vars(tok[start:at], env), tok[at:]
-        return Readings.of(head + tail,
-                           {o + tail for o in getattr(head, 'others', ())})
     return Readings.of(expand_vars(text, env), {text})
 
 
@@ -1017,9 +1009,16 @@ def expand_vars(value, env):
     (extract_env_prefix folds them left-to-right), so one pass suffices.
 
     A reference a substitution body holds in single quotes is that body's
-    text, so it stays as written (Q365)."""
+    text, which the shell running the body may expand again, so the value
+    takes both readings (Q365)."""
     held = _single_quoted_in_bodies(value)
+    out = _expand(value, env, held)
+    if held:
+        out = Readings.of(out, _choices(_expand(value, env, ())))
+    return out
 
+
+def _expand(value, env, held):
     def live(m):
         return not any(a < m.start() < b for a, b in held)
 
@@ -3605,9 +3604,9 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
                         body = expand_vars(body, {
                             k: Readings.of(v, {body_env.get(k)})
                             for k, v in words_env.items()})
-                        others = getattr(body, 'others', ())
                     else:
                         body = expand_vars(body, words_env)
+                    others = getattr(body, 'others', ())
                     # A live `$X` of a prefix-only name is the parent's value,
                     # unknown here, which the child must not read as the
                     # prefix's.

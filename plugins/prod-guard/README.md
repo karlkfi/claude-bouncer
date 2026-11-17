@@ -313,8 +313,10 @@ or `sudo` hands the child: `env C=<ctx> bash -c '… "$C" …'` reads `<ctx>`, a
 after `env -i` or `env -u C` it reads `C` as empty. A body the parent expands
 does not, since the parent reads its own `C` before `env` runs. A `$C` written
 in single quotes is text, as bash keeps it: `B='$C'` holds the two characters
-`$C`, and so does what `$(echo '$C')` prints, so a child shell that expands
-it again reads its own `C`. It is deliberately conservative: an **undefined** variable is
+`$C`, and so does what `$(echo '$C')` prints. A child shell that expands it
+again reads its own `C`, which the guard cannot always see, so it judges both
+the text and the value: a production `C` still denies, and any other prompts.
+It is deliberately conservative: an **undefined** variable is
 left literal (so the target stays unknown and still prompts, never silently
 allowed), and non-trivial `$` forms — command substitution `$(…)`, arithmetic,
 and every `${…}` operator (`${V:-default}`, `${#V}`, …) — are not expanded, so

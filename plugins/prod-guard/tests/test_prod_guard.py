@@ -1063,10 +1063,26 @@ class VariableExpansionDecisionTests(unittest.TestCase):
                     # also takes the literal reading.
                     "C=kind-ci; B=x'$C'; " + k % '$B',
                     "C=kind-ci; B='$C'\"\"; " + k % '$B',
-                    "C=kind-ci; B=\"$C\"'y'; " + k % '$B',
-                    "C=gke_acme_prod-us; B='$C'; " + k % '$B'):
+                    "C=kind-ci; B=\"$C\"'y'; " + k % '$B'):
             with self.subTest(cmd=cmd):
                 self.assertEqual(run_hook(cmd)[0], "ask")
+
+    def test_single_quoted_name_keeps_the_value_a_child_may_expand(self):
+        # The child reads C wherever it has it, which the guard cannot always
+        # see, so a production value still denies (#357 review). bash 5.3.15
+        # passes the production context in each of these.
+        p = "C=gke_acme_prod-us; "
+        k = 'bash -c "kubectl --context=%s delete pod x"'
+        for cmd in (p + "B='$C'; " + k % '$B',
+                    p + "export C; B='$C'; " + k % '$B',
+                    "set -a; " + p + "B='$C'; " + k % '$B',
+                    p + "B='$C'; eval \"kubectl --context=$B delete pod x\"",
+                    "export " + p + k % "$(echo '$C')",
+                    "export " + p + k % "`echo '$C'`",
+                    "export " + p + "export B='$C'; bash -c 'eval "
+                    "\"kubectl --context=$B delete pod x\"'"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(run_hook(cmd)[0], "deny")
 
     def test_quoted_names_the_shell_expands_still_resolve(self):
         k = 'bash -c "kubectl --context=%s delete pod x"'
