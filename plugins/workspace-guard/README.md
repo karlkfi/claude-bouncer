@@ -199,6 +199,8 @@ different repository's scratch still asks entirely.
 | `sed '/x/w /etc/leak' notes.md` (the script writes a file) | **ask** |
 | `sed -l p /etc/hosts` (macOS `-l` takes no argument) | **ask** |
 | `p='w /etc/leak'; sed "$p" notes.md` (the value adds a `w`) | **ask** |
+| `awk '{print > "/etc/leak"}' notes.md` (the program writes a file) | **ask** |
+| `awk '{print > $1 ".txt"}' notes.md` (a target the hook cannot name) | **ask** |
 | `cat /tmp/out` · `cat /var/tmp/x`    | **deny** |
 | `sed -f /tmp/evil.sed notes.md`      | **deny** |
 | `sed -i '' '/^#/d' notes.md` (script or path?) | **deny** |
@@ -957,7 +959,14 @@ through the same boundary rules and produce the same reasons. Symlink staging
    a `[…]` hides the delimiter, so the script and the operands are read every
    way and the files unioned. A double-quoted script is read with the literals
    the same command assigns substituted in, a loop variable's once per value.
-   Any other expansion in it — `$(…)`, a `${…}` operator, `$1`, `$_` — denies. `dd` is handled separately because its operands are
+   Any other expansion in it — `$(…)`, a `${…}` operator, `$1`, `$_` — denies.
+   An `awk` program is read for the files it opens: `print` or `printf` with
+   `>`/`>>` writes one, and `getline <` and gawk's `@include` read one. A target
+   written as string literals is judged as the file awk opens, concatenated as
+   awk concatenates it and read both ways where macOS awk, gawk and mawk
+   disagree (an escape like `\q`, a `getline < "a" "b"`). A target named any
+   other way — a variable, a field, a concatenation with one, or a write to
+   `ARGV`/`ARGC` — asks, since the data decides it. `dd` is handled separately because its operands are
    all `KEY=VALUE` pairs — `if=PATH` and `of=PATH` are the file operands; the
    rest (`bs=`, `count=`, `conv=`, `iflag=`, `oflag=`, …) are values, not paths.
    `mktemp` is handled separately too, because its *default* location is host
@@ -1195,8 +1204,9 @@ through the same boundary rules and produce the same reasons. Symlink staging
    token, and even once step 15 has read it the hook has no basis to vouch for a
    construct it reads at one remove. **Interpreter code suppresses it on the same
    grounds** — `python3 -c`, `python3 -m <module>`, `perl -e`, a heredoc fed to
-   `python3`, a script resolving outside the root, or GNU sed's `e` command and
-   `s///e` flag, in the Bash tool. A `-m`
+   `python3`, a script resolving outside the root, GNU sed's `e` command and
+   `s///e` flag, or an awk program's `system()`, pipes and gawk `@load`, in the
+   Bash tool. A `-m`
    operand is a module name resolved on `sys.path`, so it is code the hook
    cannot read rather than a file beside the cwd. Interpreters are not guarded
    commands and a bare `python3 x.py` still defers to your own permission rules;
@@ -1854,6 +1864,14 @@ final output.
   denies, and a value from the operator's environment is read as written. Nor
   is a script loaded with `-f FILE` read: FILE is judged as a read, and its
   contents are not the hook's to read.
+- An `awk` program is read as written, with no expansion substituted. A
+  double-quoted program holding a name the command binds, a `$(…)`, a `${…}`
+  operator or `$_` asks, since the value can add a redirection
+  (`p='{print > "../x"}'; awk "$p" f`). A `$1` there does not, because the
+  hook cannot tell it from the escaped field `\$1`, and neither does a name the
+  command never binds; both are read as written. A loop variable asks even
+  where its values are literals. A program loaded with `-f FILE` is not read,
+  as with sed.
 - Heredoc body lines are dropped from the raw command string before parsing, so
   path-like body content (`</div>`, `/title`), prose, or an unbalanced quote in
   the body is never mistaken for a file argument and never aborts the parse (a

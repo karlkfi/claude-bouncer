@@ -108,6 +108,13 @@ class CategorizeTests(unittest.TestCase):
                   "cannot read: s/a/$(cat v)/. Fix: write the script literally.")
         self.assertEqual(fr.categorize(reason), {'sedexpand': ['s/a/$(cat v)/']})
 
+    def test_awk_target_reason_buckets_by_target(self):
+        # Q334's ask, whose token is an awk expression rather than a path.
+        reason = ("workspace-guard: awk program opens a file the hook cannot "
+                  "name: $1 \".txt\". The target is a variable, a field or a "
+                  "concatenation.")
+        self.assertEqual(fr.categorize(reason), {'awktarget': ['$1 ".txt"']})
+
     def test_unrecognized_reason_buckets_as_other(self):
         self.assertEqual(fr.categorize("Guarded commands target workspace/pipe only"),
                          {'other': []})

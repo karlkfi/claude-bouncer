@@ -1783,6 +1783,131 @@ class HookEndToEndTests(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self._decision(cmd, "allow")
 
+    # --- Q334: files an awk program opens ------------------------------------
+
+    def test_awk_program_literal_targets_ask(self):
+        # Each program wrote or read its file on macOS awk, gawk 5.2.1 or mawk
+        # 1.3.4 with a relative name; here the name is moved outside the root.
+        F = "/q334-fake/x"
+        for cmd, paths in (
+                ("awk '{print > \"%s\"}' in.txt" % F, [F]),
+                ("awk '{print $1 >> \"%s\"}' in.txt" % F, [F]),
+                ("awk 'BEGIN{printf(\"%%s\\n\", 1) > \"%s\"}'" % F, [F]),
+                ("awk 'BEGIN{getline l < \"%s\"}' in.txt" % F, [F]),
+                ("awk 'BEGIN{while ((getline l < \"%s\") > 0) n++}'" % F, [F]),
+                ("awk 'BEGIN{getline $2 < \"%s\"}'" % F, [F]),
+                ("gawk '@include \"%s\"' in.txt" % F, [F]),
+                # Every awk measured concatenates a print target.
+                ("awk '{print > \"/q334-fake/a\" \"b\"}' in.txt", ["/q334-fake/ab"]),
+                ("awk '{print > (\"/q334-fake/a\" \"b\")}' in.txt", ["/q334-fake/ab"]),
+                # macOS awk reads `< \"i\" \"n\"` as `in`, gawk and mawk as `i`.
+                ("awk 'BEGIN{getline l < \"/q334-fake/i\" \"n\"}'",
+                 ["/q334-fake/i", "/q334-fake/in"]),
+                ("awk 'BEGIN{print 1 > \"\\057q334-fake\\057x\"}'", [F]),
+                ("awk 'BEGIN{print 1 > \"\\x2fq334-fake\\x2fx\"}'", [F]),
+                ("awk 'BEGIN{print 1 > \"/q334-fake/x\\0tail\"}'", [F]),
+                # macOS awk and gawk drop an unknown escape's backslash; mawk keeps it.
+                ("awk 'BEGIN{print 1 > \"/q334-fake/q\\qz\"}'",
+                 ["/q334-fake/qqz", "/q334-fake/q\\qz"])):
+            with self.subTest(cmd=cmd):
+                reason = self._decision(cmd, "ask")[
+                    "hookSpecificOutput"]["permissionDecisionReason"]
+                for path in paths:
+                    self.assertIn(path, reason)
+
+    def test_awk_lexer_finds_a_redirect_past_a_regex(self):
+        # Reviewer C's shapes: a lexer that took the first `/` as a division,
+        # or ended the print at the newline, hid the redirect from the hook, and
+        # the awk named wrote the file. A `\"` or `#` in the regex is what a
+        # misreading turns into a string or a comment.
+        L = "/q334-fake/L"
+        for cmd, wrote_on in (
+                ('BEGIN { if (1) /"/ ; print "x" > "%s" ; y = /"/ }', "macOS, gawk"),
+                ('BEGIN { if (1) /#/ ; print "x" > "%s"\n}', "macOS, gawk"),
+                ('BEGIN { while (0) /"/ ; print "x" > "%s" ; y = /"/ }', "macOS, gawk"),
+                ('BEGIN { for (;0;) /"/ ; print "x" > "%s" ; y = /"/ }', "macOS, gawk"),
+                ('BEGIN { if (1)\n/"/ ; print "x" > "%s" ; y = /"/ }', "macOS, gawk"),
+                ('BEGIN { if (0) z = 1; else /"/ ; print "x" > "%s" ; y = /"/ }', "all"),
+                ('BEGIN { do /"/ ; while (0); print "x" > "%s"; y = /"/ }', "all"),
+                ('BEGIN { exit /"/ } END { print "x" > "%s" ; y = /"/ }', "all"),
+                ('function f() { return /"/ } BEGIN { print "x" > "%s"; z = /"/ }', "all"),
+                ('BEGIN { y = x++ / 2; print "x" > "%s"; z = 1 / 2 }', "macOS, gawk"),
+                ('BEGIN { y = x-- / 2; print "x" > "%s"; z = 1 / 2 }', "macOS, gawk"),
+                ('BEGIN { y = getline / 2; print "x" > "%s"; z = 1 / 2 }', "all"),
+                ('BEGIN { print "x",\n"y" > "%s" }', "all"),
+                ('BEGIN { print "x" &&\n1 > "%s" }', "all"),
+                ('BEGIN { print 0 ||\n1 > "%s" }', "all"),
+                ('BEGIN { print 1 ?\n"a" : "b" > "%s" }', "gawk"),
+                ('BEGIN { print "x" \\\n> "%s" }', "all"),
+                ('BEGIN { if ("a/b" ~ /[/]/) print "x" > "%s" }', "gawk, mawk")):
+            cmd = "awk %s in.txt" % shlex.quote(cmd % L)
+            with self.subTest(cmd=cmd, wrote_on=wrote_on):
+                self.assertIn(L, self._decision(cmd, "ask")[
+                    "hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_awk_target_it_cannot_name_asks(self):
+        # A data-named target has no literal rewrite, so a person decides.
+        for cmd, shown in (
+                ("awk '{print > $1 \".txt\"}' in.txt", '$1 ".txt"'),
+                ("awk -v out=x '{print > out}' in.txt", "out"),
+                ("awk 'BEGIN{getline l < f}' in.txt", "f"),
+                ("awk 'BEGIN{getline l < \"/q334-fake/\" f}' in.txt", '"/q334-fake/" f'),
+                ("awk 'BEGIN{print 1 > \"\\x2fab\"}' in.txt", '"\\x2fab"'),
+                ("awk 'BEGIN{print 1 > \"/q334-fake/x' in.txt", "BEGIN{print"),
+                # mawk reads a second `>` as a comparison and writes a file named 0.
+                ("awk 'BEGIN{print > \"a\" > \"b\"}' in.txt", '"a" > "b"'),
+                # ARGV and ARGC name the files awk reads next.
+                ("awk 'BEGIN{ARGV[1] = \"/q334-fake/x\"; ARGC = 2} {print}'", "ARGV[1]"),
+                ("awk 'BEGIN{ARGC++} {print}' in.txt", "ARGC"),
+                ("awk 'BEGIN{split(\"a b\", ARGV)} {print}' in.txt", "ARGV"),
+                # A program completed by a value the hook does not read (D2).
+                ("p='{print > \"/q334-fake/x\"}'; awk \"$p\" in.txt", "$p"),
+                ("pat='/ {print > \"../x\"} /'; awk \"/$pat/\" in.txt", "/$pat/"),
+                ("awk \"${p:-1}\" in.txt", "${p:-1}"),
+                ("awk \"$_\" in.txt", "$_"),
+                # The cost of reading no value in: a loop's literals ask too.
+                ("for t in a b; do awk \"/^func $t/\" in.txt; done", "/^func $t/")):
+            with self.subTest(cmd=cmd):
+                reason = self._decision(cmd, "ask")[
+                    "hookSpecificOutput"]["permissionDecisionReason"]
+                self.assertIn("awk program opens a file the hook cannot name: ", reason)
+                self.assertIn(shown, reason)
+
+    def test_awk_program_that_runs_a_command_withholds_the_allow(self):
+        for cmd in ("awk 'BEGIN{system(\"true\")}' in.txt",
+                    "awk 'BEGIN{system (\"true\")}' in.txt",
+                    "awk 'BEGIN{system \\\n(\"true\")}' in.txt",
+                    "awk '{print | \"sort\"}' in.txt",
+                    "awk 'BEGIN{\"date\" | getline d}' in.txt",
+                    "gawk 'BEGIN{print |& \"cat\"}' in.txt",
+                    "gawk '@load \"rwarray\"' in.txt",
+                    "gawk 'BEGIN{f = \"system\"; @f(\"true\")}' in.txt"):
+            with self.subTest(cmd=cmd):
+                self._defer(cmd)
+
+    def test_awk_program_that_opens_nothing_outside_allows(self):
+        for cmd in ("awk '{print $1}' in.txt", "awk -F: '$3 > 100 {print}' in.txt",
+                    "awk '{if ($1 > 2) print $1}' in.txt", "awk 'NR>1' in.txt",
+                    "awk '{print ($1 > 2)}' in.txt",
+                    "awk '{printf \"%s > %s\\n\", $1, $2}' in.txt",
+                    "awk '/a>b/' in.txt", "awk '{sum += $2} END {print sum / NR}' in.txt",
+                    "awk '{print > \"out.txt\"}' in.txt",
+                    "awk '{print $1 >> \"log.txt\"}' in.txt",
+                    "awk '{print > \"/dev/stderr\"}' in.txt",
+                    "awk '{print > \"a\" \"b\"}' in.txt",
+                    "awk '{a[$1]++} END {for (k in a) print k > \"counts.txt\"}' in.txt",
+                    "awk 'BEGIN {while ((getline l < \"in.txt\") > 0) n++; print n}'",
+                    "awk 'BEGIN{for (i = 1; i < ARGC; i++) print ARGV[i]}' in.txt",
+                    "awk 'FNR==NR{a[$1]; next} $1 in a' in.txt in.txt",
+                    "awk 'BEGIN{x = /\"/ ; print \"x\" > \"o\" ; y = /\"/}' in.txt",
+                    # A `$1` in double quotes is the escaped field `\\$1`, which
+                    # the token cannot tell from bash's (Q391).
+                    "awk \"{print \\$3}\" in.txt", "awk \"/$pat/\" in.txt",
+                    "awk \"{print \\\"$HOME\\\"}\" in.txt",
+                    "ps aux | awk '{print $2}'"):
+            with self.subTest(cmd=cmd):
+                self._decision(cmd, "allow")
+
     # --- Q232: the token after `sed -i ''` -----------------------------------
     # BSD sed reads it as the script and GNU sed as a file. Where Q328's parser
     # reads it as a script naming no file and running nothing, an outside

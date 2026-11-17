@@ -3297,7 +3297,7 @@ def output_assigned(cmd):
     return whole - other
 
 
-def sed_script_hides(word, bound, glued=frozenset()):
+def sed_script_hides(word, bound, glued=frozenset(), fields=False):
     """True when sed script `word` holds an expansion that takes its text from
     the command in a way the hook does not read (Q335): a `$(…)`, a backtick, a
     `${…}` operator, indirection, a positional parameter, `$_` or a name like
@@ -3314,13 +3314,17 @@ def sed_script_hides(word, bound, glued=frozenset()):
     word wholly in single quotes expands nothing, so `sed -n '$p'` is sed's
     last-line address. A bare `$(` is where an unquoted substitution was split
     off, its body judged on its own; `$((…))` arithmetic arrives the same way.
+
+    With `fields`, a `$1` is left alone: in a double-quoted awk program it is
+    usually an escaped `\\$1`, an awk field, and the token cannot tell the two
+    apart (Q391).
     """
     if word == '$(' or (getattr(word, 'quoted_chars', 0) == len(word)
                         and getattr(word, 'quotes', None) == {"'"}):
         return False
     for m in SED_EXPANSION_RE.finditer(word):
         name = m.group(1) if m.group(1) is not None else m.group(2)
-        if name is not None and name in '#?$!-':
+        if name is not None and (name in '#?$!-' or (fields and name.isdigit())):
             continue                              # a number or the flags
         if name is None or not IDENT_RE.fullmatch(name) \
                 or name in SED_IMPLICIT_VARS or name in bound \
@@ -3373,6 +3377,272 @@ def sed_script_slot(tokens):
         if named or runs:
             return None
     return len(files)
+
+
+# An awk program's own file access (Q334). A `/` after one of these names opens
+# a regex; after any other name it divides, `getline / 2` included.
+AWK_REGEX_AFTER = frozenset({'print', 'printf', 'return', 'case', 'else', 'do',
+                             'exit'})
+# A newline after one of these continues the statement rather than ending it.
+AWK_CONTINUES = frozenset({',', '{', '&&', '||', '?', ':', 'do', 'else'})
+AWK_OPS = ('**=', '>>', '>=', '<=', '==', '!=', '&&', '||', '|&', '++', '--',
+           '+=', '-=', '*=', '/=', '%=', '^=', '**', '!~')
+AWK_ASSIGN_OPS = frozenset({'=', '+=', '-=', '*=', '/=', '%=', '^=', '**=',
+                            '++', '--'})
+AWK_ESCAPES = {'"': '"', '\\': '\\', 'a': '\a', 'b': '\b', 'f': '\f',
+               'n': '\n', 'r': '\r', 't': '\t', 'v': '\v'}
+AWK_NUMBER_RE = re.compile(r'0[xX][0-9A-Fa-f]+|(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?')
+
+
+def _awk_tokens(text):
+    """awk program `text` as `(kind, value, start, end)` tuples, or None when a
+    string or regex never closes.
+
+    `kind` is `name`, `num`, `str` (value: the text between the quotes),
+    `regex`, `nl` (a newline that ends a statement), `post` (a postfix `++` or
+    `--`), `hdr` (the `)` closing an `if`, `while` or `for` header) or `op`.
+    Whether a `/` divides or opens a regex turns on the token before it, and
+    reading a regex as a division can open a string or a comment that hides
+    the rest of the program, so the rules follow what the awks were measured
+    doing rather than the grammar.
+    """
+    toks, headers, i, n = [], [], 0, len(text)
+    while i < n:
+        c, prev = text[i], toks[-1] if toks else None
+        if c in ' \t\r':
+            i += 1
+        elif c == '\\' and text[i + 1:i + 2] == '\n':
+            i += 2
+        elif c == '#':
+            i = _sed_eol(text, i)
+        elif c == '\n':
+            if prev is not None and prev[0] != 'nl' and prev[1] not in AWK_CONTINUES:
+                toks.append(('nl', c, i, i + 1))
+            i += 1
+        elif c == '"':
+            j = i + 1
+            while j < n and text[j] not in '"\n':
+                j += 2 if text[j] == '\\' else 1
+            if j >= n or text[j] != '"':
+                return None
+            toks.append(('str', text[i + 1:j], i, j + 1))
+            i = j + 1
+        elif c == '/' and (prev is None or prev[0] in ('nl', 'hdr')
+                           or (prev[0] == 'name' and prev[1] in AWK_REGEX_AFTER)
+                           or (prev[0] == 'op' and prev[1] not in (')', ']'))):
+            j = i + 1
+            while j < n and text[j] not in '/\n':
+                if text[j] == '\\':
+                    j += 2
+                elif text[j] == '[':
+                    j = _sed_bracket_end(text, j) or n
+                else:
+                    j += 1
+            if j >= n or text[j] != '/':
+                return None
+            toks.append(('regex', text[i + 1:j], i, j + 1))
+            i = j + 1
+        elif c.isdigit() or (c == '.' and text[i + 1:i + 2].isdigit()):
+            m = AWK_NUMBER_RE.match(text, i)
+            toks.append(('num', m.group(), i, m.end()))
+            i = m.end()
+        elif IDENT_RE.match(text, i):
+            m = IDENT_RE.match(text, i)
+            toks.append(('name', m.group(), i, m.end()))
+            i = m.end()
+        else:
+            op = next((o for o in AWK_OPS if text.startswith(o, i)), c)
+            kind = 'op'
+            if op == '(':
+                headers.append(prev is not None and prev[0] == 'name'
+                               and prev[1] in ('if', 'while', 'for'))
+            elif op == ')' and headers and headers.pop():
+                kind = 'hdr'
+            elif op in ('++', '--') and prev is not None and (
+                    prev[0] in ('num', 'str', 'post')
+                    or (prev[0] == 'name' and prev[1] not in AWK_REGEX_AFTER)
+                    or (prev[0] == 'op' and prev[1] in (')', ']'))):
+                kind = 'post'
+            toks.append((kind, op, i, i + len(op)))
+            i += len(op)
+    return toks
+
+
+def awk_literal_names(raws):
+    """The file names the awk string literals `raws` concatenate to, or None
+    when an escape in them cannot be read.
+
+    One name per reading of an unknown escape: macOS awk and gawk drop its
+    backslash (`"\\q"` is `q`) and mawk keeps it. A NUL ends the name, as it
+    does for the `open` call that receives it. A `\\x` with three or more hex
+    digits is left unread, since how far each awk takes it was not measured.
+    """
+    names = []
+    for keep in (False, True):
+        out = []
+        for raw in raws:
+            i = 0
+            while i < len(raw):
+                if raw[i] != '\\':
+                    out.append(raw[i])
+                    i += 1
+                    continue
+                d = raw[i + 1:i + 2]
+                hexes = re.match(r'[0-9A-Fa-f]*', raw[i + 2:]).group() \
+                    if d == 'x' else ''
+                if d in AWK_ESCAPES:
+                    out.append(AWK_ESCAPES[d])
+                    i += 2
+                elif d and d in '01234567':
+                    m = re.match(r'[0-7]{1,3}', raw[i + 1:]).group()
+                    out.append(chr(int(m, 8) & 0xFF))
+                    i += 1 + len(m)
+                elif len(hexes) > 2:
+                    return None
+                elif hexes:
+                    out.append(chr(int(hexes, 16)))
+                    i += 2 + len(hexes)
+                elif d in ('', '\n'):
+                    return None
+                else:
+                    out.append('\\' + d if keep else d)
+                    i += 2
+        name = ''.join(out).split('\0', 1)[0]
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def awk_program_reads(text):
+    """Read awk program `text` for the files it opens and whether it runs a
+    command.
+
+    Returns `(files, unread, runs)`. `files` lists `(name, is_read)` for each
+    target written as string literals: a `print`/`printf` redirection, a
+    `getline <` and a gawk `@include`. `unread` holds the text of each target
+    named any other way, a variable, a field or a concatenation with one, and
+    of each write to `ARGV` or `ARGC`, which names the files awk reads next. A
+    program the lexer cannot finish is unread whole. `runs` is a pipe,
+    `system`, gawk's `@load` or an indirect `@f(…)` call.
+
+    A `getline <` target followed by more string literals is judged both ways:
+    macOS awk reads `< "i" "n"` as `in`, gawk and mawk as `i`.
+    """
+    toks = _awk_tokens(text)
+    if toks is None:
+        return [], [text], False
+    files, unread, runs = [], [], False
+    depth, calls, print_at, target = 0, [], None, None
+
+    def judge(span, is_read):
+        if not span:
+            return
+        lits = [t[1] for t in span if t[0] == 'str']
+        names = awk_literal_names(lits) if lits and all(
+            t[0] == 'str' or t[1] in ('(', ')') for t in span) else None
+        if names is None:
+            unread.append(text[span[0][2]:span[-1][3]])
+        else:
+            files.extend((nm, is_read) for nm in names)
+
+    def balanced(j, opener, closer):
+        level = 0
+        for j in range(j, len(toks)):
+            level += (toks[j][1] == opener) - (toks[j][1] == closer)
+            if level == 0:
+                return j + 1
+        return len(toks)
+
+    def lvalue_end(j):
+        # Index past an lvalue at `j`: a name with an optional `[…]`, or `$`
+        # and the operand it applies to.
+        dollar = j < len(toks) and toks[j][1] == '$'
+        while j < len(toks) and toks[j][1] == '$':
+            j += 1
+        if j < len(toks) and toks[j][0] in ('name', 'num'):
+            j += 1
+        elif dollar and j < len(toks) and toks[j][1] == '(':
+            j = balanced(j, '(', ')')
+        if j < len(toks) and toks[j][1] == '[' and toks[j - 1][0] == 'name':
+            j = balanced(j, '[', ']')
+        return j
+
+    for k, (kind, val, start, end) in enumerate(toks):
+        prev = toks[k - 1] if k else None
+        if kind == 'nl' or (kind == 'op' and val in (';', '{', '}')):
+            if target is not None:
+                judge(toks[target:k], False)
+            print_at = target = None
+            continue
+        if kind == 'op' and val in ('(', '['):
+            calls.append(prev[1] if prev is not None and prev[0] == 'name'
+                         else None)
+            depth += 1
+        elif val in (')', ']') and kind in ('op', 'hdr'):
+            if calls:
+                calls.pop()
+            depth -= 1
+            if print_at is not None and depth < print_at:
+                if target is not None:
+                    judge(toks[target:k], False)
+                print_at = target = None
+        if kind == 'name' and val in ('print', 'printf') and print_at is None:
+            print_at = depth
+        elif kind == 'op' and val in ('>', '>>') and print_at == depth \
+                and target is None:
+            target = k + 1
+        elif kind == 'op' and val in ('|', '|&'):
+            runs = True
+            if target is None:
+                print_at = None
+        elif kind == 'name' and val == 'system':
+            runs = True
+        elif kind == 'name' and val == 'getline':
+            j = lvalue_end(k + 1)
+            if j < len(toks) and toks[j][1] == '<' and toks[j][0] == 'op':
+                run = j + 1
+                while run < len(toks) and toks[run][0] == 'str':
+                    run += 1
+                if run == j + 1:
+                    judge(toks[j + 1:j + 2], True)
+                    continue
+                judge(toks[j + 1:j + 2], True)
+                judge(toks[j + 1:run], True)
+                if run < len(toks) and (toks[run][0] in ('name', 'num')
+                                        or toks[run][1] in ('$', '(')):
+                    unread.append(text[toks[j + 1][2]:toks[run][3]])
+        elif kind == 'op' and val == '@' and k + 1 < len(toks):
+            word = toks[k + 1]
+            if word[1] == 'include' and word[0] == 'name':
+                judge(toks[k + 2:k + 3], True)
+            elif word[1] == 'load' and word[0] == 'name':
+                runs = True
+            elif word[0] == 'name' and k + 2 < len(toks) and toks[k + 2][1] == '(':
+                runs = True
+        elif kind == 'name' and val in ('ARGV', 'ARGC'):
+            j = lvalue_end(k)
+            nxt = toks[j] if j < len(toks) else None
+            if (nxt is not None and nxt[1] in AWK_ASSIGN_OPS
+                    and nxt[0] in ('op', 'post')) \
+                    or (prev is not None and (
+                        prev[1] in ('++', '--')
+                        or (prev[0] == 'name' and prev[1] == 'getline')
+                        or (prev[1] == ',' and calls and calls[-1] in (
+                            'split', 'sub', 'gsub', 'patsplit')))):
+                unread.append(text[start:toks[j - 1][3]])
+    if target is not None:
+        judge(toks[target:], False)
+    return files, unread, runs
+
+
+def awk_program_word(tokens):
+    """The word an `awk` command takes as its program, or None when it has none
+    (`-f FILE` supplies it, and FILE is judged as a read)."""
+    spec = SPEC['awk']
+    _, flags_seen, positionals = _split_args(tokens, spec)
+    if not positionals or any(f in flags_seen for f in spec['prog_suppressed_by']):
+        return None
+    return positionals[0]
 
 
 def files_in_command(tokens):
@@ -3641,12 +3911,14 @@ def build_reason(offenders, scratch_hint='', override=None, prefixable=False):
                       script and GNU sed as a file (Q232).
       * 'sedexpand' — a sed script completed by an expansion the hook cannot
                       read, which can add a `w`/`r` command to it (Q335).
+      * 'awktarget' — a file an awk program opens under a name the hook cannot
+                      read, or a program built from such an expansion (Q334).
 
     Categories are emitted in a stable order; tokens within each are sorted and
     de-duplicated.
     """
     buckets = {'hosttemp': [], 'outside': [], 'expand': [], 'untracked': [],
-               'sedscript': [], 'sedexpand': []}
+               'sedscript': [], 'sedexpand': [], 'awktarget': []}
     siblings, kills, crosses = [], [], []
     for item in offenders:
         tok, cat = item[0], item[1]
@@ -3718,6 +3990,15 @@ def build_reason(offenders, scratch_hint='', override=None, prefixable=False):
             "script literally, or use a plain $VAR set to a literal earlier in "
             "the same command (VAR=value; ...) so the hook can read the script "
             "bash builds.")
+    if buckets['awktarget']:
+        hints.append(
+            "awk program opens a file the hook cannot name: "
+            + ", ".join(sorted(set(buckets['awktarget'])))
+            + ". The target is a variable, a field or a concatenation, or the "
+            "program is built from a shell expansion, so the file awk opens is "
+            "decided when it runs. Fix: write the target as a string literal "
+            "(print > \"out.txt\") and the hook checks it; approve this prompt "
+            "if the name can only land inside the project root.")
     return " ".join(hints)
 
 
@@ -5850,6 +6131,22 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
                         outside.append(o)
                 if runs:
                     signal = signal or 'interpreter'
+        prog = awk_program_word(g) if cmd_name == 'awk' else None
+        if prog is not None:
+            # An awk program's redirections name files too (Q334), and its
+            # pipes and `system()` run commands, like sed's `e`. A program
+            # completed by an expansion is unread, but not substituted, since
+            # the token cannot tell `\$b` from `$b` (Q391).
+            afiles, unread, runs = awk_program_reads(prog)
+            if sed_script_hides(prog, bound_vars, glued_vars, fields=True):
+                unread.append(prog)
+            for f, f_is_read in afiles:
+                o = check_file(f, cmd_cwd, cmd_cwd_unknown, is_read=f_is_read)
+                if o is not None:
+                    outside.append(o)
+            outside += [(u, 'awktarget', None) for u in unread]
+            if runs:
+                signal = signal or 'interpreter'
     track_stable()                                # state after the last group
 
     # A grep's pattern is a pid source only when it filters `ps` output, which is

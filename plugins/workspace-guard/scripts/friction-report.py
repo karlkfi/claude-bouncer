@@ -66,6 +66,8 @@ REASON_PATTERNS = {
     'sedscript': re.compile(r"sed script read as a path: (.*?)\. Fix:"),
     'sedexpand': re.compile(r"sed script built from a value the hook cannot "
                             r"read: (.*?)\. Fix:"),
+    'awktarget': re.compile(r"awk program opens a file the hook cannot name: "
+                            r"(.*?)\. The target is"),
 }
 
 # A denying hook leaves no attachment of its own: Claude Code persists hook
