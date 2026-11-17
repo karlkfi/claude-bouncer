@@ -198,9 +198,11 @@ different repository's scratch still asks entirely.
 | `cat /tmp/claude-501/<other-project>/…` (cross-project read) | **ask** |
 | `sed '/x/w /etc/leak' notes.md` (the script writes a file) | **ask** |
 | `sed -l p /etc/hosts` (macOS `-l` takes no argument) | **ask** |
+| `p='w /etc/leak'; sed "$p" notes.md` (the value adds a `w`) | **ask** |
 | `cat /tmp/out` · `cat /var/tmp/x`    | **deny** |
 | `sed -f /tmp/evil.sed notes.md`      | **deny** |
 | `sed -i '' '/^#/d' notes.md` (script or path?) | **deny** |
+| `sed "$(cat prog)" notes.md` · `sed "${p:-w /etc/x}" notes.md` (script the hook cannot read) | **deny** |
 | `grep foo data.txt > /tmp/out.txt`   | **deny** |
 | `sort -o /tmp/out.txt data.txt`      | **deny** |
 | `base64 -o /tmp/out.b64 data.bin` (BSD) | **deny** |
@@ -953,7 +955,9 @@ through the same boundary rules and produce the same reasons. Symlink staging
    one, so `sed '/x/w ../leak' f` is judged like `cp f ../leak`. GNU and BSD sed
    disagree about which word is the script after `-i` or `-l` and about whether
    a `[…]` hides the delimiter, so the script and the operands are read every
-   way and the files unioned. `dd` is handled separately because its operands are
+   way and the files unioned. A double-quoted script is read with the literals
+   the same command assigns substituted in, a loop variable's once per value.
+   Any other expansion in it — `$(…)`, a `${…}` operator, `$1`, `$_` — denies. `dd` is handled separately because its operands are
    all `KEY=VALUE` pairs — `if=PATH` and `of=PATH` are the file operands; the
    rest (`bs=`, `count=`, `conv=`, `iflag=`, `oflag=`, …) are values, not paths.
    `mktemp` is handled separately too, because its *default* location is host
@@ -1840,11 +1844,15 @@ final output.
   macOS sed makes the edit, and GNU sed makes it too and then exits 2 on the
   empty `''` operand (GNU sed 4.9, measured in a `debian:stable-slim`
   container on 2026-10-04).
-- A `sed` script is read as the text the hook sees. One built at runtime
-  (`sed "s/$a/$b/" f`, `sed "$prog" f`) can gain a `w` command from the value
-  of the expansion, and that file is not judged. Nor is a script loaded with
-  `-f FILE`: FILE is judged as a read, and its contents are not the hook's to
-  read.
+- A `sed` script reads a plain `$NAME` as written unless the same command
+  assigns NAME a literal. So a value bound any other way — by `$(…)`, `read`,
+  `declare`, `local`, `printf -v`, `mapfile` or a subshell — is not seen, and
+  can give the script a `w` command whose file is not judged:
+  `b=$(cat f); sed "s/a/$b/" g`. Routing a file name through a command's output
+  takes intent, and denying every such value would deny the common
+  `v=$(git rev-parse HEAD); sed "s/OLD/$v/" f`. A value from the operator's
+  environment is read as written too. Nor is a script loaded with `-f FILE`
+  read: FILE is judged as a read, and its contents are not the hook's to read.
 - Heredoc body lines are dropped from the raw command string before parsing, so
   path-like body content (`</div>`, `/title`), prose, or an unbalanced quote in
   the body is never mistaken for a file argument and never aborts the parse (a

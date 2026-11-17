@@ -13,7 +13,7 @@ import sys, os, json, re, shlex, shutil, fnmatch, collections, functools, tempfi
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 from bouncer_parse import (                                    # noqa: E402
     ASSIGN_APPEND, ASSIGN_PLAIN, ASSIGN_SUBSCRIPT, ASSIGNMENT_RE,
-    COMMENT_PRECEDERS, DUP, MAX_SUBST_DEPTH, PUNCT_CHARS, QuoteTrackingLexer, REDIR, SEPARATORS, SUBST_OPEN,
+    COMMENT_PRECEDERS, DUP, MAX_SUBST_DEPTH, PUNCT_CHARS, QuotedStr, QuoteTrackingLexer, REDIR, SEPARATORS, SUBST_OPEN,
     _OPERATORS, is_assignment, is_operator, is_reserved_word, split_assignment,
     _consume_heredoc_body, _scan_backticks, _scan_dollar_paren,
     _skip_balanced_parens, command_substitutions, glue_dollar_paren,
@@ -1391,13 +1391,25 @@ def substitute_vars(tok, varmap):
         name = m.group(1) or m.group(2)
         return varmap[name] if name in varmap else m.group(0)
 
-    return VAR_USE_RE.sub(repl, tok)
+    out = VAR_USE_RE.sub(repl, tok)
+    if out == tok:
+        return tok                                # keep a QuotedStr's record
+    if getattr(tok, 'quoted_chars', 0) == len(tok):
+        # A value spliced into a wholly quoted word is quoted too (Q335).
+        out = QuotedStr(out)
+        out.quotes, out.quoted_from, out.glued = tok.quotes, 0, tok.glued
+        out.quoted_chars = len(out)
+    return out
 
 
-def apply_assignment_group(g, varmap, persists):
+def apply_assignment_group(g, varmap, persists, textmap=None):
     """If ``g`` is nothing but variable assignments — ``NAME=VAL ...`` or
     ``export [-flag] NAME=VAL ...`` — fold them into ``varmap`` and return
     the list of assigned names; else return None with ``varmap`` untouched.
+
+    ``textmap`` takes the values ``varmap`` turns away for their whitespace or
+    glob characters but that expand nothing: as a path they would split, but
+    spliced into a double-quoted sed script they are exactly this text (Q335).
 
     Must be called on the PRE-substitution tokens: bash decides what is an
     assignment before expansion, so ``$f`` expanding to ``g=x`` runs a
@@ -1433,7 +1445,14 @@ def apply_assignment_group(g, varmap, persists):
     for t in pairs:
         name, form, raw = split_assignment(t)
         names.append(name)
-        val = literal_assignment_value(substitute_vars(raw, varmap))
+        text = substitute_vars(raw, varmap)
+        val = literal_assignment_value(text)
+        if textmap is not None:
+            textmap.pop(name, None)
+            if val is None and text and form == ASSIGN_PLAIN and persists \
+                    and name not in NEVER_PROPAGATE and not text.startswith('~') \
+                    and '$' not in text and '`' not in text:
+                textmap[name] = text
         # `NAME+=v` resolves to the old value plus `v`. Paths are resolved from
         # this map, and an append onto a value it cannot prove is not
         # resolvable -- so drop the name, which is what it already does for a
@@ -3183,9 +3202,9 @@ def sed_script_reads(text, brackets):
 
 
 def _sed_scripts(tokens, bsd):
-    """The script text `sed` runs for `tokens`, under GNU's reading of the argv
-    or (`bsd`) BSD's: there `-i` always takes the next word as its suffix and
-    the first operand ends the options."""
+    """The words `sed` joins into its script for `tokens`, under GNU's reading
+    of the argv or (`bsd`) BSD's: there `-i` always takes the next word as its
+    suffix and the first operand ends the options."""
     exprs, positionals, from_file = [], [], False
     i, n, end_opts = 1, len(tokens), False
     while i < n:
@@ -3223,8 +3242,51 @@ def _sed_scripts(tokens, bsd):
             if ch == 'i':
                 break
     if exprs or from_file:
-        return '\n'.join(exprs)
-    return positionals[0] if positionals else ''
+        return exprs
+    return positionals[:1]
+
+
+def sed_script_words(tokens):
+    """Every word either sed reads as script text."""
+    words = []
+    for bsd in (False, True):
+        words += [w for w in _sed_scripts(tokens, bsd) if w not in words]
+    return words
+
+
+# An expansion in a sed script: a `$(…)` or a backtick, `${…}`, or `$NAME` and
+# the one-character parameters. `$((…))` is arithmetic, a number, and is left out.
+SED_EXPANSION_RE = re.compile(
+    r'`|\$\((?!\()|\$\{([^}]*)\}?|\$([A-Za-z_][A-Za-z0-9_]*|[0-9@*_!#?$-])')
+# Names bash fills with no `NAME=` the hook could see in the string.
+SED_IMPLICIT_VARS = frozenset({'_', 'BASH_REMATCH', 'REPLY', 'OPTARG', 'OPTIND',
+                               'MAPFILE'})
+
+
+def sed_script_hides(word):
+    """True when sed script `word` holds an expansion that takes its text from
+    the command in a way the hook does not read (Q335): a `$(…)`, a backtick, a
+    `${…}` operator, indirection, a positional parameter, `$_` or a name like
+    `BASH_REMATCH` that bash fills itself. Any of them can add a `w` command or
+    end an `s` part early.
+
+    A plain `$NAME`, `${NAME}` or `$((…))` is read as written: its value is a
+    literal the hook substitutes, or one it cannot see (README, Limitations). A
+    word wholly in single quotes expands nothing, so `sed -n '$p'` is sed's
+    last-line address. A bare `$(` is where an unquoted substitution was split
+    off, its body judged on its own; `$((…))` arithmetic arrives the same way.
+    """
+    if word == '$(' or (getattr(word, 'quoted_chars', 0) == len(word)
+                        and getattr(word, 'quotes', None) == {"'"}):
+        return False
+    for m in SED_EXPANSION_RE.finditer(word):
+        name = m.group(1) if m.group(1) is not None else m.group(2)
+        if name is not None and name in '#?$!-':
+            continue                              # a number or the flags
+        if name is None or not IDENT_RE.fullmatch(name) \
+                or name in SED_IMPLICIT_VARS:
+            return True
+    return False
 
 
 def sed_script_files(tokens):
@@ -3235,7 +3297,8 @@ def sed_script_files(tokens):
     files, runs = [], False
     for bsd in (False, True):
         for brackets in (False, True):
-            f, r = sed_script_reads(_sed_scripts(tokens, bsd), brackets)
+            f, r = sed_script_reads('\n'.join(_sed_scripts(tokens, bsd)),
+                                    brackets)
             files += [x for x in f if x not in files]
             runs = runs or r
     return files, runs
@@ -3535,12 +3598,14 @@ def build_reason(offenders, scratch_hint='', override=None, prefixable=False):
       * 'untracked' — a relative path after a `cd` the hook couldn't follow.
       * 'sedscript' — the token after `sed -i ''`, which BSD sed reads as the
                       script and GNU sed as a file (Q232).
+      * 'sedexpand' — a sed script completed by an expansion the hook cannot
+                      read, which can add a `w`/`r` command to it (Q335).
 
     Categories are emitted in a stable order; tokens within each are sorted and
     de-duplicated.
     """
     buckets = {'hosttemp': [], 'outside': [], 'expand': [], 'untracked': [],
-               'sedscript': []}
+               'sedscript': [], 'sedexpand': []}
     siblings, kills, crosses = [], [], []
     for item in offenders:
         tok, cat = item[0], item[1]
@@ -3603,6 +3668,15 @@ def build_reason(offenders, scratch_hint='', override=None, prefixable=False):
             "`sed -i '' -e SCRIPT FILE` is the same edit on macOS sed. GNU sed "
             "makes the edit too but then exits 2 on the empty '' operand; "
             "there, write `sed -i -e SCRIPT FILE`.")
+    if buckets['sedexpand']:
+        hints.append(
+            "sed script built from a value the hook cannot read: "
+            + ", ".join(sorted(set(buckets['sedexpand'])))
+            + ". Fix: a $(...), a `...`, a ${...} operator, $1 or $_ in a sed "
+            "script can add a w or r command that names a file. Write the "
+            "script literally, or use a plain $VAR set to a literal earlier in "
+            "the same command (VAR=value; ...) so the hook can read the script "
+            "bash builds.")
     return " ".join(hints)
 
 
@@ -3906,7 +3980,9 @@ ATTRIBUTION = 'workspace-guard: '
 # is a script to BSD sed and a file to GNU sed, the hook cannot see which sed
 # runs, and the person at the prompt is being asked about a "path" that is
 # usually a script. The `-e` rewrite settles the reading either way.
-UNPARSED_CATS = frozenset({'expand', 'untracked', 'sedscript'})
+# 'sedexpand' joins them too (Q335): the person at the prompt sees the same
+# unexpanded script, and writing it literally settles what it does.
+UNPARSED_CATS = frozenset({'expand', 'untracked', 'sedscript', 'sedexpand'})
 
 
 # Modes where a defer RUNS the command (`docs/permission-modes.md`). A
@@ -5271,6 +5347,9 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
     # one: `f=/outside/x; cat "$(cat $f)"; f=docs/ok` keeps its `ask` instead of
     # resolving `$f` to the later, in-workspace literal.
     stable_vars, unstable_vars = {}, set()
+    # Values `varmap` turns away that a quoted sed script splices in as text
+    # (Q335); see `apply_assignment_group`.
+    textmap = {}
 
     def track_stable():
         """Fold the live `varmap` into `stable_vars`. Called before each group
@@ -5375,7 +5454,7 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
         # the reserved words come off before the for-header check too.
         kw_g = strip_sh_keywords(sub_g)
         if propagate:
-            assigned = apply_assignment_group(g, varmap, persists)
+            assigned = apply_assignment_group(g, varmap, persists, textmap)
             if assigned is not None:
                 # A name set as a scalar literal is no longer a loop variable.
                 for nm in assigned:
@@ -5393,6 +5472,7 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
             if forbind is not None:
                 name, values = forbind
                 varmap.pop(name, None)            # a loop var isn't a scalar
+                textmap.pop(name, None)
                 if values is None:
                     loopmap.pop(name, None)       # unresolvable list -> poison
                     blacklist_loops([name])
@@ -5405,8 +5485,10 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
                 loopmap.clear()
                 blacklist_loops(list(stable_loops))
                 propagate = False
+                textmap.clear()
             else:
                 poison_vars(sub_g, varmap)
+                poison_vars(sub_g, textmap)
                 had = set(loopmap)
                 poison_vars(sub_g, loopmap)       # same rules invalidate loops
                 blacklist_loops(had - set(loopmap))
@@ -5688,13 +5770,30 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
         if cmd_name == 'sed':
             # A script's `w`/`r` filenames are operands too (Q328), and its `e`
             # runs a command the hook does not read, like an interpreter's code.
-            sfiles, runs = sed_script_files(g)
-            for f, f_is_read in sfiles:
-                o = check_file(f, cmd_cwd, cmd_cwd_unknown, is_read=f_is_read)
-                if o is not None:
-                    outside.append(o)
-            if runs:
-                signal = signal or 'interpreter'
+            # A quoted word takes the literals `textmap` holds, and a loop
+            # variable's script is read once per value bash gives it.
+            words = sed_script_words(g)
+            outside += [(w, 'sedexpand', None) for w in words
+                        if sed_script_hides(w)]
+            variants = [list(g)]
+            for i, t in enumerate(g):
+                if t not in words:
+                    continue
+                if getattr(t, 'quoted_chars', 0) == len(t):
+                    t = substitute_vars(t, textmap)
+                alts = expand_loop_candidates(t, loopmap)
+                if alts is None or len(variants) * len(alts) > MAX_LOOP_CANDIDATES:
+                    outside.append((g[i], 'sedexpand', None))
+                    continue
+                variants = [v[:i] + [a] + v[i + 1:] for v in variants for a in alts]
+            for v in variants:
+                sfiles, runs = sed_script_files(v)
+                for f, f_is_read in sfiles:
+                    o = check_file(f, cmd_cwd, cmd_cwd_unknown, is_read=f_is_read)
+                    if o is not None:
+                        outside.append(o)
+                if runs:
+                    signal = signal or 'interpreter'
     track_stable()                                # state after the last group
 
     # A grep's pattern is a pid source only when it filters `ps` output, which is
