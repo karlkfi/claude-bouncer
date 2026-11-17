@@ -883,9 +883,10 @@ def _scan_dollar_paren(text, start):
     """
     return _trampoline(_scan_dollar_paren_steps(text, start))
 
-def _scan_dollar_paren_steps(text, start):
+def _scan_dollar_paren_steps(text, start, brace=False):
     i, n = start, len(text)
     in_single = in_double = False
+    braces = 0 if brace else None   # open `{` groups in a funsub body
     cmd_pos = True        # bash reads a command just past the `$(`
     clauses = []          # one entry per open `case`: 'in' | 'pat' | 'body'
     pending = []          # heredoc delimiters armed, awaiting their bodies
@@ -910,10 +911,12 @@ def _scan_dollar_paren_steps(text, start):
             elif text.startswith('$((', i):
                 end = yield _arith_end_steps(text, i + 1)
             if end < 0 and text.startswith('$(', i):
-                frames.append((cmd_pos, clauses, pending, parens, brk, dollar))
+                frames.append((cmd_pos, clauses, pending, parens, brk, dollar,
+                               braces))
                 in_double = False
                 cmd_pos = brk = True
                 clauses, pending, parens, dollar = [], [], [], -2
+                braces = None
                 i += 2
                 continue
             if text.startswith('${', i):
@@ -1022,11 +1025,14 @@ def _scan_dollar_paren_steps(text, start):
             continue
         if c == ')':
             if not parens and frames:
-                cmd_pos, clauses, pending, parens, brk, dollar = frames.pop()
+                (cmd_pos, clauses, pending, parens, brk, dollar,
+                 braces) = frames.pop()
                 in_double = True
                 i += 1
                 continue
             if not parens:
+                if braces is not None:
+                    return (None, start)          # `${ echo ); }`
                 return (text[start:i], i + 1)
             brk = not parens.pop()                # `$(a)#b` is one word too
             cmd_pos = True
@@ -1043,6 +1049,14 @@ def _scan_dollar_paren_steps(text, start):
             continue
         if c == '$':
             dollar = i
+        if braces is not None and cmd_pos and not parens and (
+                c == '}' or c == '{' and text[i+1:i+2] in ('', ' ', '\t', '\n')):
+            if c == '{':
+                braces += 1
+            elif braces:
+                braces -= 1
+            else:
+                return (text[start:i], i + 1)     # `}b` closes too
         # only standing alone in command position: `echo {` and `!case` are words
         cmd_pos = c in '&|' or (cmd_pos and c in _PUNCT_KEYWORDS
                                 and text[i+1:i+2] in ('', ' ', '\t', '\n'))
@@ -1072,10 +1086,29 @@ def _brace_end(text, i):
     or not (``"${x:-'}'}"`` prints ``'}'``), and a nested ``${``, ``$(`` or
     backtick holds its own. A bare ``{`` does not nest -- ``${x:-{a}`` ends at
     the first ``}``.
+
+    A bash 5.3 funsub, ``${ list; }`` or ``${| list; }``, is a list rather
+    than a parameter (Q357), so it is scanned as a ``$(…)`` body is and ends at
+    the ``}`` standing in command position: ``${ echo }; }`` prints ``}``, and
+    ``${ { echo a; }; }`` holds its own group.
     """
     return _trampoline(_brace_end_steps(text, i))
 
+def _funsub_at(text, i):
+    """Whether a funsub opens at ``text[i]``: ``${`` followed by a blank, a
+    newline or ``|``. Before bash 5.3 the same text is a bad substitution."""
+    return text.startswith('${', i) and text[i+2:i+3] in (' ', '\t', '\n', '|')
+
+def _funsub_body_start(text, i):
+    """Where the list of the funsub at ``text[i]`` starts: past the ``|`` of
+    ``${|``, which substitutes ``$REPLY`` rather than the output."""
+    return i + 3 if text[i+2:i+3] == '|' else i + 2
+
 def _brace_end_steps(text, i):
+    if _funsub_at(text, i):
+        start = _funsub_body_start(text, i)
+        body, end = yield _scan_dollar_paren_steps(text, start, brace=True)
+        return -1 if body is None else end
     i, n = i + 2, len(text)
     in_double = False
     while i < n:
@@ -1212,7 +1245,7 @@ def _unescape_backticks(body, in_double):
     return ''.join(out)
 
 
-def command_substitutions(text, quotes=True, spans=None):
+def command_substitutions(text, quotes=True, spans=None, funsubs=None):
     """Extract the command-substitution bodies bash would evaluate in ``text``.
 
     Returns the inner command string of each ``$(…)`` and backtick ``` `…` ```
@@ -1253,6 +1286,11 @@ def command_substitutions(text, quotes=True, spans=None):
     The span covers the substitution rather than the body so the caller can
     replace the whole construct, which is what keeps the body out of a tokenizer
     that would otherwise read its text as the enclosing command's own.
+
+    A bash 5.3 funsub, ``${ list; }`` or ``${| list; }``, is returned like any
+    other body (Q357). It alone runs in the CURRENT shell, so a `cd` in it
+    moves the commands after it; pass a list as ``funsubs`` to collect, per
+    returned body, whether it came from one.
     """
     bodies = []
     i, n = 0, len(text)
@@ -1297,6 +1335,18 @@ def command_substitutions(text, quotes=True, spans=None):
             brk = False
             i += 1
             continue
+        if c == '$' and _funsub_at(text, i):
+            end = _brace_end(text, i)
+            if end < 0:
+                break                              # unterminated -> stop
+            bodies.append(text[_funsub_body_start(text, i):end - 1])
+            if spans is not None:
+                spans.append((i, end))
+            if funsubs is not None:
+                funsubs.append(True)
+            brk = False
+            i = end
+            continue
         if c == '$' and i + 1 < n and text[i + 1] == '(':
             brk = False                            # `$(a)#b` is one word
             end = _arith_end(text, i + 1) if text[i+2:i+3] == '(' else -1
@@ -1309,6 +1359,8 @@ def command_substitutions(text, quotes=True, spans=None):
             bodies.append(body)
             if spans is not None:
                 spans.append((i, end))
+            if funsubs is not None:
+                funsubs.append(False)
             i = end
             continue
         if c == '`':
@@ -1318,6 +1370,8 @@ def command_substitutions(text, quotes=True, spans=None):
             bodies.append(_unescape_backticks(body, in_double))
             if spans is not None:
                 spans.append((i, end))
+            if funsubs is not None:
+                funsubs.append(False)
             brk = False
             i = end
             continue

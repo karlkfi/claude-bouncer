@@ -5494,6 +5494,53 @@ class InShellCdTests(OutsideParentFixture, unittest.TestCase):
                 self.assertEqual("allow", self._decision(cmd))
 
 
+class FunsubCdTests(OutsideParentFixture, unittest.TestCase):
+    """Q357: a bash 5.3 funsub runs its body in this shell.
+
+    `${ list; }` and `${| list; }` substitute a list's output, or `$REPLY`,
+    without the subshell a `$( )` gets, so a `cd` in one moves every later
+    command. The lexer had no reading of either: the body's readers were never
+    judged, and its `cd` reached the tracker only by accident, when an `x=`
+    prefix left it in command position. Every shape here was driven under bash
+    5.3.15 to see which file it reads.
+    """
+
+    def test_a_funsub_cd_moves_the_commands_after_it(self):
+        # Pre-fix all but the `x=` row allowed; bash reads the parent's file.
+        for cmd in ("echo ${ cd ..; }; cat in.txt",
+                    'echo "${ cd ..; }"; cat in.txt',
+                    "echo ${| cd ..; }; cat in.txt",
+                    "x=${ cd ..; }; cat in.txt",
+                    "echo ${ cd ..; } $(cat in.txt)",
+                    "echo ${ echo ${ cd ..; }; }; cat in.txt",
+                    "echo ${ cat ../in.txt; }"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual("ask", self._decision(cmd))
+
+    def test_what_the_tracker_cannot_follow_is_unresolvable(self):
+        # A function the funsub defines or holds, an operand built from one,
+        # and a name it may reassign.
+        for cmd in ("echo ${ f() { cd ..; }; }; f; cat in.txt",
+                    "f() { echo ${ cd ..; }; }; f; cat in.txt",
+                    "cat ${ cd ..; } in.txt",
+                    "d=sub; echo ${ d=..; }; cd $d; cat in.txt"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual("deny", self._decision(cmd))
+
+    def test_a_funsub_that_cannot_move_the_caller_keeps_the_cwd(self):
+        # A pipeline stage and a subshell hold their own cwd, a quoted one is
+        # text, and a `cd` the tracker follows stays followed.
+        for cmd in ("echo ${ cd ..; } | cat; cat in.txt",
+                    "(echo ${ cd ..; }); cat in.txt",
+                    "echo '${ cd ..; }'; cat in.txt",
+                    "echo ${ cd sub; }; cat ../in.txt",
+                    "echo ${ (cd ..); }; cat in.txt",
+                    "for f in in.txt; do echo ${ :; }; cat $f; done",
+                    "echo ${ echo }; }; cat in.txt"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual("allow", self._decision(cmd))
+
+
 class PipedCompoundCdTests(OutsideParentFixture, unittest.TestCase):
     """Q272: a compound command piped or backgrounded as a whole is a subshell.
 

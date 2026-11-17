@@ -308,6 +308,63 @@ class CommandSubstitutionTests(unittest.TestCase):
         self.assertEqual([], bp.command_substitutions('echo $((1+2))'))
 
 
+class FunsubTests(unittest.TestCase):
+    """bash 5.3's ``${ list; }`` and ``${| list; }`` substitute a list (Q357).
+
+    Each command was driven under `env -i /opt/homebrew/bin/bash --norc
+    --noprofile -c` (5.3.15), with the output noted beside it.
+    """
+
+    def test_each_form_is_a_body(self):
+        for cmd, body in (
+                ('echo ${ cd OUT; }; cat x', ' cd OUT; '),
+                ('echo "${ cd OUT; }"; cat x', ' cd OUT; '),
+                ('echo ${| cd OUT; }; cat x', ' cd OUT; '),
+                ('x=${ cd OUT; }; cat x', ' cd OUT; '),
+                ('echo ${\tcat x; }', '\tcat x; '),
+                ('echo ${\ncat x\n}', '\ncat x\n'),
+                ('echo ${x:-${ cat y; }}', ' cat y; ')):
+            with self.subTest(cmd=cmd):
+                funsubs = []
+                self.assertEqual([body], bp.command_substitutions(
+                    cmd, funsubs=funsubs))
+                self.assertEqual([True], funsubs)
+
+    def test_it_closes_at_a_brace_in_command_position(self):
+        for cmd, body in (
+                ('echo ${ echo }; }', ' echo }; '),           # }
+                ('echo ${ { echo a; }; }', ' { echo a; }; '),  # a
+                ('echo ${ echo a;}b', ' echo a;'),            # ab
+                ('echo ${ echo a& }', ' echo a& '),           # (empty)
+                ("echo ${ echo '}'; }", " echo '}'; "),       # }
+                ('echo ${ echo $(echo }); }', ' echo $(echo }); '),  # }
+                ('echo ${ case x in x) echo c;; esac; }',
+                 ' case x in x) echo c;; esac; ')):           # c
+            with self.subTest(cmd=cmd):
+                self.assertEqual([body], bp.command_substitutions(cmd))
+
+    def test_what_bash_does_not_run_is_no_body(self):
+        for cmd in ('echo ${ echo a }',       # unexpected EOF
+                    "echo '${ cd OUT; }'",    # literal
+                    'echo \\${ cd OUT; }',    # escaped
+                    'echo ${x}'):
+            with self.subTest(cmd=cmd):
+                self.assertEqual([], bp.command_substitutions(cmd))
+
+    def test_other_bodies_are_not_funsubs(self):
+        funsubs = []
+        self.assertEqual(['a', 'b'], bp.command_substitutions(
+            'echo $(a) `b`', funsubs=funsubs))
+        self.assertEqual([False, False], funsubs)
+
+    def test_a_funsub_holds_its_own_close_inside_a_substitution(self):
+        # `a b`. Read as a parameter, it ended at the `}` in its comment, and
+        # the `)` after that closed the `$( )` before `echo b`.
+        cmd = 'echo $( echo ${ echo a; # } )\n}; echo b )'
+        self.assertEqual([' echo ${ echo a; # } )\n}; echo b '],
+                         bp.command_substitutions(cmd))
+
+
 class ArithmeticCloseTests(unittest.TestCase):
     """Whether bash reads a `((` as arithmetic, and where it ends (Q338, Q361).
 
