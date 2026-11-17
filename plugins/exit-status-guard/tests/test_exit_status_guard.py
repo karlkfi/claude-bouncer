@@ -135,6 +135,14 @@ CASES = [
      False, True, ''),
     ("gate behind a [[ comment", "[[ -n x #it's\n]] && make check | tail -5",
      False, True, ''),
+    # Q346: an operand that opens with a quote or an expansion still ends.
+    ("gate behind a [[ comment in a $( )",
+     "[[ -n $( [[ x =~ \"a\" ]];#it's\necho y) ]] && echo $(make check | tail -5)",
+     False, True, ''),
+    ("gate behind an ANSI-C =~ operand",
+     "[[ x =~ $'a' ]];#it's\nmake check | tail -5", False, True, ''),
+    ("gate behind a ${ } =~ operand",
+     "[[ x =~ ${y:-a} ]];#it's\nmake check | tail -5", False, True, ''),
 
     # --- PIPESTATUS is not portable across shells ----------------------------
     ('PIPESTATUS[0] after a gate',

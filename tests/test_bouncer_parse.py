@@ -119,6 +119,29 @@ class StripCommentsTests(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertEqual(want, bp.strip_comments(cmd))
 
+    def test_an_operand_or_a_word_ends_a_dbracket_comment_rule(self):
+        # bash 5.3.15 runs `id` after each (Q346): the operand ends at the blank
+        # whatever it opens with, and a `[[` that is only an argument opens no
+        # test. Kept as text, the `'` would hide `id`.
+        for cmd in ("[[ x =~ \"a\" ]];#it's\nid", "[[ x =~ 'a' ]];#it's\nid",
+                    "[[ x =~ $'a' ]];#it's\nid", "[[ x =~ \\a ]];#it's\nid",
+                    "[[ x =~ `true` ]];#it's\nid", "[[ x =~ ${y:-a} ]];#it's\nid",
+                    "if [[ x =~ \"a\" ]];#it's\nid", "! [[ x =~ \"a\" ]];#it's\nid",
+                    "time -p [[ x =~ \"a\" ]];#it's\nid",
+                    "case x in a) [[ x =~ \"a\" ]];#it's\nid",
+                    "echo [[ =~ x;#it's\nid", "echo $(true) [[ =~ x;#it's\nid",
+                    "-p [[ =~ x;#it's\nid"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(cmd.replace("#it's", ''), bp.strip_comments(cmd))
+        # A `[[` after a reserved word is still a test, so a glued `#` is text.
+        for cmd in ('if [[ a =~ (#x) ]]; then id; fi', '! [[ x =~ (a|#b) ]] || id',
+                    'while [[ x =~ (#a) ]]; do id; done',
+                    'time -p [[ x =~ (a|#b) ]] || id', '{ [[ x =~ (#a) ]] || id; }',
+                    'case x in a) [[ x =~ (#a) ]] || id;; esac',
+                    '[[ x =~ "a"#b ]] || id'):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(cmd, bp.strip_comments(cmd))
+
     def test_a_backtick_or_brace_expansion_holds_no_comment(self):
         # bash 5.3.15 runs `id` after each: a comment in backticks ends at the
         # closing backtick, and a `#` in `${...}` is text (Q254).
@@ -895,7 +918,13 @@ class CommentOutsideSubstitutionTests(unittest.TestCase):
                     "[[ x =~ \"a\" ]] #it's\n$(P)",
                     "[[ x =~ \"a\" ]];#it's\n$(P)", "[[ x =~ \\a ]];#it's\n$(P)",
                     "[[ x =~ $(true) ]];#it's\n$(P)",
-                    '[[ x =~ (a|#$(P)) ]]', '[[ x =~ a(#$(P)) ]]'):
+                    '[[ x =~ (a|#$(P)) ]]', '[[ x =~ a(#$(P)) ]]',
+                    # Q346: an extglob group is skipped whole, so its `(` is no
+                    # depth, and a `[[` that is only an argument opens no test.
+                    "[[ x =~ @(a) ]];#it's\n$(P)", "echo [[ =~ x;#it's\n$(P)",
+                    "case [[ in [[) echo =~ x;#it's\n;; esac; echo $(P)",
+                    'if [[ x =~ (a|#$(P)) ]]; then :; fi',
+                    'x && [[ a =~ (#$(P)) ]]'):
             cmd = cmd.replace('P', self.P)
             with self.subTest(cmd=cmd):
                 self.assertIn(self.P, bp.command_substitutions(cmd))

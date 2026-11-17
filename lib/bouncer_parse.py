@@ -403,7 +403,8 @@ def strip_comments(cmd):
     A `!(` in command position is a negated subshell instead, which is what
     bash runs it as unless `shopt -s extglob` has run. Inside `[[ … ]]` a `#`
     still starts a comment after a blank or a grouping `(`; only in a `=~`
-    operand is one not after a blank text, as in `[[ a =~ (#x) ]]`. Holding
+    operand is one not after a blank text, as in `[[ a =~ (#x) ]]`. A `[[`
+    opens a test only in command position; `echo [[` is a word. Holding
     the whole `[[` span instead keeps a comment bash strips, and a `'` in one
     then hides the lines after it. A `(( … ))` arithmetic command holds no
     comment either: `(( 1 #2 )); id` fails its arithmetic and runs `id`. bash
@@ -425,6 +426,8 @@ def strip_comments(cmd):
             in_single = c != "'"
             i += 1
             continue
+        if regex is not None and not in_double and i >= quiet:
+            regex = _regex_step(regex, cmd, i)
         if not in_double and c == "'":
             in_single = True
             out.append(c); i += 1
@@ -468,16 +471,9 @@ def strip_comments(cmd):
                 closes.add(quiet - 1)
             elif at_word and cmd.startswith('((', i) and _arith_end(cmd, i) > 0:
                 quiet = _arith_end(cmd, i)                  # `(( … ))`
-            elif regex == 'op':
-                regex = 'next' if c in ' \t\n' else 'op'
-            elif regex is not None and c not in ' \t\n':
-                depth = 0 if regex == 'next' else regex
-                regex = depth + (c == '(') - (c == ')' and depth > 0)
-            elif regex == 0:
-                regex = None                         # the operand ends
             if at_word and cmd[i+2:i+3] in ('', ' ', '\t', '\n'):
                 if cmd.startswith('[[', i):
-                    dbracket = True
+                    dbracket = dbracket or _command_position(cmd, i, closes)
                 elif dbracket and cmd.startswith('=~', i):
                     regex = 'op'
             if dbracket and regex is None and at_word \
@@ -506,6 +502,47 @@ def _at_command_start(out):
     nothing yet, or a separator or an opening `(` or `{` before any blanks."""
     text = ''.join(out).rstrip(' \t')
     return not text or text[-1] in ';&|(\n{'
+
+_COMMAND_WORDS = frozenset(
+    ('!', '{', 'do', 'elif', 'else', 'if', 'then', 'time', 'until', 'while'))
+
+def _command_position(text, i, closes=()):
+    """Whether a word at ``i`` in raw ``text`` is in command position: after a
+    separator, a `(`, a `)` that ends a case pattern, or a reserved word that
+    is itself in command position, so `if ! [[` opens a test and `echo [[`
+    does not (Q346). ``closes`` holds the index of each `)` that closes a
+    substitution or an extglob group, after which the word is an argument."""
+    timed = False
+    while True:
+        j = i
+        while j and (text[j-1] in ' \t' or text[j-2:j] == '\\\n'):
+            j -= 1 if text[j-1] in ' \t' else 2
+        if not j or text[j-1] in ';&|\n(':
+            return not timed
+        if text[j-1] == ')':
+            return not timed and j - 1 not in closes
+        k = j
+        while k and text[k-1] not in ' \t\n;&|()<>':
+            k -= 1
+        word = text[k:j]
+        if timed and word != 'time' or word not in _COMMAND_WORDS | {'-p'}:
+            return False
+        timed, i = word == '-p', k
+
+def _regex_step(state, text, i):
+    """The `=~` operand state after ``text[i]``, for the `[[` comment rule:
+    'op' on the operator, 'next' once a blank follows it, then the paren depth
+    until a blank at depth 0 ends the operand (None). A caller steps it ahead
+    of its quote and substitution branches, since those start an operand too.
+    An extglob `(` is not counted, since the scanners skip its group whole."""
+    c = text[i]
+    if state == 'op':
+        return 'next' if c in ' \t\n' else 'op'
+    if c in ' \t\n':
+        return None if state == 0 else state
+    depth = 0 if state == 'next' else state
+    opens = c == '(' and not (i and text[i-1] in '?*+@!')
+    return depth + opens - (c == ')' and depth > 0)
 
 def _scan_heredoc_delim(text, i):
     """Read a heredoc delimiter at ``i`` -- the index just past the ``<<``.
@@ -1304,6 +1341,7 @@ def command_substitutions(text, quotes=True, spans=None, funsubs=None):
     pending = []          # heredoc delimiters armed, awaiting their bodies
     dbracket = False      # inside `[[ … ]]`
     regex = None          # a `=~` operand: None, 'op', 'next', paren depth
+    closes = set()        # indices of the `)` that end a word
     while i < n:
         c = text[i]
         if in_single:
@@ -1312,13 +1350,7 @@ def command_substitutions(text, quotes=True, spans=None, funsubs=None):
             i += 1
             continue
         if regex is not None and quotes and not in_double and i >= quiet:
-            if regex == 'op':                      # ahead of the quote and
-                regex = 'next' if c in ' \t\n' else 'op'   # substitution steps,
-            elif c not in ' \t\n':                 # which also start an operand
-                depth = 0 if regex == 'next' else regex
-                regex = depth + (c == '(') - (c == ')' and depth > 0)
-            elif regex == 0:
-                regex = None
+            regex = _regex_step(regex, text, i)
         if c == '\\':                              # escapes next char (not in '')
             brk = brk and text[i+1:i+2] == '\n'    # a continuation joins words
             i += 2
@@ -1354,11 +1386,13 @@ def command_substitutions(text, quotes=True, spans=None, funsubs=None):
             brk = False                            # `$(a)#b` is one word
             end = _arith_end(text, i + 1) if text[i+2:i+3] == '(' else -1
             if end > 0:
+                closes.add(end - 1)
                 i = end                            # $((…)) arithmetic
                 continue
             body, end = _scan_dollar_paren(text, i + 2)
             if body is None:
                 break                              # unterminated -> stop
+            closes.add(end - 1)
             bodies.append(body)
             if spans is not None:
                 spans.append((i, end))
@@ -1382,7 +1416,8 @@ def command_substitutions(text, quotes=True, spans=None, funsubs=None):
             if i >= quiet:                         # strip_comments' `[[` rule
                 if brk and text[i+2:i+3] in ('', ' ', '\t', '\n'):
                     if text.startswith('[[', i):
-                        dbracket = True
+                        dbracket = dbracket or _command_position(
+                            text, i, closes)
                     elif dbracket and text.startswith('=~', i):
                         regex = 'op'
                 if dbracket and regex is None and brk \
@@ -1399,6 +1434,8 @@ def command_substitutions(text, quotes=True, spans=None, funsubs=None):
                 parens.append(i > 0 and text[i-1] in '<>?*+@!')
             elif c == ')':
                 brk = not (parens and parens.pop())    # `<(a)#b`, `@(a)#b` too
+                if not brk:
+                    closes.add(i)
                 i += 1
                 continue
             elif text.startswith('<<', i) and i >= quiet:
