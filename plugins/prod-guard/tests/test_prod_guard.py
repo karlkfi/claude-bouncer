@@ -3959,6 +3959,32 @@ class SpecialCaseTests(unittest.TestCase):
         self.assertIsNone(run_hook(
             "C=kind-ci bash -c '%s'" % k, home=home)[0])
 
+    def test_a_command_after_source_may_be_a_function_that_sets_any_name(self):
+        # With x.sh defining `f`, `echo` and `kubectl` to set C, bash 5.3.15
+        # prints the file's value at the mutation for each of these (Q336).
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        k = "kubectl --context $C delete ns x"
+        for mid in ("f", "echo hi", "kubectl get pods",
+                    "if true; then f; fi", "eval f"):
+            for src in ("source x.sh", ". x.sh"):
+                with self.subTest(src=src, mid=mid):
+                    self.assertEqual(run_hook(
+                        "%s; C=kind-ci; %s; %s" % (src, mid, k),
+                        home=home)[0], "ask")
+        self.assertEqual(run_hook(
+            "C=kind-ci; BASH_ENV=x.sh bash -c 'C=kind-ci; f; %s'" % k,
+            home=home)[0], "ask")
+        # A call that runs apart reaches nothing, a name assigned after the
+        # call stands, and with no source a call sets nothing.
+        for cmd in ("source x.sh; C=kind-ci; f | cat; " + k,
+                    "source x.sh; C=kind-ci; (f); " + k,
+                    "source x.sh; f; C=kind-ci; " + k,
+                    "(source x.sh); C=kind-ci; f; " + k,
+                    "C=kind-ci; f; " + k,
+                    "C=kind-ci bash -c 'C=kind-ci; f; %s'" % k):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(run_hook(cmd, home=home)[0])
+
     def test_a_function_body_is_judged_again_where_it_is_called(self):
         # The call's prefix, and a value assigned after the definition, are
         # what the body runs with: bash 5.3.15 prints `in-body [y]` for
