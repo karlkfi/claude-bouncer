@@ -1237,6 +1237,19 @@ class AssignmentTests(unittest.TestCase):
             with self.subTest(word=word):
                 self.assertFalse(bp.is_assignment(bp.lex(word)[0]))
 
+    def test_a_word_glued_to_a_dollar_paren_keeps_its_record(self):
+        """`glue_dollar_paren` appends a `(`, so the word is still what it was
+        written as (Q175)."""
+        for word, assigns in (("'SP='$(x)", False), ("'SP'=$(x)", False),
+                              ('"SP="$(x)', False), (r'\SP=$(x)', False),
+                              ('SP=$(x)', True), ("SP='a b'$(x)", True)):
+            toks = bp.lex(word)
+            glued = bp.glue_dollar_paren(bp.split_operator_runs(toks))[0]
+            with self.subTest(word=word):
+                self.assertTrue(glued.endswith('$('))
+                self.assertEqual(toks[0].quoted_from, glued.quoted_from)
+                self.assertEqual(assigns, bp.is_assignment(glued))
+
     def test_a_plain_str_reads_as_written_plain(self):
         """A hand-built token carries no record, so it keeps the old reading."""
         self.assertTrue(bp.is_assignment('SP=/x'))

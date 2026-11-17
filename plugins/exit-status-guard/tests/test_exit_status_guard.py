@@ -2009,6 +2009,30 @@ class TestHookEndToEnd(unittest.TestCase):
                     'deny',
                     json.loads(out)['hookSpecificOutput']['permissionDecision'])
 
+    def test_an_override_quoted_before_a_dollar_paren_arms_nothing(self):
+        """Q175: bash 5.3.15 runs each quoted word below as a command, exit
+        127, so only the two plain overrides lift the deny."""
+        for cmd, want in (
+                ('make check | tail', 'deny'),
+                ('EXIT_STATUS_GUARD_OVERRIDE=$(echo x) true; make check | tail', ''),
+                ("'EXIT_STATUS_GUARD_OVERRIDE=x' true; make check | tail", 'deny'),
+                ("'EXIT_STATUS_GUARD_OVERRIDE='$(echo x) true; make check | tail",
+                 'deny'),
+                ("'EXIT_STATUS_GUARD_OVERRIDE'=$(echo x) true; make check | tail",
+                 'deny'),
+                ('"EXIT_STATUS_GUARD_OVERRIDE="$(echo x) true; make check | tail',
+                 'deny'),
+                ('\\EXIT_STATUS_GUARD_OVERRIDE=$(echo x) true; make check | tail',
+                 'deny'),
+                ("EXIT_STATUS_GUARD_OVERRIDE='a b'$(echo x) true; make check | tail",
+                 '')):
+            with self.subTest(cmd):
+                out = self.run_hook({'tool_name': 'Bash', 'cwd': REPO,
+                                     'tool_input': {'command': cmd}})
+                got = out and json.loads(out)['hookSpecificOutput'][
+                    'permissionDecision']
+                self.assertEqual(want, got)
+
     def test_stays_silent_on_a_clean_command(self):
         out = self.run_hook({
             'tool_name': 'Bash', 'cwd': REPO,

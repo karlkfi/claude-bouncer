@@ -1954,15 +1954,18 @@ def is_assignment(token):
     carries a quote and assigns, so only where the quoting starts separates it
     from `'SP=/x'`.
 
-    A plain `str` carries no such record, so it is read as written plain -- the
-    pre-Q170 behaviour, and fail-open in this direction: it arms an override on
-    a word bash would not have assigned. Provenance survives slicing and
-    reordering and dies at anything that builds a new string, which happens on
-    live paths and not only in hand-built token lists: `substitute_vars`
-    returns a new `str` for a token carrying `$`, `glue_dollar_paren`
-    concatenates, and prod-guard's `expand_argv` rebuilds every token. Every
-    command-position caller in that file runs above its boundary. The other
-    guards have not been swept.
+    A plain `str` carries no such record, so it is read as written plain, the
+    pre-Q170 behaviour. What that costs depends on the reader. An override
+    armed on a word bash would not have assigned gets no more than writing it
+    plainly would; a variable a later expansion reads resolves to a value bash
+    never set, which is fail-open. Provenance survives slicing, reordering and
+    `glue_dollar_paren`, whose append moves no offset, and dies at a rebuild
+    that changes the text: `substitute_vars` returns a new `str` for a token
+    carrying `$`, and prod-guard's `expand_argv` rebuilds every token. So
+    decide what a word is on the token the lexer produced, and carry the record
+    only through a rebuild that leaves the word's prefix intact. prod-guard
+    reads command position above `expand_argv`, and workspace-guard decides
+    its peels on the raw tokens (Q175).
 
     A subscript is the exception to "quoting before the `=` disarms": bash
     peels `FOO["0"]=x` and `FOO['a']=x`. So quoting that starts strictly
@@ -2101,11 +2104,19 @@ def glue_dollar_paren(tokens):
     which EXPANSION_RE recognises as a runtime expansion, while the `(` is
     kept in the stream so group splitting (and checking of guarded commands
     *inside* the substitution) is unchanged.
+
+    The glued word keeps its `QuotedStr` record (Q175). Appending leaves every
+    offset into the word where it was, so `quoted_from` still says whether
+    the word was an assignment as written: `'FOO='$(x)` is a command.
     """
     out = []
     for t in tokens:
         if t == '(' and out and out[-1].endswith('$'):
-            out[-1] += '('
+            word = out[-1] + '('
+            if isinstance(out[-1], QuotedStr):
+                word = QuotedStr(word)
+                vars(word).update(vars(out[-1]))
+            out[-1] = word
         out.append(t)
     return out
 
