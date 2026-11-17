@@ -658,15 +658,25 @@ class CommentInSubstitutionTests(unittest.TestCase):
                     'echo "$(%s)" T' % body))
                 bp.strip_comments('echo "$(%s)"' % body)
 
-    def test_a_brace_span_in_double_quotes_adds_no_recursion(self):
-        # `${…}` alternating with `$(` still recurses through `_brace_end`
-        # (Q337); stepping over it here must not deepen that per level.
-        body = 'echo ")"'
-        for _ in range(400):
-            body = 'echo "${x:-$(%s)}"' % body
-        body += ' ; cat /etc/passwd'
-        self.assertEqual([body], bp.command_substitutions(
-            'echo "$(%s)" T' % body))
+    def test_nested_brace_spans_hold_at_any_depth(self):
+        # A thousand of either shape raised RecursionError (Q337), so the
+        # hook exited 1 and nothing judged the `cat` after it.
+        shapes = (lambda b: '${y:-%s}' % b,
+                  lambda b: '"${x:-$(echo %s)}"' % b,
+                  lambda b: '${x:-$(echo %s)}' % b)
+        for depth in (1, 24, 25, 26, 27, 1000):
+            for shape in shapes:
+                inner = '")"'
+                for _ in range(depth):
+                    inner = shape(inner)
+                body = 'echo %s ; cat /etc/passwd' % inner
+                with self.subTest(depth=depth, sample=shape('…')):
+                    self.assertEqual([body], bp.command_substitutions(
+                        'echo "$(%s)" T' % body))
+                    self.assertEqual([body], bp.command_substitutions(
+                        'x=$(%s) T' % body))
+                    wrapped = '${y:-%s}' % body
+                    self.assertEqual(len(wrapped), bp._brace_end(wrapped, 0))
 
 
 class CommentOutsideSubstitutionTests(unittest.TestCase):
