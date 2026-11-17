@@ -3482,10 +3482,22 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
             for tok in argv[1:]:
                 if not tok.startswith('-') and ASSIGNMENT_RE.match(tok):
                     name, form, value = split_assignment(tok)
+                    # An operand expanded from a name with several readings
+                    # assigns each of them (Q377). One that splits to another
+                    # name leaves this one unknown.
+                    others = set()
+                    for o in getattr(tok, 'others', ()):
+                        n, _, v = split_assignment(o) if ASSIGNMENT_RE.match(o) \
+                            else (None, None, None)
+                        others.add(v if n == name else None)
                     # `export NAME+=v` appends to the inherited value; unset
                     # gives just `v` (Q174).
                     if form == ASSIGN_APPEND:
-                        value = shell_env.get(name, '') + value
+                        prior = shell_env.get(name, '')
+                        value = prior + value
+                        others = {None if o is None else prior + o
+                                  for o in others}
+                    value = Readings.of(value, others)
                     _assign({name: value}, defining, maybe, functions,
                             shell_env, exported)
             continue

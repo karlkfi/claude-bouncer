@@ -3991,6 +3991,7 @@ class SpecialCaseTests(unittest.TestCase):
         # still ask on the unset reading.
         home = make_home(kubeconfig=KUBECONFIG_PROD)
         k = "kubectl --context $C delete ns x"
+        d = "kubectl --context $D delete ns x"
         p = "C=gke_acme_prod-us; "
         for cmd in ("source x.sh; %sf; %s" % (p, k),
                     "source x.sh; %sls; %s" % (p, k),
@@ -4004,9 +4005,25 @@ class SpecialCaseTests(unittest.TestCase):
                     # the ones a segment reads are forked.
                     "A=1; B=2; D=3; E=4; %ssource x.sh; %s" % (p, k),
                     "export C=gke_acme_prod-us; BASH_ENV=x.sh bash -c '%s'" % k,
-                    "C=gke_acme_prod-us BASH_ENV=x.sh bash -c 'f; %s'" % k):
+                    "C=gke_acme_prod-us BASH_ENV=x.sh bash -c 'f; %s'" % k,
+                    p + "source x.sh; export D=$C; " + d,
+                    "C=gke_acme_prod-us; x && C=kind-ci; export D=$C; " + d):
             with self.subTest(cmd=cmd):
                 self.assertEqual(run_hook(cmd, home=home)[0], "deny")
+        # A builtin's operand carries both readings on, as a bare assignment
+        # does (#356 review).
+        for b in ("export", "declare", "readonly"):
+            with self.subTest(b=b):
+                self.assertEqual(run_hook(
+                    "C=kind-ci; source x.sh; %s D=$C; %s" % (b, d),
+                    home=home)[0], "ask")
+        for cmd in ('C=kind-ci; source x.sh; export D="$C"; ' + d,
+                    "C=kind-ci; source x.sh; export D=$C; bash -c '%s'" % d,
+                    "source x.sh; C=kind-ci; f; export D=$C; " + d):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(run_hook(cmd, home=home)[0], "ask")
+        self.assertIsNone(run_hook("C=kind-ci; export D=$C; " + d,
+                                   home=home)[0])
 
     def test_a_function_body_is_judged_again_where_it_is_called(self):
         # The call's prefix, and a value assigned after the definition, are
