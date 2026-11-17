@@ -825,9 +825,16 @@ def analyze_class_a(raw, cfg, depth=0):
         any_bg = any_bg or bg
         # A segment opens or closes compounds only with its leading words, so
         # a sleep after `done` is outside the loop and judged on its own (Q283).
+        timed = False
         for t in group:
             if getattr(t, 'quoted_from', None) is not None:
                 break
+            # The `time` keyword times the compound after it, as strip_head
+            # reads it: `time -p while ...` still opens the loop.
+            if t == 'time' or (timed and t.startswith('-')):
+                timed = True
+                continue
+            timed = False
             if t in COMPOUND_OPEN:
                 opened.append(t)
             elif t in COMPOUND_CLOSE:

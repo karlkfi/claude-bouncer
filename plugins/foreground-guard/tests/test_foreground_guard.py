@@ -497,6 +497,7 @@ class LoopAndSleepTests(unittest.TestCase):
         "{ for c in a b; do true; done; }; sleep 1",
         "for c in a b; do echo done; done; sleep 1",
         "for c in done; do true; done; sleep 1",
+        "time for c in a b; do true; done; sleep 1",
     )
 
     # The sleep is in the loop's condition or body, however deeply nested.
@@ -513,6 +514,13 @@ class LoopAndSleepTests(unittest.TestCase):
         "while true; do case x in x) sleep 1;; esac; done",
         "while true; do case $x in a) ls;; done) ls;; esac; sleep 1; done",
         "bash -c 'while true; do ls; sleep 1; done'",
+        "time while true; do sleep 1; done",
+        "time for i in 1 2; do sleep 1; done",
+        "time -p while true; do sleep 1; done",
+        "time -p -- until false; do sleep 1; done",
+        "! time while true; do sleep 1; done",
+        "ls; time for i in 1 2; do curl x; sleep 1; done",
+        "time { while true; do sleep 1; done; }",
     )
 
     def test_sleep_after_loop_defers(self):
