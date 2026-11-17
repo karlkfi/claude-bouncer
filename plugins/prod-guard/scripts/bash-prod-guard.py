@@ -3576,6 +3576,11 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
             # only some runs were parent-expanded, and under-expanding is the
             # safe direction (unresolved target -> prompt).
             body = first_flag_value(argv_raw, ('-c',))
+            if body and depth >= 3:
+                # A body this deep is not read, so what it runs is unknown (Q340).
+                findings.append((ASK, 'prod-guard: `%s -c` runs a body nested '
+                                 'deeper than the guard reads, so what it runs '
+                                 'is unknown. Confirm it is safe.' % tool, None))
             if body:
                 # The default stands in for a body that reached here as a
                 # plain str rather than a token (`-c=…`, which flag_values

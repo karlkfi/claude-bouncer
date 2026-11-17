@@ -21,6 +21,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -3246,10 +3247,28 @@ class BypassBatteryTests(unittest.TestCase):
             "bash -c \"sh -c 'kubectl --context gke_acme_prod-us delete ns x'\"")
         self.assertEqual(decision, "deny")
 
+    def test_a_shell_body_past_the_depth_bound_asks(self):
+        # bash 5.3.15 runs the fourth body, so it is not read and asks (Q340).
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        def nest(cmd, n):
+            for _ in range(n):
+                cmd = "bash -c " + shlex.quote(cmd)
+            return cmd
+        k = "kubectl --context gke_acme_prod-us delete pod x"
+        for cmd in (nest(k, 4), nest(k, 5), nest("echo hi", 4),
+                    nest("sh -c " + shlex.quote(k), 3),
+                    nest("env bash -c " + shlex.quote(k), 3)):
+            with self.subTest(cmd=cmd):
+                decision, reason = run_hook(cmd, home=home)
+                self.assertEqual(decision, "ask")
+                self.assertIn("nested deeper than the guard reads", reason)
+        self.assertEqual(run_hook(nest(k, 3), home=home)[0], "deny")
+        self.assertIsNone(run_hook(nest("bash -c ''", 3), home=home)[0])
+
     def test_recursion_depth_bound_is_a_known_limit(self):
-        # Beyond depth 3 the evaluator stops recursing — a DOCUMENTED false
-        # negative (README Limitations). This test locks the bound so a
-        # change to it is a conscious decision, not drift.
+        # Beyond depth 3 the evaluator stops recursing; the caller asks for a
+        # body it would hand past the bound (Q299, Q340). This test locks the
+        # bound so a change to it is a conscious decision, not drift.
         guard._PATTERNS = None
         findings, override, _session = guard.evaluate_command_string(
             "kubectl --context gke_acme_prod-us delete ns x", {"cwd": "/"}, depth=4)
