@@ -1819,8 +1819,9 @@ class HookEndToEndTests(unittest.TestCase):
         # Reviewer C's shapes: a lexer that took the first `/` as a division,
         # or ended the print at the newline, hid the redirect from the hook, and
         # the awk named wrote the file. A `\"` or `#` in the regex is what a
-        # misreading turns into a string or a comment.
-        L = "/q334-fake/L"
+        # misreading turns into a string or a comment. The target is spelled
+        # with octal escapes, since a `/` would end a misread regex early.
+        L = "\\057q334-fake\\057L"
         for cmd, wrote_on in (
                 ('BEGIN { if (1) /"/ ; print "x" > "%s" ; y = /"/ }', "macOS, gawk"),
                 ('BEGIN { if (1) /#/ ; print "x" > "%s"\n}', "macOS, gawk"),
@@ -1842,8 +1843,9 @@ class HookEndToEndTests(unittest.TestCase):
                 ('BEGIN { if ("a/b" ~ /[/]/) print "x" > "%s" }', "gawk, mawk")):
             cmd = "awk %s in.txt" % shlex.quote(cmd % L)
             with self.subTest(cmd=cmd, wrote_on=wrote_on):
-                self.assertIn(L, self._decision(cmd, "ask")[
-                    "hookSpecificOutput"]["permissionDecisionReason"])
+                self.assertIn("Outside-workspace path(s): /q334-fake/L.",
+                              self._decision(cmd, "ask")[
+                                  "hookSpecificOutput"]["permissionDecisionReason"])
 
     def test_awk_target_it_cannot_name_asks(self):
         # A data-named target has no literal rewrite, so a person decides.
