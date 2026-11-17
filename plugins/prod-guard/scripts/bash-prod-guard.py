@@ -929,6 +929,9 @@ def extract_env_prefix(argv, base_env=None):
 # immediately after the name, and positional/special params (`$1`, `$@`, `$$`,
 # `$?`) because the bare branch requires a letter/underscore right after `$`.
 VAR_REF_RE = re.compile(r'\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))')
+# A `$` the shell leaves as text, which the lexer hands on as a bare `$`: one
+# escaped, or one a closing quote ends (`"$"X`). Driven on bash 5.3.15.
+_LEFT_DOLLAR_RE = re.compile(r'\\\$|\$"')
 
 
 def expand_vars(value, env):
@@ -3454,7 +3457,8 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
             # single-quoted run was expanded by the PARENT while building the
             # argument, so its `$C` resolves against this shell's vars whether
             # or not the name was exported -- do that here and let the child
-            # re-expand what is left. Mixed quoting keeps the child's env:
+            # re-expand what is left, save a `$` the parent left as text.
+            # Mixed quoting keeps the child's env:
             # only some runs were parent-expanded, and under-expanding is the
             # safe direction (unresolved target -> prompt).
             body = first_flag_value(argv_raw, ('-c',))
@@ -3464,8 +3468,6 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
                 # splits): unknown quoting reads as single, so it expands in
                 # the child and nothing new resolves.
                 quotes = getattr(body, 'quotes', frozenset("'"))
-                if "'" not in quotes:
-                    body = expand_vars(body, same_shell)
                 # What `env`/`sudo` add reaches the body only where the child
                 # does the expanding: a body written wholly in single quotes.
                 # Anywhere else a `$C` left over is the parent's, unknown here,
@@ -3476,12 +3478,30 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
                         == len(body)):
                     body_env = {k: v for k, v in child.items()
                                 if child_env.get(k) == v}
+                others = ()
+                if "'" not in quotes:
+                    # `"\$X"` and `"$"X` reach the child as `$X`, which the
+                    # lexer cannot tell from a live `"$X"`. Where the command
+                    # holds either, a name also takes the value the child
+                    # would give it (Q348).
+                    if any(_LEFT_DOLLAR_RE.search(s)
+                           for s in (ctx.get('command') or '', raw)):
+                        body = expand_vars(body, {
+                            k: Readings.of(v, {body_env.get(k)})
+                            for k, v in same_shell.items()})
+                        others = getattr(body, 'others', ())
+                    else:
+                        body = expand_vars(body, same_shell)
                 # bash runs a `BASH_ENV` file before the body, which can set
                 # any name the body reads (Q299).
+                sub_shell = {} if tool == 'bash' and child.get('BASH_ENV') \
+                    else None
                 sub_f, sub_o, sub_s = evaluate_command_string(
-                    body, ctx, depth + 1, body_env,
-                    {} if tool == 'bash' and child.get('BASH_ENV') else None)
+                    body, ctx, depth + 1, body_env, sub_shell)
                 findings += sub_f
+                for other in sorted(others):
+                    findings += evaluate_command_string(
+                        other, ctx, depth + 1, body_env, sub_shell)[0]
                 override = override or sub_o
                 session_reason = session_reason if session_reason is not None else sub_s
             continue
@@ -3572,7 +3592,7 @@ def main():
     if os.environ.get('PROD_GUARD_DISABLE') == '1':
         return
 
-    ctx = {'cwd': data.get('cwd') or os.getcwd()}
+    ctx = {'cwd': data.get('cwd') or os.getcwd(), 'command': command}
 
     if data.get('hook_event_name') == 'PostToolUse':
         # The command RAN — so if PreToolUse downgraded a deny to an ask, the

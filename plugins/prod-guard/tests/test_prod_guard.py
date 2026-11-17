@@ -1000,6 +1000,44 @@ class VariableExpansionDecisionTests(unittest.TestCase):
             "CTX=gke_acme_prod-us; bash -c 'kubectl --context '\"$CTX\"' delete ns x'")
         self.assertEqual(decision, "ask")
 
+    # --- Q348: a `$` the parent leaves as text expands in the child ---------
+    # `"\$X"` and `"$"X` hand the child `$X`, as a live `"$X"` would not, and
+    # the child never sees an unexported X. bash 5.3.15 with X=parent prints
+    # `[]` for `bash -c "echo [\$X]"` and `bash -c "echo [$""X]"`.
+
+    def test_escaped_dollar_in_child_body_reads_the_childs_value(self):
+        decision, reason = run_hook(
+            'X=kind-ci; bash -c "\\$X kubectl --context=gke_acme_prod-us '
+            'delete pod x"')
+        self.assertEqual(decision, "deny")
+        self.assertIn("gke_acme_prod-us", reason)
+
+    def test_dollar_ended_by_a_quote_in_child_body_reads_the_childs_value(self):
+        decision, _ = run_hook(
+            'X=kind-ci; bash -c "$""X kubectl --context=gke_acme_prod-us '
+            'delete pod x"')
+        self.assertEqual(decision, "deny")
+
+    def test_escaped_context_in_child_body_is_unknown(self):
+        # The child reads an empty `--context=`, which is the current context.
+        decision, _ = run_hook(
+            'C=kind-ci; bash -c "kubectl --context=\\$C delete pod x"')
+        self.assertEqual(decision, "ask")
+
+    def test_escaped_dollar_of_an_exported_name_still_defers(self):
+        # The child has the exported value, so both readings agree.
+        decision, _ = run_hook(
+            'export C=kind-ci; bash -c "kubectl --context=\\$C delete pod x"')
+        self.assertIsNone(decision)
+
+    def test_live_dollar_in_child_body_keeps_the_parents_value(self):
+        # Only a command holding a left-alone `$` takes the child's reading,
+        # so a live `"$X"` still runs `kind-ci`.
+        decision, _ = run_hook(
+            'X=kind-ci; bash -c "$X kubectl --context=gke_acme_prod-us '
+            'delete pod x"')
+        self.assertIsNone(decision)
+
     # --- Q151: an `eval` body runs in the CURRENT shell --------------------
     # `eval` starts no child, so quoting decides nothing: bash expands the body
     # against this shell's vars either way. Verified against bash 5.3.15 with
