@@ -489,6 +489,48 @@ class LoopAndSleepTests(unittest.TestCase):
         d, _ = run_hook("for f in *.py; do python3 -m py_compile $f; done")
         self.assertIsNone(d)
 
+    # A sleep after `done` runs once, after the loop, so nothing polls (Q283).
+    SLEEP_AFTER_LOOP = (
+        "for c in a b; do true; done; sleep 1; ls",
+        "for c in a b; do true; done && sleep 1",
+        "for c in a b; do true; done\nsleep 1",
+        "{ for c in a b; do true; done; }; sleep 1",
+        "for c in a b; do echo done; done; sleep 1",
+        "for c in done; do true; done; sleep 1",
+    )
+
+    # The sleep is in the loop's condition or body, however deeply nested.
+    SLEEP_IN_LOOP = (
+        "while true; do sleep 1; done",
+        "while sleep 1; do ls; done",
+        "until false; do sleep 1; done",
+        "until sleep 1; do ls; done",
+        "for i in 1 2; do for j in 1 2; do sleep 1; done; done",
+        "for i in 1 2; do for j in 1 2; do true; done; sleep 1; done",
+        "while true; do { sleep 1; }; done",
+        "while true; do (sleep 1); done",
+        "while true; do if true; then sleep 1; fi; done",
+        "while true; do case x in x) sleep 1;; esac; done",
+        "while true; do case $x in a) ls;; done) ls;; esac; sleep 1; done",
+        "bash -c 'while true; do ls; sleep 1; done'",
+    )
+
+    def test_sleep_after_loop_defers(self):
+        for cmd in self.SLEEP_AFTER_LOOP:
+            d, _ = run_hook(cmd)
+            self.assertIsNone(d, "expected defer for %r" % cmd)
+
+    def test_sleep_in_loop_denies(self):
+        for cmd in self.SLEEP_IN_LOOP:
+            d, r = run_hook(cmd)
+            self.assertEqual(d, "deny", cmd)
+            self.assertIn("loop", r, cmd)
+
+    def test_long_sleep_after_loop_still_judged_by_floor(self):
+        d, r = run_hook("for c in a b; do true; done; sleep 30")
+        self.assertEqual(d, "deny")
+        self.assertNotIn("`while`/`until`/`for` loop", r)
+
     def test_while_read_defers(self):
         d, _ = run_hook("while read -r line; do echo $line; done < input.txt")
         self.assertIsNone(d)
