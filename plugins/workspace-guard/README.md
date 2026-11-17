@@ -1845,7 +1845,8 @@ final output.
   empty `''` operand (GNU sed 4.9, measured in a `debian:stable-slim`
   container on 2026-10-04).
 - A `sed` script reads a plain `$NAME` as written when the command binds NAME
-  only as `NAME=$(…)` or with `read`. Such a value is not seen, and can give the
+  only as `NAME=$(…)`, the substitution being the whole value, or with `read`.
+  Such a value is not seen, and can give the
   script a `w` command whose file is not judged: `b=$(cat f); sed "s/a/$b/" g`.
   Routing a file name through a command's output takes intent, and denying
   every such value would deny the common `v=$(git rev-parse HEAD); sed
