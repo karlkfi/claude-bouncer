@@ -64,6 +64,8 @@ REASON_PATTERNS = {
     'crosssession': re.compile(r"Cross-session scratch write\(s\)"),
     'kill':      re.compile(r"Unanchored process kill\(s\)"),
     'sedscript': re.compile(r"sed script read as a path: (.*?)\. Fix:"),
+    'sedexpand': re.compile(r"sed script built from a value the hook cannot "
+                            r"read: (.*?)\. Fix:"),
 }
 
 # A denying hook leaves no attachment of its own: Claude Code persists hook

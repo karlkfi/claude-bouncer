@@ -1690,6 +1690,99 @@ class HookEndToEndTests(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self._defer(cmd)
 
+    # --- Q335: a sed script completed by an expansion ------------------------
+
+    def test_sed_script_reads_the_literal_a_variable_splices_in(self):
+        # macOS and GNU sed both created the `w` file for these two shapes. The
+        # values hold a space, so they are no path literal, but inside double
+        # quotes bash splices exactly this text into the script.
+        for cmd, path in (
+                ("b='x/w /etc/q335-fake;s/q'; sed \"s/a/$b/\" in.txt",
+                 "/etc/q335-fake;s/q/"),
+                ("prog='w /etc/q335-fake'; sed \"$prog\" in.txt", "/etc/q335-fake"),
+                ("for b in x/w/etc/q335-fake y; do sed \"s/a/$b/\" in.txt; done",
+                 "/etc/q335-fake/")):
+            with self.subTest(cmd=cmd):
+                out = self._decision(cmd, "ask")
+                self.assertIn(path, out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_sed_script_expansion_that_is_not_a_plain_name_denies(self):
+        # Each puts literal command text into the script without a `NAME=` the
+        # hook reads; review measured the first six writing a file on bash 5.3
+        # and macOS sed.
+        for cmd, word in (
+                ("sed \"${u:-w /etc/q335-fake}\" in.txt", "${u:-w /etc/q335-fake}"),
+                ("echo 'w /etc/q335-fake'; sed \"$_\" in.txt", "$_"),
+                ("set -- 'w /etc/q335-fake'; sed \"$1\" in.txt", "$1"),
+                ("f() { sed \"$1\" in.txt; }; f 'w /etc/q335-fake'", "$1"),
+                ("[[ 'w /etc/q335-fake' =~ .* ]]; sed \"$BASH_REMATCH\" in.txt",
+                 "$BASH_REMATCH"),
+                ("p='w /etc/q335-fake'; n=p; sed \"${!n}\" in.txt", "${!n}"),
+                ("sed \"$(cat in.txt)\" in.txt", "$(cat in.txt)"),
+                ("sed \"s/a/`cat in.txt`/\" in.txt", "s/a/`cat in.txt`/")):
+            with self.subTest(cmd=cmd):
+                out = self._decision(cmd, "deny")
+                self.assertIn("sed script built from a value the hook cannot "
+                              "read: " + word,
+                              out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_sed_script_name_bound_but_not_substituted_denies(self):
+        # Review found each of these missing the literal maps by a different
+        # route, and bash 5.3 with macOS sed wrote the file for all but the
+        # GNU-only `--expression=`.
+        for cmd, word in (
+                ("p='w /etc/q335-fake'; sed -e\"$p\" in.txt", "$p"),
+                ("p='w /etc/q335-fake'; sed --expression=\"$p\" in.txt", "$p"),
+                ("for p in w/etc/q335-fake; do sed -e\"$p\" in.txt; done", "$p"),
+                ("{ p='w /etc/q335-fake'; sed \"$p\" in.txt; }", "$p"),
+                ("(p='w /etc/q335-fake'; sed \"$p\" in.txt)", "$p"),
+                ("a=('w /etc/q335-fake'); sed \"$a\" in.txt", "$a"),
+                ("p='w /etc/q335-fake'; sed \"$p\"x in.txt", "$px"),
+                ("p='w /etc/q335-fake'; q=$p; sed \"$q\" in.txt", "$q"),
+                ("declare p='w /etc/q335-fake'; sed \"$p\" in.txt", "$p"),
+                ("printf -v p 'w /etc/q335-fake'; sed \"$p\" in.txt", "$p"),
+                ("p='w /etc/q335-fake'; sed \"$p\"\"x\" in.txt", "$px"),
+                ("p='w /etc/q335-fake'; sed \"$p\"$'x' in.txt", "$px"),
+                ("p='w /etc/q335-fake'; sed \"$p\"$''x in.txt", "$px"),
+                ("for f in *.txt; do sed \"$f\"x in.txt; done", "$fx"),
+                # A substitution that starts the value is not the whole of it,
+                # and `$((…))` arithmetic is never a command's output.
+                ("p=$(true)'w /etc/q335-fake'; sed \"$p\" in.txt", "$p"),
+                ("p=\"$(true)w /etc/q335-fake\"; sed \"$p\" in.txt", "$p"),
+                ("p=`true`'w /etc/q335-fake'; sed \"$p\" in.txt", "$p"),
+                ("p=$((1))'w /etc/q335-fake'; sed \"$p\" in.txt", "$p"),
+                ("p=$(true); printf -v p 'w /etc/q335-fake'; sed \"$p\" in.txt",
+                 "$p")):
+            with self.subTest(cmd=cmd):
+                out = self._decision(cmd, "deny")
+                self.assertIn("sed script built from a value the hook cannot "
+                              "read: " + word,
+                              out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_sed_script_expansion_it_can_read_allows(self):
+        # The commonest seds there are: a name the string never sets, a literal
+        # it sets, and a script wholly in single quotes, which expands nothing.
+        for cmd in ("sed \"s/$old/$new/g\" in.txt", "sed -n '$p' in.txt",
+                    "x=1; sed -n '$p' in.txt", "p=$(cat in.txt); sed -n '$p' in.txt",
+                    "old=a; new=b; sed \"s/$old/$new/g\" in.txt",
+                    "b='x/w out.txt'; sed \"s/a/$b/\" in.txt",
+                    "sed \"s|$HOME|~|\" in.txt", "sed \"1,$((n+1))d\" in.txt",
+                    "sed -n $((n+1))p in.txt", "sed \"s/a/$$/\" in.txt",
+                    "for b in x y; do sed \"s/a/$b/\" in.txt; done",
+                    # A value from `$(…)` or `read` is not read (README,
+                    # Limitations), so the commonest of them stays allowed.
+                    "a=$(cat in.txt) && sed -i '' \"s/^rank: .*/rank: $a/\" in.txt",
+                    "while read v; do sed \"s/x/$v/\" in.txt; done < in.txt",
+                    "p=\"$(cat in.txt)\"; sed \"s/a/$p/\" in.txt",
+                    "p=`cat in.txt`; sed \"s/a/$p/\" in.txt",
+                    "p='w x'; sed -n '$p' in.txt",
+                    # A longer name that merely starts with a bound one.
+                    "for f in *.txt; do sed -i '' \"s/$from/$to/\" \"$f\"; done",
+                    "for f in in.txt; do sed -i '' \"s/x/$foo/\" \"$f\"; done",
+                    "v=1.2.3; sed -i '' \"s/$v/$ver/\" in.txt"):
+            with self.subTest(cmd=cmd):
+                self._decision(cmd, "allow")
+
     # --- Q232: the token after `sed -i ''` -----------------------------------
     # BSD sed reads it as the script and GNU sed as a file. Where Q328's parser
     # reads it as a script naming no file and running nothing, an outside
