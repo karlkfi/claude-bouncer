@@ -1142,6 +1142,21 @@ CASES = [
     ('a gate among array elements', 'arr=(x $(make check) y)', False, False, ''),
     ('a gate in an array assigned for a command',
      'arr=($(make check)) cmd', False, True, 'command substitution'),
+    # A quoted `)` is an element, not the close: `arr=(")" $(false))` and
+    # `arr=(\) $(false))` exit 1 (Q343).
+    ('a gate after a quoted paren in an array',
+     'arr=(")" $(make check))', False, False, ''),
+    ('a gate after a single-quoted paren in an array',
+     "arr=(')' $(make check))", False, False, ''),
+    ('a gate after an escaped paren in an array',
+     'arr=(\\) $(make check))', False, False, ''),
+    ('a gate after a quoted paren in an array assigned for a command',
+     'arr=(")" $(make check)) cmd', False, True, 'command substitution'),
+    ('a gate piped after an array holding a quoted paren',
+     'arr=(")"); make check | tail', False, True, 'piped'),
+    # `x= "("` assigns x empty and runs `(` as a command, so no array opens.
+    ('a quoted paren after an empty assignment opens no array',
+     'x= "(" $(make check) ")"', False, True, 'command substitution'),
     ('a non-gate echoed', 'echo "$(git log -1)"', False, False, ''),
     ('a gate whose failure is discarded inside',
      'echo "$(make check || true)"', False, False, ''),
