@@ -1867,9 +1867,10 @@ final output.
 - An `awk` program is read as written, with no expansion substituted. A
   double-quoted program holding a name the command binds, a `$(…)`, a `${…}`
   operator or `$_` asks, since the value can add a redirection
-  (`p='{print > "../x"}'; awk "$p" f`). A `$1` there does not, because the
-  hook cannot tell it from the escaped field `\$1`, and neither does a name the
-  command never binds; both are read as written. A loop variable asks even
+  (`p='{print > "../x"}'; awk "$p" f`). Three are read as written: a name the
+  command binds only as `NAME=$(…)` or with `read`, as for sed; a name it never
+  binds; and `$1`, which the hook cannot tell from the escaped field `\$1`, so
+  `set -- '{print > "../x"}'; awk "$1" f` is not judged. A loop variable asks even
   where its values are literals. A program loaded with `-f FILE` is not read,
   as with sed.
 - Heredoc body lines are dropped from the raw command string before parsing, so

@@ -3416,7 +3416,8 @@ def _awk_tokens(text):
         elif c == '#':
             i = _sed_eol(text, i)
         elif c == '\n':
-            if prev is not None and prev[0] != 'nl' and prev[1] not in AWK_CONTINUES:
+            if prev is not None and prev[0] != 'nl' and not (
+                    prev[0] in ('op', 'name') and prev[1] in AWK_CONTINUES):
                 toks.append(('nl', c, i, i + 1))
             i += 1
         elif c == '"':
@@ -3521,7 +3522,8 @@ def awk_program_reads(text):
     target written as string literals: a `print`/`printf` redirection, a
     `getline <` and a gawk `@include`. `unread` holds the text of each target
     named any other way, a variable, a field or a concatenation with one, and
-    of each write to `ARGV` or `ARGC`, which names the files awk reads next. A
+    of each write to `ARGV` or `ARGC`, which names the files awk reads next,
+    including `ARGV` handed over whole and gawk's `SYMTAB`. A
     program the lexer cannot finish is unread whole. `runs` is a pipe,
     `system`, gawk's `@load` or an indirect `@f(…)` call.
 
@@ -3619,11 +3621,17 @@ def awk_program_reads(text):
                 runs = True
             elif word[0] == 'name' and k + 2 < len(toks) and toks[k + 2][1] == '(':
                 runs = True
-        elif kind == 'name' and val in ('ARGV', 'ARGC'):
+        elif kind == 'name' and val in ('ARGV', 'ARGC', 'SYMTAB'):
+            # A bare ARGV is the array handed over whole, which a function or
+            # gawk's `match`/`asort` can fill; gawk's SYMTAB reaches it by name.
             j = lvalue_end(k)
             nxt = toks[j] if j < len(toks) else None
-            if (nxt is not None and nxt[1] in AWK_ASSIGN_OPS
-                    and nxt[0] in ('op', 'post')) \
+            bare = val == 'ARGV' and (k + 1 == len(toks) or toks[k + 1][1] != '[')
+            if val == 'SYMTAB' or (bare and not (
+                    prev is not None and prev[0] == 'name'
+                    and prev[1] in ('in', 'delete'))) \
+                    or (nxt is not None and nxt[1] in AWK_ASSIGN_OPS
+                        and nxt[0] in ('op', 'post')) \
                     or (prev is not None and (
                         prev[1] in ('++', '--')
                         or (prev[0] == 'name' and prev[1] == 'getline')

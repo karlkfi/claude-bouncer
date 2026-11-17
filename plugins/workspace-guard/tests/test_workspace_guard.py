@@ -1840,7 +1840,11 @@ class HookEndToEndTests(unittest.TestCase):
                 ('BEGIN { print 0 ||\n1 > "%s" }', "all"),
                 ('BEGIN { print 1 ?\n"a" : "b" > "%s" }', "gawk"),
                 ('BEGIN { print "x" \\\n> "%s" }', "all"),
-                ('BEGIN { if ("a/b" ~ /[/]/) print "x" > "%s" }', "gawk, mawk")):
+                ('BEGIN { if ("a/b" ~ /[/]/) print "x" > "%s" }', "gawk, mawk"),
+                # A string or regex whose text is `,` or `do` continues nothing.
+                ('BEGIN { x = ","\n/"/ ; print "x" > "%s" ; y = /"/ }', "all"),
+                ('BEGIN { x = "do"\n/"/ ; print "x" > "%s" ; y = /"/ }', "all"),
+                ('BEGIN { y = $0 ~ /,/\n/"/ ; print "x" > "%s" ; z = /"/ }', "all")):
             cmd = "awk %s in.txt" % shlex.quote(cmd % L)
             with self.subTest(cmd=cmd, wrote_on=wrote_on):
                 self.assertIn("Outside-workspace path(s): /q334-fake/L",
@@ -1862,6 +1866,12 @@ class HookEndToEndTests(unittest.TestCase):
                 ("awk 'BEGIN{ARGV[1] = \"/q334-fake/x\"; ARGC = 2} {print}'", "ARGV[1]"),
                 ("awk 'BEGIN{ARGC++} {print}' in.txt", "ARGC"),
                 ("awk 'BEGIN{split(\"a b\", ARGV)} {print}' in.txt", "ARGV"),
+                # The array handed over whole is filled where the hook cannot see.
+                ("awk 'function f(a) { a[1] = \"/q334-fake/x\" } BEGIN { f(ARGV) }"
+                 " {print; exit}' in.txt", "ARGV"),
+                ("gawk 'BEGIN{match(\"x\", /(.*)/, ARGV)} {print}' in.txt", "ARGV"),
+                ("gawk 'BEGIN{t[1] = \"x\"; asort(t, ARGV)} {print}' in.txt", "ARGV"),
+                ("gawk 'BEGIN{SYMTAB[\"ARGV\"][1] = \"x\"} {print}' in.txt", "SYMTAB"),
                 # A program completed by a value the hook does not read (D2).
                 ("p='{print > \"/q334-fake/x\"}'; awk \"$p\" in.txt", "$p"),
                 ("pat='/ {print > \"../x\"} /'; awk \"/$pat/\" in.txt", "/$pat/"),
@@ -1900,6 +1910,8 @@ class HookEndToEndTests(unittest.TestCase):
                     "awk '{a[$1]++} END {for (k in a) print k > \"counts.txt\"}' in.txt",
                     "awk 'BEGIN {while ((getline l < \"in.txt\") > 0) n++; print n}'",
                     "awk 'BEGIN{for (i = 1; i < ARGC; i++) print ARGV[i]}' in.txt",
+                    "awk 'BEGIN{for (k in ARGV) n++} {print}' in.txt",
+                    "awk 'BEGIN{delete ARGV[1]} {print}' in.txt",
                     "awk 'FNR==NR{a[$1]; next} $1 in a' in.txt in.txt",
                     "awk 'BEGIN{x = /\"/ ; print \"x\" > \"o\" ; y = /\"/}' in.txt",
                     # A `$1` in double quotes is the escaped field `\\$1`, which
