@@ -1046,6 +1046,8 @@ def tested_form(segs, gate_at, mutator_at):
     var = status_captured(segs, gate_at, mutator_at)
     if not var:
         return False
+    if exits_on_failure(segs, var, gate_at, mutator_at):
+        return True
     j = mutator_at - 1
     while j >= 0 and next_op(segs[j].post_ops) == '&&':
         tokens = segs[j].tokens
@@ -1053,6 +1055,69 @@ def tested_form(segs, gate_at, mutator_at):
                 ' '.join(tokens), var, quotes=False):
             return True
         j -= 1
+    return False
+
+
+# A comparison of the capture with 0 that holds when the gate passed, or when
+# it failed. Any other test -- `-gt`, a `!`, a comparison with 1 -- is neither.
+PASSED_OPS = frozenset({'-eq', '=', '=='})
+FAILED_OPS = frozenset({'-ne', '!='})
+
+
+def status_verdict(tokens, var):
+    """'passed' or 'failed' for a `[ "$var" -eq 0 ]`-style test, else ''."""
+    if not tokens or tokens[0] not in STATUS_TESTS:
+        return ''
+    close = {'[': ']', '[[': ']]'}.get(tokens[0])
+    if close and tokens[-1] != close:
+        return ''
+    body = tokens[1:-1] if close else tokens[1:]
+    if len(body) != 3 or {body[0], body[2]} not in (
+            {'$' + var, '0'}, {'${%s}' % var, '0'}):
+        return ''
+    return ('passed' if body[1] in PASSED_OPS
+            else 'failed' if body[1] in FAILED_OPS else '')
+
+
+def exits_on_failure(segs, var, gate_at, mutator_at):
+    """Whether a top-level statement between the capture and the mutator exits
+    when the captured
+    status is a failure: `[ "$rc" -eq 0 ] || exit 1`, `[ "$rc" -ne 0 ] && exit
+    1`, or `if [ "$rc" -ne 0 ]; then exit 1; fi` (Q351).
+
+    `exit` only: a `return` outside a function prints an error and the command
+    carries on. Outside every compound and subshell, since an `exit` in either
+    does not stop the mutator.
+    """
+    ends = (';', '\n')
+    nest = 0
+    captured = False
+    for k in range(gate_at + 1, mutator_at):
+        if not captured:
+            captured = segs[k].depth == 0 and segs[k].tokens == [var + '=$?']
+            continue
+        toks, seg = segs[k].tokens, segs[k]
+        starts = next_op(segs[k - 1].post_ops) in ends
+        later = segs[k + 1:mutator_at]
+        if nest == 0 and seg.depth == 0 and starts and later and all(
+                s.depth == 0 for s in later[:3]):
+            op, exit_seg = next_op(seg.post_ops), later[0]
+            exits = (head_words(exit_seg)[:1] == ['exit']
+                     and next_op(exit_seg.post_ops) in ends)
+            verdict = status_verdict(toks, var)
+            if exits and ((op == '||' and verdict == 'passed')
+                          or (op == '&&' and verdict == 'failed')):
+                return True
+            if (toks[:1] == ['if'] and op in ends
+                    and status_verdict(toks[1:], var) == 'failed'
+                    and exit_seg.tokens[:1] == ['then'] and exits
+                    and len(later) > 1 and later[1].tokens == ['fi']
+                    and next_op(later[1].post_ops) in ends):
+                return True
+        if toks and all(t in COMPOUND_CLOSERS for t in toks):
+            nest -= len(toks)
+        else:
+            nest += sum(1 for t in toks[:2] if t in COMPOUND_OPENERS)
     return False
 
 
