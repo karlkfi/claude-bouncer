@@ -73,7 +73,7 @@ The hook produces one of four outcomes:
   those three instead (see
   [Suppression escalation](#suppression-escalation-in-pre-approving-modes)).
 
-Guarded commands: `grep` (and `egrep`, `fgrep`), `rg`, `sed`, `awk` (and
+Guarded commands: `grep` (and `egrep`, `fgrep`), `rg`, `sed` (and `gsed`), `awk` (and
 `gawk`, `mawk`), `jq`, `yq`, `cat`, `head`, `tail`, `sort`, `wc`, `diff`,
 `file`, `hexdump`, `cut`, `base64` (whose BSD `-o OUT` is treated as a write,
 like `sort -o`), `uniq`, `xxd` (whose optional second positional is an

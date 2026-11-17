@@ -104,6 +104,8 @@ class SpecShapeTests(unittest.TestCase):
             guard.ALIASES,
             {"egrep": "grep", "fgrep": "grep",
              "gawk": "awk", "mawk": "awk",
+             # Q341: GNU sed's Homebrew name; the sed row reads GNU's argv.
+             "gsed": "sed",
              # Q9: pure cat-shape readers aliased to `cat`.
              "less": "cat", "more": "cat",
              # Q37: uniq/xxd left the alias list — their second positional
@@ -3556,6 +3558,16 @@ class HookEndToEndTests(unittest.TestCase):
 
     def test_gawk_workspace_allow(self):
         self._decision("gawk '{print}' in.txt", "allow")
+
+    def test_gsed_gets_what_sed_gets(self):
+        # Q341: each of these deferred, so the operator's own rules decided.
+        for cmd, want in (("gsed -i 's/a/b/' /etc/q341-fake/y", "ask"),
+                          ("gsed -n '/x/w /etc/q341-fake/x' in.txt", "ask"),
+                          ("/opt/homebrew/bin/gsed 's/a/b/' /etc/q341-fake/y",
+                           "ask"),
+                          ("gsed 's/a/b/' in.txt", "allow")):
+            with self.subTest(cmd=cmd):
+                self._decision(cmd, want)
 
     # --- rg end-to-end ------------------------------------------------------
 

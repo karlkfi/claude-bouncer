@@ -1153,6 +1153,7 @@ SPEC = {
 # treatment across: WRITE_COMMANDS and ENTRY_OPERANDS are keyed on the resolved
 # name, so `unlink` picks up write context and by-the-name resolution for free.
 ALIASES = {'egrep':'grep','fgrep':'grep','gawk':'awk','mawk':'awk',
+           'gsed':'sed',
            'less':'cat','more':'cat',
            'tac':'cat','rev':'cat','nl':'cat',
            'od':'cat',
