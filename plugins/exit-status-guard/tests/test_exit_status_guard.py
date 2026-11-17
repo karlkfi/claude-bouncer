@@ -847,6 +847,25 @@ CASES = [
     ('backgrounded commit naming --help still denies',
      'git commit -m "docs: --help text" > tmp/c.log 2>&1; echo "EXIT=$?"',
      True, True, ''),
+    # git's completion helper prints the option list and exits only as the
+    # subcommand's sole argument; anywhere else git rejects it or runs (Q350).
+    ('git checkout completion helper piped',
+     'git checkout --git-completion-helper-all | tr " " "\\n"', False, False, ''),
+    ('git switch completion helper piped',
+     'git switch --git-completion-helper-all | tr " " "\\n"', False, False, ''),
+    ('git checkout completion helper sequenced before a commit',
+     'git checkout --git-completion-helper-all; git commit -m x', False, False, ''),
+    ('git push completion helper piped',
+     'git push --git-completion-helper | tr " " "\\n"', False, False, ''),
+    ('git checkout of a branch piped still denies', 'git checkout main | tr " " "\\n"',
+     False, True, 'piped'),
+    ('git checkout with a branch beside the helper still denies',
+     'git checkout b --git-completion-helper-all | tr " " "\\n"', False, True, 'piped'),
+    ('completion helper as a commit message still denies',
+     'git commit -m --git-completion-helper; git push', False, True,
+     'is sequenced before'),
+    ('make check piped beside a completion helper still denies',
+     'git checkout --git-completion-helper-all; make check | tail', False, True, 'piped'),
 
     # --- A backgrounded gate whose status the last statement drops -----------
     ('the canonical lost background status',
