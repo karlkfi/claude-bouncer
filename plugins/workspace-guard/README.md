@@ -1233,9 +1233,11 @@ through the same boundary rules and produce the same reasons. Symlink staging
    The words after a substitution's close stay with the command it sits in, so
    `cat <(echo a) /outside/f` is a read and `echo $(date) cat /outside/f`, which
    opens nothing, is not. That holds only where the command is a plain literal
-   name. A substitution can expand to nothing, so at the head, behind a wrapper
-   or `eval`, or behind `$X`, the words after it are read as a command of their
-   own: `env $(true) cat /outside/f` runs the `cat`, and asks. A `<(…)` or
+   name. A substitution can expand to nothing, so at the head, straight after a
+   wrapper's own options, behind `eval`, or behind `$X`, the words after it are
+   read as a command of their own: `env $(true) cat /outside/f` runs the `cat`,
+   and asks. A wrapper that already named its command resumes like the command
+   itself, so `env -u X grep -v <(echo x) /outside/f` asks too. A `<(…)` or
    `>(…)` is read as the `/dev/fd/63` bash passes in its place, so it still
    fills a pattern or program slot: in `grep -v <(echo x) /outside/f` the file
    is the file operand, and asks.
