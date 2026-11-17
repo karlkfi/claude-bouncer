@@ -1843,7 +1843,7 @@ class HookEndToEndTests(unittest.TestCase):
                 ('BEGIN { if ("a/b" ~ /[/]/) print "x" > "%s" }', "gawk, mawk")):
             cmd = "awk %s in.txt" % shlex.quote(cmd % L)
             with self.subTest(cmd=cmd, wrote_on=wrote_on):
-                self.assertIn("Outside-workspace path(s): /q334-fake/L.",
+                self.assertIn("Outside-workspace path(s): /q334-fake/L",
                               self._decision(cmd, "ask")[
                                   "hookSpecificOutput"]["permissionDecisionReason"])
 
