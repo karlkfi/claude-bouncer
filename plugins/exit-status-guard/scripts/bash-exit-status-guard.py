@@ -1251,14 +1251,15 @@ SUBST_RE = re.compile(re.escape(SUBST_WORD) + r'(\d+)_')
 
 def fold_arrays(tokens):
     """Join each `NAME=(` … `)` compound assignment into one word, whose
-    parens would otherwise split it into segments of their own."""
+    parens would otherwise split it into segments of their own. A quoted `")"`
+    is an element, not the close (Q343)."""
     out, i = [], 0
     while i < len(tokens):
         t = tokens[i]
-        if (t.endswith('=') and tokens[i + 1:i + 2] == ['(']
-                and is_assignment(t)):
+        if (t.endswith('=') and i + 1 < len(tokens)
+                and is_operator(tokens[i + 1], ('(',)) and is_assignment(t)):
             j = i + 2
-            while j < len(tokens) and tokens[j] != ')':
+            while j < len(tokens) and not is_operator(tokens[j], (')',)):
                 j += 1
             out.append('%s(%s)' % (t, ' '.join(tokens[i + 2:j])))
             i = j + 1
