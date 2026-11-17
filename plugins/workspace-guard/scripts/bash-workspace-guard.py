@@ -3290,6 +3290,11 @@ def files_in_command(tokens):
         file_positionals = [p for p in file_positionals
                             if '=' not in p.split('/')[0]]
     files += file_positionals
+    if name == 'sed' and '-l' in tokens and os.path.basename(tokens[0]) != 'gsed':
+        # BSD sed's `-l` takes no argument, so `sed -l p ../x` reads `../x` on
+        # macOS (Q374). Judge the operands under that reading too.
+        bsd = files_in_command([t for t in tokens if t != '-l'])
+        files += [f for f in bsd if f not in files]
     return files
 
 

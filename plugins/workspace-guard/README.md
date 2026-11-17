@@ -197,6 +197,7 @@ different repository's scratch still asks entirely.
 | `cp x /tmp/claude-501/<this-project>/<sibling>/…` (sibling write) | **ask** |
 | `cat /tmp/claude-501/<other-project>/…` (cross-project read) | **ask** |
 | `sed '/x/w /etc/leak' notes.md` (the script writes a file) | **ask** |
+| `sed -l p /etc/hosts` (macOS `-l` takes no argument) | **ask** |
 | `cat /tmp/out` · `cat /var/tmp/x`    | **deny** |
 | `sed -f /tmp/evil.sed notes.md`      | **deny** |
 | `sed -i '' '/^#/d' notes.md` (script or path?) | **deny** |
@@ -950,9 +951,9 @@ through the same boundary rules and produce the same reasons. Symlink staging
    program/pattern to skip. A `sed` script is read for the files it names
    itself: `w`/`W` and an `s` command's `w` flag write one and `r`/`R` read
    one, so `sed '/x/w ../leak' f` is judged like `cp f ../leak`. GNU and BSD sed
-   disagree about which word is the script after `-i` and about whether a
-   `[…]` hides the delimiter, so the script is read every way and the files
-   unioned. `dd` is handled separately because its operands are
+   disagree about which word is the script after `-i` or `-l` and about whether
+   a `[…]` hides the delimiter, so the script and the operands are read every
+   way and the files unioned. `dd` is handled separately because its operands are
    all `KEY=VALUE` pairs — `if=PATH` and `of=PATH` are the file operands; the
    rest (`bs=`, `count=`, `conv=`, `iflag=`, `oflag=`, …) are values, not paths.
    `mktemp` is handled separately too, because its *default* location is host
