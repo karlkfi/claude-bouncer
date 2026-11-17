@@ -13877,7 +13877,24 @@ class ProcessSubstBodyTests(OutsideParentFixture, unittest.TestCase):
 
     def test_a_cd_before_the_substitution_moves_its_body(self):
         self.assertEqual("ask", self._decision("cd ..; true <(rm -rf q276-x)"))
-        self.assertIsNone(self._decision("cd sub; true <(rm -rf ../in.txt)"))
+        # The body is a group of its own, as a bare `$(…)` one is, so it gets
+        # the `allow` `rm -rf in.txt` gets written plainly (Q282).
+        self.assertEqual("allow",
+                         self._decision("cd sub; true <(rm -rf ../in.txt)"))
+
+    def test_a_cd_in_the_body_stays_in_it(self):
+        # Q282: bash reads `sub/../in.txt`, the workspace's own file. The outer
+        # read took the `<` as a redirect onto the `(` and opened no subshell,
+        # so it resolved `../in.txt` from the root and asked.
+        for cmd in ("true <(cd sub; cat ../in.txt)",
+                    "cat <(cd sub; cat ../in.txt)",
+                    "tee >(cd sub; cat ../in.txt) < in.txt"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual("allow", self._decision(cmd))
+        for cmd in ("true <(cd sub; cat ../../q282-x)",
+                    "true <(cd sub); cat ../q282-x"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual("ask", self._decision(cmd))
 
     def test_a_substitution_inside_one_is_left_to_the_recursion(self):
         # The `$(id)` inside the `<(…)` is that body's own; listing it beside
