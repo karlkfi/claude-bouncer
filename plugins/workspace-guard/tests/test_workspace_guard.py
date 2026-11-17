@@ -13891,8 +13891,11 @@ class ProcessSubstBodyTests(OutsideParentFixture, unittest.TestCase):
                     "tee >(cd sub; cat ../in.txt) < in.txt"):
             with self.subTest(cmd=cmd):
                 self.assertEqual("allow", self._decision(cmd))
+        # Behind an assignment the `cd` leaked into the rest of the string, so
+        # the outside `../q282-x` got an `allow` bash reads it under.
         for cmd in ("true <(cd sub; cat ../../q282-x)",
-                    "true <(cd sub); cat ../q282-x"):
+                    "true <(cd sub); cat ../q282-x",
+                    "x=<(cd sub); cat ../q282-x"):
             with self.subTest(cmd=cmd):
                 self.assertEqual("ask", self._decision(cmd))
 
