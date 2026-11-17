@@ -110,6 +110,7 @@ Decision cell.
 | `git log --follow -- README.md` | defer |
 | `journalctl -f`, `docker logs -f c1`, `watch kubectl get pods` | **deny** |
 | `while true; do gh pr checks 1; sleep 5; done` | **deny** (poll loop) |
+| `while true; do gh pr checks 1; x=$(sleep 5); done` | **deny** (poll loop) |
 | `gh pr checks 1; sleep 5; gh pr checks 1` | **deny** (repeat-with-sleep) |
 | `pkill -f probe.sh; sleep 2; pgrep -fl probe.sh` | defer (different commands, below floor) |
 | `sleep 300` | **deny** (≥ floor, default 10 s) |
@@ -225,8 +226,9 @@ claude plugin update foreground-guard@claude-bouncer
 **Class A — loop and sleep forms:**
 
 - `while`/`until`/`for` loops whose condition or body runs `sleep` (any
-  duration — the loop multiplies it). A `sleep` after the loop's `done` runs
-  once and is judged by the rules below.
+  duration — the loop multiplies it), directly or through a `$( )`,
+  `bash -c` or `eval` body. A `sleep` after the loop's `done` runs once and
+  is judged by the rules below.
 - Chained repeat-with-sleep: `cmd; sleep N; cmd; ...` — the same command
   on both sides of a sleep is a poll regardless of `N`. A sleep between two
   *different* commands is one wait (a settle after a kill, grace after a

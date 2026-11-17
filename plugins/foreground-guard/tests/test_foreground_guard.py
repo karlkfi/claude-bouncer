@@ -534,6 +534,43 @@ class LoopAndSleepTests(unittest.TestCase):
             self.assertEqual(d, "deny", cmd)
             self.assertIn("loop", r, cmd)
 
+    # The loop body sleeps through a nested command string (Q359).
+    NESTED_SLEEP_IN_LOOP = (
+        "while true; do x=$(sleep 1); done",
+        "while true; do bash -c 'sleep 1'; done",
+        "while true; do eval 'sleep 1'; done",
+        "while true; do gh pr checks 1; x=$(sleep 5); done",
+        "while x=$(sleep 1); do ls; done",
+        "for i in 1 2; do bash -c 'x=$(sleep 1)'; done",
+        "while true; do x=$(sleep 30); done",
+        "for i in 1 2; do for j in $(sleep 1; echo a); do :; done; done",
+        "for i in $(sleep 1); do x=$(sleep 1); done",
+    )
+
+    # The nested sleep is outside the loop, detached, or bounded.
+    NESTED_SLEEP_NOT_IN_LOOP = (
+        "x=$(sleep 1); for i in 1 2; do ls; done",
+        "for i in 1 2; do ls; done; bash -c 'sleep 1'",
+        "while true; do x=$(sleep 1) & done",
+        "while true; do timeout 5 bash -c 'sleep 1'; done",
+        "while true; do bash -c 'sleep 1 &'; done",
+        # A `for` word list is expanded once, before the first iteration.
+        "for i in $(sleep 1; echo a b c); do :; done",
+        "time for i in $(sleep 1); do :; done",
+        "for i in 1; do :; done; for j in $(sleep 1); do :; done",
+    )
+
+    def test_nested_sleep_in_loop_denies(self):
+        for cmd in self.NESTED_SLEEP_IN_LOOP:
+            d, r = run_hook(cmd)
+            self.assertEqual(d, "deny", cmd)
+            self.assertIn("`while`/`until`/`for` loop", r, cmd)
+
+    def test_nested_sleep_not_in_loop_defers(self):
+        for cmd in self.NESTED_SLEEP_NOT_IN_LOOP:
+            d, _ = run_hook(cmd)
+            self.assertIsNone(d, "expected defer for %r" % cmd)
+
     def test_long_sleep_after_loop_still_judged_by_floor(self):
         d, r = run_hook("for c in a b; do true; done; sleep 30")
         self.assertEqual(d, "deny")
