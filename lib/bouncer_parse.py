@@ -787,6 +787,29 @@ def _scan_case_pattern(text, start):
     return None
 
 
+def _trampoline(steps):
+    """Run a ``*_steps`` generator to its return value.
+
+    Each one yields a nested scan it needs the result of, and is sent that
+    result back, so a nested ``${`` or ``$(`` costs a list entry rather than
+    a Python frame. Recursing, a thousand nested ``${y:-`` raised
+    ``RecursionError`` and the hook exited 1, which Claude Code reads as no
+    decision (Q337).
+    """
+    stack, result = [steps], None
+    while True:
+        try:
+            nested = stack[-1].send(result)
+        except StopIteration as done:
+            stack.pop()
+            if not stack:
+                return done.value
+            result = done.value
+            continue
+        stack.append(nested)
+        result = None
+
+
 def _scan_dollar_paren(text, start):
     """Scan a ``$(`` body from ``start`` (just past ``$(``) to its matching ``)``.
 
@@ -855,6 +878,9 @@ def _scan_dollar_paren(text, start):
     stepped over: a paren in double quotes closes nothing anyway, and counting
     its parens flat would miscount a quoted one in a ``$(…)`` inside it.
     """
+    return _trampoline(_scan_dollar_paren_steps(text, start))
+
+def _scan_dollar_paren_steps(text, start):
     i, n = start, len(text)
     in_single = in_double = False
     cmd_pos = True        # bash reads a command just past the `$(`
@@ -884,7 +910,9 @@ def _scan_dollar_paren(text, start):
                 clauses, pending, parens, dollar = [], [], [], -2
                 i += 2
                 continue
-            end = _brace_end(text, i) if text.startswith('${', i) else -1
+            end = -1
+            if text.startswith('${', i):
+                end = yield _brace_end_steps(text, i)
             if end < 0 and c == '`':
                 end = _scan_backticks(text, i + 1)[1]
             i = max(end, i + 1)
@@ -929,7 +957,7 @@ def _scan_dollar_paren(text, start):
             continue
         end = _ansi_c_end(text, i)
         if end < 0 and text.startswith('${', i):
-            end = _brace_end(text, i)
+            end = yield _brace_end_steps(text, i)
         elif end < 0 and c == '`':
             end = _scan_backticks(text, i + 1)[1]
         if end > 0:
@@ -1038,6 +1066,9 @@ def _brace_end(text, i):
     backtick holds its own. A bare ``{`` does not nest -- ``${x:-{a}`` ends at
     the first ``}``.
     """
+    return _trampoline(_brace_end_steps(text, i))
+
+def _brace_end_steps(text, i):
     i, n = i + 2, len(text)
     in_double = False
     while i < n:
@@ -1057,10 +1088,10 @@ def _brace_end(text, i):
         elif text.startswith('$((', i):
             end = _skip_balanced_parens(text, i + 1)
         elif text.startswith('$(', i):
-            end = _scan_dollar_paren(text, i + 2)[1]
+            end = (yield _scan_dollar_paren_steps(text, i + 2))[1]
             end = -1 if end == i + 2 else end
         elif text.startswith('${', i):
-            end = _brace_end(text, i)
+            end = yield _brace_end_steps(text, i)
         elif c == '`':
             end = _scan_backticks(text, i + 1)[1]
             end = -1 if end == i + 1 else end
