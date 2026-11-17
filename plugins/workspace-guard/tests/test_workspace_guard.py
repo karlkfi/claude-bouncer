@@ -5513,7 +5513,11 @@ class FunsubCdTests(OutsideParentFixture, unittest.TestCase):
                     "x=${ cd ..; }; cat in.txt",
                     "echo ${ cd ..; } $(cat in.txt)",
                     "echo ${ echo ${ cd ..; }; }; cat in.txt",
-                    "echo ${ cat ../in.txt; }"):
+                    "echo ${ cat ../in.txt; }",
+                    # A heredoc in the body hid what followed it.
+                    "echo ${ cat <<E\nhi\nE\ncd ..; }; cat in.txt",
+                    'echo "${ cat <<E\nhi\nE\ncd ..; }"; cat in.txt',
+                    "echo ${ cat <<'E'\nhi\nE\ncat ../in.txt; }"):
             with self.subTest(cmd=cmd):
                 self.assertEqual("ask", self._decision(cmd))
 

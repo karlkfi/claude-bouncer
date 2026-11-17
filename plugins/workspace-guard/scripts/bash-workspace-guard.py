@@ -5053,9 +5053,12 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
 
     stripped = strip_heredoc_bodies(cmd)
     masked = mask_funsubs(stripped)
-    if masked is None:                            # no funsub can be placed
+    # The bodies come from a string that kept their heredocs, which the full
+    # strip above leaves half-armed (Q357); the two scans pair one to one.
+    whole = mask_funsubs(strip_heredoc_bodies(cmd, own_level_only=True))
+    if masked is None or whole is None or len(whole[1]) != len(masked[1]):
         masked, base_cwd_unknown = (stripped, []), True
-    stripped, fun_bodies = masked
+    stripped, fun_bodies = masked[0], whole[1] if masked[1] else []
     tokens = tokenize_command(stripped, heredocs=False)
     if tokens is None:
         return [], False, KillFacts(None, None, [])   # unbalanced quotes -> defer

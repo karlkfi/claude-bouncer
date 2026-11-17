@@ -622,7 +622,8 @@ def strip_heredoc_bodies(cmd, expanded=None, unterminated=None,
     re-scanning the raw string for substitution bodies needs both halves: the
     top level's data gone, since an apostrophe in one opens a quoted run that
     swallows the rest of the scan, and each body whole, since its terminator is
-    what lets the next strip disarm it cleanly (Q119). The returned string is
+    what lets the next strip disarm it cleanly (Q119). A funsub is copied
+    through whole for the same reason (Q357). The returned string is
     not itself re-strippable — the top level's own `<<WORD` comes back disarmed,
     as it does by default — so re-scan the bodies, never the result. The default
     strips every level, because the callers that hand it to shlex need all of it
@@ -656,6 +657,12 @@ def strip_heredoc_bodies(cmd, expanded=None, unterminated=None,
                 last = cmd[i-1]
             elif cmd[i-1] != '\n':                # a continuation joins words
                 last = c                          # `\ ` opens no word (Q324)
+            continue
+        # A funsub's heredocs are its own as much as a `$(…)` body's are.
+        end = _brace_end(cmd, i) if own_level_only and _funsub_at(cmd, i) \
+            else -1
+        if end > 0:
+            out.append(cmd[i:end]); last = 'x'; i = end
             continue
         # A substitution body is parsed in its own quote context, so these two
         # openers are recognised whether or not a `"` is still open.

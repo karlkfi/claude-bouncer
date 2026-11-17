@@ -365,6 +365,18 @@ class FunsubTests(unittest.TestCase):
                          bp.command_substitutions(cmd))
 
 
+class OwnLevelHeredocTests(unittest.TestCase):
+    def test_a_funsub_keeps_its_heredoc_as_a_substitution_does(self):
+        # Stripped, the body handed on was `cat <<E\nP;`, whose `P` a second
+        # strip then swallows as heredoc data (Q357).
+        for cmd in ('echo $( cat <<E\nhi\nE\nP; )',
+                    'echo ${ cat <<E\nhi\nE\nP; }',
+                    'echo "${ cat <<E\nhi\nE\nP; }"'):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(cmd, bp.strip_heredoc_bodies(
+                    cmd, own_level_only=True))
+
+
 class ArithmeticCloseTests(unittest.TestCase):
     """Whether bash reads a `((` as arithmetic, and where it ends (Q338, Q361).
 
