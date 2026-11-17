@@ -3450,6 +3450,9 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
             _unset(reassigned_names(tool, argv[1:])
                    if tool in REASSIGN_BUILTINS else {EVERY_NAME},
                    defining, maybe, functions, shell_env, exported)
+            if tool in SOURCE_BUILTINS and maybe != 'apart':
+                # And it may define any command as a function (Q336).
+                functions.setdefault(EVERY_NAME, set())
             continue
         if tool in ('for', 'select') and group[0] == tool \
                 and getattr(group[0], 'quoted_from', None) is None:
@@ -3526,15 +3529,18 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
                                 prefixed - set(shell_env), (word,), texts)
                             if k in body_env}}
                 # bash runs a `BASH_ENV` file before the body, which can set
-                # any name the body reads (Q299).
-                sub_shell = {} if tool == 'bash' and child.get('BASH_ENV') \
-                    else None
+                # any name the body reads (Q299) and define any command (Q336).
+                sourced = tool == 'bash' and child.get('BASH_ENV')
+                sub_shell = {} if sourced else None
+                sub_known = ({EVERY_NAME: set()}, {}) if sourced else None
                 sub_f, sub_o, sub_s = evaluate_command_string(
-                    body, ctx, depth + 1, body_env, sub_shell)
+                    body, ctx, depth + 1, body_env, sub_shell,
+                    known=sub_known)
                 findings += sub_f
                 for other in sorted(others):
                     findings += evaluate_command_string(
-                        other, ctx, depth + 1, body_env, sub_shell)[0]
+                        other, ctx, depth + 1, body_env, sub_shell,
+                        known=sub_known)[0]
                 override = override or sub_o
                 session_reason = session_reason if session_reason is not None else sub_s
             continue
@@ -3589,6 +3595,10 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
             # runs apart, where it reaches nothing.
             if defining is None and maybe != 'apart':
                 _forget(functions[tool], shell_env, exported)
+        elif EVERY_NAME in functions:
+            # A sourced file may have defined it, so it may set any name.
+            _unset({EVERY_NAME}, defining, maybe, functions, shell_env,
+                   exported)
         evaluator = EVALUATORS.get(tool)
         if evaluator is None:
             continue  # uncovered tool: defer

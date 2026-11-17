@@ -289,7 +289,9 @@ judged under each, so a production value on either side denies. A later `&&`
 in the same list runs only if the assignment did, so it sees only the new
 value. A name set with no value the guard can read also prompts. That covers names set by `read`, `printf -v`, `mapfile`, `getopts`, `unset` or a
 `for` loop, and every name after `source`, `.`, or a `bash -c` that a
-`BASH_ENV` file runs ahead of. A guard
+`BASH_ENV` file runs ahead of. The file may also define functions, so after it
+any command the string did not define may set every name, and one assigned
+before that command prompts after it. A guard
 that only inspected the first token would be trivially bypassed by
 `echo hi && kubectl --context prod delete ns x`. A substitution is split out
 inside double quotes and unquoted heredoc bodies too, where bash still runs
