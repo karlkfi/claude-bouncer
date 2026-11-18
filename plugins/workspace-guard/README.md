@@ -1217,8 +1217,12 @@ through the same boundary rules and produce the same reasons. Symlink staging
    what the hook withdraws is only its willingness to *vouch* for them, so
    `cat README.md && python3 -c '…'` no longer runs silently. A script path that
    resolves **inside** the workspace is exempt — that is repo-resident code the
-   boundary already trusts — as is an interpreter run on another filesystem
-   (`ssh`, `docker exec`, `kubectl exec`) and a `--version`/`--help` query.
+   boundary already trusts — unless the same string also writes it (a redirect,
+   `tee`, `cp`/`mv`/`ln` onto it, `sed -i`), since then it is code the agent has
+   just authored: `cat > t.sh <<'EOF' … EOF; bash t.sh` defers, and so does
+   `./t.sh` or `source t.sh` after the same write. An interpreter run on another
+   filesystem (`ssh`, `docker exec`, `kubectl exec`) and a `--version`/`--help`
+   query are exempt too.
    A `Stop-Process` or a `taskkill` suppresses
    the PowerShell `allow` too,
    including one this step had no cause to deny and one written inside a `$(…)`
@@ -1830,9 +1834,15 @@ final output.
   withholds `allow` and so protects nothing under `auto`, `acceptEdits`, or
   `bypassPermissions` — see
   [`docs/permission-modes.md`](docs/permission-modes.md).
+  An in-workspace script vouches only when nothing in the string writes it;
+  the writes counted are the ones the hook reads anyway — redirect targets and
+  the write operands of guarded commands, in any order and inside `$(…)` or
+  `sh -c` bodies, with a write to a directory covering every script under it.
   Residuals, all erring toward silence: inline code (`python3 -c`, `python3 -m`,
-  a heredoc) carries no path to check, and the PowerShell tool does not yet
-  apply the suppression.
+  a heredoc) carries no path to check; a write by a command the hook does not
+  guard (`curl -o t.sh`, `git checkout`, `tar x`) is not seen, so
+  `cat README.md; curl -o t.sh URL; bash t.sh` still allows; and the PowerShell
+  tool does not apply the same-string write check.
 - A leading `~`/`~/…` is expanded to your home directory (bash does this
   deterministically), so a home path inside the root is allowed. Tokens that
   bash would expand *unpredictably* at runtime — `~user`/`~+`/`~-`, or a `$`

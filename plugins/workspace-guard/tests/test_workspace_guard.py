@@ -9354,6 +9354,27 @@ class InterpreterSuppressesAllowTests(unittest.TestCase):
                     "cat in.txt && node subdir/app.js"):
             self._decision(cmd, "allow")
 
+    def test_a_script_the_string_writes_does_not_vouch(self):
+        # Code the same call writes is authored, not repo-resident. Measured at
+        # workspace-guard/v1.15.0: each of these returned `allow`, the first
+        # with an outside read in the heredoc body it then ran.
+        for cmd in ("cat > t2.sh <<'EOF'\ncat /q72-fake-target/f\nEOF\n"
+                    "bash t2.sh",
+                    "cat in.txt > t.sh; bash t.sh",
+                    "cp in.txt t.sh && bash t.sh",
+                    "cat in.txt | tee t.sh; sh t.sh",
+                    "cat in.txt; cp in.txt sub/ && python3 sub/in.txt",
+                    "cat in.txt; bash t.sh; cp in.txt t.sh",
+                    "cat in.txt; x=\"$(cp in.txt t.sh)\"; bash t.sh",
+                    "cat in.txt > t.sh; ./t.sh",
+                    "cat in.txt > t.sh; source t.sh"):
+            self._decision(cmd, "defer")
+
+    def test_reading_a_resident_script_before_running_it_still_allows(self):
+        # A read is not a write: the documented exemption holds.
+        self._decision("cat in.txt; bash in.txt", "allow")
+        self._decision("cat in.txt > out.txt; bash in.txt", "allow")
+
     def test_an_interpreter_on_another_filesystem_still_allows(self):
         # Locality is decided the way `shell_c_bodies` decides it: the code runs
         # on another host, so this workspace's boundary has nothing to say.
