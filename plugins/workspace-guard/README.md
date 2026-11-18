@@ -234,7 +234,7 @@ different repository's scratch still asks entirely.
 | `f=$HOME/x; cat $f` (non-literal value) | **deny** |
 | `cat $TMPDIR/out.log`                | **deny** |
 | `cd $HOME && cat notes.md` (untracked `cd`) | **deny** |
-| `source env.sh; cat notes.md` (`eval`, `source`, a trap) | **deny** |
+| `source env.sh; cat notes.md` (`eval`, `source`, a trap that can `cd`) | **deny** |
 | `cat $f /etc/hosts` (also names an outside path) | **deny** |
 | `rm -rf <sibling-worktree>` (the whole checkout) | **deny** |
 | `rm ~/.claude/skills/x` (a symlink into a sibling) | **ask** |
@@ -992,7 +992,11 @@ through the same boundary rules and produce the same reasons. Symlink staging
    untracked-`cd` `deny` below. So does `eval`, `source` or `.`, a `trap`
    that can fire before the shell exits (any signal but `EXIT`), and a
    `mapfile -C` callback: each runs code in this shell that the string does not
-   spell out, and that code can `cd` (`source env.sh; cat x` denies). A bash
+   spell out, and that code can `cd` (`source env.sh; cat x` denies). A trap
+   whose action is written out in the string is read instead, and loses the
+   cwd only when that body could move it inline, so
+   `trap 'rm -f ./tmp/k' EXIT INT; cat x` is judged as usual while
+   `trap 'cd ..' INT` and `trap "$t" INT` still deny what follows. A bash
    5.3 `${ …; }` or `${| …; }` substitution runs in this shell too, and its
    body is read: a `cd` there moves the command it sits in and everything
    after (`echo ${ cd ..; }; cat x` asks on `../x`), and a function it defines
