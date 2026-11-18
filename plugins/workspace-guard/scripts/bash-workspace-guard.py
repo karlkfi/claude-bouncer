@@ -4795,7 +4795,8 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
                     if idx < len(bodies) and texts[idx].startswith('${'):
                         yield bodies[idx]
         funcs = cd_functions(groups, scopes, funcs, moves=lambda g: any(
-            funsub_moves(b, funcs, lastpipe) for b in funsubs_in(g)))
+            funsub_moves(b, funcs, lastpipe) for b in funsubs_in(g)),
+            lastpipe=lastpipe)
         left_unknown = False
         for (g, g_redir, _persists, _pipe, nhd), (shells, own), g_hs in zip(
                 groups, scopes, hs):
@@ -4850,7 +4851,7 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
             if kind is not None:
                 cwd, unknown = apply_cd(kind, arg, cwd, unknown)
             elif own and (calls_cd_function(wrap, funcs)
-                          or runs_in_shell(wrap)):
+                          or runs_in_shell(wrap, funcs, lastpipe)):
                 unknown = True
             moved = moved or (cwd, unknown) != fallback
             # Recorded after this group's own `cd`, so a `cd $d` cannot read an
@@ -4937,7 +4938,7 @@ def function_scope(shells):
     return None
 
 
-def cd_functions(groups, scopes, known=(), moves=None):
+def cd_functions(groups, scopes, known=(), moves=None, lastpipe=False):
     """Names of the functions a call to which moves the caller's cwd (Q265).
 
     A body runs in the shell that calls it, so a `cd` written at the body's own
@@ -4945,6 +4946,7 @@ def cd_functions(groups, scopes, known=(), moves=None):
     A body calling one of these moves its caller too. ``known`` names the ones
     an enclosing string defined, which a substitution inherits. ``moves``, when
     given, says whether a group holds a funsub that moves the cwd (Q357).
+    ``lastpipe`` is for the trap bodies a group sets.
     """
     funcs, grew = set(known), True
     while grew:
@@ -4961,7 +4963,8 @@ def cd_functions(groups, scopes, known=(), moves=None):
             if wrap.external or not wrap.argv:
                 continue
             if (classify_cd(wrap.argv)[0] is not None
-                    or wrap.argv[0] in funcs or runs_in_shell(wrap)):
+                    or wrap.argv[0] in funcs
+                    or runs_in_shell(wrap, funcs, lastpipe)):
                 funcs.add(name)
                 grew = True
     return funcs
@@ -4973,10 +4976,14 @@ def calls_cd_function(wrap, funcs):
         and wrap.argv[0] in funcs
 
 
-def runs_in_shell(wrap):
+def runs_in_shell(wrap, funcs=(), lastpipe=False):
     """Whether a peeled group runs a list in this shell that the string does
     not spell out -- `eval`, `source`, `.`, a trap that can fire before exit,
-    a `mapfile -C` callback -- so a `cd` in it moves the caller (Q356)."""
+    a `mapfile -C` callback -- so a `cd` in it moves the caller (Q356).
+
+    A trap whose action is literal is spelled out, so its body is read as a
+    funsub body is, with ``funcs`` and ``lastpipe`` as `funsub_moves` takes
+    them, and only a body that can move the cwd counts."""
     if wrap.external or not wrap.argv:
         return False
     name, args = wrap.argv[0], wrap.argv[1:]
@@ -4987,7 +4994,9 @@ def runs_in_shell(wrap):
             args = args[1:]
         if len(args) < 2 or args[0] in ('', '-') or args[0].startswith('-'):
             return False                          # -p, -l, a reset, an ignore
-        return any(s.upper() not in ('EXIT', 'SIGEXIT', '0') for s in args[1:])
+        return any(s.upper() not in ('EXIT', 'SIGEXIT', '0')
+                   for s in args[1:]) and trap_action_moves(
+                       args[0], funcs, lastpipe)
     if name in ('mapfile', 'readarray'):
         it = iter(args)
         for a in it:
@@ -5001,6 +5010,32 @@ def runs_in_shell(wrap):
                         next(it, None)
                     break
     return False
+
+
+def trap_action_moves(action, funcs=(), lastpipe=False):
+    """Whether a trap's action can leave the shell in another directory.
+
+    Bash expands the word once when the trap is set and parses the result when
+    it fires, so a `$` or backtick outside single quotes, or an unquoted glob,
+    brace or tilde, makes a body the string does not spell out. A word read
+    back from a substitution has lost its quoting record and counts as unquoted.
+    A body that defines a function or turns `lastpipe` on changes what the
+    commands after it do, which reading it from a probe directory cannot see.
+    """
+    whole = getattr(action, 'quoted_chars', 0) == len(action)
+    single = whole and getattr(action, 'quotes', frozenset()) == {"'"}
+    if not single and (re.search(r'[$`]', action)
+                       or not whole and re.search(r'[*?[{~]', action)):
+        return True
+    tokens = tokenize_command(action)
+    if tokens is None:
+        return True
+    scopes = []
+    groups = split_groups(tokens, scopes)
+    if any(function_scope(shells) is not None for shells, _ in scopes) \
+            or any(lastpipe_setting(g) for g, *_ in groups):
+        return True
+    return funsub_moves(action, funcs, lastpipe)
 
 
 def lastpipe_setting(words):
@@ -5477,11 +5512,12 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
     scopes = []
     groups = split_groups(resume_interrupted_commands(tokens), scopes,
                           lastpipe=seed_lastpipe)
-    cd_funcs = cd_functions(groups, scopes, seed_funcs, moves=lambda g: any(
-        funsub_moves(b, seed_funcs, seed_lastpipe) for b in funsubs_in(g)))
     # Whether `lastpipe` may be on anywhere in the string, for the bodies it
     # runs; a superset, since a body's position is not tracked here.
     lastpipe = seed_lastpipe or any(lastpipe_setting(g) for g, *_ in groups)
+    cd_funcs = cd_functions(groups, scopes, seed_funcs, moves=lambda g: any(
+        funsub_moves(b, seed_funcs, seed_lastpipe) for b in funsubs_in(g)),
+        lastpipe=lastpipe)
 
     def is_outside(rp):
         return path_is_outside(rp, proj)
@@ -5973,7 +6009,8 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
         # only (Q173). A call to a function whose body runs a `cd` moves the
         # cwd somewhere the definition does not say (Q265), and so can an
         # `eval`, `source` or trap.
-        if own and (calls_cd_function(wrap, cd_funcs) or runs_in_shell(wrap)):
+        if own and (calls_cd_function(wrap, cd_funcs)
+                    or runs_in_shell(wrap, cd_funcs, lastpipe)):
             group_cwd_unknown = True
         kind, arg = (None, None) if wrap.external else classify_cd(g)
         if kind is not None:

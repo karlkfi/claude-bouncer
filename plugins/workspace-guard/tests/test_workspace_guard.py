@@ -5725,6 +5725,48 @@ class InShellCdTests(OutsideParentFixture, unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertEqual("allow", self._decision(cmd))
 
+    def test_a_literal_trap_body_is_read_for_a_cd(self):
+        # Q397: a trap body written out in the string is read like a funsub
+        # body, so a cleanup that cannot cd keeps the cwd. Pre-fix every one
+        # denied as an untracked cd, the first two lifted from real sessions.
+        for cmd in ("trap 'rm -f ./tmp/k.pem' EXIT INT TERM; cat in.txt",
+                    "cd sub; trap 'rm -f ./tmp/q215/app.key' EXIT INT TERM; "
+                    "cat ../in.txt",
+                    "trap \"rm -f ./tmp/k.pem\" INT; cat in.txt",
+                    "trap 'rm -f \"$KEY_FILE\"' INT; cat in.txt",
+                    "trap 'rm x | cd ..' INT; cat in.txt",
+                    "f() { rm x; }; trap f INT; cat in.txt",
+                    "g() { trap 'rm x' INT; }; g; cat in.txt"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual("allow", self._decision(cmd))
+
+    def test_a_trap_body_that_can_cd_or_cannot_be_read_drops_the_cwd(self):
+        # A body that moves the cwd inline moves it from a trap too, and one
+        # bash builds by expanding a word when the trap is set is not in the
+        # string to read.
+        for cmd in ("trap 'cd sub' INT; cat in.txt",
+                    "trap 'rm x; cd ..' INT; cat in.txt",
+                    "trap 'pushd ..' INT; cat in.txt",
+                    "trap 'eval x' INT; cat in.txt",
+                    "trap 'trap \"cd ..\" DEBUG' INT; cat in.txt",
+                    "trap '${ cd ..; }' INT; cat in.txt",
+                    "trap 'rm x | cd ..' INT; shopt -s lastpipe; cat in.txt",
+                    "f() { cd ..; }; trap f INT; cat in.txt",
+                    "trap f INT; f() { cd ..; }; cat in.txt",
+                    "g() { trap 'cd ..' INT; }; g; cat in.txt",
+                    "g() { trap 'rm x | cd ..' INT; }; shopt -s lastpipe; g; "
+                    "cat in.txt",
+                    "trap 'f() { cd ..; }' INT; f; cat in.txt",
+                    "trap 'shopt -s lastpipe' INT; rm x | cd ..; cat in.txt",
+                    'trap "$t" INT; cat in.txt',
+                    'trap "rm $f" INT; cat in.txt',
+                    "trap $t INT; cat in.txt",
+                    'trap "$(echo cd ..)" INT; cat in.txt',
+                    "trap `echo x` INT; cat in.txt",
+                    "trap ~/x INT; cat in.txt"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual("deny", self._decision(cmd))
+
 
 class FunsubCdTests(OutsideParentFixture, unittest.TestCase):
     """Q357: a bash 5.3 funsub runs its body in this shell.
