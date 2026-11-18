@@ -4573,6 +4573,30 @@ def resolve_native_path(raw, cwd):
 KillFacts = collections.namedtuple('KillFacts', ['signal', 'launder', 'patterns'])
 
 
+class ScriptWrites:
+    """Paths a string writes and the in-workspace scripts it runs, gathered
+    across every recursion of one `analyze_command` call.
+
+    An in-workspace script vouches as repo-resident code, which it is not when
+    the same string writes it: then it is code the agent has just authored.
+    Order is not tracked, since a loop or a `&` runs a textually later write
+    first. A write to a directory covers every script beneath it, which is what
+    `cp x dir/` does. Paths compare casefolded, since `T.SH` and `t.sh` are one
+    file on APFS and NTFS and `realpath` cannot fold a path not yet created. A
+    run whose operand could not be resolved (`unknown`) is covered by any write.
+    """
+
+    def __init__(self):
+        self.writes, self.runs, self.unknown = set(), [], False
+
+    def authored(self):
+        if self.unknown and self.writes:
+            return True
+        writes = [w.casefold().rstrip(os.sep) for w in self.writes]
+        return any(r == w or r.startswith(w + os.sep)
+                   for r in (r.casefold() for r in self.runs) for w in writes)
+
+
 def tokenize_command(cmd, heredocs=True):
     r"""Shell tokens for a command string, or None when the quoting is unbalanced.
 
@@ -5428,7 +5452,11 @@ def analyze_command(cmd, ctx, base_cwd, depth=0, suppressed=None):
       ``pkill`` rule, and is what keeps the bare-word pattern of a
       ``grep -v grep`` stage from denying an otherwise anchored pipeline.
     """
-    offenders, guarded, kf = _analyze_command(cmd, ctx, base_cwd, depth)
+    scripts = ScriptWrites()
+    offenders, guarded, kf = _analyze_command(cmd, ctx, base_cwd, depth,
+                                              scripts=scripts)
+    if not kf.signal and scripts.authored():
+        kf = kf._replace(signal=INTERPRETER_SIGNAL)
     if suppressed is not None and guarded and kf.signal:
         suppressed.append(kf.signal)
     if kf.launder and kf.patterns and not any(a for _, a in kf.patterns):
@@ -5442,7 +5470,7 @@ def analyze_command(cmd, ctx, base_cwd, depth=0, suppressed=None):
 
 def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None,
                      seed_loops=None, base_cwd_unknown=False, seed_funcs=(),
-                     seed_lastpipe=False):
+                     seed_lastpipe=False, scripts=None):
     """Analyze one command string; returns ``(offenders, guarded, KillFacts)``.
 
     Command-substitution bodies (``"$(…)"`` and backtick ``` `…` ```, plus the
@@ -5484,7 +5512,12 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
     substitution inherits from the string that defined them (Q265), and
     ``seed_lastpipe`` says the enclosing string may have turned `lastpipe` on,
     which a substitution inherits too (Q272).
+
+    ``scripts`` is the :class:`ScriptWrites` every recursion shares, so a write
+    inside a body still counts against a script the outer string runs.
     """
+    if scripts is None:
+        scripts = ScriptWrites()
     proj, cwd = ctx.proj, base_cwd
     # Alias for readability at the two use sites far below; the group loop's own
     # nesting counter is `paren` so that neither can shadow the other (Q63).
@@ -5624,6 +5657,12 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
                 continue
             if kind in ('expand', 'untracked'):
                 return (cand, kind, None)
+            if not is_read:
+                # Both spellings, since `cp x link` writes through the link
+                # that a script operand's realpath lands on.
+                scripts.writes.add(rp)
+                scripts.writes.add(resolve_token(
+                    cand, group_cwd, group_cwd_unknown, not entry)[1])
             # A path staged outside by an earlier `ln` (symbolic or hard) is
             # flagged even when it physically lives under the session temp dir —
             # checked BEFORE the session-tmp allow so the ln-staging defense
@@ -5960,7 +5999,9 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
         # already trusts, and exempting it is what keeps this from costing an
         # order of magnitude more friction than it buys. An unresolvable operand
         # (untracked cwd, a runtime-expanded token) cannot be shown to be
-        # in-workspace, so it suppresses.
+        # in-workspace, so it suppresses. A script the string also writes is
+        # not repo-resident, which `ScriptWrites` settles once every write in
+        # the string has been seen.
         src = interp_code_source(g)
         if src is not None:
             kind, tok = src
@@ -5986,6 +6027,32 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
                     k, rp = resolve_token(tok, cmd_cwd, cmd_cwd_unknown)
                     if k != 'path' or path_is_outside(rp, ctx.proj):
                         signal = signal or 'interpreter'
+                    else:
+                        scripts.runs.append(rp)
+                    # An option taking an argument (`bash -o errexit t.sh`)
+                    # makes `tok` that argument, so after one every later
+                    # operand may be the script.
+                    at = g.index(tok)
+                    if any(t.startswith('-') for t in g[1:at]):
+                        for t in g[at + 1:]:
+                            k, rp = resolve_token(t, cmd_cwd, cmd_cwd_unknown)
+                            if k == 'path':
+                                scripts.runs.append(rp)
+                            elif k != 'skip':
+                                scripts.unknown = True
+        elif g and (('/' in g[0] and not g[0].endswith('/'))
+                    or os.path.basename(g[0]) in ('source', '.')):
+            # A script run by path or sourced never needed the exemption, but
+            # it runs the same authored code when the string writes it.
+            ops = g[1:2] if '/' not in g[0] else [g[0]]
+            if ops == ['--']:
+                ops = g[2:3]
+            if ops:
+                k, rp = resolve_token(ops[0], cmd_cwd, cmd_cwd_unknown)
+                if k == 'path':
+                    scripts.runs.append(rp)
+                elif k != 'skip':
+                    scripts.unknown = True
         # The body is readable after all when it is a command string this host
         # runs — queued whatever the classification above landed on, since the
         # two answer different questions. Skipped once the cwd is untracked: the
@@ -6252,7 +6319,8 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
                                                   seed_loops=stable_loops,
                                                   base_cwd_unknown=body_cwd_unknown,
                                                   seed_funcs=cd_funcs,
-                                                  seed_lastpipe=lastpipe)
+                                                  seed_lastpipe=lastpipe,
+                                                  scripts=scripts)
             outside.extend(sub_off)
             signal = merge_nested_signal(signal, sub_kf.signal)
             launder = launder or sub_kf.launder
@@ -6271,7 +6339,8 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
     if subst_depth < MAX_SUBST_DEPTH:
         for body, body_cwd in shell_bodies:
             b_off, _, b_kf = _analyze_command(body, ctx, body_cwd,
-                                              subst_depth + 1, in_subst)
+                                              subst_depth + 1, in_subst,
+                                              scripts=scripts)
             outside.extend(b_off)
             signal = merge_nested_signal(signal, b_kf.signal)
             launder = launder or b_kf.launder
@@ -6286,7 +6355,8 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
             break
         f_off, _, f_kf = _analyze_command(body, ctx, body_cwd, subst_depth + 1,
                                           in_subst,
-                                          base_cwd_unknown=body_cwd_unknown)
+                                          base_cwd_unknown=body_cwd_unknown,
+                                          scripts=scripts)
         outside.extend(f_off)
         signal = merge_nested_signal(signal, f_kf.signal)
         launder = launder or f_kf.launder
