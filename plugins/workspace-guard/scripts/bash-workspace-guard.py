@@ -5502,12 +5502,12 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
     scopes = []
     groups = split_groups(resume_interrupted_commands(tokens), scopes,
                           lastpipe=seed_lastpipe)
-    cd_funcs = cd_functions(groups, scopes, seed_funcs, moves=lambda g: any(
-        funsub_moves(b, seed_funcs, seed_lastpipe) for b in funsubs_in(g)),
-        lastpipe=seed_lastpipe)
     # Whether `lastpipe` may be on anywhere in the string, for the bodies it
     # runs; a superset, since a body's position is not tracked here.
     lastpipe = seed_lastpipe or any(lastpipe_setting(g) for g, *_ in groups)
+    cd_funcs = cd_functions(groups, scopes, seed_funcs, moves=lambda g: any(
+        funsub_moves(b, seed_funcs, seed_lastpipe) for b in funsubs_in(g)),
+        lastpipe=lastpipe)
 
     def is_outside(rp):
         return path_is_outside(rp, proj)
