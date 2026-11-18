@@ -5756,6 +5756,8 @@ class InShellCdTests(OutsideParentFixture, unittest.TestCase):
                     "g() { trap 'cd ..' INT; }; g; cat in.txt",
                     "g() { trap 'rm x | cd ..' INT; }; shopt -s lastpipe; g; "
                     "cat in.txt",
+                    "trap 'f() { cd ..; }' INT; f; cat in.txt",
+                    "trap 'shopt -s lastpipe' INT; rm x | cd ..; cat in.txt",
                     'trap "$t" INT; cat in.txt',
                     'trap "rm $f" INT; cat in.txt',
                     "trap $t INT; cat in.txt",

@@ -5019,11 +5019,21 @@ def trap_action_moves(action, funcs=(), lastpipe=False):
     it fires, so a `$` or backtick outside single quotes, or an unquoted glob,
     brace or tilde, makes a body the string does not spell out. A word read
     back from a substitution has lost its quoting record and counts as unquoted.
+    A body that defines a function or turns `lastpipe` on changes what the
+    commands after it do, which reading it from a probe directory cannot see.
     """
     whole = getattr(action, 'quoted_chars', 0) == len(action)
     single = whole and getattr(action, 'quotes', frozenset()) == {"'"}
     if not single and (re.search(r'[$`]', action)
                        or not whole and re.search(r'[*?[{~]', action)):
+        return True
+    tokens = tokenize_command(action)
+    if tokens is None:
+        return True
+    scopes = []
+    groups = split_groups(tokens, scopes)
+    if any(function_scope(shells) is not None for shells, _ in scopes) \
+            or any(lastpipe_setting(g) for g, *_ in groups):
         return True
     return funsub_moves(action, funcs, lastpipe)
 
