@@ -9370,6 +9370,23 @@ class InterpreterSuppressesAllowTests(unittest.TestCase):
                     "cat in.txt > t.sh; source t.sh"):
             self._decision(cmd, "defer")
 
+    def test_a_written_script_still_counts_when_its_run_is_hard_to_read(self):
+        # Review of PR 368: an operand the hook cannot resolve, a case the
+        # filesystem folds, and an option argument read as the script.
+        for cmd in ("cat > t.sh <<'EOF'\ncat /q72-fake-target/f\nEOF\n"
+                    "source -- t.sh",
+                    "cat in.txt > t.sh; . -- t.sh",
+                    "cat in.txt > t.sh; \"$PWD\"/t.sh",
+                    "cat in.txt > t.sh; source $PWD/t.sh",
+                    "cat > T.SH <<'EOF'\ncat /q72-fake-target/f\nEOF\n"
+                    "bash t.sh",
+                    "cat in.txt > t.sh; bash -o errexit t.sh",
+                    "cat in.txt > t.py; python3 -W ignore t.py"):
+            self._decision(cmd, "defer")
+
+    def test_an_unresolvable_run_with_no_write_still_allows(self):
+        self._decision("cat in.txt; \"$PWD\"/t.sh", "allow")
+
     def test_reading_a_resident_script_before_running_it_still_allows(self):
         # A read is not a write: the documented exemption holds.
         self._decision("cat in.txt; bash in.txt", "allow")

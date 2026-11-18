@@ -4581,15 +4581,20 @@ class ScriptWrites:
     the same string writes it: then it is code the agent has just authored.
     Order is not tracked, since a loop or a `&` runs a textually later write
     first. A write to a directory covers every script beneath it, which is what
-    `cp x dir/` and `tar -C dir` do.
+    `cp x dir/` does. Paths compare casefolded, since `T.SH` and `t.sh` are one
+    file on APFS and NTFS and `realpath` cannot fold a path not yet created. A
+    run whose operand could not be resolved (`unknown`) is covered by any write.
     """
 
     def __init__(self):
-        self.writes, self.runs = set(), []
+        self.writes, self.runs, self.unknown = set(), [], False
 
     def authored(self):
-        return any(r == w or r.startswith(w.rstrip(os.sep) + os.sep)
-                   for r in self.runs for w in self.writes)
+        if self.unknown and self.writes:
+            return True
+        writes = [w.casefold().rstrip(os.sep) for w in self.writes]
+        return any(r == w or r.startswith(w + os.sep)
+                   for r in (r.casefold() for r in self.runs) for w in writes)
 
 
 def tokenize_command(cmd, heredocs=True):
@@ -6024,15 +6029,28 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
                         signal = signal or 'interpreter'
                     else:
                         scripts.runs.append(rp)
+                    # An option taking an argument (`bash -o errexit t.sh`)
+                    # makes `tok` that argument, so after one every later
+                    # operand may be the script.
+                    at = g.index(tok)
+                    if any(t.startswith('-') for t in g[1:at]):
+                        for t in g[at + 1:]:
+                            k, rp = resolve_token(t, cmd_cwd, cmd_cwd_unknown)
+                            if k == 'path':
+                                scripts.runs.append(rp)
         elif g and (('/' in g[0] and not g[0].endswith('/'))
-                    or (os.path.basename(g[0]) in ('source', '.')
-                        and len(g) > 1)):
+                    or os.path.basename(g[0]) in ('source', '.')):
             # A script run by path or sourced never needed the exemption, but
             # it runs the same authored code when the string writes it.
-            k, rp = resolve_token(g[0] if '/' in g[0] else g[1],
-                                  cmd_cwd, cmd_cwd_unknown)
-            if k == 'path':
-                scripts.runs.append(rp)
+            ops = g[1:2] if '/' not in g[0] else [g[0]]
+            if ops == ['--']:
+                ops = g[2:3]
+            if ops:
+                k, rp = resolve_token(ops[0], cmd_cwd, cmd_cwd_unknown)
+                if k == 'path':
+                    scripts.runs.append(rp)
+                elif k != 'skip':
+                    scripts.unknown = True
         # The body is readable after all when it is a command string this host
         # runs — queued whatever the classification above landed on, since the
         # two answer different questions. Skipped once the cwd is untracked: the
