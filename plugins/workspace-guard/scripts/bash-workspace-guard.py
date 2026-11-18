@@ -6038,6 +6038,8 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
                             k, rp = resolve_token(t, cmd_cwd, cmd_cwd_unknown)
                             if k == 'path':
                                 scripts.runs.append(rp)
+                            elif k != 'skip':
+                                scripts.unknown = True
         elif g and (('/' in g[0] and not g[0].endswith('/'))
                     or os.path.basename(g[0]) in ('source', '.')):
             # A script run by path or sourced never needed the exemption, but

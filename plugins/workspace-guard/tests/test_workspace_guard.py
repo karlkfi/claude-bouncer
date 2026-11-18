@@ -9381,6 +9381,7 @@ class InterpreterSuppressesAllowTests(unittest.TestCase):
                     "cat > T.SH <<'EOF'\ncat /q72-fake-target/f\nEOF\n"
                     "bash t.sh",
                     "cat in.txt > t.sh; bash -o errexit t.sh",
+                    "cat in.txt > t.sh; bash -o errexit $PWD/t.sh",
                     "cat in.txt > t.py; python3 -W ignore t.py"):
             self._decision(cmd, "defer")
 
