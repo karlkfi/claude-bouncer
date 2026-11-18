@@ -393,20 +393,55 @@ class _Tokens(list):
     too_deep = False
 
 
+class _DeepBody(str):
+    """Stands in the token stream for a substitution body found at
+    ``MAX_SUBST_DEPTH``, until `tokenize` reads it afresh and splices it in."""
+
+
+# How many bodies past the cap `tokenize` reads afresh. Each read reaches 26
+# levels deeper, so a single chain is read 545 levels down, past the ~500
+# where unbounded recursion used to fail. Reading costs time quadratic in the
+# depth, so anything past the budget is left unread, and the command asks.
+_DEEP_BODY_BUDGET = 20
+
+
 def _tokenize_body(body, depth, deep):
-    """Tokenize a substitution body found at ``depth``, or leave it unread
-    past the cap, noting that in ``deep``. Unbounded, the recursion exhausted
-    Python's stack near 500 levels and the hook deferred (Q342)."""
+    """Tokenize a substitution body found at ``depth``, or past the cap leave
+    a `_DeepBody` for `tokenize` to read, noting that in ``deep``. Unbounded,
+    the recursion exhausted Python's stack near 500 levels and the hook
+    deferred (Q342)."""
     if depth >= MAX_SUBST_DEPTH:
         deep.append(body)
-        return None
-    tokens = tokenize(body, depth + 1)
+        return [_DeepBody(body)]
+    tokens = _tokenize(body, depth + 1)
     if getattr(tokens, 'too_deep', False):
         deep.append(body)
     return tokens
 
 
-def tokenize(raw, depth=0):
+def tokenize(raw):
+    """Tokenize ``raw`` (see `_tokenize`), then read each body left at the
+    depth cap from a fresh stack and splice it in where it would have gone,
+    until none is left or `_DEEP_BODY_BUDGET` is spent. The recursion is
+    bounded per read, so a production target nested hundreds of levels deep
+    is still judged where it sits (Q396). A body past the budget, or one that
+    does not lex, is dropped, and ``too_deep`` stays set so the command asks."""
+    tokens = _tokenize(raw, 0)
+    budget = _DEEP_BODY_BUDGET
+    while tokens is not None and tokens.too_deep:
+        at = [i for i, t in enumerate(tokens) if isinstance(t, _DeepBody)]
+        if not at:
+            break
+        for i in reversed(at):
+            body = None
+            if budget > 0:
+                budget -= 1
+                body = _tokenize(tokens[i], 0)
+            tokens[i:i + 1] = body or []
+    return tokens
+
+
+def _tokenize(raw, depth=0):
     """shlex-tokenize with POSIX quoting and punctuation grouping. Newlines
     are rewritten to `;` first, because shlex treats a newline as plain
     whitespace, which would merge `true\ncmd` into one segment. Comments are
@@ -426,9 +461,9 @@ def tokenize(raw, depth=0):
     lexer, which drops the backslash as bash does: inside double quotes it
     reaches a `bash -c` body as the substitution the child runs (Q322).
 
-    A body nested deeper than ``MAX_SUBST_DEPTH`` is not tokenized, and the
-    stream returned says so in ``too_deep``. What sits beside it at a
-    shallower depth is still read.
+    A body nested deeper than ``MAX_SUBST_DEPTH`` is not tokenized here: a
+    `_DeepBody` holds its place, and the stream returned says so in
+    ``too_deep``. What sits beside it at a shallower depth is still read.
 
     Returns None on unbalanced quotes (caller defers: fail-open on parse
     errors)."""
@@ -3338,11 +3373,13 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
     if tokens is None:
         return findings, override, session_reason  # unparseable: fail-open
     if getattr(tokens, 'too_deep', False):
-        # A body this deep is not read, so what it runs is unknown (Q342).
+        # Past `_DEEP_BODY_BUDGET` a body is not read at all, and `tokenize`
+        # cannot say which deep body went unread, so this asks on depth alone.
+        # A deny found in what was read still wins (Q342, Q396).
         findings.append((ASK, 'prod-guard: a command substitution is nested '
                          'more than %d levels deep, deeper than the guard '
-                         'reads, so what it runs is unknown. Confirm it is '
-                         'safe.' % MAX_SUBST_DEPTH, None))
+                         'reads reliably, so what it runs may be unknown. '
+                         'Confirm it is safe.' % MAX_SUBST_DEPTH, None))
     if raw is None:
         raw = ' '.join(tokens)
     # Two scopes, both seeded from what this shell inherited (os.environ at the
