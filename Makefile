@@ -10,7 +10,7 @@ CLAIMS_FLAGS := $(if $(CI),--strict)
 .PHONY: check sync sync-check launcher-check version-check path-filter-check \
         action-pin-check install-ref-check gate-parity-check lib-test plugin-tests \
         validate images help backlog backlog-next backlog-lint backlog-claims \
-        backlog-claim
+        backlog-claim mdreflow md-reflow md-reflow-check md-reflow-explain
 
 help:
 	@echo "make check             run everything CI runs"
@@ -22,6 +22,9 @@ help:
 	@echo "make action-pin-check  fail if a workflow action is not pinned to a SHA"
 	@echo "make install-ref-check fail if a README names a retired repo or marketplace"
 	@echo "make gate-parity-check fail if a gate in \`make check\` is not run by CI"
+	@echo "make md-reflow         reflow Markdown prose to one sentence per line"
+	@echo "make md-reflow-check   fail if Markdown prose is not one sentence per line"
+	@echo "make md-reflow-explain name each paragraph mdreflow declines, and why"
 	@echo "make lib-test          test the shared parser"
 	@echo "make plugin-tests      test every plugin"
 	@echo "make validate          validate the marketplace manifest"
@@ -33,8 +36,8 @@ help:
 	@echo "make backlog-claims    fail if an id this branch adds holds no claim"
 
 check: sync-check launcher-check version-check path-filter-check \
-       action-pin-check install-ref-check gate-parity-check backlog-lint \
-       backlog-claims lib-test \
+       action-pin-check install-ref-check gate-parity-check md-reflow-check \
+       backlog-lint backlog-claims lib-test \
        plugin-tests
 
 sync:
@@ -79,6 +82,27 @@ install-ref-check:
 # passes every local run and is never run where a pull request is decided.
 gate-parity-check:
 	$(PYTHON) scripts/gate-parity-check.py
+
+# Built on every run rather than when the file is missing: go's own cache makes
+# that cheap, and a version bump in tools/go.mod can never meet a stale binary.
+# Not vendored, because installing any plugin clones this whole repository.
+mdreflow:
+	@command -v go >/dev/null || { \
+	  echo "mdreflow is built from tools/go.mod and needs Go: https://go.dev/dl" >&2; \
+	  exit 2; }
+	@go build -C tools -o ../.build/mdreflow github.com/jbeda/mdreflow/cmd/mdreflow
+
+md-reflow: mdreflow
+	.build/mdreflow .
+
+# A line-break convention nothing checks decays on the next hand-wrapped
+# paragraph.
+md-reflow-check: mdreflow
+	.build/mdreflow --check .
+
+# Outside `check`: mdreflow declining a paragraph is a correct outcome.
+md-reflow-explain: mdreflow
+	.build/mdreflow --explain --check . 2>&1
 
 lib-test:
 	$(PYTHON) -m unittest discover tests

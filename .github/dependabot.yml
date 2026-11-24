@@ -1,4 +1,5 @@
-# Keeps the SHA pins in .github/workflows/ current.
+# Keeps the SHA pins in .github/workflows/ and the tool pin in tools/go.mod
+# current.
 #
 # `make action-pin-check` fails a mutable ref, so every action here is frozen
 # at a commit. A frozen pin is a dependency nobody looks at again -- a year on
@@ -27,5 +28,14 @@ updates:
       actions:
         patterns:
           - "*"
+    commit-message:
+      prefix: chore(repo)
+
+  # The formatter behind `make md-reflow-check`. A bump that moves where it
+  # breaks lines arrives red; run `make md-reflow` on its branch to take it.
+  - package-ecosystem: gomod
+    directory: /tools
+    schedule:
+      interval: weekly
     commit-message:
       prefix: chore(repo)

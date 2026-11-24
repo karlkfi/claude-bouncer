@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 
+# Tools built from tools/go.mod
+.build/
+
 # Session scratch
 tmp/
 .claude/worktrees/

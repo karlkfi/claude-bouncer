@@ -201,6 +201,7 @@ Everything reachable from its second parent came from the old repository.
 ## Where the notes live
 
 `plugins/<name>/docs/releases/vX.Y.Z.md`, one file per tag, holding the body verbatim with no title heading.
+Write each paragraph and bullet on one line, because GitHub renders every newline in a release body as a line break; `make md-reflow` skips these files for that reason.
 All five plugins have the directory and a README stating the convention — what a file is, how to publish, why a fix goes in the file rather than the web form, and how to verify.
 Read the one under the plugin you are releasing rather than a sibling's.
 Every guard released from a retired repository before the move, so each README names its own: which repository an older body is corrected in, and which one the verify script falls back to for a bare `vX.Y.Z` tag.

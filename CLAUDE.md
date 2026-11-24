@@ -58,7 +58,8 @@ Invoke the `session-backlog` skill for any change to the store.
 
 ```
 make check    # drift, launchers, version, path filters, action pins, install refs,
-              # gate parity, backlog lint, parser tests, all five suites
+              # gate parity, Markdown line breaks, backlog lint, parser tests,
+              # all five suites
 ```
 
 Run it before proposing a change is done.
@@ -95,6 +96,13 @@ It does not read `plugins/*/docs/releases/`, which record what shipped at that v
 A step or job carrying `if:` or `continue-on-error:` does not count, and neither does a job that needs one.
 Adding a gate means adding it to both lists, and this fails until you do.
 `plugin-tests` and `backlog-lint` are reached differently, one job per plugin and the root suite reading the recipe's flags, and the script checks each of those on its own terms.
+
+`make md-reflow-check` is the fifth, and the one gate that needs Go.
+Tracked Markdown is one sentence per source line, so a changed sentence is a one-line diff.
+Never place the breaks by hand: run `make md-reflow`, which applies [mdreflow](https://github.com/jbeda/mdreflow) at the version pinned in `tools/go.mod`, then `make backlog-lint`, because a reflow can move a line that a backlog row cites.
+Release bodies, `plugins/*/docs/releases/v*.md`, are excluded: GitHub renders every newline in a release body as a line break, so those stay one line per paragraph.
+A line that keeps two sentences is usually mdreflow's doing and not a miss.
+It does not break after punctuation inside `**bold.**` or a link, before a sentence opening in lowercase, or between two code spans that each hold a `$`, which it reads as one math span; hand-breaking one is undone by the next run.
 
 Python 3.9 is the floor. exit-status-guard supports it and CI runs the shared parser against it, so 3.10+ syntax in `lib/` breaks that job and nothing else, which makes it easy to miss locally.
 
