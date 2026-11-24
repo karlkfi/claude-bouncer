@@ -74,7 +74,7 @@ classifier reason states only the CAUSE; `confirm()` adds the closing clause, so
 the two paths read honestly — an `ask` offers a confirmation, a `deny` says
 there is none to be had and points at the terminal instead.
 
-Two verdicts deny in every mode rather than only in an unattended one, for the
+Three verdicts deny in every mode rather than only in an unattended one, for the
 same reason: the missing input is a fact the session can settle for itself, so
 the answer belongs in the reason rather than in a prompt, and `refuse()` writes
 it there from DENY_ROUTES. 'deny-unreachable' is a `git reset --hard` moving a
@@ -82,8 +82,17 @@ branch whose tip the guard has PROVED nothing else reaches AND whose orphaned
 commits it could not prove reproducible, which a `gh pr view` settles in either
 direction — a merged pull request says the content is already on main, and no
 pull request says it is not; 'deny-rebase' is a push onto a base that has moved
-into this branch's own lines, which a `git rebase` settles. Every other `ask` in
-the file still asks a human, including the three `classify_reset` keeps.
+into this branch's own lines, which a `git rebase` settles; 'deny-unpinned' is a
+gh write naming a pull request, issue or release that exists in every repository
+while naming no repository, which `--repo` settles. Every other `ask` in the
+file still asks a human, including the three `classify_reset` keeps.
+
+'deny-unpinned' is the one of the three that denies a command the guard would
+otherwise have DEFERRED, so it adds friction rather than redirecting an existing
+verdict. That is deliberate and is the only form the catch can take: the wrong
+target is a silent success against someone else's repository, which a prompt
+cannot catch either, because the command reads correctly to a human — the
+directory it resolves against is not in it.
 
 That denial is final, which is a dead end for a command the session had a good
 reason to run: with nothing to answer the prompt, work reroutes onto whatever
@@ -466,6 +475,52 @@ DESTRUCTIVE_GH = {
     ('workflow', 'disable'): 'disables a workflow',
 }
 
+# `gh <sub> <subsub>` pairs that mutate a resource named by a BARE number or
+# tag — `gh pr edit 158`, `gh issue close 42`, `gh release delete v1.2.0`. Each
+# maps to the noun used in the denial.
+#
+# These deny without `--repo`/`-R`, and the reason is the identifier rather than
+# the verb. gh resolves the repository from the process's working directory; a
+# shell's directory drifts between calls and a hook cannot see where it drifted
+# to. So `158` names a different pull request in every checkout on the machine,
+# every one of those is a valid target, and the wrong one is indistinguishable
+# from the right one in the command, in the prompt, and in the result — the
+# failure is a silent success against someone else's repository, which is the
+# one shape no human reviewing the prompt can catch either. Naming the repo is
+# what makes the target checkable, and it is always available, which is why this
+# denial is never a dead end and takes no break-glass.
+#
+# Deliberately NOT here: `gh pr create`, `gh run rerun`, `gh workflow run`. A
+# run id is long and effectively repo-unique, and a create needs a branch the
+# other repository does not have, so both fail loudly in the wrong repo instead
+# of succeeding against the wrong resource. The predicate is collision, not
+# mutation — adding an entry means arguing that its identifier collides.
+GH_PIN_REQUIRED = {
+    ('pr', 'edit'): 'a pull request',
+    ('pr', 'close'): 'a pull request',
+    ('pr', 'reopen'): 'a pull request',
+    ('pr', 'merge'): 'a pull request',
+    ('pr', 'comment'): 'a pull request',
+    ('pr', 'review'): 'a pull request',
+    ('pr', 'ready'): 'a pull request',
+    ('pr', 'lock'): 'a pull request',
+    ('pr', 'unlock'): 'a pull request',
+    ('issue', 'edit'): 'an issue',
+    ('issue', 'close'): 'an issue',
+    ('issue', 'reopen'): 'an issue',
+    ('issue', 'comment'): 'an issue',
+    ('issue', 'delete'): 'an issue',
+    ('issue', 'lock'): 'an issue',
+    ('issue', 'unlock'): 'an issue',
+    ('issue', 'pin'): 'an issue',
+    ('issue', 'unpin'): 'an issue',
+    ('issue', 'transfer'): 'an issue',
+    ('release', 'edit'): 'a release',
+    ('release', 'delete'): 'a release',
+    ('release', 'delete-asset'): 'a release',
+    ('release', 'upload'): 'a release',
+}
+
 # `gh api` options that consume a SEPARATE following value token, so the value
 # isn't re-read as another option. (`--opt=value` and attached short forms like
 # `-XPOST` are a single token and need no entry.)
@@ -773,6 +828,12 @@ DENY_ROUTES = {
         "run that rebase and push the result. Retrying the push as given "
         "meets the same overlap, because the cause is the base this branch is "
         "built on rather than the permission mode."),
+    'deny-unpinned': (
+        "re-run it with `--repo <owner>/<name>` naming the repository you "
+        "mean. `gh repo view --json nameWithOwner -q .nameWithOwner` reads the "
+        "one the current directory resolves to, which is worth checking rather "
+        "than assuming: the shell's directory persists across calls and drifts, "
+        "so the repository gh picks is not always the one the work is in."),
 }
 
 
@@ -2616,14 +2677,53 @@ def classify_gh_api(args):
     return ('defer', None)
 
 
+def names_repo(args):
+    """True if a gh command names its repository with `--repo`/`-R`.
+
+    All four spellings gh accepts: the separate-token pair (`--repo o/n`), the
+    attached long form (`--repo=o/n`), the separate short pair (`-R o/n`), and
+    the glued short form (`-Ro/n`), which Cobra takes for any shorthand. Only
+    the flag's presence is read, never its value — whether it names the right
+    repository is the author's claim to make, and the point is that the command
+    now carries one to check. An empty value (`--repo=`) does not count, since
+    gh falls back to the directory exactly as if the flag were absent.
+
+    `parse_invocation` leaves these in `args` rather than `globals` because gh
+    takes `--repo` per command, not before the subcommand."""
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in ('--repo', '-R'):
+            return i + 1 < len(args) and bool(args[i + 1])
+        if a.startswith('--repo='):
+            return bool(a[len('--repo='):])
+        if a.startswith('-R') and len(a) > 2 and not a.startswith('--'):
+            return True
+        i += 1
+    return False
+
+
 def classify_gh(sub, args):
-    """Verdict for a `gh <sub>` command: allow read-only ones, ask on
-    destructive deletes/disables (repo/label/release/secret/variable/gist/cache,
-    workflow disable, branch), defer the rest."""
+    """Verdict for a `gh <sub>` command: deny a write whose target is a bare
+    colliding identifier and which names no repository (GH_PIN_REQUIRED), allow
+    read-only ones, ask on destructive deletes/disables
+    (repo/label/release/secret/variable/gist/cache, workflow disable, branch),
+    defer the rest."""
     if sub == 'api':
         return classify_gh_api(args)
     pos = [a for a in args if not a.startswith('-')]
     subsub = pos[0] if pos else ''
+    # Ahead of every other arm, including the destructive `ask`: a `gh release
+    # delete v1.2.0` with no `--repo` raises both questions at once, and the
+    # unpinned one has to be settled first because the answer to "do you mean to
+    # delete this" is worthless while which repository it lands in is unknown.
+    # A human approving that prompt would be approving the wrong thing.
+    noun = GH_PIN_REQUIRED.get((sub, subsub))
+    if noun is not None and not names_repo(args):
+        return ('deny-unpinned',
+                "`gh {} {}` names {} that exists in every repository, and no "
+                "`--repo` says which one is meant — gh reads that from the "
+                "working directory".format(sub, subsub, noun))
     # `gh pr close --delete-branch` (`-d`) deletes a branch whose work was never
     # merged, so the commits are left reachable from nothing — destructive, ask.
     #
@@ -2810,15 +2910,19 @@ def is_overridable(inv, verdict, writes):
 
 def classify_segment(inv, branch, policy, cwd, probe, mode='', session_id=''):
     """Verdict ('nongit' | 'allow' | 'ask' | 'ask-shared' | 'deny-rebase' |
-    'deny-unreachable' | 'defer', reason) for one segment. 'nongit' marks a
-    segment that isn't a git/gh invocation (so the whole command can't be
-    auto-approved); 'ask-shared' is an `ask` whose cause is a protected branch,
-    kept distinct so the break-glass can't lift it. The two DENY_ROUTES tags
-    deny in every permission mode, because the cause is a fact the session can
-    check for itself — 'deny-unreachable' for a reset onto a tip nothing else
-    reaches, 'deny-rebase' for a push onto a base that has moved into this
-    branch's own lines. The break-glass still lifts both, so they travel with
-    the plain `ask` everywhere else.
+    'deny-unreachable' | 'deny-unpinned' | 'defer', reason) for one segment.
+    'nongit' marks a segment that isn't a git/gh invocation (so the whole
+    command can't be auto-approved); 'ask-shared' is an `ask` whose cause is a
+    protected branch, kept distinct so the break-glass can't lift it. The three
+    DENY_ROUTES tags deny in every permission mode, because the cause is a fact
+    the session can check for itself — 'deny-unreachable' for a reset onto a tip
+    nothing else reaches, 'deny-rebase' for a push onto a base that has moved
+    into this branch's own lines, 'deny-unpinned' for a gh write naming a target
+    that exists in every repository without naming the repository. The
+    break-glass lifts the first two, so they travel with the plain `ask`
+    everywhere else; it does not lift 'deny-unpinned', which needs none —
+    `--repo` is always available and is the thing being asked for, where the
+    other two name work the session must go and do.
 
     `cwd` and `probe` are the caller's answer to *which tree does this segment
     act on* — see `git_cwd` and `cd_destination`. `probe` false means the hook

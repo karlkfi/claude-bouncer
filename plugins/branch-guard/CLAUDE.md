@@ -2,7 +2,7 @@
 
 A Claude Code plugin that adds a `PreToolUse` hook for `Bash`, `Edit`, `Write`, `MultiEdit`, and `NotebookEdit`.
 Its job is to **minimize routine git/branch approval prompts** (especially in `acceptEdits` and non-interactive modes) while keeping a human in the loop for protected-branch and destructive operations.
-For Bash it classifies each `git`/`gh` command and auto-approves the safe ones (read-only git/gh, staging, branch creation, fetch, a commit/push of a feature/worktree branch), asks before protected-branch or destructive ones (`reset --hard`, `clean -f`, a `branch -D` that would orphan commits, …), **denies** the two cases whose cause is a fact the session can check for itself rather than a judgement (a clean-worktree `reset --hard` onto a tip proved unreachable, in `classify_reset`, and a push onto a base that has moved into this branch's own lines, in `classify_git` — see `DENY_ROUTES`), and defers on anything it can't classify.
+For Bash it classifies each `git`/`gh` command and auto-approves the safe ones (read-only git/gh, staging, branch creation, fetch, a commit/push of a feature/worktree branch), asks before protected-branch or destructive ones (`reset --hard`, `clean -f`, a `branch -D` that would orphan commits, …), **denies** the three cases whose cause is a fact the session can check for itself rather than a judgement (a clean-worktree `reset --hard` onto a tip proved unreachable, in `classify_reset`; a push onto a base that has moved into this branch's own lines, in `classify_git`; and a `gh` write naming a pull request, issue or release while naming no `--repo`, in `classify_gh` — see `DENY_ROUTES`), and defers on anything it can't classify.
 For edits it asks when the file's repo is on a protected branch, unless the path is gitignored.
 See `README.md` for the user-facing overview and the decision tables.
 
@@ -31,6 +31,15 @@ A would-be `ask` is withdrawn when the path is gitignored (`path_is_ignored`), b
 The probe runs only inside the `is_protected` arm, so a feature-branch edit still costs no subprocess, and it returns True *only* on `check-ignore` exit 0: every other answer (not ignored, outside the worktree, not a repo, git missing) keeps the `ask`.
 It probes `os.path.realpath(path)`, not the path as given — a symlink inside an ignored directory is itself ignored while the write lands on its target, so probing the link exempted edits to tracked files (fixed after 1.4.2); resolving also fails safe, since a link out of the worktree reports not-ignored and keeps the `ask`.
 `check-ignore` consults the **index** by default, so a tracked file that also matches an ignore rule (`git add -f`) reports not-ignored and keeps prompting — that is what makes one probe sufficient and why `--no-index` must never be added, since it would read the pattern alone and drop the guard on a file whose edits do land on the branch.
+
+`classify_gh` answers one question ahead of every other arm, including the destructive `ask`: does a write whose target is a **colliding identifier** name its repository?
+`GH_PIN_REQUIRED` maps the `(sub, subsub)` pairs that take a bare pull-request number, issue number or release tag to the noun used in the denial, and `names_repo` reads all four spellings gh accepts (`--repo o/n`, `--repo=o/n`, `-R o/n`, `-Ro/n`), presence only — whether it names the *right* repository is the author's claim, and the point is that there is now one to check.
+An empty value is not a pin, since gh falls back to the directory exactly as if the flag were absent.
+The ordering is load-bearing: `gh release delete v1` raises both questions at once, and a human answering "do you mean to delete this" while which repository it lands in is unknown is approving the wrong thing.
+**The predicate is collision, not mutation** — `gh pr create` and `gh run rerun` are deliberately out, because a create needs a branch the wrong repository lacks and a run id is effectively repo-unique, so both fail loudly there rather than succeeding against the wrong resource; adding an entry means arguing that its identifier collides.
+This is the one `DENY_ROUTES` verdict that denies what the guard would otherwise have **deferred**, so it adds friction rather than redirecting an existing verdict — the only form the catch can take, because the wrong target is a silent success and the prompt a human would read cannot show the directory the command resolves against.
+It takes no break-glass, and that is not an oversight: `--repo` is always available and is the thing being asked for, so an override would route around the fix.
+`is_overridable` refuses it by falling through to the `('ask', 'deny-unreachable')` test, which is where any new deny tag lands by default — a new one that *should* be liftable has to say so explicitly.
 
 The git/gh classifier is the contract: `READONLY_GIT` (allow on any branch), `READONLY_GH` (allow), per-subcommand rules in `classify_git` (safe mutations like `add`/`switch -c`/`worktree add`; `_feature()` for branch-sensitive mutations — allow on non-protected, ask on protected; destructive → ask, or deny where the cause is a checkable fact; unknown → defer).
 `GIT_ESCAPE_HATCHES` (`-c`/`--config-env`) downgrade a would-be `allow` to defer (but never weaken an `ask`).
@@ -314,6 +323,7 @@ The dependency direction is one-way: `CLAUDE.md` may link out to `README.md` and
 | Task | Reference |
 |---|---|
 | Changing which git/gh commands auto-allow vs ask (the classifier) | `hooks/branch-guard.py` (`classify_git`/`classify_gh`, `READONLY_GIT`/`READONLY_GH`) + `README.md` behavior table |
+| Changing which `gh` writes must name `--repo` | `hooks/branch-guard.py` (`GH_PIN_REQUIRED`/`names_repo`, the `deny-unpinned` arm at the top of `classify_gh`) + `README.md` "`gh` writes name their repository" |
 | Changing the decision logic, git/push detection, or protected-branch set | `hooks/branch-guard.py` + `README.md` behavior & push-guard tables |
 | Changing which branches are protected or the `BRANCH_GUARD_PROTECTED_BRANCHES` config | `hooks/branch-guard.py` (`protected_patterns`/`is_protected`/`DEFAULT_PROTECTED_BRANCHES`) + `README.md` "Configuration" section |
 | Changing push-guard policies or the `BRANCH_GUARD_PUSH_POLICY` config | `hooks/branch-guard.py` (`push_decision`/`push_policy`/`PUSH_POLICIES`) + `README.md` "Push guard" section |
