@@ -1238,75 +1238,75 @@ through the same boundary rules and produce the same reasons. Symlink staging
    `grep -v` and a pattern read from a `-f` file contribute nothing that can
    anchor.
 14. **Recurse into command substitutions.** A guarded command hidden in a
-   `"$(…)"` or backtick `` `…` `` substitution — `echo "$(mktemp -p /tmp x)"`,
-   `` x=`grep secret /etc/passwd` `` — isn't tokenized as its own command by the
-   step-1 lexer (the metacharacters are inside quotes), so its file ops would be
-   invisible. The hook scans the *raw* command for substitution bodies in
-   unquoted or double-quoted context (single-quoted `'$(…)'` is a bash literal
-   and is skipped; `$((…))` arithmetic has no command) and runs each body back
-   through steps 1–15. Heredoc bodies leave the command line first and are
-   scanned on their own: a quoted-delimiter body is literal to bash and is
-   dropped, an unquoted one is scanned with quoting turned off, because bash
-   applies none inside it — so the apostrophe in a `don't` there is text, not
-   the start of a quoted run that would hide a live `$(…)` after it. Only
-   *offenders* bubble up: a clean guarded command inside
-   a substitution never turns a deferring outer command into an `allow` — this
-   step can only add friction. (The bare unquoted `$(…)` form was already caught,
-   because its `(`/`)` split the inner command into its own group.) Nesting is
-   followed 25 levels deep; see Limitations for what the bound costs.
+    `"$(…)"` or backtick `` `…` `` substitution — `echo "$(mktemp -p /tmp x)"`,
+    `` x=`grep secret /etc/passwd` `` — isn't tokenized as its own command by the
+    step-1 lexer (the metacharacters are inside quotes), so its file ops would be
+    invisible. The hook scans the *raw* command for substitution bodies in
+    unquoted or double-quoted context (single-quoted `'$(…)'` is a bash literal
+    and is skipped; `$((…))` arithmetic has no command) and runs each body back
+    through steps 1–15. Heredoc bodies leave the command line first and are
+    scanned on their own: a quoted-delimiter body is literal to bash and is
+    dropped, an unquoted one is scanned with quoting turned off, because bash
+    applies none inside it — so the apostrophe in a `don't` there is text, not
+    the start of a quoted run that would hide a live `$(…)` after it. Only
+    *offenders* bubble up: a clean guarded command inside
+    a substitution never turns a deferring outer command into an `allow` — this
+    step can only add friction. (The bare unquoted `$(…)` form was already caught,
+    because its `(`/`)` split the inner command into its own group.) Nesting is
+    followed 25 levels deep; see Limitations for what the bound costs.
 
-   The words after a substitution's close stay with the command it sits in, so
-   `cat <(echo a) /outside/f` is a read and `echo $(date) cat /outside/f`, which
-   opens nothing, is not. That holds only where the command is a plain literal
-   name. A substitution can expand to nothing, so at the head, straight after a
-   wrapper's own options, behind `eval`, or behind `$X`, the words after it are
-   read as a command of their own: `env $(true) cat /outside/f` runs the `cat`,
-   and asks. A wrapper that already named its command resumes like the command
-   itself, so `env -u X grep -v <(echo x) /outside/f` asks too. A `<(…)` or
-   `>(…)` is read as the `/dev/fd/63` bash passes in its place, so it still
-   fills a pattern or program slot: in `grep -v <(echo x) /outside/f` the file
-   is the file operand, and asks.
+    The words after a substitution's close stay with the command it sits in, so
+    `cat <(echo a) /outside/f` is a read and `echo $(date) cat /outside/f`, which
+    opens nothing, is not. That holds only where the command is a plain literal
+    name. A substitution can expand to nothing, so at the head, straight after a
+    wrapper's own options, behind `eval`, or behind `$X`, the words after it are
+    read as a command of their own: `env $(true) cat /outside/f` runs the `cat`,
+    and asks. A wrapper that already named its command resumes like the command
+    itself, so `env -u X grep -v <(echo x) /outside/f` asks too. A `<(…)` or
+    `>(…)` is read as the `/dev/fd/63` bash passes in its place, so it still
+    fills a pattern or program slot: in `grep -v <(echo x) /outside/f` the file
+    is the file operand, and asks.
 
-   A body starts from the enclosing string's propagated literal variables
-   (step 4), since bash's substitution inherits them: without that,
-   `f=docs/x; grep -c p "$(echo "$f")"` would prompt on an unresolvable `$f`
-   where the same command without the `$( )` is allowed. The scan runs once for
-   the whole string, after step 4 has finished, so it has no position at which
-   to snapshot the map — it therefore gets only the names holding *one* literal
-   at every point in the string. A name reassigned to a different value, or
-   dropped anywhere by a poisoning command, is withheld for good and its `$f`
-   stays a runtime-expanded `deny`, so a value from later in the string can never
-   stand in for the one the body actually sees.
+    A body starts from the enclosing string's propagated literal variables
+    (step 4), since bash's substitution inherits them: without that,
+    `f=docs/x; grep -c p "$(echo "$f")"` would prompt on an unresolvable `$f`
+    where the same command without the `$( )` is allowed. The scan runs once for
+    the whole string, after step 4 has finished, so it has no position at which
+    to snapshot the map — it therefore gets only the names holding *one* literal
+    at every point in the string. A name reassigned to a different value, or
+    dropped anywhere by a poisoning command, is withheld for good and its `$f`
+    stays a runtime-expanded `deny`, so a value from later in the string can never
+    stand in for the one the body actually sees.
 15. **Recurse into shell `-c` bodies.** A body is an ordinary command string that
-   happened to arrive inside one token, so it runs back through steps 1–16 and
-   its offenders fold in — but only when this host is what executes it. The
-   group's command word has to be a shell or a local wrapper (`timeout`, `env`,
-   `xargs`, `find`, `nohup`, `nice`, `ionice`, `stdbuf`, `setsid`, `time`);
-   anything else is treated as remote and the body is left alone, because the
-   paths in `docker exec c sh -c '…'` or `ssh h sh -c '…'` are not this
-   filesystem's. The `-c` must be the shell's own option, found in the option run
-   right after the shell word — otherwise a `bash run.sh | grep -c '^FAIL'` would
-   hand the tokenizer a grep pattern and get offenders invented out of it. Each
-   body resolves against its group's cwd, so a preceding `cd` moves it; once the
-   hook has lost track of the cwd the body is skipped, since a relative path
-   would otherwise resolve against a stale directory and read as in-workspace.
-   Like step 14 this only *adds* friction: the body's own `guarded` is dropped,
-   so a body reading nothing but workspace files still leaves the string
-   deferring. The 25-level nesting bound covers these too.
+    happened to arrive inside one token, so it runs back through steps 1–16 and
+    its offenders fold in — but only when this host is what executes it. The
+    group's command word has to be a shell or a local wrapper (`timeout`, `env`,
+    `xargs`, `find`, `nohup`, `nice`, `ionice`, `stdbuf`, `setsid`, `time`);
+    anything else is treated as remote and the body is left alone, because the
+    paths in `docker exec c sh -c '…'` or `ssh h sh -c '…'` are not this
+    filesystem's. The `-c` must be the shell's own option, found in the option run
+    right after the shell word — otherwise a `bash run.sh | grep -c '^FAIL'` would
+    hand the tokenizer a grep pattern and get offenders invented out of it. Each
+    body resolves against its group's cwd, so a preceding `cd` moves it; once the
+    hook has lost track of the cwd the body is skipped, since a relative path
+    would otherwise resolve against a stale directory and read as in-workspace.
+    Like step 14 this only *adds* friction: the body's own `guarded` is dropped,
+    so a body reading nothing but workspace files still leaves the string
+    deferring. The 25-level nesting bound covers these too.
 16. **Recurse into the commands `find` runs.** Each `-exec`, `-execdir`, `-ok`
-   and `-okdir` command, up to its `;` or the `+` after a `{}`, is rebuilt as a
-   command string and goes back through steps 1–16 like a `-c` body: offenders
-   fold in, `guarded` is dropped. `{}` is filled in by find at runtime, so it is
-   replaced by each start point rather than read as a file name — every match
-   is a start or sits under one. A `-execdir` command runs in its match's
-   directory, so its relative operands are resolved from the start, from the
-   directory part of the start's spelling (where GNU findutils runs the start
-   entry), and from find's own cwd (where BSD find does). `-delete` makes the
-   start points writes, and `-fprint`, `-fprint0`, `-fprintf` and `-fls` name a
-   file find writes itself. Start points read from `-files0-from`, or appended
-   by an `xargs`, are ones the hook cannot see, so `{}` or `-delete` behind them
-   withholds `allow`. A bare `find /etc -name x` lists names the way `ls -R`
-   does, and is no more judged than `ls`.
+    and `-okdir` command, up to its `;` or the `+` after a `{}`, is rebuilt as a
+    command string and goes back through steps 1–16 like a `-c` body: offenders
+    fold in, `guarded` is dropped. `{}` is filled in by find at runtime, so it is
+    replaced by each start point rather than read as a file name — every match
+    is a start or sits under one. A `-execdir` command runs in its match's
+    directory, so its relative operands are resolved from the start, from the
+    directory part of the start's spelling (where GNU findutils runs the start
+    entry), and from find's own cwd (where BSD find does). `-delete` makes the
+    start points writes, and `-fprint`, `-fprint0`, `-fprintf` and `-fls` name a
+    file find writes itself. Start points read from `-files0-from`, or appended
+    by an `xargs`, are ones the hook cannot see, so `{}` or `-delete` behind them
+    withholds `allow`. A bare `find /etc -name x` lists names the way `ls -R`
+    does, and is no more judged than `ls`.
 
 ## Agent guidance: avoiding prompts
 
