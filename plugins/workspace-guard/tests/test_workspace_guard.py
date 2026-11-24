@@ -104,6 +104,8 @@ class SpecShapeTests(unittest.TestCase):
             guard.ALIASES,
             {"egrep": "grep", "fgrep": "grep",
              "gawk": "awk", "mawk": "awk",
+             # Q341: GNU sed's Homebrew name; the sed row reads GNU's argv.
+             "gsed": "sed",
              # Q9: pure cat-shape readers aliased to `cat`.
              "less": "cat", "more": "cat",
              # Q37: uniq/xxd left the alias list — their second positional
@@ -1687,6 +1689,238 @@ class HookEndToEndTests(unittest.TestCase):
         for cmd in ("sed '1e date' in.txt", "sed 's/x/date/e' in.txt"):
             with self.subTest(cmd=cmd):
                 self._defer(cmd)
+
+    # --- Q335: a sed script completed by an expansion ------------------------
+
+    def test_sed_script_reads_the_literal_a_variable_splices_in(self):
+        # macOS and GNU sed both created the `w` file for these two shapes. The
+        # values hold a space, so they are no path literal, but inside double
+        # quotes bash splices exactly this text into the script.
+        for cmd, path in (
+                ("b='x/w /etc/q335-fake;s/q'; sed \"s/a/$b/\" in.txt",
+                 "/etc/q335-fake;s/q/"),
+                ("prog='w /etc/q335-fake'; sed \"$prog\" in.txt", "/etc/q335-fake"),
+                ("for b in x/w/etc/q335-fake y; do sed \"s/a/$b/\" in.txt; done",
+                 "/etc/q335-fake/")):
+            with self.subTest(cmd=cmd):
+                out = self._decision(cmd, "ask")
+                self.assertIn(path, out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_sed_script_expansion_that_is_not_a_plain_name_denies(self):
+        # Each puts literal command text into the script without a `NAME=` the
+        # hook reads; review measured the first six writing a file on bash 5.3
+        # and macOS sed.
+        for cmd, word in (
+                ("sed \"${u:-w /etc/q335-fake}\" in.txt", "${u:-w /etc/q335-fake}"),
+                ("echo 'w /etc/q335-fake'; sed \"$_\" in.txt", "$_"),
+                ("set -- 'w /etc/q335-fake'; sed \"$1\" in.txt", "$1"),
+                ("f() { sed \"$1\" in.txt; }; f 'w /etc/q335-fake'", "$1"),
+                ("[[ 'w /etc/q335-fake' =~ .* ]]; sed \"$BASH_REMATCH\" in.txt",
+                 "$BASH_REMATCH"),
+                ("p='w /etc/q335-fake'; n=p; sed \"${!n}\" in.txt", "${!n}"),
+                ("sed \"$(cat in.txt)\" in.txt", "$(cat in.txt)"),
+                ("sed \"s/a/`cat in.txt`/\" in.txt", "s/a/`cat in.txt`/")):
+            with self.subTest(cmd=cmd):
+                out = self._decision(cmd, "deny")
+                self.assertIn("sed script built from a value the hook cannot "
+                              "read: " + word,
+                              out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_sed_script_name_bound_but_not_substituted_denies(self):
+        # Review found each of these missing the literal maps by a different
+        # route, and bash 5.3 with macOS sed wrote the file for all but the
+        # GNU-only `--expression=`.
+        for cmd, word in (
+                ("p='w /etc/q335-fake'; sed -e\"$p\" in.txt", "$p"),
+                ("p='w /etc/q335-fake'; sed --expression=\"$p\" in.txt", "$p"),
+                ("for p in w/etc/q335-fake; do sed -e\"$p\" in.txt; done", "$p"),
+                ("{ p='w /etc/q335-fake'; sed \"$p\" in.txt; }", "$p"),
+                ("(p='w /etc/q335-fake'; sed \"$p\" in.txt)", "$p"),
+                ("a=('w /etc/q335-fake'); sed \"$a\" in.txt", "$a"),
+                ("p='w /etc/q335-fake'; sed \"$p\"x in.txt", "$px"),
+                ("p='w /etc/q335-fake'; q=$p; sed \"$q\" in.txt", "$q"),
+                ("declare p='w /etc/q335-fake'; sed \"$p\" in.txt", "$p"),
+                ("printf -v p 'w /etc/q335-fake'; sed \"$p\" in.txt", "$p"),
+                ("p='w /etc/q335-fake'; sed \"$p\"\"x\" in.txt", "$px"),
+                ("p='w /etc/q335-fake'; sed \"$p\"$'x' in.txt", "$px"),
+                ("p='w /etc/q335-fake'; sed \"$p\"$''x in.txt", "$px"),
+                ("for f in *.txt; do sed \"$f\"x in.txt; done", "$fx"),
+                # A substitution that starts the value is not the whole of it,
+                # and `$((…))` arithmetic is never a command's output.
+                ("p=$(true)'w /etc/q335-fake'; sed \"$p\" in.txt", "$p"),
+                ("p=\"$(true)w /etc/q335-fake\"; sed \"$p\" in.txt", "$p"),
+                ("p=`true`'w /etc/q335-fake'; sed \"$p\" in.txt", "$p"),
+                ("p=$((1))'w /etc/q335-fake'; sed \"$p\" in.txt", "$p"),
+                ("p=$(true); printf -v p 'w /etc/q335-fake'; sed \"$p\" in.txt",
+                 "$p")):
+            with self.subTest(cmd=cmd):
+                out = self._decision(cmd, "deny")
+                self.assertIn("sed script built from a value the hook cannot "
+                              "read: " + word,
+                              out["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_sed_script_expansion_it_can_read_allows(self):
+        # The commonest seds there are: a name the string never sets, a literal
+        # it sets, and a script wholly in single quotes, which expands nothing.
+        for cmd in ("sed \"s/$old/$new/g\" in.txt", "sed -n '$p' in.txt",
+                    "x=1; sed -n '$p' in.txt", "p=$(cat in.txt); sed -n '$p' in.txt",
+                    "old=a; new=b; sed \"s/$old/$new/g\" in.txt",
+                    "b='x/w out.txt'; sed \"s/a/$b/\" in.txt",
+                    "sed \"s|$HOME|~|\" in.txt", "sed \"1,$((n+1))d\" in.txt",
+                    "sed -n $((n+1))p in.txt", "sed \"s/a/$$/\" in.txt",
+                    "for b in x y; do sed \"s/a/$b/\" in.txt; done",
+                    # A value from `$(…)` or `read` is not read (README,
+                    # Limitations), so the commonest of them stays allowed.
+                    "a=$(cat in.txt) && sed -i '' \"s/^rank: .*/rank: $a/\" in.txt",
+                    "while read v; do sed \"s/x/$v/\" in.txt; done < in.txt",
+                    "p=\"$(cat in.txt)\"; sed \"s/a/$p/\" in.txt",
+                    "p=`cat in.txt`; sed \"s/a/$p/\" in.txt",
+                    "p='w x'; sed -n '$p' in.txt",
+                    # A longer name that merely starts with a bound one.
+                    "for f in *.txt; do sed -i '' \"s/$from/$to/\" \"$f\"; done",
+                    "for f in in.txt; do sed -i '' \"s/x/$foo/\" \"$f\"; done",
+                    "v=1.2.3; sed -i '' \"s/$v/$ver/\" in.txt"):
+            with self.subTest(cmd=cmd):
+                self._decision(cmd, "allow")
+
+    # --- Q334: files an awk program opens ------------------------------------
+
+    def test_awk_program_literal_targets_ask(self):
+        # Each program wrote or read its file on macOS awk, gawk 5.2.1 or mawk
+        # 1.3.4 with a relative name; here the name is moved outside the root.
+        F = "/q334-fake/x"
+        for cmd, paths in (
+                ("awk '{print > \"%s\"}' in.txt" % F, [F]),
+                ("awk '{print $1 >> \"%s\"}' in.txt" % F, [F]),
+                ("awk 'BEGIN{printf(\"%%s\\n\", 1) > \"%s\"}'" % F, [F]),
+                ("awk 'BEGIN{getline l < \"%s\"}' in.txt" % F, [F]),
+                ("awk 'BEGIN{while ((getline l < \"%s\") > 0) n++}'" % F, [F]),
+                ("awk 'BEGIN{getline $2 < \"%s\"}'" % F, [F]),
+                ("gawk '@include \"%s\"' in.txt" % F, [F]),
+                # Every awk measured concatenates a print target.
+                ("awk '{print > \"/q334-fake/a\" \"b\"}' in.txt", ["/q334-fake/ab"]),
+                ("awk '{print > (\"/q334-fake/a\" \"b\")}' in.txt", ["/q334-fake/ab"]),
+                # macOS awk reads `< \"i\" \"n\"` as `in`, gawk and mawk as `i`.
+                ("awk 'BEGIN{getline l < \"/q334-fake/i\" \"n\"}'",
+                 ["/q334-fake/i", "/q334-fake/in"]),
+                ("awk 'BEGIN{print 1 > \"\\057q334-fake\\057x\"}'", [F]),
+                ("awk 'BEGIN{print 1 > \"\\x2fq334-fake\\x2fx\"}'", [F]),
+                ("awk 'BEGIN{print 1 > \"/q334-fake/x\\0tail\"}'", [F]),
+                # macOS awk and gawk drop an unknown escape's backslash; mawk keeps it.
+                ("awk 'BEGIN{print 1 > \"/q334-fake/q\\qz\"}'",
+                 ["/q334-fake/qqz", "/q334-fake/q\\qz"])):
+            with self.subTest(cmd=cmd):
+                reason = self._decision(cmd, "ask")[
+                    "hookSpecificOutput"]["permissionDecisionReason"]
+                for path in paths:
+                    self.assertIn(path, reason)
+
+    def test_awk_lexer_finds_a_redirect_past_a_regex(self):
+        # Reviewer C's shapes: a lexer that took the first `/` as a division,
+        # or ended the print at the newline, hid the redirect from the hook, and
+        # the awk named wrote the file. A `\"` or `#` in the regex is what a
+        # misreading turns into a string or a comment. The target is spelled
+        # with octal escapes, since a `/` would end a misread regex early.
+        L = "\\057q334-fake\\057L"
+        for cmd, wrote_on in (
+                ('BEGIN { if (1) /"/ ; print "x" > "%s" ; y = /"/ }', "macOS, gawk"),
+                ('BEGIN { if (1) /#/ ; print "x" > "%s"\n}', "macOS, gawk"),
+                ('BEGIN { while (0) /"/ ; print "x" > "%s" ; y = /"/ }', "macOS, gawk"),
+                ('BEGIN { for (;0;) /"/ ; print "x" > "%s" ; y = /"/ }', "macOS, gawk"),
+                ('BEGIN { if (1)\n/"/ ; print "x" > "%s" ; y = /"/ }', "macOS, gawk"),
+                ('BEGIN { if (0) z = 1; else /"/ ; print "x" > "%s" ; y = /"/ }', "all"),
+                ('BEGIN { do /"/ ; while (0); print "x" > "%s"; y = /"/ }', "all"),
+                ('BEGIN { exit /"/ } END { print "x" > "%s" ; y = /"/ }', "all"),
+                ('function f() { return /"/ } BEGIN { print "x" > "%s"; z = /"/ }', "all"),
+                ('BEGIN { y = x++ / 2; print "x" > "%s"; z = 1 / 2 }', "macOS, gawk"),
+                ('BEGIN { y = x-- / 2; print "x" > "%s"; z = 1 / 2 }', "macOS, gawk"),
+                ('BEGIN { y = getline / 2; print "x" > "%s"; z = 1 / 2 }', "all"),
+                ('BEGIN { print "x",\n"y" > "%s" }', "all"),
+                ('BEGIN { print "x" &&\n1 > "%s" }', "all"),
+                ('BEGIN { print 0 ||\n1 > "%s" }', "all"),
+                ('BEGIN { print 1 ?\n"a" : "b" > "%s" }', "gawk"),
+                ('BEGIN { print "x" \\\n> "%s" }', "all"),
+                ('BEGIN { if ("a/b" ~ /[/]/) print "x" > "%s" }', "gawk, mawk"),
+                # A string or regex whose text is `,` or `do` continues nothing.
+                ('BEGIN { x = ","\n/"/ ; print "x" > "%s" ; y = /"/ }', "all"),
+                ('BEGIN { x = "do"\n/"/ ; print "x" > "%s" ; y = /"/ }', "all"),
+                ('BEGIN { y = $0 ~ /,/\n/"/ ; print "x" > "%s" ; z = /"/ }', "all")):
+            cmd = "awk %s in.txt" % shlex.quote(cmd % L)
+            with self.subTest(cmd=cmd, wrote_on=wrote_on):
+                self.assertIn("Outside-workspace path(s): /q334-fake/L",
+                              self._decision(cmd, "ask")[
+                                  "hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_awk_target_it_cannot_name_asks(self):
+        # A data-named target has no literal rewrite, so a person decides.
+        for cmd, shown in (
+                ("awk '{print > $1 \".txt\"}' in.txt", '$1 ".txt"'),
+                ("awk -v out=x '{print > out}' in.txt", "out"),
+                ("awk 'BEGIN{getline l < f}' in.txt", "f"),
+                ("awk 'BEGIN{getline l < \"/q334-fake/\" f}' in.txt", '"/q334-fake/" f'),
+                ("awk 'BEGIN{print 1 > \"\\x2fab\"}' in.txt", '"\\x2fab"'),
+                ("awk 'BEGIN{print 1 > \"/q334-fake/x' in.txt", "BEGIN{print"),
+                # mawk reads a second `>` as a comparison and writes a file named 0.
+                ("awk 'BEGIN{print > \"a\" > \"b\"}' in.txt", '"a" > "b"'),
+                # ARGV and ARGC name the files awk reads next.
+                ("awk 'BEGIN{ARGV[1] = \"/q334-fake/x\"; ARGC = 2} {print}'", "ARGV[1]"),
+                ("awk 'BEGIN{ARGC++} {print}' in.txt", "ARGC"),
+                ("awk 'BEGIN{split(\"a b\", ARGV)} {print}' in.txt", "ARGV"),
+                # The array handed over whole is filled where the hook cannot see.
+                ("awk 'function f(a) { a[1] = \"/q334-fake/x\" } BEGIN { f(ARGV) }"
+                 " {print; exit}' in.txt", "ARGV"),
+                ("gawk 'BEGIN{match(\"x\", /(.*)/, ARGV)} {print}' in.txt", "ARGV"),
+                ("gawk 'BEGIN{t[1] = \"x\"; asort(t, ARGV)} {print}' in.txt", "ARGV"),
+                ("gawk 'BEGIN{SYMTAB[\"ARGV\"][1] = \"x\"} {print}' in.txt", "SYMTAB"),
+                # A program completed by a value the hook does not read (D2).
+                ("p='{print > \"/q334-fake/x\"}'; awk \"$p\" in.txt", "$p"),
+                ("pat='/ {print > \"../x\"} /'; awk \"/$pat/\" in.txt", "/$pat/"),
+                ("awk \"${p:-1}\" in.txt", "${p:-1}"),
+                ("awk \"$_\" in.txt", "$_"),
+                # The cost of reading no value in: a loop's literals ask too.
+                ("for t in a b; do awk \"/^func $t/\" in.txt; done", "/^func $t/")):
+            with self.subTest(cmd=cmd):
+                reason = self._decision(cmd, "ask")[
+                    "hookSpecificOutput"]["permissionDecisionReason"]
+                self.assertIn("awk program opens a file the hook cannot name: ", reason)
+                self.assertIn(shown, reason)
+
+    def test_awk_program_that_runs_a_command_withholds_the_allow(self):
+        for cmd in ("awk 'BEGIN{system(\"true\")}' in.txt",
+                    "awk 'BEGIN{system (\"true\")}' in.txt",
+                    "awk 'BEGIN{system \\\n(\"true\")}' in.txt",
+                    "awk '{print | \"sort\"}' in.txt",
+                    "awk 'BEGIN{\"date\" | getline d}' in.txt",
+                    "gawk 'BEGIN{print |& \"cat\"}' in.txt",
+                    "gawk '@load \"rwarray\"' in.txt",
+                    "gawk 'BEGIN{f = \"system\"; @f(\"true\")}' in.txt"):
+            with self.subTest(cmd=cmd):
+                self._defer(cmd)
+
+    def test_awk_program_that_opens_nothing_outside_allows(self):
+        for cmd in ("awk '{print $1}' in.txt", "awk -F: '$3 > 100 {print}' in.txt",
+                    "awk '{if ($1 > 2) print $1}' in.txt", "awk 'NR>1' in.txt",
+                    "awk '{print ($1 > 2)}' in.txt",
+                    "awk '{printf \"%s > %s\\n\", $1, $2}' in.txt",
+                    "awk '/a>b/' in.txt", "awk '{sum += $2} END {print sum / NR}' in.txt",
+                    "awk '{print > \"out.txt\"}' in.txt",
+                    "awk '{print $1 >> \"log.txt\"}' in.txt",
+                    "awk '{print > \"/dev/stderr\"}' in.txt",
+                    "awk '{print > \"a\" \"b\"}' in.txt",
+                    "awk '{a[$1]++} END {for (k in a) print k > \"counts.txt\"}' in.txt",
+                    "awk 'BEGIN {while ((getline l < \"in.txt\") > 0) n++; print n}'",
+                    "awk 'BEGIN{for (i = 1; i < ARGC; i++) print ARGV[i]}' in.txt",
+                    "awk 'BEGIN{for (k in ARGV) n++} {print}' in.txt",
+                    "awk 'BEGIN{delete ARGV[1]} {print}' in.txt",
+                    "awk 'FNR==NR{a[$1]; next} $1 in a' in.txt in.txt",
+                    "awk 'BEGIN{x = /\"/ ; print \"x\" > \"o\" ; y = /\"/}' in.txt",
+                    # A `$1` in double quotes is the escaped field `\\$1`, which
+                    # the token cannot tell from bash's (Q391).
+                    "awk \"{print \\$3}\" in.txt", "awk \"/$pat/\" in.txt",
+                    "awk \"{print \\\"$HOME\\\"}\" in.txt",
+                    "ps aux | awk '{print $2}'"):
+            with self.subTest(cmd=cmd):
+                self._decision(cmd, "allow")
 
     # --- Q232: the token after `sed -i ''` -----------------------------------
     # BSD sed reads it as the script and GNU sed as a file. Where Q328's parser
@@ -3557,6 +3791,29 @@ class HookEndToEndTests(unittest.TestCase):
     def test_gawk_workspace_allow(self):
         self._decision("gawk '{print}' in.txt", "allow")
 
+    def test_gsed_gets_what_sed_gets(self):
+        # Q341: each of these deferred, so the operator's own rules decided.
+        for cmd, want in (("gsed -i 's/a/b/' /etc/q341-fake/y", "ask"),
+                          ("gsed -n '/x/w /etc/q341-fake/x' in.txt", "ask"),
+                          ("/opt/homebrew/bin/gsed 's/a/b/' /etc/q341-fake/y",
+                           "ask"),
+                          ("gsed 's/a/b/' in.txt", "allow")):
+            with self.subTest(cmd=cmd):
+                self._decision(cmd, want)
+
+    def test_sed_l_read_both_ways(self):
+        # Q374: BSD `-l` takes no argument, so macOS sed reads the outside file
+        # after `-l p`; GNU's takes N, and the GNU reading still holds.
+        for cmd, want in (("sed -l p /etc/q374-fake", "ask"),
+                          ("/usr/bin/sed -l p /etc/q374-fake", "ask"),
+                          ("sed -l 5 p /etc/q374-fake", "ask"),
+                          ("sed -l 5 p in.txt", "allow"),
+                          ("gsed -l 5 p in.txt", "allow"),
+                          ("sed -l p in.txt", "allow"),
+                          ("""sed -l -i '' "s/x/$v/" in.txt""", "allow")):
+            with self.subTest(cmd=cmd):
+                self._decision(cmd, want)
+
     # --- rg end-to-end ------------------------------------------------------
 
     def test_rg_glob_workspace_allow(self):
@@ -4568,6 +4825,14 @@ class QuotedSubstBodyEndToEndTests(unittest.TestCase):
     def test_arithmetic_expansion_defers(self):
         self._defer('echo "$((1 + 2))"')
 
+    def test_a_dollar_double_paren_closed_by_one_paren_is_judged(self):
+        # bash runs `$((echo x) ; cmd)` as a substitution around a subshell,
+        # not arithmetic (Q338).
+        for shape in ('echo $((echo x) ; rm %s)', 'x=$((echo x) ; rm %s)',
+                      'echo "$(echo "$((echo x) ; rm %s)")"'):
+            with self.subTest(shape=shape):
+                self._decision(shape % "/etc/q338-fake-target", "ask")
+
 
 class SubstitutionResumesCommandEndToEndTests(unittest.TestCase):
     """The words after a substitution's close belong to the command it sits in
@@ -4621,9 +4886,31 @@ class SubstitutionResumesCommandEndToEndTests(unittest.TestCase):
                     "nohup $(echo) cat {}", "xargs $(echo) cat {}",
                     "eval $(echo) cat {}", "$((5)) cat {}",
                     "<(echo a) cat {}", "> in.txt $(echo) cat {}",
-                    "> in.txt env $(echo) cat {}"):
+                    "> in.txt env $(echo) cat {}", "env -u X $(echo) cat {}",
+                    "nice -n 5 $(echo) cat {}", "sudo -u x $(echo) cat {}",
+                    "env nice $(echo) cat {}"):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self._verdict(cmd), "ask")
+
+    def test_a_wrapper_that_named_its_command_resumes(self):
+        # bash prints the planted file on every row (Q360): the wrapper's own
+        # words are peeled with its grammar, and what is left names the
+        # command the substitution sits in. Each got an `allow` before.
+        for cmd in ("env grep -v <(echo x) {}", "command grep -v <(echo x) {}",
+                    "nice grep -v <(echo x) {}", "env cat <(echo a) {}",
+                    "env grep -v $(echo x) {}", "env -u X grep -v <(echo x) {}",
+                    "nice -n 5 grep -v <(echo x) {}",
+                    "timeout 5 grep -v <(echo x) {}",
+                    "sudo grep -v <(echo x) {}",
+                    "env FOO=1 nice -n 5 grep -v <(echo x) {}"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self._verdict(cmd), "ask")
+        with open(os.path.join(self.workspace, "in.txt"), "w") as f:
+            f.write("hello\n")
+        self.assertEqual(
+            run_hook("env grep -v <(echo x) in.txt", self.workspace,
+                     project_dir=self.workspace)
+            ["hookSpecificOutput"]["permissionDecision"], "allow")
 
     def test_the_operand_deny_stands(self):
         for cmd in ("cat $(echo a) {}", "cat $(echo a) in.txt",
@@ -4642,13 +4929,32 @@ class SubstitutionResumesCommandEndToEndTests(unittest.TestCase):
         self.assertEqual(
             guard.resume_interrupted_commands(
                 guard.tokenize_command("tee 2>(cat) f")),
-            ["tee", "f", "2", ">", "(", "cat", ")"])
+            ["tee", "/dev/fd/63", "f", "2", ">", "(", "cat", ")"])
         out = run_hook("cat <(echo a) in.txt", self.workspace,
                        project_dir=self.workspace)
         self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "allow")
         for cmd in ("tee >(cat) {}", "echo $(date) > {}"):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self._verdict(cmd), "ask")
+
+    def test_a_process_substitution_keeps_its_slot(self):
+        # bash passes `/dev/fd/63` as the pattern or program, so the next word
+        # is a file: bash printed a planted file for the grep and awk rows
+        # (Q354), which got an `allow` while the slot closed up behind the body.
+        for cmd in ("grep -v <(echo x) {}", "awk <(echo '{{print}}') {}",
+                    "sed <(echo p) {}", "grep <(echo x) <(echo y) {}",
+                    "grep -f <(echo x) {}", "cat <(echo a) {}"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self._verdict(cmd), "ask")
+        with open(os.path.join(self.workspace, "in.txt"), "w") as f:
+            f.write("hello\n")
+        for cmd in ("grep -v <(echo x) in.txt", "awk <(echo '{print}') in.txt",
+                    "paste <(cat in.txt) <(cat in.txt)",
+                    "while read l; do :; done < <(cat in.txt)"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(
+                    run_hook(cmd, self.workspace, project_dir=self.workspace)
+                    ["hookSpecificOutput"]["permissionDecision"], "allow")
 
     def test_a_separator_still_ends_the_command(self):
         for cmd in ("echo $(date) a; cat {}", "echo $(date) a | cat {}",
@@ -5416,6 +5722,99 @@ class InShellCdTests(OutsideParentFixture, unittest.TestCase):
                     "mapfile -d -C a < in.txt; cat in.txt",
                     "eval cd .. | cat; cat in.txt",
                     "f() { eval cd ..; }; cat in.txt"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual("allow", self._decision(cmd))
+
+    def test_a_literal_trap_body_is_read_for_a_cd(self):
+        # Q397: a trap body written out in the string is read like a funsub
+        # body, so a cleanup that cannot cd keeps the cwd. Pre-fix every one
+        # denied as an untracked cd, the first two lifted from real sessions.
+        for cmd in ("trap 'rm -f ./tmp/k.pem' EXIT INT TERM; cat in.txt",
+                    "cd sub; trap 'rm -f ./tmp/q215/app.key' EXIT INT TERM; "
+                    "cat ../in.txt",
+                    "trap \"rm -f ./tmp/k.pem\" INT; cat in.txt",
+                    "trap 'rm -f \"$KEY_FILE\"' INT; cat in.txt",
+                    "trap 'rm x | cd ..' INT; cat in.txt",
+                    "f() { rm x; }; trap f INT; cat in.txt",
+                    "g() { trap 'rm x' INT; }; g; cat in.txt"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual("allow", self._decision(cmd))
+
+    def test_a_trap_body_that_can_cd_or_cannot_be_read_drops_the_cwd(self):
+        # A body that moves the cwd inline moves it from a trap too, and one
+        # bash builds by expanding a word when the trap is set is not in the
+        # string to read.
+        for cmd in ("trap 'cd sub' INT; cat in.txt",
+                    "trap 'rm x; cd ..' INT; cat in.txt",
+                    "trap 'pushd ..' INT; cat in.txt",
+                    "trap 'eval x' INT; cat in.txt",
+                    "trap 'trap \"cd ..\" DEBUG' INT; cat in.txt",
+                    "trap '${ cd ..; }' INT; cat in.txt",
+                    "trap 'rm x | cd ..' INT; shopt -s lastpipe; cat in.txt",
+                    "f() { cd ..; }; trap f INT; cat in.txt",
+                    "trap f INT; f() { cd ..; }; cat in.txt",
+                    "g() { trap 'cd ..' INT; }; g; cat in.txt",
+                    "g() { trap 'rm x | cd ..' INT; }; shopt -s lastpipe; g; "
+                    "cat in.txt",
+                    "trap 'f() { cd ..; }' INT; f; cat in.txt",
+                    "trap 'shopt -s lastpipe' INT; rm x | cd ..; cat in.txt",
+                    'trap "$t" INT; cat in.txt',
+                    'trap "rm $f" INT; cat in.txt',
+                    "trap $t INT; cat in.txt",
+                    'trap "$(echo cd ..)" INT; cat in.txt',
+                    "trap `echo x` INT; cat in.txt",
+                    "trap ~/x INT; cat in.txt"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual("deny", self._decision(cmd))
+
+
+class FunsubCdTests(OutsideParentFixture, unittest.TestCase):
+    """Q357: a bash 5.3 funsub runs its body in this shell.
+
+    `${ list; }` and `${| list; }` substitute a list's output, or `$REPLY`,
+    without the subshell a `$( )` gets, so a `cd` in one moves every later
+    command. The lexer had no reading of either: the body's readers were never
+    judged, and its `cd` reached the tracker only by accident, when an `x=`
+    prefix left it in command position. Every shape here was driven under bash
+    5.3.15 to see which file it reads.
+    """
+
+    def test_a_funsub_cd_moves_the_commands_after_it(self):
+        # Pre-fix all but the `x=` row allowed; bash reads the parent's file.
+        for cmd in ("echo ${ cd ..; }; cat in.txt",
+                    'echo "${ cd ..; }"; cat in.txt',
+                    "echo ${| cd ..; }; cat in.txt",
+                    "x=${ cd ..; }; cat in.txt",
+                    "echo ${ cd ..; } $(cat in.txt)",
+                    "echo ${ echo ${ cd ..; }; }; cat in.txt",
+                    "echo ${ cat ../in.txt; }",
+                    # A heredoc in the body hid what followed it.
+                    "echo ${ cat <<E\nhi\nE\ncd ..; }; cat in.txt",
+                    'echo "${ cat <<E\nhi\nE\ncd ..; }"; cat in.txt',
+                    "echo ${ cat <<'E'\nhi\nE\ncat ../in.txt; }"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual("ask", self._decision(cmd))
+
+    def test_what_the_tracker_cannot_follow_is_unresolvable(self):
+        # A function the funsub defines or holds, an operand built from one,
+        # and a name it may reassign.
+        for cmd in ("echo ${ f() { cd ..; }; }; f; cat in.txt",
+                    "f() { echo ${ cd ..; }; }; f; cat in.txt",
+                    "cat ${ cd ..; } in.txt",
+                    "d=sub; echo ${ d=..; }; cd $d; cat in.txt"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual("deny", self._decision(cmd))
+
+    def test_a_funsub_that_cannot_move_the_caller_keeps_the_cwd(self):
+        # A pipeline stage and a subshell hold their own cwd, a quoted one is
+        # text, and a `cd` the tracker follows stays followed.
+        for cmd in ("echo ${ cd ..; } | cat; cat in.txt",
+                    "(echo ${ cd ..; }); cat in.txt",
+                    "echo '${ cd ..; }'; cat in.txt",
+                    "echo ${ cd sub; }; cat ../in.txt",
+                    "echo ${ (cd ..); }; cat in.txt",
+                    "for f in in.txt; do echo ${ :; }; cat $f; done",
+                    "echo ${ echo }; }; cat in.txt"):
             with self.subTest(cmd=cmd):
                 self.assertEqual("allow", self._decision(cmd))
 
@@ -7740,6 +8139,17 @@ class UnanchoredKillEndToEndTests(unittest.TestCase):
             'WORKSPACE_GUARD_OVERRIDE="stuck harness" pkill -f ginkgo', "ask")
         self.assertIn("stuck harness", r)
 
+    def test_a_quoted_override_name_before_a_dollar_paren_disarms_nothing(self):
+        # bash 5.3.15 runs each quoted word as a command, exit 127, so only the
+        # control assigns (Q175).
+        r = self._decision(
+            'WORKSPACE_GUARD_OVERRIDE=$(echo why) pkill -f ginkgo', "ask")
+        self.assertIn("WORKSPACE_GUARD_OVERRIDE is set", r)
+        for name in ("'WORKSPACE_GUARD_OVERRIDE='", "'WORKSPACE_GUARD_OVERRIDE'=",
+                     '"WORKSPACE_GUARD_OVERRIDE"=', 'WORKSPACE_GUARD_OVERRIDE\\='):
+            with self.subTest(name=name):
+                self._decision(name + '$(echo why) pkill -f ginkgo', "deny")
+
     def test_override_name_in_the_pattern_disarms_nothing(self):
         self._decision('pkill -f WORKSPACE_GUARD_OVERRIDE=r', "deny")
 
@@ -8943,6 +9353,45 @@ class InterpreterSuppressesAllowTests(unittest.TestCase):
                     "cat in.txt && bash ./script.sh",
                     "cat in.txt && node subdir/app.js"):
             self._decision(cmd, "allow")
+
+    def test_a_script_the_string_writes_does_not_vouch(self):
+        # Code the same call writes is authored, not repo-resident. Measured at
+        # workspace-guard/v1.15.0: each of these returned `allow`, the first
+        # with an outside read in the heredoc body it then ran.
+        for cmd in ("cat > t2.sh <<'EOF'\ncat /q72-fake-target/f\nEOF\n"
+                    "bash t2.sh",
+                    "cat in.txt > t.sh; bash t.sh",
+                    "cp in.txt t.sh && bash t.sh",
+                    "cat in.txt | tee t.sh; sh t.sh",
+                    "cat in.txt; cp in.txt sub/ && python3 sub/in.txt",
+                    "cat in.txt; bash t.sh; cp in.txt t.sh",
+                    "cat in.txt; x=\"$(cp in.txt t.sh)\"; bash t.sh",
+                    "cat in.txt > t.sh; ./t.sh",
+                    "cat in.txt > t.sh; source t.sh"):
+            self._decision(cmd, "defer")
+
+    def test_a_written_script_still_counts_when_its_run_is_hard_to_read(self):
+        # Review of PR 368: an operand the hook cannot resolve, a case the
+        # filesystem folds, and an option argument read as the script.
+        for cmd in ("cat > t.sh <<'EOF'\ncat /q72-fake-target/f\nEOF\n"
+                    "source -- t.sh",
+                    "cat in.txt > t.sh; . -- t.sh",
+                    "cat in.txt > t.sh; \"$PWD\"/t.sh",
+                    "cat in.txt > t.sh; source $PWD/t.sh",
+                    "cat > T.SH <<'EOF'\ncat /q72-fake-target/f\nEOF\n"
+                    "bash t.sh",
+                    "cat in.txt > t.sh; bash -o errexit t.sh",
+                    "cat in.txt > t.sh; bash -o errexit $PWD/t.sh",
+                    "cat in.txt > t.py; python3 -W ignore t.py"):
+            self._decision(cmd, "defer")
+
+    def test_an_unresolvable_run_with_no_write_still_allows(self):
+        self._decision("cat in.txt; \"$PWD\"/t.sh", "allow")
+
+    def test_reading_a_resident_script_before_running_it_still_allows(self):
+        # A read is not a write: the documented exemption holds.
+        self._decision("cat in.txt; bash in.txt", "allow")
+        self._decision("cat in.txt > out.txt; bash in.txt", "allow")
 
     def test_an_interpreter_on_another_filesystem_still_allows(self):
         # Locality is decided the way `shell_c_bodies` decides it: the code runs
@@ -13836,7 +14285,27 @@ class ProcessSubstBodyTests(OutsideParentFixture, unittest.TestCase):
 
     def test_a_cd_before_the_substitution_moves_its_body(self):
         self.assertEqual("ask", self._decision("cd ..; true <(rm -rf q276-x)"))
-        self.assertIsNone(self._decision("cd sub; true <(rm -rf ../in.txt)"))
+        # The body is a group of its own, as a bare `$(…)` one is, so it gets
+        # the `allow` `rm -rf in.txt` gets written plainly (Q282).
+        self.assertEqual("allow",
+                         self._decision("cd sub; true <(rm -rf ../in.txt)"))
+
+    def test_a_cd_in_the_body_stays_in_it(self):
+        # Q282: bash reads `sub/../in.txt`, the workspace's own file. The outer
+        # read took the `<` as a redirect onto the `(` and opened no subshell,
+        # so it resolved `../in.txt` from the root and asked.
+        for cmd in ("true <(cd sub; cat ../in.txt)",
+                    "cat <(cd sub; cat ../in.txt)",
+                    "tee >(cd sub; cat ../in.txt) < in.txt"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual("allow", self._decision(cmd))
+        # Behind an assignment the `cd` leaked into the rest of the string, so
+        # the outside `../q282-x` got an `allow` bash reads it under.
+        for cmd in ("true <(cd sub; cat ../../q282-x)",
+                    "true <(cd sub); cat ../q282-x",
+                    "x=<(cd sub); cat ../q282-x"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual("ask", self._decision(cmd))
 
     def test_a_substitution_inside_one_is_left_to_the_recursion(self):
         # The `$(id)` inside the `<(…)` is that body's own; listing it beside

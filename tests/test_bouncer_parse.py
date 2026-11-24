@@ -119,6 +119,35 @@ class StripCommentsTests(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertEqual(want, bp.strip_comments(cmd))
 
+    def test_an_operand_or_a_word_ends_a_dbracket_comment_rule(self):
+        # bash 5.3.15 runs `id` after each (Q346): the operand ends at the blank
+        # whatever it opens with, and a `[[` that is only an argument opens no
+        # test. Kept as text, the `'` would hide `id`.
+        for cmd in ("[[ x =~ \"a\" ]];#it's\nid", "[[ x =~ 'a' ]];#it's\nid",
+                    "[[ x =~ $'a' ]];#it's\nid", "[[ x =~ \\a ]];#it's\nid",
+                    "[[ x =~ `true` ]];#it's\nid", "[[ x =~ ${y:-a} ]];#it's\nid",
+                    "if [[ x =~ \"a\" ]];#it's\nid", "! [[ x =~ \"a\" ]];#it's\nid",
+                    "time -p [[ x =~ \"a\" ]];#it's\nid",
+                    "case x in a) [[ x =~ \"a\" ]];#it's\nid",
+                    "echo [[ =~ x;#it's\nid", "echo $(true) [[ =~ x;#it's\nid",
+                    "-p [[ =~ x;#it's\nid"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(cmd.replace("#it's", ''), bp.strip_comments(cmd))
+        # A `[[` after a reserved word, or as the body of a function or a named
+        # coproc, is still a test, so a glued `#` is text.
+        for cmd in ('if [[ a =~ (#x) ]]; then id; fi', '! [[ x =~ (a|#b) ]] || id',
+                    'while [[ x =~ (#a) ]]; do id; done',
+                    'time -p [[ x =~ (a|#b) ]] || id', '{ [[ x =~ (#a) ]] || id; }',
+                    'case x in a) [[ x =~ (#a) ]] || id;; esac',
+                    '[[ x =~ "a"#b ]] || id', 'coproc [[ a =~ (#x) ]]; id',
+                    'coproc { [[ a =~ (#x) ]]; }; id',
+                    'coproc NAME { [[ a =~ (#x) ]]; }; id',
+                    'coproc NAME [[ a =~ (#x) ]]; id',
+                    'function f { [[ a =~ (#x) ]]; }; id',
+                    'function f [[ a =~ (#x) ]]; id'):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(cmd, bp.strip_comments(cmd))
+
     def test_a_backtick_or_brace_expansion_holds_no_comment(self):
         # bash 5.3.15 runs `id` after each: a comment in backticks ends at the
         # closing backtick, and a `#` in `${...}` is text (Q254).
@@ -306,6 +335,158 @@ class CommandSubstitutionTests(unittest.TestCase):
 
     def test_arithmetic_holds_no_command(self):
         self.assertEqual([], bp.command_substitutions('echo $((1+2))'))
+
+
+class FunsubTests(unittest.TestCase):
+    """bash 5.3's ``${ list; }`` and ``${| list; }`` substitute a list (Q357).
+
+    Each command was driven under `env -i /opt/homebrew/bin/bash --norc
+    --noprofile -c` (5.3.15), with the output noted beside it.
+    """
+
+    def test_each_form_is_a_body(self):
+        for cmd, body in (
+                ('echo ${ cd OUT; }; cat x', ' cd OUT; '),
+                ('echo "${ cd OUT; }"; cat x', ' cd OUT; '),
+                ('echo ${| cd OUT; }; cat x', ' cd OUT; '),
+                ('x=${ cd OUT; }; cat x', ' cd OUT; '),
+                ('echo ${\tcat x; }', '\tcat x; '),
+                ('echo ${\ncat x\n}', '\ncat x\n'),
+                ('echo ${x:-${ cat y; }}', ' cat y; ')):
+            with self.subTest(cmd=cmd):
+                funsubs = []
+                self.assertEqual([body], bp.command_substitutions(
+                    cmd, funsubs=funsubs))
+                self.assertEqual([True], funsubs)
+
+    def test_it_closes_at_a_brace_in_command_position(self):
+        for cmd, body in (
+                ('echo ${ echo }; }', ' echo }; '),           # }
+                ('echo ${ { echo a; }; }', ' { echo a; }; '),  # a
+                ('echo ${ echo a;}b', ' echo a;'),            # ab
+                ('echo ${ echo a& }', ' echo a& '),           # (empty)
+                ("echo ${ echo '}'; }", " echo '}'; "),       # }
+                ('echo ${ echo $(echo }); }', ' echo $(echo }); '),  # }
+                ('echo ${ case x in x) echo c;; esac; }',
+                 ' case x in x) echo c;; esac; ')):           # c
+            with self.subTest(cmd=cmd):
+                self.assertEqual([body], bp.command_substitutions(cmd))
+
+    def test_what_bash_does_not_run_is_no_body(self):
+        for cmd in ('echo ${ echo a }',       # unexpected EOF
+                    "echo '${ cd OUT; }'",    # literal
+                    'echo \\${ cd OUT; }',    # escaped
+                    'echo ${x}'):
+            with self.subTest(cmd=cmd):
+                self.assertEqual([], bp.command_substitutions(cmd))
+
+    def test_other_bodies_are_not_funsubs(self):
+        funsubs = []
+        self.assertEqual(['a', 'b'], bp.command_substitutions(
+            'echo $(a) `b`', funsubs=funsubs))
+        self.assertEqual([False, False], funsubs)
+
+    def test_a_funsub_holds_its_own_close_inside_a_substitution(self):
+        # `a b`. Read as a parameter, it ended at the `}` in its comment, and
+        # the `)` after that closed the `$( )` before `echo b`.
+        cmd = 'echo $( echo ${ echo a; # } )\n}; echo b )'
+        self.assertEqual([' echo ${ echo a; # } )\n}; echo b '],
+                         bp.command_substitutions(cmd))
+
+
+class OwnLevelHeredocTests(unittest.TestCase):
+    def test_a_funsub_keeps_its_heredoc_as_a_substitution_does(self):
+        # Stripped, the body handed on was `cat <<E\nP;`, whose `P` a second
+        # strip then swallows as heredoc data (Q357).
+        for cmd in ('echo $( cat <<E\nhi\nE\nP; )',
+                    'echo ${ cat <<E\nhi\nE\nP; }',
+                    'echo "${ cat <<E\nhi\nE\nP; }"'):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(cmd, bp.strip_heredoc_bodies(
+                    cmd, own_level_only=True))
+
+
+class ArithmeticCloseTests(unittest.TestCase):
+    """Whether bash reads a `((` as arithmetic, and where it ends (Q338, Q361).
+
+    Each command was driven under `env -i /opt/homebrew/bin/bash --norc
+    --noprofile -c` (5.3.15), with the output noted beside it.
+    """
+    QUOTED_PARENS = ('$(( $(echo ")" | wc -c) ))',           # 2
+                     '$(( $(echo "(" | wc -c) ))',           # 2
+                     '$(( $(( $(echo "(" | wc -c) )) + 1 ))')  # 3
+
+    def test_the_delimiter_decides_not_the_text(self):
+        for cmd, bodies in (
+                ('echo $((echo x))', []),             # arithmetic syntax error
+                ('echo $(( 1 ) )', ['( 1 ) ']),       # `1: command not found`
+                ('echo $((echo x) ; echo P)', ['(echo x) ; echo P']),  # x P
+                ('echo $((1)+(2))', ['(1)+(2)']),     # syntax error near `+`
+                ('x=1; echo $(( ${x:-(} ) ))', []),   # arithmetic: `(` counts
+                ('echo ${x:-$((echo x) ; echo ID)}', ['(echo x) ; echo ID'])):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(bodies, bp.command_substitutions(cmd))
+
+    def test_a_quoted_paren_in_arithmetic_closes_nothing(self):
+        # Counted flat, the quoted paren closed the `$((` early or left it open,
+        # and the commands after it were cut from a body or never scanned.
+        for arith in self.QUOTED_PARENS:
+            body = 'echo %s ; cat /etc/passwd' % arith
+            wrapped = '${x:-%s}' % arith
+            with self.subTest(arith=arith):
+                self.assertEqual(['echo ID'], bp.command_substitutions(
+                    'echo %s ; echo $(echo ID)' % arith))
+                self.assertEqual([body], bp.command_substitutions('x=$(%s)' % body))
+                self.assertEqual([body], bp.command_substitutions(
+                    'echo "$(%s)"' % body))
+                self.assertEqual(len(wrapped), bp._brace_end(wrapped, 0))
+                self.assertEqual(['echo RAN'], bp.process_substitutions(
+                    'echo %s <(echo RAN)' % arith))
+                self.assertEqual(len(arith) + 3, bp._subscript_end(
+                    'A[%s]=1' % arith, 1))
+
+    def test_a_subshell_substitution_in_double_quotes_is_scanned(self):
+        for inner in ('$((echo x) ; echo ID)',                # x, ID
+                      '$((echo ")") ; echo ID)'):             # ), ID
+            body = 'echo "%s"' % inner
+            with self.subTest(inner=inner):
+                self.assertEqual([body], bp.command_substitutions(
+                    'echo "$(%s)"' % body))
+                self.assertEqual([inner[2:-1]], bp.command_substitutions(body))
+
+    def test_an_arithmetic_command_holds_no_comment(self):
+        cmd = '(( $(echo "(" | wc -c) #2 )); echo $(echo ID)'  # error, then ID
+        self.assertEqual(cmd, bp.strip_comments(cmd))
+        self.assertEqual(['echo "(" | wc -c', 'echo ID'],
+                         bp.command_substitutions(cmd))
+
+    def test_an_arithmetic_shift_arms_no_heredoc(self):
+        cmd = '(( $(echo "(" | wc -c) << 2 )) ; cat <<EOF\nbody\nEOF\necho ID'
+        self.assertEqual('(( $(echo "(" | wc -c) << 2 )) ; cat <<EOF\necho ID',
+                         bp.strip_heredoc_bodies(cmd))                 # body, ID
+
+    def test_nested_arithmetic_holds_at_any_depth(self):
+        # The close is found through the trampoline and stepped over, so depth
+        # costs neither a Python frame nor a rescan of what it closed.
+        for depth in (1, 1000, 2000):
+            arith = '$(( 1 + ' * depth + '1' + ' ))' * depth
+            with self.subTest(depth=depth):
+                self.assertEqual(['id'], bp.command_substitutions(
+                    'echo %s ; echo $(id)' % arith))
+                self.assertEqual(['echo "%s" ; id' % arith],
+                                 bp.command_substitutions(
+                                     'x=$(echo "%s" ; id)' % arith))
+                self.assertEqual(['(echo x) ; ' + '$((echo x) ; ' * (depth - 1)
+                                  + 'id' + ')' * (depth - 1)],
+                                 bp.command_substitutions(
+                                     'echo ' + '$((echo x) ; ' * depth
+                                     + 'id' + ')' * depth))
+
+    def test_a_subshell_substitution_keeps_its_heredoc(self):
+        # bash ends the substitution at its `)`, so the heredoc there is
+        # unterminated and `hi` and `EOF` run as commands.
+        cmd = 'echo $((cat <<EOF) ; echo ID)\nhi\nEOF\n'
+        self.assertEqual(cmd, bp.strip_heredoc_bodies(cmd))
 
 
 class ProcessSubstitutionTests(unittest.TestCase):
@@ -658,15 +839,25 @@ class CommentInSubstitutionTests(unittest.TestCase):
                     'echo "$(%s)" T' % body))
                 bp.strip_comments('echo "$(%s)"' % body)
 
-    def test_a_brace_span_in_double_quotes_adds_no_recursion(self):
-        # `${…}` alternating with `$(` still recurses through `_brace_end`
-        # (Q337); stepping over it here must not deepen that per level.
-        body = 'echo ")"'
-        for _ in range(400):
-            body = 'echo "${x:-$(%s)}"' % body
-        body += ' ; cat /etc/passwd'
-        self.assertEqual([body], bp.command_substitutions(
-            'echo "$(%s)" T' % body))
+    def test_nested_brace_spans_hold_at_any_depth(self):
+        # A thousand of either shape raised RecursionError (Q337), so the
+        # hook exited 1 and nothing judged the `cat` after it.
+        shapes = (lambda b: '${y:-%s}' % b,
+                  lambda b: '"${x:-$(echo %s)}"' % b,
+                  lambda b: '${x:-$(echo %s)}' % b)
+        for depth in (1, 24, 25, 26, 27, 1000):
+            for shape in shapes:
+                inner = '")"'
+                for _ in range(depth):
+                    inner = shape(inner)
+                body = 'echo %s ; cat /etc/passwd' % inner
+                with self.subTest(depth=depth, sample=shape('…')):
+                    self.assertEqual([body], bp.command_substitutions(
+                        'echo "$(%s)" T' % body))
+                    self.assertEqual([body], bp.command_substitutions(
+                        'x=$(%s) T' % body))
+                    wrapped = '${y:-%s}' % body
+                    self.assertEqual(len(wrapped), bp._brace_end(wrapped, 0))
 
 
 class CommentOutsideSubstitutionTests(unittest.TestCase):
@@ -733,7 +924,13 @@ class CommentOutsideSubstitutionTests(unittest.TestCase):
                     "[[ x =~ \"a\" ]] #it's\n$(P)",
                     "[[ x =~ \"a\" ]];#it's\n$(P)", "[[ x =~ \\a ]];#it's\n$(P)",
                     "[[ x =~ $(true) ]];#it's\n$(P)",
-                    '[[ x =~ (a|#$(P)) ]]', '[[ x =~ a(#$(P)) ]]'):
+                    '[[ x =~ (a|#$(P)) ]]', '[[ x =~ a(#$(P)) ]]',
+                    # Q346: an extglob group is skipped whole, so its `(` is no
+                    # depth, and a `[[` that is only an argument opens no test.
+                    "[[ x =~ @(a) ]];#it's\n$(P)", "echo [[ =~ x;#it's\n$(P)",
+                    "case [[ in [[) echo =~ x;#it's\n;; esac; echo $(P)",
+                    'if [[ x =~ (a|#$(P)) ]]; then :; fi',
+                    'x && [[ a =~ (#$(P)) ]]'):
             cmd = cmd.replace('P', self.P)
             with self.subTest(cmd=cmd):
                 self.assertIn(self.P, bp.command_substitutions(cmd))
@@ -1039,6 +1236,19 @@ class AssignmentTests(unittest.TestCase):
         for word in ('cat', "'cat'", '1A=x', '-A=x'):
             with self.subTest(word=word):
                 self.assertFalse(bp.is_assignment(bp.lex(word)[0]))
+
+    def test_a_word_glued_to_a_dollar_paren_keeps_its_record(self):
+        """`glue_dollar_paren` appends a `(`, so the word is still what it was
+        written as (Q175)."""
+        for word, assigns in (("'SP='$(x)", False), ("'SP'=$(x)", False),
+                              ('"SP="$(x)', False), (r'\SP=$(x)', False),
+                              ('SP=$(x)', True), ("SP='a b'$(x)", True)):
+            toks = bp.lex(word)
+            glued = bp.glue_dollar_paren(bp.split_operator_runs(toks))[0]
+            with self.subTest(word=word):
+                self.assertTrue(glued.endswith('$('))
+                self.assertEqual(toks[0].quoted_from, glued.quoted_from)
+                self.assertEqual(assigns, bp.is_assignment(glued))
 
     def test_a_plain_str_reads_as_written_plain(self):
         """A hand-built token carries no record, so it keeps the old reading."""

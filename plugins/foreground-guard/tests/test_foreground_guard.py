@@ -435,6 +435,16 @@ class SubstitutionTests(unittest.TestCase):
         "cat <<EOF\nx = '$(gh run watch 456)'\nEOF",
         "cat <<EOF\ndon't wait: $(gh run watch 456)\nEOF",
         'git commit -m "$(cat <<MSG\nnote $(gh run watch 456)\nMSG\n)"',
+        # A `$((` closed by one paren is a substitution around a subshell
+        # (Q338); the nested double-quoted form deferred.
+        'echo $((echo x) ; tail -f log.txt)',
+        'x=$((echo x) ; tail -f log.txt)',
+        'echo "$(echo "$((echo x) ; tail -f log.txt)")"',
+        # bash 5.3's funsub substitutes a list too (Q357), and a heredoc in a
+        # body ends before the commands after it.
+        'echo ${ sleep 600; }',
+        'echo ${ cat <<E\nhi\nE\nsleep 600; }',
+        'echo $( cat <<E\nhi\nE\nsleep 600; )',
     ]
     DEFERS = [
         "echo '$(gh run watch 456)'",
@@ -488,6 +498,93 @@ class LoopAndSleepTests(unittest.TestCase):
     def test_loop_without_sleep_defers(self):
         d, _ = run_hook("for f in *.py; do python3 -m py_compile $f; done")
         self.assertIsNone(d)
+
+    # A sleep after `done` runs once, after the loop, so nothing polls (Q283).
+    SLEEP_AFTER_LOOP = (
+        "for c in a b; do true; done; sleep 1; ls",
+        "for c in a b; do true; done && sleep 1",
+        "for c in a b; do true; done\nsleep 1",
+        "{ for c in a b; do true; done; }; sleep 1",
+        "for c in a b; do echo done; done; sleep 1",
+        "for c in done; do true; done; sleep 1",
+        "time for c in a b; do true; done; sleep 1",
+    )
+
+    # The sleep is in the loop's condition or body, however deeply nested.
+    SLEEP_IN_LOOP = (
+        "while true; do sleep 1; done",
+        "while sleep 1; do ls; done",
+        "until false; do sleep 1; done",
+        "until sleep 1; do ls; done",
+        "for i in 1 2; do for j in 1 2; do sleep 1; done; done",
+        "for i in 1 2; do for j in 1 2; do true; done; sleep 1; done",
+        "while true; do { sleep 1; }; done",
+        "while true; do (sleep 1); done",
+        "while true; do if true; then sleep 1; fi; done",
+        "while true; do case x in x) sleep 1;; esac; done",
+        "while true; do case $x in a) ls;; done) ls;; esac; sleep 1; done",
+        "bash -c 'while true; do ls; sleep 1; done'",
+        "time while true; do sleep 1; done",
+        "time for i in 1 2; do sleep 1; done",
+        "time -p while true; do sleep 1; done",
+        "time -p -- until false; do sleep 1; done",
+        "! time while true; do sleep 1; done",
+        "ls; time for i in 1 2; do curl x; sleep 1; done",
+        "time { while true; do sleep 1; done; }",
+    )
+
+    def test_sleep_after_loop_defers(self):
+        for cmd in self.SLEEP_AFTER_LOOP:
+            d, _ = run_hook(cmd)
+            self.assertIsNone(d, "expected defer for %r" % cmd)
+
+    def test_sleep_in_loop_denies(self):
+        for cmd in self.SLEEP_IN_LOOP:
+            d, r = run_hook(cmd)
+            self.assertEqual(d, "deny", cmd)
+            self.assertIn("loop", r, cmd)
+
+    # The loop body sleeps through a nested command string (Q359).
+    NESTED_SLEEP_IN_LOOP = (
+        "while true; do x=$(sleep 1); done",
+        "while true; do bash -c 'sleep 1'; done",
+        "while true; do eval 'sleep 1'; done",
+        "while true; do gh pr checks 1; x=$(sleep 5); done",
+        "while x=$(sleep 1); do ls; done",
+        "for i in 1 2; do bash -c 'x=$(sleep 1)'; done",
+        "while true; do x=$(sleep 30); done",
+        "for i in 1 2; do for j in $(sleep 1; echo a); do :; done; done",
+        "for i in $(sleep 1); do x=$(sleep 1); done",
+    )
+
+    # The nested sleep is outside the loop, detached, or bounded.
+    NESTED_SLEEP_NOT_IN_LOOP = (
+        "x=$(sleep 1); for i in 1 2; do ls; done",
+        "for i in 1 2; do ls; done; bash -c 'sleep 1'",
+        "while true; do x=$(sleep 1) & done",
+        "while true; do timeout 5 bash -c 'sleep 1'; done",
+        "while true; do bash -c 'sleep 1 &'; done",
+        # A `for` word list is expanded once, before the first iteration.
+        "for i in $(sleep 1; echo a b c); do :; done",
+        "time for i in $(sleep 1); do :; done",
+        "for i in 1; do :; done; for j in $(sleep 1); do :; done",
+    )
+
+    def test_nested_sleep_in_loop_denies(self):
+        for cmd in self.NESTED_SLEEP_IN_LOOP:
+            d, r = run_hook(cmd)
+            self.assertEqual(d, "deny", cmd)
+            self.assertIn("`while`/`until`/`for` loop", r, cmd)
+
+    def test_nested_sleep_not_in_loop_defers(self):
+        for cmd in self.NESTED_SLEEP_NOT_IN_LOOP:
+            d, _ = run_hook(cmd)
+            self.assertIsNone(d, "expected defer for %r" % cmd)
+
+    def test_long_sleep_after_loop_still_judged_by_floor(self):
+        d, r = run_hook("for c in a b; do true; done; sleep 30")
+        self.assertEqual(d, "deny")
+        self.assertNotIn("`while`/`until`/`for` loop", r)
 
     def test_while_read_defers(self):
         d, _ = run_hook("while read -r line; do echo $line; done < input.txt")
@@ -1599,6 +1696,16 @@ class RobustnessTests(unittest.TestCase):
                                        "tool_input": {"file_path": "/x"}})
         self.assertIsNone(d)
 
+    def test_monitor_poll_loop_defers(self):
+        # A Monitor until-loop is the wait the deny text advises. The matcher
+        # names Monitor so it arrives as itself instead of disguised as Bash.
+        d, _ = run_hook(None, payload={"tool_name": "Monitor", "tool_input": {
+            "command": "until curl -sf -o /dev/null http://localhost:8000/; "
+                       "do sleep 3; done; echo up",
+            "description": "docs-serve on :8000 ready",
+            "timeout_ms": 900000}})
+        self.assertIsNone(d)
+
     def test_empty_command_defers(self):
         d, _ = run_hook("   ")
         self.assertIsNone(d)
@@ -1741,7 +1848,7 @@ class WiringTests(unittest.TestCase):
         with open(REPO / "hooks" / "hooks.json", encoding="utf-8") as f:
             hooks = json.load(f)
         entries = hooks["hooks"]["PreToolUse"]
-        self.assertEqual(entries[0]["matcher"], "Bash")
+        self.assertEqual(entries[0]["matcher"], "Bash|Monitor")
         cmd = entries[0]["hooks"][0]["command"]
         self.assertEqual(
             cmd, '"${CLAUDE_PLUGIN_ROOT}/scripts/run-python-hook.cmd" '

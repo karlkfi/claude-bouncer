@@ -3340,6 +3340,171 @@ def refuse(reason, routes, liftable=False):
     emit('deny', f"{reason} — {routes}")
 
 
+# Shells whose `-c` string `body_verdicts` judges as a command of its own
+# (Q297), and the long options before it that take a separate value. A body
+# nested deeper than MAX_BODY_DEPTH is left unread, which defers.
+SHELL_NAMES = {'sh', 'bash', 'dash', 'zsh', 'ksh', 'mksh', 'ash'}
+SHELL_LONG_VALUE_OPTS = {'--rcfile', '--init-file'}
+MAX_BODY_DEPTH = 4
+
+
+def shell_c_body(seg):
+    """(body, env, chdir) when a segment runs a shell on a `-c` string, else
+    None. `body` is the string, or None when `-c` has nothing after it; `env`
+    and `chdir` are what the prefix and the wrappers in front of the shell
+    hand it, as `parse_invocation` reads them for git. The shell takes every
+    option before its first operand, so `bash -c -e 'x'` runs `x`, and the
+    operands after the body are its `$0` and arguments."""
+    i, env = 0, {}
+    while i < len(seg) and is_assignment(seg[i]):
+        name, form, value = split_assignment(seg[i])
+        if form != ASSIGN_SUBSCRIPT:
+            env[name] = value if form == ASSIGN_PLAIN else None
+        i += 1
+    operands = []
+    argv, chdir = peel_wrappers(seg[i:], operands)
+    if not argv or argv[0].rsplit('/', 1)[-1] not in SHELL_NAMES:
+        return None
+    for t in operands:
+        name, _, value = split_assignment(t, append_is_operator=False)
+        env[name] = value
+    j, c_mode = 1, False
+    while j < len(argv):
+        t = argv[j]
+        if t in ('-', '--'):
+            j += 1
+            break
+        if t.startswith('--'):
+            j += 2 if t in SHELL_LONG_VALUE_OPTS else 1
+            continue
+        if len(t) < 2 or t[0] not in '-+':
+            break
+        j += 1
+        for ch in t[1:]:
+            if ch == 'c':
+                c_mode = True
+            elif ch in 'oO':
+                j += 1                              # `-o pipefail`, `-O extglob`
+    if not c_mode:
+        return None
+    return (argv[j] if j < len(argv) else None, env, chdir)
+
+
+def body_verdicts(shell, seg_cwd, cwd, head_base, ctx, depth):
+    """The protective verdicts in a shell's `-c` body (Q297), judged from the
+    directory the shell starts in. The segment running the shell stands as
+    `nongit` beside them, so a body's `allow` approves nothing: the shell can
+    change the environment the classifier never reads. A body that will not
+    lex, or one nested past MAX_BODY_DEPTH, adds nothing and defers."""
+    body, env, chdir = shell
+    verdicts = [('nongit', None, False)]
+    if body is None or depth >= MAX_BODY_DEPTH:
+        return verdicts
+    try:
+        tokens = tokenize(strip_heredocs(body))
+    except ValueError:
+        return verdicts
+    for hop in chdir:
+        if hop is None or not is_literal_path(hop):
+            seg_cwd = head_base = None
+            break
+        seg_cwd, head_base = resolve_path(seg_cwd, hop), resolve_path(head_base, hop)
+    if seg_cwd is not None:
+        head_base = seg_cwd
+    tail = []
+    segments = command_segments(tokens, tail)
+    invs = [parse_invocation(s) for s, _, _ in segments]
+    for inv in invs:
+        if inv:
+            inv['env'] = {**env, **inv['env']}
+    inner = judge_segments(segments, tail, invs, seg_cwd, cwd, head_base, ctx,
+                           depth + 1)
+    return verdicts + [(v, r, False) for v, r, _ in inner
+                       if v in ('ask', 'ask-shared') or v in DENY_ROUTES]
+
+
+def judge_segments(segments, tail, invs, seg_cwd, cwd, head_base, ctx, depth=0):
+    """[(verdict, reason, overridable)] for each segment, in source order.
+
+    The working directory is a per-segment fact, not a per-command one: a
+    literal `cd` moves it for everything after it, and a literal `git -C`
+    moves it for one invocation. Reading it once answered about the tree the
+    command had already left — a deny for an overlap belonging to the
+    session's branch rather than the pushed one, and an allow for a `git -C`
+    push that really did overlap. Where the target is one the hook can't
+    resolve, `probe` goes false and the probes stand down. `cwd` is the tree
+    the command is judged against, and `head_base` where HEAD is read after a
+    `cd` the hook couldn't follow — None where no directory is a fair guess."""
+    verdicts, frames = [], []
+    flat, apart = compound_layout(segments, tail)
+    for pos, at in enumerate(flat):
+        if not isinstance(at, int):
+            seg_cwd = group_cwd(frames, flat, apart, pos, seg_cwd)
+            continue
+        (seg, writes, _), inv = segments[at], invs[at]
+        if loop_head(seg):
+            seg_cwd = group_cwd(frames, flat, apart, pos, seg_cwd)
+        shell = shell_c_body(seg) if inv is None else None
+        if shell:
+            verdicts += body_verdicts(shell, seg_cwd, cwd, head_base, ctx, depth)
+        elif inv is None:
+            is_cd, dest = cd_destination(seg, seg_cwd)
+            # A non-git segment rides along only if it's a pure read-only
+            # filter (`git log | head`), a side-effect-free label/no-op
+            # (`echo "---"`), or a `cd` that lands in the worktree the
+            # command is already judged against. A segment that writes a
+            # file, or anything else, is `nongit` so the command can't be
+            # auto-approved.
+            # `main()` already required at least one git/gh segment, so a
+            # filter-/benign-only command (`head -5`, `echo hi`) defers
+            # rather than allows.
+            # The `cd` arm is the one that costs a probe, and it is what
+            # made the break-glass unreachable behind the `cd` most sessions
+            # lead with: `nongit` is outside the set `liftable` accepts, so
+            # `cd . && OVERRIDE=… git reset --hard` re-emitted the
+            # unprefixed denial minus its closing invitation. A `cd`
+            # elsewhere stays `nongit` — the override must not lift a
+            # verdict measured in a tree the command left.
+            if writes:
+                verdicts.append(('nongit', None, False))
+            elif is_cd:
+                verdicts.append(
+                    ('benign' if same_worktree(cwd, dest, ctx['roots'])
+                     else 'nongit', None, False))
+            elif is_safe_read_filter(seg):
+                verdicts.append(('filter', None, False))
+            elif is_benign_segment(seg):
+                verdicts.append(('benign', None, False))
+            else:
+                verdicts.append(('nongit', None, False))
+            # A `case` arm ends at a `;;` no mark records, so the next
+            # arm would inherit a `cd` bash never ran there.
+            if is_cd and pos not in apart:
+                seg_cwd = (None if any(f[0] == 'case' for f in frames)
+                           else dest)
+        else:
+            inv_cwd = invocation_cwd(seg_cwd, inv)
+            # The session's own branch is no answer for a repository the
+            # invocation re-aims and the hook can't name: None, which the
+            # branch-sensitive verbs ask on. A `cd` it couldn't follow still
+            # reads the session's branch.
+            head_cwd = inv_cwd or invocation_cwd(seg_cwd or head_base, inv, True)
+            seg_branch = branch_in(head_cwd, ctx['branches']) if head_cwd else None
+            ctx['seen'].add(seg_branch)
+            verdict, reason = classify_segment(
+                inv, seg_branch, ctx['policy'], inv_cwd or cwd,
+                inv_cwd is not None, ctx['mode'], ctx['session_id'])
+            # An output redirect to a file is a write side-effect the
+            # classifier can't see (`git log --format=… > f` writes
+            # possibly-attacker-influenced content). Downgrade a would-be
+            # allow to defer, but never weaken a protective `ask`.
+            if writes and verdict == 'allow':
+                verdict = 'defer'
+            verdicts.append((verdict, reason,
+                             is_overridable(inv, verdict, writes)))
+    return verdicts
+
+
 def main():
     try:
         data = json.load(sys.stdin)
@@ -3374,84 +3539,16 @@ def main():
         tail = []
         segments = command_segments(tokens, tail)
         invs = [parse_invocation(seg) for seg, _, _ in segments]
-        if not any(invs):
+        if not any(invs) and not any(shell_c_body(seg) for seg, _, _ in segments):
             return                                 # no git/gh command -> defer
         note_branch_creations(data)
 
-        policy = push_policy()
         cwd = data.get('cwd') or os.getcwd()
-        # The working directory is a per-segment fact, not a per-command one: a
-        # literal `cd` moves it for everything after it, and a literal `git -C`
-        # moves it for one invocation. Reading it once answered about the tree
-        # the command had already left — a deny for an overlap belonging to the
-        # session's branch rather than the pushed one, and an allow for a
-        # `git -C` push that really did overlap. Where the target is one the
-        # hook can't resolve, `probe` goes false and the probes stand down.
-        seg_cwd = cwd
-        branches, roots, seen, verdicts, frames = {}, {}, set(), [], []
-        flat, apart = compound_layout(segments, tail)
-        for pos, at in enumerate(flat):
-            if not isinstance(at, int):
-                seg_cwd = group_cwd(frames, flat, apart, pos, seg_cwd)
-                continue
-            (seg, writes, _), inv = segments[at], invs[at]
-            if loop_head(seg):
-                seg_cwd = group_cwd(frames, flat, apart, pos, seg_cwd)
-            if inv is None:
-                is_cd, dest = cd_destination(seg, seg_cwd)
-                # A non-git segment rides along only if it's a pure read-only
-                # filter (`git log | head`), a side-effect-free label/no-op
-                # (`echo "---"`), or a `cd` that lands in the worktree the
-                # command is already judged against. A segment that writes a
-                # file, or anything else, is `nongit` so the command can't be
-                # auto-approved.
-                # `not any(invs)` above already guaranteed at least one git/gh
-                # segment, so a filter-/benign-only command (`head -5`,
-                # `echo hi`) defers rather than allows.
-                # The `cd` arm is the one that costs a probe, and it is what
-                # made the break-glass unreachable behind the `cd` most sessions
-                # lead with: `nongit` is outside the set `liftable` accepts, so
-                # `cd . && OVERRIDE=… git reset --hard` re-emitted the
-                # unprefixed denial minus its closing invitation. A `cd`
-                # elsewhere stays `nongit` — the override must not lift a
-                # verdict measured in a tree the command left.
-                if writes:
-                    verdicts.append(('nongit', None, False))
-                elif is_cd:
-                    verdicts.append(
-                        ('benign' if same_worktree(cwd, dest, roots)
-                         else 'nongit', None, False))
-                elif is_safe_read_filter(seg):
-                    verdicts.append(('filter', None, False))
-                elif is_benign_segment(seg):
-                    verdicts.append(('benign', None, False))
-                else:
-                    verdicts.append(('nongit', None, False))
-                # A `case` arm ends at a `;;` no mark records, so the next
-                # arm would inherit a `cd` bash never ran there.
-                if is_cd and pos not in apart:
-                    seg_cwd = (None if any(f[0] == 'case' for f in frames)
-                               else dest)
-            else:
-                inv_cwd = invocation_cwd(seg_cwd, inv)
-                # The session's own branch is no answer for a repository the
-                # invocation re-aims and the hook can't name: None, which the
-                # branch-sensitive verbs ask on. A `cd` it couldn't follow still
-                # reads the session's branch.
-                head_cwd = inv_cwd or invocation_cwd(seg_cwd or cwd, inv, True)
-                seg_branch = branch_in(head_cwd, branches) if head_cwd else None
-                seen.add(seg_branch)
-                verdict, reason = classify_segment(
-                    inv, seg_branch, policy, inv_cwd or cwd,
-                    inv_cwd is not None, mode, data.get('session_id') or '')
-                # An output redirect to a file is a write side-effect the
-                # classifier can't see (`git log --format=… > f` writes
-                # possibly-attacker-influenced content). Downgrade a would-be
-                # allow to defer, but never weaken a protective `ask`.
-                if writes and verdict == 'allow':
-                    verdict = 'defer'
-                verdicts.append((verdict, reason,
-                                 is_overridable(inv, verdict, writes)))
+        seen = set()
+        verdicts = judge_segments(segments, tail, invs, cwd, cwd, cwd, {
+            'policy': push_policy(), 'mode': mode,
+            'session_id': data.get('session_id') or '',
+            'branches': {}, 'roots': {}, 'seen': seen})
 
         # A protective ask wins over everything (and becomes deny when no human
         # is present). A shared one — the cause is a protected branch — is

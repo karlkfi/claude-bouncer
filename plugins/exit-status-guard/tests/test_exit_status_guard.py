@@ -135,6 +135,19 @@ CASES = [
      False, True, ''),
     ("gate behind a [[ comment", "[[ -n x #it's\n]] && make check | tail -5",
      False, True, ''),
+    # Q346: an operand that opens with a quote or an expansion still ends.
+    ("gate behind a [[ comment in a $( )",
+     "[[ -n $( [[ x =~ \"a\" ]];#it's\necho y) ]] && echo $(make check | tail -5)",
+     False, True, ''),
+    ("gate behind an ANSI-C =~ operand",
+     "[[ x =~ $'a' ]];#it's\nmake check | tail -5", False, True, ''),
+    ("gate behind a ${ } =~ operand",
+     "[[ x =~ ${y:-a} ]];#it's\nmake check | tail -5", False, True, ''),
+    # ... and a test as a named coproc's or a function's body is still one.
+    ('gate after a named coproc test',
+     'coproc NAME { [[ a =~ (#x) ]]; }; make check | tail -5', False, True, ''),
+    ('gate after a function test',
+     'function f [[ a =~ (#x) ]]; make check | tail -5', False, True, ''),
 
     # --- PIPESTATUS is not portable across shells ----------------------------
     ('PIPESTATUS[0] after a gate',
@@ -847,6 +860,25 @@ CASES = [
     ('backgrounded commit naming --help still denies',
      'git commit -m "docs: --help text" > tmp/c.log 2>&1; echo "EXIT=$?"',
      True, True, ''),
+    # git's completion helper prints the option list and exits only as the
+    # subcommand's sole argument; anywhere else git rejects it or runs (Q350).
+    ('git checkout completion helper piped',
+     'git checkout --git-completion-helper-all | tr " " "\\n"', False, False, ''),
+    ('git switch completion helper piped',
+     'git switch --git-completion-helper-all | tr " " "\\n"', False, False, ''),
+    ('git checkout completion helper sequenced before a commit',
+     'git checkout --git-completion-helper-all; git commit -m x', False, False, ''),
+    ('git push completion helper piped',
+     'git push --git-completion-helper | tr " " "\\n"', False, False, ''),
+    ('git checkout of a branch piped still denies', 'git checkout main | tr " " "\\n"',
+     False, True, 'piped'),
+    ('git checkout with a branch beside the helper still denies',
+     'git checkout b --git-completion-helper-all | tr " " "\\n"', False, True, 'piped'),
+    ('completion helper as a commit message still denies',
+     'git commit -m --git-completion-helper; git push', False, True,
+     'is sequenced before'),
+    ('make check piped beside a completion helper still denies',
+     'git checkout --git-completion-helper-all; make check | tail', False, True, 'piped'),
 
     # --- A backgrounded gate whose status the last statement drops -----------
     ('the canonical lost background status',
@@ -925,6 +957,31 @@ CASES = [
     ('PIPESTATUS read inside arithmetic is still a read',
      'make check | tail; exit $((${PIPESTATUS[0]}|0))', False, True,
      'reads $PIPESTATUS to recover'),
+    # Q339: the mask's end was found by counting every paren, so the quoted
+    # `(` in the substitution left one open and the mask ran to end-of-string,
+    # taking the gated pipeline with it.
+    ('a quoted paren in a substitution inside arithmetic ends nothing',
+     'echo $(( $(echo "(" | wc -c) )) ; make check | tail', False, True,
+     "exit status is the filter's"),
+    ('the same, in a double-quoted substitution',
+     'echo "$(echo "$(( $(echo "(" | wc -c) ))" ; make check | tail)"',
+     False, True, "exit status is the filter's"),
+    # Q361: one `$((` deeper, the parser's own step over the inner `$((`
+    # counted the quoted `(` and found no close.
+    ('a quoted paren one arithmetic deeper ends nothing either',
+     'echo $(( $(( $(echo "(" | wc -c) )) + 1 )) ; make check | tail',
+     False, True, "exit status is the filter's"),
+    # Q338: a `$((` whose first close is a single `)` is `$( (`, a substitution
+    # around a subshell, and bash runs the commands in it.
+    ('a $(( closed by one paren is a substitution',
+     'echo $((echo x) ; make check | tail)', False, True,
+     "exit status is the filter's"),
+    ('the same, assigned',
+     'x=$((echo x) ; make check | tail)', False, True,
+     "exit status is the filter's"),
+    ('the same, in nested double quotes',
+     'echo "$(echo "$((echo x) ; make check | tail)")"', False, True,
+     "exit status is the filter's"),
 
     # --- A gate sequenced before a state change with `;` ---------------------
     ('check then push', 'make check; git push', False, True,
@@ -1133,6 +1190,21 @@ CASES = [
     ('a gate among array elements', 'arr=(x $(make check) y)', False, False, ''),
     ('a gate in an array assigned for a command',
      'arr=($(make check)) cmd', False, True, 'command substitution'),
+    # A quoted `)` is an element, not the close: `arr=(")" $(false))` and
+    # `arr=(\) $(false))` exit 1 (Q343).
+    ('a gate after a quoted paren in an array',
+     'arr=(")" $(make check))', False, False, ''),
+    ('a gate after a single-quoted paren in an array',
+     "arr=(')' $(make check))", False, False, ''),
+    ('a gate after an escaped paren in an array',
+     'arr=(\\) $(make check))', False, False, ''),
+    ('a gate after a quoted paren in an array assigned for a command',
+     'arr=(")" $(make check)) cmd', False, True, 'command substitution'),
+    ('a gate piped after an array holding a quoted paren',
+     'arr=(")"); make check | tail', False, True, 'piped'),
+    # `x= "("` assigns x empty and runs `(` as a command, so no array opens.
+    ('a quoted paren after an empty assignment opens no array',
+     'x= "(" $(make check) ")"', False, True, 'command substitution'),
     ('a non-gate echoed', 'echo "$(git log -1)"', False, False, ''),
     ('a gate whose failure is discarded inside',
      'echo "$(make check || true)"', False, False, ''),
@@ -1251,6 +1323,50 @@ CASES = [
     ('a test with no capture to read',
      'make check > tmp/c.log 2>&1; [ "$rc" -eq 0 ] && git push',
      False, True, ''),
+    # A test that exits on failure stops the command before the `;` reaches the
+    # mutator, so the mutator runs only when the gate passed (Q351).
+    ('a commit joined to a test of the capture',
+     'make check > l 2>&1; rc=$?; [ "$rc" -eq 0 ] && git commit -m x', False, False, ''),
+    ('a gate that exits on its own failure',
+     'make check > l 2>&1 || exit 1; git commit -m x', False, False, ''),
+    ('a passing test or exit, then the commit',
+     'make check > l 2>&1; rc=$?; [ "$rc" -eq 0 ] || exit 1; git commit -m x',
+     False, False, ''),
+    ('a failing test and exit, then the commit',
+     'make check > l 2>&1; rc=$?; [ "$rc" -ne 0 ] && exit 1; git commit -m x',
+     False, False, ''),
+    ('an if that exits on a failing test, then the commit',
+     'make check > l 2>&1; rc=$?; if [ "$rc" -ne 0 ]; then exit 1; fi; git commit -m x',
+     False, False, ''),
+    ('a log read between the exiting test and the push',
+     'make check > l 2>&1; rc=$?; tail -3 l; [[ ${rc} -eq 0 ]] || exit "$rc"; git push',
+     False, False, ''),
+    # Each of these reaches the mutator on a failed gate.
+    ('an echo on failure is not an exit',
+     'make check > l 2>&1; rc=$?; [ "$rc" -eq 0 ] || echo bad; git commit -m x',
+     False, True, 'is sequenced before'),
+    ('an exit on the passing side of the test',
+     'make check > l 2>&1; rc=$?; [ "$rc" -ne 0 ] || exit 1; git commit -m x',
+     False, True, 'is sequenced before'),
+    ('an if that exits on a passing test',
+     'make check > l 2>&1; rc=$?; if [ "$rc" -eq 0 ]; then exit 1; fi; git commit -m x',
+     False, True, 'is sequenced before'),
+    # bash -c prints an error for a `return` outside a function and carries on.
+    ('a return outside a function is not an exit',
+     'make check > l 2>&1; rc=$?; [ "$rc" -eq 0 ] || return 1; git commit -m x',
+     False, True, 'is sequenced before'),
+    ('an exit inside a subshell stops only the subshell',
+     'make check > l 2>&1; rc=$?; ( [ "$rc" -eq 0 ] || exit 1 ); git commit -m x',
+     False, True, 'is sequenced before'),
+    ('an exiting test inside another branch is not on every path',
+     'make check > l 2>&1; rc=$?; if [ -n "$CI" ]; then :; [ "$rc" -eq 0 ] || exit 1; fi; '
+     'git commit -m x', False, True, 'is sequenced before'),
+    ('an exiting test read before the capture',
+     'make check > l 2>&1; [ "$rc" -eq 0 ] || exit 1; rc=$?; git commit -m x',
+     False, True, 'is sequenced before'),
+    ('make check piped beside an exiting test still denies',
+     'make check > l 2>&1; rc=$?; [ "$rc" -eq 0 ] || exit 1; make check | tail',
+     False, True, 'piped'),
 
     # --- Read forms of a subcommand that also writes -------------------------
     # `git tag` and `kubectl rollout` each have a read form and a write form
@@ -1893,6 +2009,30 @@ class TestHookEndToEnd(unittest.TestCase):
                     'deny',
                     json.loads(out)['hookSpecificOutput']['permissionDecision'])
 
+    def test_an_override_quoted_before_a_dollar_paren_arms_nothing(self):
+        """Q175: bash 5.3.15 runs each quoted word below as a command, exit
+        127, so only the two plain overrides lift the deny."""
+        for cmd, want in (
+                ('make check | tail', 'deny'),
+                ('EXIT_STATUS_GUARD_OVERRIDE=$(echo x) true; make check | tail', ''),
+                ("'EXIT_STATUS_GUARD_OVERRIDE=x' true; make check | tail", 'deny'),
+                ("'EXIT_STATUS_GUARD_OVERRIDE='$(echo x) true; make check | tail",
+                 'deny'),
+                ("'EXIT_STATUS_GUARD_OVERRIDE'=$(echo x) true; make check | tail",
+                 'deny'),
+                ('"EXIT_STATUS_GUARD_OVERRIDE="$(echo x) true; make check | tail',
+                 'deny'),
+                ('\\EXIT_STATUS_GUARD_OVERRIDE=$(echo x) true; make check | tail',
+                 'deny'),
+                ("EXIT_STATUS_GUARD_OVERRIDE='a b'$(echo x) true; make check | tail",
+                 '')):
+            with self.subTest(cmd):
+                out = self.run_hook({'tool_name': 'Bash', 'cwd': REPO,
+                                     'tool_input': {'command': cmd}})
+                got = out and json.loads(out)['hookSpecificOutput'][
+                    'permissionDecision']
+                self.assertEqual(want, got)
+
     def test_stays_silent_on_a_clean_command(self):
         out = self.run_hook({
             'tool_name': 'Bash', 'cwd': REPO,
@@ -2044,6 +2184,11 @@ class TestSegmentation(unittest.TestCase):
     def test_a_spaced_substitution_is_not_arithmetic(self):
         segs = self.segs('out=$( (make check | tail -1) )')
         self.assertIn('|', [pg.next_op(s.post_ops) for s in segs])
+
+    def test_a_quoted_paren_does_not_extend_the_arithmetic(self):
+        segs = self.segs('echo $(( $(echo "(") )) ; make check')
+        self.assertEqual([['echo', pg.ARITHMETIC_WORD], ['make', 'check']],
+                         [s.tokens for s in segs])
 
     def test_arithmetic_in_single_quotes_is_left_to_shlex(self):
         segs = self.segs("echo '$((a|b))' && git push")

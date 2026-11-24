@@ -46,7 +46,7 @@ from bouncer_parse import (                                    # noqa: E402
     MAX_SUBST_DEPTH, PIPE_OPS, PUNCT_CHARS, QuoteTrackingLexer, REDIR,
     SEPARATORS, SH_KEYWORDS, _OPERATORS, is_assignment, is_operator, split_assignment,
     _consume_heredoc_body, _scan_backticks, _scan_dollar_paren,
-    _skip_balanced_parens, command_substitutions, glue_dollar_paren,
+    command_substitutions, glue_dollar_paren,
     process_substitutions,
     note_discarded_writes, split_operator_runs, strip_comments,
     strip_env_prefix, strip_heredoc_bodies, strip_sh_keywords,
@@ -157,6 +157,10 @@ def mask_arithmetic(text):
     text is literal, and shlex keeps it inside its word without help. Only the
     `$((` spelling is masked -- `$( (…) )` is a substitution around a subshell,
     and a gate piped inside one is still a lost status.
+
+    The close is found by `_scan_dollar_paren`, which tracks quotes and nested
+    substitutions. Counted flat, the `"("` in `$(( $(echo "(") ))` left a paren
+    open and the mask ran to end-of-string, hiding every command after it (Q339).
     """
     out = []
     i, n = 0, len(text)
@@ -185,7 +189,8 @@ def mask_arithmetic(text):
             continue
         if text.startswith('$((', i):
             out.append(ARITHMETIC_WORD)
-            i = _skip_balanced_parens(text, i + 1)
+            body, end = _scan_dollar_paren(text, i + 2)
+            i = n if body is None else end
             continue
         out.append(c)
         i += 1
@@ -401,6 +406,12 @@ def head_words(seg):
 # `--version` is the way out of it.
 PROBE_FLAGS = frozenset({'--version', '--help', '-V', '-h', 'version', '--usage'})
 
+# git prints a subcommand's option names for `git <sub> --git-completion-helper`
+# and exits, but only when the helper is the sole argument: `git checkout b
+# --git-completion-helper-all` exits 129, and `git commit -m
+# --git-completion-helper` commits. So it is not a probe flag (Q350).
+GIT_COMPLETION_HELPERS = frozenset({'--git-completion-helper', '--git-completion-helper-all'})
+
 # Sub-subcommands that report state without changing any: their output is the
 # point, so there is no status for a pipe to swallow and nothing for `&&` to
 # gate. Recognised structurally for every gate, the same way probes are --
@@ -502,6 +513,8 @@ class Registry(object):
         # spelled inside a quoted argument stays one word: `git commit -m "bump
         # --version output"` is a commit, and still a gate.
         if any(w in PROBE_FLAGS for w in words[1:]):
+            return False
+        if len(words) == 3 and words[0] == 'git' and words[2] in GIT_COMPLETION_HELPERS:
             return False
         return not is_read(words)
 
@@ -1033,6 +1046,8 @@ def tested_form(segs, gate_at, mutator_at):
     var = status_captured(segs, gate_at, mutator_at)
     if not var:
         return False
+    if exits_on_failure(segs, var, gate_at, mutator_at):
+        return True
     j = mutator_at - 1
     while j >= 0 and next_op(segs[j].post_ops) == '&&':
         tokens = segs[j].tokens
@@ -1040,6 +1055,69 @@ def tested_form(segs, gate_at, mutator_at):
                 ' '.join(tokens), var, quotes=False):
             return True
         j -= 1
+    return False
+
+
+# A comparison of the capture with 0 that holds when the gate passed, or when
+# it failed. Any other test -- `-gt`, a `!`, a comparison with 1 -- is neither.
+PASSED_OPS = frozenset({'-eq', '=', '=='})
+FAILED_OPS = frozenset({'-ne', '!='})
+
+
+def status_verdict(tokens, var):
+    """'passed' or 'failed' for a `[ "$var" -eq 0 ]`-style test, else ''."""
+    if not tokens or tokens[0] not in STATUS_TESTS:
+        return ''
+    close = {'[': ']', '[[': ']]'}.get(tokens[0])
+    if close and tokens[-1] != close:
+        return ''
+    body = tokens[1:-1] if close else tokens[1:]
+    if len(body) != 3 or {body[0], body[2]} not in (
+            {'$' + var, '0'}, {'${%s}' % var, '0'}):
+        return ''
+    return ('passed' if body[1] in PASSED_OPS
+            else 'failed' if body[1] in FAILED_OPS else '')
+
+
+def exits_on_failure(segs, var, gate_at, mutator_at):
+    """Whether a top-level statement between the capture and the mutator exits
+    when the captured
+    status is a failure: `[ "$rc" -eq 0 ] || exit 1`, `[ "$rc" -ne 0 ] && exit
+    1`, or `if [ "$rc" -ne 0 ]; then exit 1; fi` (Q351).
+
+    `exit` only: a `return` outside a function prints an error and the command
+    carries on. Outside every compound and subshell, since an `exit` in either
+    does not stop the mutator.
+    """
+    ends = (';', '\n')
+    nest = 0
+    captured = False
+    for k in range(gate_at + 1, mutator_at):
+        if not captured:
+            captured = segs[k].depth == 0 and segs[k].tokens == [var + '=$?']
+            continue
+        toks, seg = segs[k].tokens, segs[k]
+        starts = next_op(segs[k - 1].post_ops) in ends
+        later = segs[k + 1:mutator_at]
+        if nest == 0 and seg.depth == 0 and starts and later and all(
+                s.depth == 0 for s in later[:3]):
+            op, exit_seg = next_op(seg.post_ops), later[0]
+            exits = (head_words(exit_seg)[:1] == ['exit']
+                     and next_op(exit_seg.post_ops) in ends)
+            verdict = status_verdict(toks, var)
+            if exits and ((op == '||' and verdict == 'passed')
+                          or (op == '&&' and verdict == 'failed')):
+                return True
+            if (toks[:1] == ['if'] and op in ends
+                    and status_verdict(toks[1:], var) == 'failed'
+                    and exit_seg.tokens[:1] == ['then'] and exits
+                    and len(later) > 1 and later[1].tokens == ['fi']
+                    and next_op(later[1].post_ops) in ends):
+                return True
+        if toks and all(t in COMPOUND_CLOSERS for t in toks):
+            nest -= len(toks)
+        else:
+            nest += sum(1 for t in toks[:2] if t in COMPOUND_OPENERS)
     return False
 
 
@@ -1246,14 +1324,15 @@ SUBST_RE = re.compile(re.escape(SUBST_WORD) + r'(\d+)_')
 
 def fold_arrays(tokens):
     """Join each `NAME=(` … `)` compound assignment into one word, whose
-    parens would otherwise split it into segments of their own."""
+    parens would otherwise split it into segments of their own. A quoted `")"`
+    is an element, not the close (Q343)."""
     out, i = [], 0
     while i < len(tokens):
         t = tokens[i]
-        if (t.endswith('=') and tokens[i + 1:i + 2] == ['(']
-                and is_assignment(t)):
+        if (t.endswith('=') and i + 1 < len(tokens)
+                and is_operator(tokens[i + 1], ('(',)) and is_assignment(t)):
             j = i + 2
-            while j < len(tokens) and tokens[j] != ')':
+            while j < len(tokens) and not is_operator(tokens[j], (')',)):
                 j += 1
             out.append('%s(%s)' % (t, ' '.join(tokens[i + 2:j])))
             i = j + 1

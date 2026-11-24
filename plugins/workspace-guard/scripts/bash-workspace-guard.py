@@ -13,7 +13,7 @@ import sys, os, json, re, shlex, shutil, fnmatch, collections, functools, tempfi
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 from bouncer_parse import (                                    # noqa: E402
     ASSIGN_APPEND, ASSIGN_PLAIN, ASSIGN_SUBSCRIPT, ASSIGNMENT_RE,
-    COMMENT_PRECEDERS, DUP, MAX_SUBST_DEPTH, PUNCT_CHARS, QuoteTrackingLexer, REDIR, SEPARATORS, SUBST_OPEN,
+    COMMENT_PRECEDERS, DUP, MAX_SUBST_DEPTH, PUNCT_CHARS, QuotedStr, QuoteTrackingLexer, REDIR, SEPARATORS, SUBST_OPEN,
     _OPERATORS, is_assignment, is_operator, is_reserved_word, split_assignment,
     _consume_heredoc_body, _scan_backticks, _scan_dollar_paren,
     _skip_balanced_parens, command_substitutions, glue_dollar_paren,
@@ -1153,6 +1153,7 @@ SPEC = {
 # treatment across: WRITE_COMMANDS and ENTRY_OPERANDS are keyed on the resolved
 # name, so `unlink` picks up write context and by-the-name resolution for free.
 ALIASES = {'egrep':'grep','fgrep':'grep','gawk':'awk','mawk':'awk',
+           'gsed':'sed',
            'less':'cat','more':'cat',
            'tac':'cat','rev':'cat','nl':'cat',
            'od':'cat',
@@ -1390,13 +1391,25 @@ def substitute_vars(tok, varmap):
         name = m.group(1) or m.group(2)
         return varmap[name] if name in varmap else m.group(0)
 
-    return VAR_USE_RE.sub(repl, tok)
+    out = VAR_USE_RE.sub(repl, tok)
+    if out == tok:
+        return tok                                # keep a QuotedStr's record
+    if getattr(tok, 'quoted_chars', 0) == len(tok):
+        # A value spliced into a wholly quoted word is quoted too (Q335).
+        out = QuotedStr(out)
+        out.quotes, out.quoted_from, out.glued = tok.quotes, 0, tok.glued
+        out.quoted_chars = len(out)
+    return out
 
 
-def apply_assignment_group(g, varmap, persists):
+def apply_assignment_group(g, varmap, persists, textmap=None):
     """If ``g`` is nothing but variable assignments — ``NAME=VAL ...`` or
     ``export [-flag] NAME=VAL ...`` — fold them into ``varmap`` and return
     the list of assigned names; else return None with ``varmap`` untouched.
+
+    ``textmap`` takes the values ``varmap`` turns away for their whitespace or
+    glob characters but that expand nothing: as a path they would split, but
+    spliced into a double-quoted sed script they are exactly this text (Q335).
 
     Must be called on the PRE-substitution tokens: bash decides what is an
     assignment before expansion, so ``$f`` expanding to ``g=x`` runs a
@@ -1432,7 +1445,14 @@ def apply_assignment_group(g, varmap, persists):
     for t in pairs:
         name, form, raw = split_assignment(t)
         names.append(name)
-        val = literal_assignment_value(substitute_vars(raw, varmap))
+        text = substitute_vars(raw, varmap)
+        val = literal_assignment_value(text)
+        if textmap is not None:
+            textmap.pop(name, None)
+            if val is None and text and form == ASSIGN_PLAIN and persists \
+                    and name not in NEVER_PROPAGATE and not text.startswith('~') \
+                    and '$' not in text and '`' not in text:
+                textmap[name] = text
         # `NAME+=v` resolves to the old value plus `v`. Paths are resolved from
         # this map, and an append onto a value it cannot prove is not
         # resolvable -- so drop the name, which is what it already does for a
@@ -3182,9 +3202,9 @@ def sed_script_reads(text, brackets):
 
 
 def _sed_scripts(tokens, bsd):
-    """The script text `sed` runs for `tokens`, under GNU's reading of the argv
-    or (`bsd`) BSD's: there `-i` always takes the next word as its suffix and
-    the first operand ends the options."""
+    """The words `sed` joins into its script for `tokens`, under GNU's reading
+    of the argv or (`bsd`) BSD's: there `-i` always takes the next word as its
+    suffix and the first operand ends the options."""
     exprs, positionals, from_file = [], [], False
     i, n, end_opts = 1, len(tokens), False
     while i < n:
@@ -3222,8 +3242,96 @@ def _sed_scripts(tokens, bsd):
             if ch == 'i':
                 break
     if exprs or from_file:
-        return '\n'.join(exprs)
-    return positionals[0] if positionals else ''
+        return exprs
+    return positionals[:1]
+
+
+def sed_script_words(tokens):
+    """Every word either sed reads as script text."""
+    words = []
+    for bsd in (False, True):
+        words += [w for w in _sed_scripts(tokens, bsd) if w not in words]
+    return words
+
+
+# An expansion in a sed script: a `$(…)` or a backtick, `${…}`, or `$NAME` and
+# the one-character parameters. `$((…))` is arithmetic, a number, and is left out.
+SED_EXPANSION_RE = re.compile(
+    r'`|\$\((?!\()|\$\{([^}]*)\}?|\$([A-Za-z_][A-Za-z0-9_]*|[0-9@*_!#?$-])')
+# A `$NAME` the source follows with quotes or a backslash and then more name
+# characters, which quote removal merges into a longer name: `"$p"x`, `$p\x`,
+# `"$p"$'x'`.
+GLUED_NAME_RE = re.compile(
+    r'\$([A-Za-z_][A-Za-z0-9_]*)(?=(?:["\'\\]|\$[\'"])+[A-Za-z0-9_])')
+# Names bash fills with no `NAME=` the hook could see in the string.
+SED_IMPLICIT_VARS = frozenset({'_', 'BASH_REMATCH', 'REPLY', 'OPTARG', 'OPTIND',
+                               'MAPFILE'})
+
+
+def sed_expansion_names(text):
+    """The plain names `text` expands, as `$NAME` or `${NAME}`."""
+    names = set()
+    for m in SED_EXPANSION_RE.finditer(text):
+        name = m.group(1) if m.group(1) is not None else m.group(2)
+        if name and IDENT_RE.fullmatch(name):
+            names.add(name)
+    return names
+
+
+def output_assigned(cmd):
+    """The names `cmd` only ever sets to a value that is wholly one command
+    substitution, `NAME=$(cmd)` or `` NAME=`cmd` ``: README, Limitations.
+
+    Read from the marked source, not the tokens, which drop whatever follows an
+    unquoted `$(…)`: `p=$(true)'w x'` reaches a group as `p=$(`, as does the
+    arithmetic `p=$((1))`, which is never marked.
+    """
+    marked, _, texts = mark_substitutions(
+        strip_heredoc_bodies(cmd, own_level_only=True, bodies=[]))
+    tokens = tokenize_command(marked, heredocs=False) if texts is not None else None
+    whole, other = set(), set()
+    for t in tokens or ():
+        if is_assignment(t):
+            name, _, raw = split_assignment(t)
+            (whole if MARK_RE.fullmatch(raw) else other).add(name)
+    return whole - other
+
+
+def sed_script_hides(word, bound, glued=frozenset(), fields=False):
+    """True when sed script `word` holds an expansion that takes its text from
+    the command in a way the hook does not read (Q335): a `$(…)`, a backtick, a
+    `${…}` operator, indirection, a positional parameter, `$_` or a name like
+    `BASH_REMATCH` that bash fills itself. Any of them can add a `w` command or
+    end an `s` part early.
+
+    So does a plain `$NAME` or `${NAME}` left in the word when the command
+    binds NAME (`bound`): the hook substitutes the literals it can, and a value
+    that reached no map on the way is as unread as an operator's. Quote removal
+    turns `"$p"x` into `$px`, so a bound prefix of NAME counts too where the
+    source glues text to it that way (`glued`). A plain name
+    the command never binds, or binds only by `read` or `$(…)`, is read as
+    written (README, Limitations), and so is `$((…))`. A
+    word wholly in single quotes expands nothing, so `sed -n '$p'` is sed's
+    last-line address. A bare `$(` is where an unquoted substitution was split
+    off, its body judged on its own; `$((…))` arithmetic arrives the same way.
+
+    With `fields`, a `$1` is left alone: in a double-quoted awk program it is
+    usually an escaped `\\$1`, an awk field, and the token cannot tell the two
+    apart (Q391).
+    """
+    if word == '$(' or (getattr(word, 'quoted_chars', 0) == len(word)
+                        and getattr(word, 'quotes', None) == {"'"}):
+        return False
+    for m in SED_EXPANSION_RE.finditer(word):
+        name = m.group(1) if m.group(1) is not None else m.group(2)
+        if name is not None and (name in '#?$!-' or (fields and name.isdigit())):
+            continue                              # a number or the flags
+        if name is None or not IDENT_RE.fullmatch(name) \
+                or name in SED_IMPLICIT_VARS or name in bound \
+                or any(name[:k] in bound and name[:k] in glued
+                       for k in range(1, len(name))):
+            return True
+    return False
 
 
 def sed_script_files(tokens):
@@ -3234,7 +3342,8 @@ def sed_script_files(tokens):
     files, runs = [], False
     for bsd in (False, True):
         for brackets in (False, True):
-            f, r = sed_script_reads(_sed_scripts(tokens, bsd), brackets)
+            f, r = sed_script_reads('\n'.join(_sed_scripts(tokens, bsd)),
+                                    brackets)
             files += [x for x in f if x not in files]
             runs = runs or r
     return files, runs
@@ -3270,6 +3379,280 @@ def sed_script_slot(tokens):
     return len(files)
 
 
+# An awk program's own file access (Q334). A `/` after one of these names opens
+# a regex; after any other name it divides, `getline / 2` included.
+AWK_REGEX_AFTER = frozenset({'print', 'printf', 'return', 'case', 'else', 'do',
+                             'exit'})
+# A newline after one of these continues the statement rather than ending it.
+AWK_CONTINUES = frozenset({',', '{', '&&', '||', '?', ':', 'do', 'else'})
+AWK_OPS = ('**=', '>>', '>=', '<=', '==', '!=', '&&', '||', '|&', '++', '--',
+           '+=', '-=', '*=', '/=', '%=', '^=', '**', '!~')
+AWK_ASSIGN_OPS = frozenset({'=', '+=', '-=', '*=', '/=', '%=', '^=', '**=',
+                            '++', '--'})
+AWK_ESCAPES = {'"': '"', '\\': '\\', 'a': '\a', 'b': '\b', 'f': '\f',
+               'n': '\n', 'r': '\r', 't': '\t', 'v': '\v'}
+AWK_NUMBER_RE = re.compile(r'0[xX][0-9A-Fa-f]+|(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?')
+
+
+def _awk_tokens(text):
+    """awk program `text` as `(kind, value, start, end)` tuples, or None when a
+    string or regex never closes.
+
+    `kind` is `name`, `num`, `str` (value: the text between the quotes),
+    `regex`, `nl` (a newline that ends a statement), `post` (a postfix `++` or
+    `--`), `hdr` (the `)` closing an `if`, `while` or `for` header) or `op`.
+    Whether a `/` divides or opens a regex turns on the token before it, and
+    reading a regex as a division can open a string or a comment that hides
+    the rest of the program, so the rules follow what the awks were measured
+    doing rather than the grammar.
+    """
+    toks, headers, i, n = [], [], 0, len(text)
+    while i < n:
+        c, prev = text[i], toks[-1] if toks else None
+        if c in ' \t\r':
+            i += 1
+        elif c == '\\' and text[i + 1:i + 2] == '\n':
+            i += 2
+        elif c == '#':
+            i = _sed_eol(text, i)
+        elif c == '\n':
+            if prev is not None and prev[0] != 'nl' and not (
+                    prev[0] in ('op', 'name') and prev[1] in AWK_CONTINUES):
+                toks.append(('nl', c, i, i + 1))
+            i += 1
+        elif c == '"':
+            j = i + 1
+            while j < n and text[j] not in '"\n':
+                j += 2 if text[j] == '\\' else 1
+            if j >= n or text[j] != '"':
+                return None
+            toks.append(('str', text[i + 1:j], i, j + 1))
+            i = j + 1
+        elif c == '/' and (prev is None or prev[0] in ('nl', 'hdr')
+                           or (prev[0] == 'name' and prev[1] in AWK_REGEX_AFTER)
+                           or (prev[0] == 'op' and prev[1] not in (')', ']'))):
+            j = i + 1
+            while j < n and text[j] not in '/\n':
+                if text[j] == '\\':
+                    j += 2
+                elif text[j] == '[':
+                    j = _sed_bracket_end(text, j) or n
+                else:
+                    j += 1
+            if j >= n or text[j] != '/':
+                return None
+            toks.append(('regex', text[i + 1:j], i, j + 1))
+            i = j + 1
+        elif c.isdigit() or (c == '.' and text[i + 1:i + 2].isdigit()):
+            m = AWK_NUMBER_RE.match(text, i)
+            toks.append(('num', m.group(), i, m.end()))
+            i = m.end()
+        elif IDENT_RE.match(text, i):
+            m = IDENT_RE.match(text, i)
+            toks.append(('name', m.group(), i, m.end()))
+            i = m.end()
+        else:
+            op = next((o for o in AWK_OPS if text.startswith(o, i)), c)
+            kind = 'op'
+            if op == '(':
+                headers.append(prev is not None and prev[0] == 'name'
+                               and prev[1] in ('if', 'while', 'for'))
+            elif op == ')' and headers and headers.pop():
+                kind = 'hdr'
+            elif op in ('++', '--') and prev is not None and (
+                    prev[0] in ('num', 'str', 'post')
+                    or (prev[0] == 'name' and prev[1] not in AWK_REGEX_AFTER)
+                    or (prev[0] == 'op' and prev[1] in (')', ']'))):
+                kind = 'post'
+            toks.append((kind, op, i, i + len(op)))
+            i += len(op)
+    return toks
+
+
+def awk_literal_names(raws):
+    """The file names the awk string literals `raws` concatenate to, or None
+    when an escape in them cannot be read.
+
+    One name per reading of an unknown escape: macOS awk and gawk drop its
+    backslash (`"\\q"` is `q`) and mawk keeps it. A NUL ends the name, as it
+    does for the `open` call that receives it. A `\\x` with three or more hex
+    digits is left unread, since how far each awk takes it was not measured.
+    """
+    names = []
+    for keep in (False, True):
+        out = []
+        for raw in raws:
+            i = 0
+            while i < len(raw):
+                if raw[i] != '\\':
+                    out.append(raw[i])
+                    i += 1
+                    continue
+                d = raw[i + 1:i + 2]
+                hexes = re.match(r'[0-9A-Fa-f]*', raw[i + 2:]).group() \
+                    if d == 'x' else ''
+                if d in AWK_ESCAPES:
+                    out.append(AWK_ESCAPES[d])
+                    i += 2
+                elif d and d in '01234567':
+                    m = re.match(r'[0-7]{1,3}', raw[i + 1:]).group()
+                    out.append(chr(int(m, 8) & 0xFF))
+                    i += 1 + len(m)
+                elif len(hexes) > 2:
+                    return None
+                elif hexes:
+                    out.append(chr(int(hexes, 16)))
+                    i += 2 + len(hexes)
+                elif d in ('', '\n'):
+                    return None
+                else:
+                    out.append('\\' + d if keep else d)
+                    i += 2
+        name = ''.join(out).split('\0', 1)[0]
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def awk_program_reads(text):
+    """Read awk program `text` for the files it opens and whether it runs a
+    command.
+
+    Returns `(files, unread, runs)`. `files` lists `(name, is_read)` for each
+    target written as string literals: a `print`/`printf` redirection, a
+    `getline <` and a gawk `@include`. `unread` holds the text of each target
+    named any other way, a variable, a field or a concatenation with one, and
+    of each write to `ARGV` or `ARGC`, which names the files awk reads next,
+    including `ARGV` handed over whole and gawk's `SYMTAB`. A
+    program the lexer cannot finish is unread whole. `runs` is a pipe,
+    `system`, gawk's `@load` or an indirect `@f(…)` call.
+
+    A `getline <` target followed by more string literals is judged both ways:
+    macOS awk reads `< "i" "n"` as `in`, gawk and mawk as `i`.
+    """
+    toks = _awk_tokens(text)
+    if toks is None:
+        return [], [text], False
+    files, unread, runs = [], [], False
+    depth, calls, print_at, target = 0, [], None, None
+
+    def judge(span, is_read):
+        if not span:
+            return
+        lits = [t[1] for t in span if t[0] == 'str']
+        names = awk_literal_names(lits) if lits and all(
+            t[0] == 'str' or t[1] in ('(', ')') for t in span) else None
+        if names is None:
+            unread.append(text[span[0][2]:span[-1][3]])
+        else:
+            files.extend((nm, is_read) for nm in names)
+
+    def balanced(j, opener, closer):
+        level = 0
+        for j in range(j, len(toks)):
+            level += (toks[j][1] == opener) - (toks[j][1] == closer)
+            if level == 0:
+                return j + 1
+        return len(toks)
+
+    def lvalue_end(j):
+        # Index past an lvalue at `j`: a name with an optional `[…]`, or `$`
+        # and the operand it applies to.
+        dollar = j < len(toks) and toks[j][1] == '$'
+        while j < len(toks) and toks[j][1] == '$':
+            j += 1
+        if j < len(toks) and toks[j][0] in ('name', 'num'):
+            j += 1
+        elif dollar and j < len(toks) and toks[j][1] == '(':
+            j = balanced(j, '(', ')')
+        if j < len(toks) and toks[j][1] == '[' and toks[j - 1][0] == 'name':
+            j = balanced(j, '[', ']')
+        return j
+
+    for k, (kind, val, start, end) in enumerate(toks):
+        prev = toks[k - 1] if k else None
+        if kind == 'nl' or (kind == 'op' and val in (';', '{', '}')):
+            if target is not None:
+                judge(toks[target:k], False)
+            print_at = target = None
+            continue
+        if kind == 'op' and val in ('(', '['):
+            calls.append(prev[1] if prev is not None and prev[0] == 'name'
+                         else None)
+            depth += 1
+        elif val in (')', ']') and kind in ('op', 'hdr'):
+            if calls:
+                calls.pop()
+            depth -= 1
+            if print_at is not None and depth < print_at:
+                if target is not None:
+                    judge(toks[target:k], False)
+                print_at = target = None
+        if kind == 'name' and val in ('print', 'printf') and print_at is None:
+            print_at = depth
+        elif kind == 'op' and val in ('>', '>>') and print_at == depth \
+                and target is None:
+            target = k + 1
+        elif kind == 'op' and val in ('|', '|&'):
+            runs = True
+            if target is None:
+                print_at = None
+        elif kind == 'name' and val == 'system':
+            runs = True
+        elif kind == 'name' and val == 'getline':
+            j = lvalue_end(k + 1)
+            if j < len(toks) and toks[j][1] == '<' and toks[j][0] == 'op':
+                run = j + 1
+                while run < len(toks) and toks[run][0] == 'str':
+                    run += 1
+                if run == j + 1:
+                    judge(toks[j + 1:j + 2], True)
+                    continue
+                judge(toks[j + 1:j + 2], True)
+                judge(toks[j + 1:run], True)
+                if run < len(toks) and (toks[run][0] in ('name', 'num')
+                                        or toks[run][1] in ('$', '(')):
+                    unread.append(text[toks[j + 1][2]:toks[run][3]])
+        elif kind == 'op' and val == '@' and k + 1 < len(toks):
+            word = toks[k + 1]
+            if word[1] == 'include' and word[0] == 'name':
+                judge(toks[k + 2:k + 3], True)
+            elif word[1] == 'load' and word[0] == 'name':
+                runs = True
+            elif word[0] == 'name' and k + 2 < len(toks) and toks[k + 2][1] == '(':
+                runs = True
+        elif kind == 'name' and val in ('ARGV', 'ARGC', 'SYMTAB'):
+            # A bare ARGV is the array handed over whole, which a function or
+            # gawk's `match`/`asort` can fill; gawk's SYMTAB reaches it by name.
+            j = lvalue_end(k)
+            nxt = toks[j] if j < len(toks) else None
+            bare = val == 'ARGV' and (k + 1 == len(toks) or toks[k + 1][1] != '[')
+            if val == 'SYMTAB' or (bare and not (
+                    prev is not None and prev[0] == 'name'
+                    and prev[1] in ('in', 'delete'))) \
+                    or (nxt is not None and nxt[1] in AWK_ASSIGN_OPS
+                        and nxt[0] in ('op', 'post')) \
+                    or (prev is not None and (
+                        prev[1] in ('++', '--')
+                        or (prev[0] == 'name' and prev[1] == 'getline')
+                        or (prev[1] == ',' and calls and calls[-1] in (
+                            'split', 'sub', 'gsub', 'patsplit')))):
+                unread.append(text[start:toks[j - 1][3]])
+    if target is not None:
+        judge(toks[target:], False)
+    return files, unread, runs
+
+
+def awk_program_word(tokens):
+    """The word an `awk` command takes as its program, or None when it has none
+    (`-f FILE` supplies it, and FILE is judged as a read)."""
+    spec = SPEC['awk']
+    _, flags_seen, positionals = _split_args(tokens, spec)
+    if not positionals or any(f in flags_seen for f in spec['prog_suppressed_by']):
+        return None
+    return positionals[0]
+
+
 def files_in_command(tokens):
     """Return list of file-arg tokens for a simple command, or None if unguarded."""
     name = ALIASES.get(os.path.basename(tokens[0]), os.path.basename(tokens[0]))
@@ -3289,6 +3672,11 @@ def files_in_command(tokens):
         file_positionals = [p for p in file_positionals
                             if '=' not in p.split('/')[0]]
     files += file_positionals
+    if name == 'sed' and '-l' in tokens and os.path.basename(tokens[0]) != 'gsed':
+        # BSD sed's `-l` takes no argument, so `sed -l p ../x` reads `../x` on
+        # macOS (Q374). Judge the operands under that reading too.
+        bsd = files_in_command([t for t in tokens if t != '-l'])
+        files += [f for f in bsd if f not in files]
     return files
 
 
@@ -3529,12 +3917,16 @@ def build_reason(offenders, scratch_hint='', override=None, prefixable=False):
       * 'untracked' — a relative path after a `cd` the hook couldn't follow.
       * 'sedscript' — the token after `sed -i ''`, which BSD sed reads as the
                       script and GNU sed as a file (Q232).
+      * 'sedexpand' — a sed script completed by an expansion the hook cannot
+                      read, which can add a `w`/`r` command to it (Q335).
+      * 'awktarget' — a file an awk program opens under a name the hook cannot
+                      read, or a program built from such an expansion (Q334).
 
     Categories are emitted in a stable order; tokens within each are sorted and
     de-duplicated.
     """
     buckets = {'hosttemp': [], 'outside': [], 'expand': [], 'untracked': [],
-               'sedscript': []}
+               'sedscript': [], 'sedexpand': [], 'awktarget': []}
     siblings, kills, crosses = [], [], []
     for item in offenders:
         tok, cat = item[0], item[1]
@@ -3597,6 +3989,24 @@ def build_reason(offenders, scratch_hint='', override=None, prefixable=False):
             "`sed -i '' -e SCRIPT FILE` is the same edit on macOS sed. GNU sed "
             "makes the edit too but then exits 2 on the empty '' operand; "
             "there, write `sed -i -e SCRIPT FILE`.")
+    if buckets['sedexpand']:
+        hints.append(
+            "sed script built from a value the hook cannot read: "
+            + ", ".join(sorted(set(buckets['sedexpand'])))
+            + ". Fix: a $(...), a `...`, a ${...} operator, $1 or $_ in a sed "
+            "script can add a w or r command that names a file. Write the "
+            "script literally, or use a plain $VAR set to a literal earlier in "
+            "the same command (VAR=value; ...) so the hook can read the script "
+            "bash builds.")
+    if buckets['awktarget']:
+        hints.append(
+            "awk program opens a file the hook cannot name: "
+            + ", ".join(sorted(set(buckets['awktarget'])))
+            + ". The target is a variable, a field or a concatenation, or the "
+            "program is built from a shell expansion, so the file awk opens is "
+            "decided when it runs. Fix: write the target as a string literal "
+            "(print > \"out.txt\") and the hook checks it; approve this prompt "
+            "if the name can only land inside the project root.")
     return " ".join(hints)
 
 
@@ -3900,7 +4310,9 @@ ATTRIBUTION = 'workspace-guard: '
 # is a script to BSD sed and a file to GNU sed, the hook cannot see which sed
 # runs, and the person at the prompt is being asked about a "path" that is
 # usually a script. The `-e` rewrite settles the reading either way.
-UNPARSED_CATS = frozenset({'expand', 'untracked', 'sedscript'})
+# 'sedexpand' joins them too (Q335): the person at the prompt sees the same
+# unexpanded script, and writing it literally settles what it does.
+UNPARSED_CATS = frozenset({'expand', 'untracked', 'sedscript', 'sedexpand'})
 
 
 # Modes where a defer RUNS the command (`docs/permission-modes.md`). A
@@ -4161,6 +4573,30 @@ def resolve_native_path(raw, cwd):
 KillFacts = collections.namedtuple('KillFacts', ['signal', 'launder', 'patterns'])
 
 
+class ScriptWrites:
+    """Paths a string writes and the in-workspace scripts it runs, gathered
+    across every recursion of one `analyze_command` call.
+
+    An in-workspace script vouches as repo-resident code, which it is not when
+    the same string writes it: then it is code the agent has just authored.
+    Order is not tracked, since a loop or a `&` runs a textually later write
+    first. A write to a directory covers every script beneath it, which is what
+    `cp x dir/` does. Paths compare casefolded, since `T.SH` and `t.sh` are one
+    file on APFS and NTFS and `realpath` cannot fold a path not yet created. A
+    run whose operand could not be resolved (`unknown`) is covered by any write.
+    """
+
+    def __init__(self):
+        self.writes, self.runs, self.unknown = set(), [], False
+
+    def authored(self):
+        if self.unknown and self.writes:
+            return True
+        writes = [w.casefold().rstrip(os.sep) for w in self.writes]
+        return any(r == w or r.startswith(w + os.sep)
+                   for r in (r.casefold() for r in self.runs) for w in writes)
+
+
 def tokenize_command(cmd, heredocs=True):
     r"""Shell tokens for a command string, or None when the quoting is unbalanced.
 
@@ -4223,6 +4659,7 @@ def tokenize_command(cmd, heredocs=True):
 # without positions (Q266, in `substitution_bodies`).
 SUBST_MARK = '\x1e'
 MARK_RE = re.compile(SUBST_MARK + r'(\d+)' + SUBST_MARK)
+FUNSUB_MARK_RE = re.compile(r'\$\{' + SUBST_MARK + r'(\d+)' + SUBST_MARK + r'\}')
 
 
 def apply_cd(kind, arg, cwd, unknown):
@@ -4254,6 +4691,30 @@ def all_substitutions(text):
             zip(command_substitutions(text, spans=cs), cs)
             if not any(ps_ <= s < pe for _, (ps_, pe) in procs)]
     return sorted(procs + cmds, key=lambda pair: pair[1][0])
+
+
+def mask_funsubs(text):
+    """Replace each outermost funsub with a ``${…}`` word standing in for it.
+
+    Returns ``(masked, bodies)``, or None when the string holds a funsub and
+    already carries the sentinel. The body is the caller's to run (Q357), not
+    words of the command it sits in, and the stand-in still reads as an
+    expansion, so an operand built from one is unresolvable.
+    """
+    spans, flags = [], []
+    found = command_substitutions(text, spans=spans, funsubs=flags)
+    picked = [(b, sp) for b, sp, f in zip(found, spans, flags) if f]
+    if not picked:
+        return text, []
+    if SUBST_MARK in text:
+        return None
+    out, last = [], 0
+    for k, (_, (start, end)) in enumerate(picked):
+        out.append(text[last:start])
+        out.append('${%s%d%s}' % (SUBST_MARK, k, SUBST_MARK))
+        last = end
+    out.append(text[last:])
+    return ''.join(out), [b for b, _ in picked]
 
 
 def mark_substitutions(text):
@@ -4288,7 +4749,7 @@ def mark_substitutions(text):
 
 
 def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
-                        inherited=None, funcs=(), lastpipe=False):
+                        inherited=None, funcs=(), lastpipe=False, end=None):
     """Every command a substitution in ``cmd`` runs, with the cwd bash runs it in.
 
     Returns ``(body, cwd, cwd_unknown)`` triples. A body whose position the scan
@@ -4323,10 +4784,19 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
     ``funcs`` names the functions an enclosing string defined whose call moves
     the cwd (Q265); a call to one here leaves the cwd unknown. ``lastpipe``
     says an enclosing string may have turned `lastpipe` on (Q272).
+
+    A funsub runs in this shell, so the cwd its body leaves behind is the one
+    every later word and group sees (Q357). Pass a list as ``end`` to receive
+    the ``(cwd, cwd_unknown, funcs)`` the whole string leaves behind, which is
+    how a funsub's own body answers that.
     """
     heredocs = []
     own = strip_heredoc_bodies(cmd, own_level_only=True, bodies=heredocs)
     marked, bodies, texts = mark_substitutions(own)
+    # Unmarked, a funsub's effect has no position either. Only a funsub's
+    # span opens with `${`.
+    blind = texts is None and any(
+        marked.startswith('${', s) for _, (s, _) in all_substitutions(marked))
     fallback = (base_cwd, base_cwd_unknown)
     sub_cwd = [fallback] * len(bodies)
     hd_cwd = [fallback] * len(heredocs)
@@ -4341,7 +4811,16 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
         usable = set(inherited or ())
         scopes, saved_shells, hs = [], [], []
         groups = split_groups(tokens, scopes, hs, lastpipe)
-        funcs = cd_functions(groups, scopes, funcs)
+
+        def funsubs_in(tokens):
+            for tok in tokens if texts is not None else ():
+                for m in MARK_RE.finditer(tok):
+                    idx = int(m.group(1))
+                    if idx < len(bodies) and texts[idx].startswith('${'):
+                        yield bodies[idx]
+        funcs = cd_functions(groups, scopes, funcs, moves=lambda g: any(
+            funsub_moves(b, funcs, lastpipe) for b in funsubs_in(g)),
+            lastpipe=lastpipe)
         left_unknown = False
         for (g, g_redir, _persists, _pipe, nhd), (shells, own), g_hs in zip(
                 groups, scopes, hs):
@@ -4353,11 +4832,20 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
             # substitution is expanded to build the command line the `cd` then
             # runs on, so `cd $(dirname x)` resolves `x` where the string
             # started, not where it lands.
+            here = (cwd, unknown)
             for tok in (g + g_redir + g_hs) if texts is not None else ():
                 for m in MARK_RE.finditer(tok):
                     idx = int(m.group(1))
                     if idx < len(sub_cwd):
-                        sub_cwd[idx] = (cwd, unknown)
+                        sub_cwd[idx] = here
+                        if texts[idx].startswith('${'):
+                            live = {k: v for k, v in (stable_vars or {}).items()
+                                    if k in usable}
+                            c, u, defined = funsub_cwd(
+                                bodies[idx], *here, live, funcs, lastpipe)
+                            here, funcs = (c, u), funcs | defined
+            if own:
+                cwd, unknown = here
             for _ in range(nhd):
                 if hd_i < len(hd_cwd):
                     hd_cwd[hd_i] = (cwd, unknown)
@@ -4387,7 +4875,7 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
             if kind is not None:
                 cwd, unknown = apply_cd(kind, arg, cwd, unknown)
             elif own and (calls_cd_function(wrap, funcs)
-                          or runs_in_shell(wrap)):
+                          or runs_in_shell(wrap, funcs, lastpipe)):
                 unknown = True
             moved = moved or (cwd, unknown) != fallback
             # Recorded after this group's own `cd`, so a `cd $d` cannot read an
@@ -4403,8 +4891,15 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
                 if is_assignment(tok):
                     usable.add(split_assignment(tok)[0])
 
-    if texts is None and moved:
+    if texts is None and (moved or blind):
         sub_cwd = [(base_cwd, True)] * len(bodies)
+    if end is not None:
+        if tokens is None:
+            end.append((base_cwd, True, set(funcs)))
+        else:
+            if saved_shells:                      # the string ends at top level
+                cwd, unknown = saved_shells[0][1], saved_shells[0][2]
+            end.append((cwd, unknown or left_unknown or blind, funcs))
     out = [(b,) + sub_cwd[i] for i, b in enumerate(bodies)]
     for i, (body, quoted) in enumerate(heredocs):
         if quoted:
@@ -4415,6 +4910,37 @@ def substitution_bodies(cmd, base_cwd, base_cwd_unknown, stable_vars=None,
         out.extend((b,) + hd_cwd[i]
                    for b in command_substitutions(body, quotes=False))
     return out
+
+
+def funsub_cwd(body, cwd, unknown, stable_vars=None, funcs=(), lastpipe=False):
+    """The ``(cwd, unknown, funcs)`` a funsub body leaves its shell with
+    (Q357): ``funcs`` adds the functions it defines whose call moves the cwd."""
+    end = []
+    substitution_bodies(body, cwd, unknown, stable_vars, stable_vars, funcs,
+                        lastpipe, end)
+    return end[0]
+
+
+def funsub_moves(body, funcs=(), lastpipe=False):
+    """Whether a funsub body can leave its shell somewhere else, from any cwd."""
+    probe = os.path.join(os.sep, 'q357-probe')
+    return funsub_cwd(body, probe, False, None, funcs, lastpipe)[:2] \
+        != (probe, False)
+
+
+def funsub_poison(body, varmap):
+    """Drop the names a funsub body may assign from ``varmap`` (Q357), by the
+    rules the group loop applies to its own groups. A nested funsub or a body
+    the tokenizer cannot read drops them all."""
+    tokens = tokenize_command(body)
+    if tokens is None or mask_funsubs(body) != (body, []):
+        varmap.clear()
+        return
+    for g, *_ in split_groups(tokens):
+        for t in g:
+            if is_assignment(t):
+                varmap.pop(split_assignment(t)[0], None)
+        poison_vars(g, varmap)
 
 
 PIPE_OPS = ('|', '|&')
@@ -4436,13 +4962,15 @@ def function_scope(shells):
     return None
 
 
-def cd_functions(groups, scopes, known=()):
+def cd_functions(groups, scopes, known=(), moves=None, lastpipe=False):
     """Names of the functions a call to which moves the caller's cwd (Q265).
 
     A body runs in the shell that calls it, so a `cd` written at the body's own
     level moves the caller at every call and moves nothing at the definition.
     A body calling one of these moves its caller too. ``known`` names the ones
-    an enclosing string defined, which a substitution inherits.
+    an enclosing string defined, which a substitution inherits. ``moves``, when
+    given, says whether a group holds a funsub that moves the cwd (Q357).
+    ``lastpipe`` is for the trap bodies a group sets.
     """
     funcs, grew = set(known), True
     while grew:
@@ -4451,7 +4979,7 @@ def cd_functions(groups, scopes, known=()):
             name = function_scope(shells)
             if name is None or name in funcs or own is False:
                 continue
-            if own is None:                       # a `lastpipe` stage (Q272)
+            if own is None or moves and moves(g):  # Q272, Q357
                 funcs.add(name)
                 grew = True
                 continue
@@ -4459,7 +4987,8 @@ def cd_functions(groups, scopes, known=()):
             if wrap.external or not wrap.argv:
                 continue
             if (classify_cd(wrap.argv)[0] is not None
-                    or wrap.argv[0] in funcs or runs_in_shell(wrap)):
+                    or wrap.argv[0] in funcs
+                    or runs_in_shell(wrap, funcs, lastpipe)):
                 funcs.add(name)
                 grew = True
     return funcs
@@ -4471,10 +5000,14 @@ def calls_cd_function(wrap, funcs):
         and wrap.argv[0] in funcs
 
 
-def runs_in_shell(wrap):
+def runs_in_shell(wrap, funcs=(), lastpipe=False):
     """Whether a peeled group runs a list in this shell that the string does
     not spell out -- `eval`, `source`, `.`, a trap that can fire before exit,
-    a `mapfile -C` callback -- so a `cd` in it moves the caller (Q356)."""
+    a `mapfile -C` callback -- so a `cd` in it moves the caller (Q356).
+
+    A trap whose action is literal is spelled out, so its body is read as a
+    funsub body is, with ``funcs`` and ``lastpipe`` as `funsub_moves` takes
+    them, and only a body that can move the cwd counts."""
     if wrap.external or not wrap.argv:
         return False
     name, args = wrap.argv[0], wrap.argv[1:]
@@ -4485,7 +5018,9 @@ def runs_in_shell(wrap):
             args = args[1:]
         if len(args) < 2 or args[0] in ('', '-') or args[0].startswith('-'):
             return False                          # -p, -l, a reset, an ignore
-        return any(s.upper() not in ('EXIT', 'SIGEXIT', '0') for s in args[1:])
+        return any(s.upper() not in ('EXIT', 'SIGEXIT', '0')
+                   for s in args[1:]) and trap_action_moves(
+                       args[0], funcs, lastpipe)
     if name in ('mapfile', 'readarray'):
         it = iter(args)
         for a in it:
@@ -4499,6 +5034,32 @@ def runs_in_shell(wrap):
                         next(it, None)
                     break
     return False
+
+
+def trap_action_moves(action, funcs=(), lastpipe=False):
+    """Whether a trap's action can leave the shell in another directory.
+
+    Bash expands the word once when the trap is set and parses the result when
+    it fires, so a `$` or backtick outside single quotes, or an unquoted glob,
+    brace or tilde, makes a body the string does not spell out. A word read
+    back from a substitution has lost its quoting record and counts as unquoted.
+    A body that defines a function or turns `lastpipe` on changes what the
+    commands after it do, which reading it from a probe directory cannot see.
+    """
+    whole = getattr(action, 'quoted_chars', 0) == len(action)
+    single = whole and getattr(action, 'quotes', frozenset()) == {"'"}
+    if not single and (re.search(r'[$`]', action)
+                       or not whole and re.search(r'[*?[{~]', action)):
+        return True
+    tokens = tokenize_command(action)
+    if tokens is None:
+        return True
+    scopes = []
+    groups = split_groups(tokens, scopes)
+    if any(function_scope(shells) is not None for shells, _ in scopes) \
+            or any(lastpipe_setting(g) for g, *_ in groups):
+        return True
+    return funsub_moves(action, funcs, lastpipe)
 
 
 def lastpipe_setting(words):
@@ -4528,6 +5089,11 @@ def stage_own(lead, sep, last_close, lastpipe):
     return True
 
 
+# What bash passes for a `<(…)` or `>(…)`; the fd number varies and no reader
+# cares which. `is_allowed_device` skips it as an operand.
+PROC_SUBST_WORD = '/dev/fd/63'
+
+
 def resumes_after_substitution(words):
     """Whether ``words``, a command up to a substitution's open, runs on past it.
 
@@ -4537,12 +5103,16 @@ def resumes_after_substitution(words):
     one behind `$X`, or a command word it glues to, as in `$(echo /bin)/cat f`,
     and `eval` runs its words whatever they are. A leading redirect hides which
     of these it is. Those keep the split, which is what judges the `cat`.
+    A wrapper is peeled with its grammar first, so `env grep <(…) f` resumes
+    on the `grep` it already named (Q360).
     """
     head = strip_env_prefix(strip_sh_keywords(words))
     if not head or head[0] in REDIR or re.search(r'[$`(]', head[0]):
         return False
     name = native_cmd_name(head[0])
-    return name != 'eval' and name not in WRAPPER_GRAMMAR
+    if name in WRAPPER_GRAMMAR:
+        return resumes_after_substitution(peel_wrappers(head).argv)
+    return name != 'eval'
 
 
 def resume_interrupted_commands(tokens):
@@ -4555,7 +5125,9 @@ def resume_interrupted_commands(tokens):
     cat /etc/x`, which opens nothing, asked. Here the words after the close go
     in front of the open, so they stay operands of their own command. A `<(`
     moves with its operator, or that operator would take the next word as a
-    redirect target (Q355).
+    redirect target (Q355), and leaves behind the word bash puts in its place,
+    or the next word takes its slot: `grep -v <(echo x) f` reads `f` as a file,
+    not as the pattern (Q354).
     """
     out, words, bodies, i = [], [], [], 0
     while i < len(tokens):
@@ -4568,7 +5140,7 @@ def resume_interrupted_commands(tokens):
                     if proc:
                         cut = -2 if words[-2:-1] and words[-2].isdigit() else -1
                         bodies.extend(words[cut:])
-                        del words[cut:]
+                        words[cut:] = [PROC_SUBST_WORD]
                     bodies.extend(resume_interrupted_commands(tokens[i:end + 1]))
                     i = end + 1
                     continue
@@ -4806,6 +5378,10 @@ def split_groups(tokens, scopes=None, herestrings=None, lastpipe=False):
                     i += 2; continue
                 i += 1; continue
             if i + 1 < len(tokens):
+                # `<(` and `>(` open a subshell, as `$(` does, so a `cd` in the
+                # body stays in it (Q282). The `(` is no redirect target.
+                if t in ('<', '>') and is_operator(tokens[i+1], {'('}):
+                    i += 1; continue
                 # `<<TAG` heredoc delimiter and `<<<STR` here-string content
                 # are not file paths — skip without recording a redirect target.
                 if t in ('<<', '<<<'):
@@ -4876,7 +5452,11 @@ def analyze_command(cmd, ctx, base_cwd, depth=0, suppressed=None):
       ``pkill`` rule, and is what keeps the bare-word pattern of a
       ``grep -v grep`` stage from denying an otherwise anchored pipeline.
     """
-    offenders, guarded, kf = _analyze_command(cmd, ctx, base_cwd, depth)
+    scripts = ScriptWrites()
+    offenders, guarded, kf = _analyze_command(cmd, ctx, base_cwd, depth,
+                                              scripts=scripts)
+    if not kf.signal and scripts.authored():
+        kf = kf._replace(signal=INTERPRETER_SIGNAL)
     if suppressed is not None and guarded and kf.signal:
         suppressed.append(kf.signal)
     if kf.launder and kf.patterns and not any(a for _, a in kf.patterns):
@@ -4890,7 +5470,7 @@ def analyze_command(cmd, ctx, base_cwd, depth=0, suppressed=None):
 
 def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None,
                      seed_loops=None, base_cwd_unknown=False, seed_funcs=(),
-                     seed_lastpipe=False):
+                     seed_lastpipe=False, scripts=None):
     """Analyze one command string; returns ``(offenders, guarded, KillFacts)``.
 
     Command-substitution bodies (``"$(…)"`` and backtick ``` `…` ```, plus the
@@ -4932,7 +5512,12 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
     substitution inherits from the string that defined them (Q265), and
     ``seed_lastpipe`` says the enclosing string may have turned `lastpipe` on,
     which a substitution inherits too (Q272).
+
+    ``scripts`` is the :class:`ScriptWrites` every recursion shares, so a write
+    inside a body still counts against a script the outer string runs.
     """
+    if scripts is None:
+        scripts = ScriptWrites()
     proj, cwd = ctx.proj, base_cwd
     # Alias for readability at the two use sites far below; the group loop's own
     # nesting counter is `paren` so that neither can shadow the other (Q63).
@@ -4940,17 +5525,32 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
     if not cmd.strip():
         return [], False, KillFacts(None, None, [])
 
-    tokens = tokenize_command(cmd)
+    stripped = strip_heredoc_bodies(cmd)
+    masked = mask_funsubs(stripped)
+    # The bodies come from a string that kept their heredocs, which the full
+    # strip above leaves half-armed (Q357); the two scans pair one to one.
+    whole = mask_funsubs(strip_heredoc_bodies(cmd, own_level_only=True))
+    if masked is None or whole is None or len(whole[1]) != len(masked[1]):
+        masked, base_cwd_unknown = (stripped, []), True
+    stripped, fun_bodies = masked[0], whole[1] if masked[1] else []
+    tokens = tokenize_command(stripped, heredocs=False)
     if tokens is None:
         return [], False, KillFacts(None, None, [])   # unbalanced quotes -> defer
+
+    def funsubs_in(toks):
+        return [fun_bodies[int(m.group(1))] for t in toks if fun_bodies
+                for m in FUNSUB_MARK_RE.finditer(t)
+                if int(m.group(1)) < len(fun_bodies)]
 
     scopes = []
     groups = split_groups(resume_interrupted_commands(tokens), scopes,
                           lastpipe=seed_lastpipe)
-    cd_funcs = cd_functions(groups, scopes, seed_funcs)
     # Whether `lastpipe` may be on anywhere in the string, for the bodies it
     # runs; a superset, since a body's position is not tracked here.
     lastpipe = seed_lastpipe or any(lastpipe_setting(g) for g, *_ in groups)
+    cd_funcs = cd_functions(groups, scopes, seed_funcs, moves=lambda g: any(
+        funsub_moves(b, seed_funcs, seed_lastpipe) for b in funsubs_in(g)),
+        lastpipe=lastpipe)
 
     def is_outside(rp):
         return path_is_outside(rp, proj)
@@ -5057,6 +5657,12 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
                 continue
             if kind in ('expand', 'untracked'):
                 return (cand, kind, None)
+            if not is_read:
+                # Both spellings, since `cp x link` writes through the link
+                # that a script operand's realpath lands on.
+                scripts.writes.add(rp)
+                scripts.writes.add(resolve_token(
+                    cand, group_cwd, group_cwd_unknown, not entry)[1])
             # A path staged outside by an earlier `ln` (symbolic or hard) is
             # flagged even when it physically lives under the session temp dir —
             # checked BEFORE the session-tmp allow so the ln-staging defense
@@ -5146,6 +5752,13 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
     # one: `f=/outside/x; cat "$(cat $f)"; f=docs/ok` keeps its `ask` instead of
     # resolving `$f` to the later, in-workspace literal.
     stable_vars, unstable_vars = {}, set()
+    # Values `varmap` turns away that a quoted sed script splices in as text
+    # (Q335); see `apply_assignment_group`. `bound_vars` is every name of
+    # `watch_vars` the string binds before the point reached, by any binder in
+    # any scope, bar a `read` or a value that is wholly a command substitution:
+    # a sed script splicing one in that was not substituted is not readable.
+    textmap, watch_vars, bound_vars = {}, sed_expansion_names(cmd), set()
+    subst_vars, glued_vars = output_assigned(cmd), set(GLUED_NAME_RE.findall(cmd))
 
     def track_stable():
         """Fold the live `varmap` into `stable_vars`. Called before each group
@@ -5201,14 +5814,33 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
     shell_bodies = []
     # The same for the commands a `find` runs, each with its own cwd state.
     find_runs = []
-    saved_shells, left_unknown = [], False
+    saved_shells, left_unknown, restore = [], False, None
     for (g, g_redir, persists, pipe, _nhd), (shells, own) in zip(groups, scopes):
+        if restore is not None:
+            group_cwd, group_cwd_unknown = restore
+            restore = None
         # A `lastpipe` stage before this one left the cwd unknown (Q272).
         group_cwd_unknown = group_cwd_unknown or left_unknown
         left_unknown = own is None
         group_cwd, group_cwd_unknown = enter_shell(
             saved_shells, shells, group_cwd, group_cwd_unknown)
         track_stable()
+        # A funsub's body runs as the words are expanded, so the command and
+        # its redirects see the cwd it left, and only this group does when the
+        # group is a subshell of its own (Q357).
+        fun_here = funsubs_in(g + g_redir)
+        if fun_here:
+            if own is False:
+                restore = (group_cwd, group_cwd_unknown)
+            for body in fun_here:
+                group_cwd, group_cwd_unknown, defined = funsub_cwd(
+                    body, group_cwd, group_cwd_unknown, dict(varmap), cd_funcs,
+                    seed_lastpipe)
+                cd_funcs |= defined
+                funsub_poison(body, varmap)
+                had = set(loopmap)
+                funsub_poison(body, loopmap)
+                blacklist_loops(had - set(loopmap))
         # Substitute known literals for path checking. The pre-substitution
         # tokens are kept for assignment parsing below — bash decides what is
         # an assignment before expansion.
@@ -5231,8 +5863,9 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
         # the reserved words come off before the for-header check too.
         kw_g = strip_sh_keywords(sub_g)
         if propagate:
-            assigned = apply_assignment_group(g, varmap, persists)
+            assigned = apply_assignment_group(g, varmap, persists, textmap)
             if assigned is not None:
+                bound_vars.update(set(assigned) - subst_vars)
                 # A name set as a scalar literal is no longer a loop variable.
                 for nm in assigned:
                     loopmap.pop(nm, None)
@@ -5249,6 +5882,8 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
             if forbind is not None:
                 name, values = forbind
                 varmap.pop(name, None)            # a loop var isn't a scalar
+                textmap.pop(name, None)
+                bound_vars.add(name)
                 if values is None:
                     loopmap.pop(name, None)       # unresolvable list -> poison
                     blacklist_loops([name])
@@ -5261,8 +5896,17 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
                 loopmap.clear()
                 blacklist_loops(list(stable_loops))
                 propagate = False
+                textmap.clear()
+                bound_vars |= watch_vars
             else:
                 poison_vars(sub_g, varmap)
+                poison_vars(sub_g, textmap)
+                rest = strip_env_prefix(strip_sh_keywords(sub_g))
+                if not rest or os.path.basename(rest[0]) != 'read':
+                    # The same rules name what this group may set, mapped or not.
+                    probe = dict.fromkeys(watch_vars - bound_vars, '')
+                    poison_vars(sub_g, probe)
+                    bound_vars |= watch_vars - bound_vars - probe.keys()
                 had = set(loopmap)
                 poison_vars(sub_g, loopmap)       # same rules invalidate loops
                 blacklist_loops(had - set(loopmap))
@@ -5355,7 +5999,9 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
         # already trusts, and exempting it is what keeps this from costing an
         # order of magnitude more friction than it buys. An unresolvable operand
         # (untracked cwd, a runtime-expanded token) cannot be shown to be
-        # in-workspace, so it suppresses.
+        # in-workspace, so it suppresses. A script the string also writes is
+        # not repo-resident, which `ScriptWrites` settles once every write in
+        # the string has been seen.
         src = interp_code_source(g)
         if src is not None:
             kind, tok = src
@@ -5381,6 +6027,32 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
                     k, rp = resolve_token(tok, cmd_cwd, cmd_cwd_unknown)
                     if k != 'path' or path_is_outside(rp, ctx.proj):
                         signal = signal or 'interpreter'
+                    else:
+                        scripts.runs.append(rp)
+                    # An option taking an argument (`bash -o errexit t.sh`)
+                    # makes `tok` that argument, so after one every later
+                    # operand may be the script.
+                    at = g.index(tok)
+                    if any(t.startswith('-') for t in g[1:at]):
+                        for t in g[at + 1:]:
+                            k, rp = resolve_token(t, cmd_cwd, cmd_cwd_unknown)
+                            if k == 'path':
+                                scripts.runs.append(rp)
+                            elif k != 'skip':
+                                scripts.unknown = True
+        elif g and (('/' in g[0] and not g[0].endswith('/'))
+                    or os.path.basename(g[0]) in ('source', '.')):
+            # A script run by path or sourced never needed the exemption, but
+            # it runs the same authored code when the string writes it.
+            ops = g[1:2] if '/' not in g[0] else [g[0]]
+            if ops == ['--']:
+                ops = g[2:3]
+            if ops:
+                k, rp = resolve_token(ops[0], cmd_cwd, cmd_cwd_unknown)
+                if k == 'path':
+                    scripts.runs.append(rp)
+                elif k != 'skip':
+                    scripts.unknown = True
         # The body is readable after all when it is a command string this host
         # runs — queued whatever the classification above landed on, since the
         # two answer different questions. Skipped once the cwd is untracked: the
@@ -5404,7 +6076,8 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
         # only (Q173). A call to a function whose body runs a `cd` moves the
         # cwd somewhere the definition does not say (Q265), and so can an
         # `eval`, `source` or trap.
-        if own and (calls_cd_function(wrap, cd_funcs) or runs_in_shell(wrap)):
+        if own and (calls_cd_function(wrap, cd_funcs)
+                    or runs_in_shell(wrap, cd_funcs, lastpipe)):
             group_cwd_unknown = True
         kind, arg = (None, None) if wrap.external else classify_cd(g)
         if kind is not None:
@@ -5544,11 +6217,46 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
         if cmd_name == 'sed':
             # A script's `w`/`r` filenames are operands too (Q328), and its `e`
             # runs a command the hook does not read, like an interpreter's code.
-            sfiles, runs = sed_script_files(g)
-            for f, f_is_read in sfiles:
+            # A quoted word takes the literals `textmap` holds, and a loop
+            # variable's script is read once per value bash gives it.
+            words = sed_script_words(g)
+            variants = [list(g)]
+            for i, t in enumerate(g):
+                if t not in words:
+                    continue
+                if getattr(t, 'quoted_chars', 0) == len(t) \
+                        and getattr(t, 'quotes', None) != {"'"}:
+                    t = substitute_vars(t, textmap)
+                alts = expand_loop_candidates(t, loopmap)
+                if alts is None or len(variants) * len(alts) > MAX_LOOP_CANDIDATES:
+                    outside.append((g[i], 'sedexpand', None))
+                    continue
+                variants = [v[:i] + [a] + v[i + 1:] for v in variants for a in alts]
+            outside += [(w, 'sedexpand', None) for v in variants
+                        for w in sed_script_words(v)
+                        if sed_script_hides(w, bound_vars, glued_vars)]
+            for v in variants:
+                sfiles, runs = sed_script_files(v)
+                for f, f_is_read in sfiles:
+                    o = check_file(f, cmd_cwd, cmd_cwd_unknown, is_read=f_is_read)
+                    if o is not None:
+                        outside.append(o)
+                if runs:
+                    signal = signal or 'interpreter'
+        prog = awk_program_word(g) if cmd_name == 'awk' else None
+        if prog is not None:
+            # An awk program's redirections name files too (Q334), and its
+            # pipes and `system()` run commands, like sed's `e`. A program
+            # completed by an expansion is unread, but not substituted, since
+            # the token cannot tell `\$b` from `$b` (Q391).
+            afiles, unread, runs = awk_program_reads(prog)
+            if sed_script_hides(prog, bound_vars, glued_vars, fields=True):
+                unread.append(prog)
+            for f, f_is_read in afiles:
                 o = check_file(f, cmd_cwd, cmd_cwd_unknown, is_read=f_is_read)
                 if o is not None:
                     outside.append(o)
+            outside += [(u, 'awktarget', None) for u in unread]
             if runs:
                 signal = signal or 'interpreter'
     track_stable()                                # state after the last group
@@ -5611,7 +6319,8 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
                                                   seed_loops=stable_loops,
                                                   base_cwd_unknown=body_cwd_unknown,
                                                   seed_funcs=cd_funcs,
-                                                  seed_lastpipe=lastpipe)
+                                                  seed_lastpipe=lastpipe,
+                                                  scripts=scripts)
             outside.extend(sub_off)
             signal = merge_nested_signal(signal, sub_kf.signal)
             launder = launder or sub_kf.launder
@@ -5630,7 +6339,8 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
     if subst_depth < MAX_SUBST_DEPTH:
         for body, body_cwd in shell_bodies:
             b_off, _, b_kf = _analyze_command(body, ctx, body_cwd,
-                                              subst_depth + 1, in_subst)
+                                              subst_depth + 1, in_subst,
+                                              scripts=scripts)
             outside.extend(b_off)
             signal = merge_nested_signal(signal, b_kf.signal)
             launder = launder or b_kf.launder
@@ -5645,7 +6355,8 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
             break
         f_off, _, f_kf = _analyze_command(body, ctx, body_cwd, subst_depth + 1,
                                           in_subst,
-                                          base_cwd_unknown=body_cwd_unknown)
+                                          base_cwd_unknown=body_cwd_unknown,
+                                          scripts=scripts)
         outside.extend(f_off)
         signal = merge_nested_signal(signal, f_kf.signal)
         launder = launder or f_kf.launder

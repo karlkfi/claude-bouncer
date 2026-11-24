@@ -320,7 +320,7 @@ def tokenize(raw):
     return tokens
 
 
-def mask_substitutions(raw):
+def mask_substitutions(raw, whole=None):
     """(masked, bodies, marker_re) for the command substitutions bash would
     run in `raw`, unquoted or inside double quotes.
 
@@ -331,11 +331,21 @@ def mask_substitutions(raw):
     so the caller can judge the body as its own command string under the
     segment that holds it -- which is what decides whether it runs in the
     background. Single quotes keep a substitution literal, so it is left
-    alone."""
+    alone.
+
+    `raw` has had every heredoc body stripped, a substitution's own included,
+    which leaves that body's `<<WORD` armed with nothing after it to close.
+    Pass the unstripped string as `whole` to take the bodies from it instead;
+    the two scans find the same substitutions in the same order."""
     spans = []
     bodies = command_substitutions(raw, spans=spans)
     if not bodies:
         return raw, [], None
+    if whole is not None:
+        kept = command_substitutions(
+            strip_heredoc_bodies(whole, own_level_only=True))
+        if len(kept) == len(bodies):
+            bodies = kept
     sentinel = next(chr(c) for c in range(0xe000, 0xf900) if chr(c) not in raw)
     out, last = [], 0
     for idx, (start, end) in enumerate(spans):
@@ -435,6 +445,8 @@ def is_operator(t):
 COMPOUND_OPEN = frozenset({'while', 'until', 'for', 'if', 'case', 'select',
                            '{'})
 COMPOUND_CLOSE = frozenset({'done', 'fi', 'esac', '}'})
+CLOSER = {'while': 'done', 'until': 'done', 'for': 'done', 'select': 'done',
+          'if': 'fi', 'case': 'esac', '{': '}'}
 
 
 def backgrounded(tokens):
@@ -514,7 +526,6 @@ def strip_head(argv, state):
     """Peel shell keywords, env-var prefixes, and launcher wrappers off a
     segment so the blocking command underneath is classified, not the
     wrapper. Side effects on `state`:
-      * 'loop'            — a while/until/for keyword led the segment
       * 'override'        — the reason from a FOREGROUND_GUARD_OVERRIDE=<reason>
                             prefix (a str, possibly empty; None when unseen)
       * 'timeout_wrapped' — (per-segment, reset by caller) the segment is
@@ -523,11 +534,7 @@ def strip_head(argv, state):
     reserved = True  # whether argv[0] stands where bash reads a keyword
     while argv:
         head = os.path.basename(argv[0])
-        if head in LOOP_KEYWORDS:
-            state['loop'] = True
-            argv = argv[1:]
-            continue
-        if head in OTHER_KEYWORDS:
+        if head in LOOP_KEYWORDS or head in OTHER_KEYWORDS:
             argv = argv[1:]
             continue
         keyword_time = reserved and argv[0] == 'time'
@@ -787,30 +794,35 @@ def finding_slow(cfg, what, min_ms, timeout_ms, timeout_was_set):
 # ---------------------------------------------------------------------------
 
 def analyze_class_a(raw, cfg, depth=0):
-    """Class A findings for a command string. Returns (findings, override).
+    """Class A findings for a command string. Returns (findings, override,
+    slept), where `slept` says a foreground `sleep` ran anywhere in it.
     Recurses (bounded) into `bash -c '...'` / `eval ...` bodies so a quoted
     poll loop can't ride past the guard; `bash some-script.sh` stays opaque
     (no script-file inspection)."""
     findings = []
-    state = {'loop': False, 'override': None}
+    state = {'override': None, 'slept': False}
     if depth > 3:
-        return findings, None
+        return findings, None, False
 
     expanded = []
-    raw = strip_heredoc_bodies(raw, expanded)
-    raw, bodies, marker_re = mask_substitutions(raw)
+    raw, bodies, marker_re = mask_substitutions(
+        strip_heredoc_bodies(raw, expanded), raw)
 
     tokens = tokenize(raw)
     if tokens is None:
-        return findings, None  # unparseable: fail-open, defer
+        return findings, None, False  # unparseable: fail-open, defer
 
-    def recurse(body):
-        # A nested command string: its findings are this command's, and an
-        # override prefix inside it stands the whole call down.
-        sub_f, sub_o = analyze_class_a(body, cfg, depth + 1)
+    def recurse(body, in_loop=False):
+        # A nested command string: its findings are this command's, an
+        # override prefix inside it stands the whole call down, and a sleep
+        # it runs inside this command's loop makes the loop a poll (Q359).
+        nonlocal loop_sleep
+        sub_f, sub_o, sub_slept = analyze_class_a(body, cfg, depth + 1)
         findings.extend(sub_f)
         if state['override'] is None:
             state['override'] = sub_o
+        state['slept'] = state['slept'] or sub_slept
+        loop_sleep = loop_sleep or (sub_slept and in_loop)
 
     matchers = watch_matchers(cfg)
     exempts = exempt_matchers(cfg)
@@ -818,18 +830,48 @@ def analyze_class_a(raw, cfg, depth=0):
 
     # Per-segment classification. kind: 'sleep' | 'cmd' | None (empty/opaque).
     segs = []            # (kind, argv) for the sandwich rule, foreground only
-    loop_sleep = False   # a foreground `sleep` seen anywhere (any duration)
+    loop_sleep = False   # a foreground `sleep` inside a loop (any duration)
     sleep_findings = []
     any_bg = False
     bg_flags = []
+    opened = []          # compound keywords open at this segment, outermost first
     segments = split_segments(tokens, bg_flags)
     for (group, _term), bg in zip(segments, bg_flags):
         any_bg = any_bg or bg
+        # A segment opens or closes compounds only with its leading words, so
+        # a sleep after `done` is outside the loop and judged on its own (Q283).
+        timed = False
+        held = len(opened)  # compounds open before this segment
+        for t in group:
+            if getattr(t, 'quoted_from', None) is not None:
+                break
+            # The `time` keyword times the compound after it, as strip_head
+            # reads it: `time -p while ...` still opens the loop.
+            if t == 'time' or (timed and t.startswith('-')):
+                timed = True
+                continue
+            timed = False
+            if t in COMPOUND_OPEN:
+                opened.append(t)
+            elif t in COMPOUND_CLOSE:
+                # Only the opener's own closer pops it: a case pattern
+                # `done)` leaves the loop around it open.
+                if opened and CLOSER[opened[-1]] == t:
+                    opened.pop()
+                    held = min(held, len(opened))
+            elif t not in OTHER_KEYWORDS:
+                break
+        in_loop = any(k in LOOP_KEYWORDS for k in opened)
+        # A `for` this segment opens expands its word list once, where a
+        # `while`/`until` condition re-runs every iteration.
+        subst_in_loop = (any(k in LOOP_KEYWORDS for k in opened[:held])
+                         or any(k in LOOP_KEYWORDS and k != 'for'
+                                for k in opened[held:]))
         # A substitution runs where the segment holding it runs: in the
         # background job under `&`, and in the foreground under a `timeout`
         # wrap, because the shell expands it before `timeout` starts.
         for body in [] if bg else substitutions_in(group, bodies, marker_re):
-            recurse(body)
+            recurse(body, subst_in_loop)
         state['timeout_wrapped'] = False
         argv = strip_head(list(group), state)
         if not argv:
@@ -840,7 +882,8 @@ def analyze_class_a(raw, cfg, depth=0):
         if head == 'sleep':
             secs = sleep_seconds(argv)
             segs.append(('sleep', argv))
-            loop_sleep = True
+            state['slept'] = True
+            loop_sleep = loop_sleep or in_loop
             if secs is None or secs >= floor:
                 sleep_findings.append(finding_sleep(cfg, secs))
             continue
@@ -853,10 +896,10 @@ def analyze_class_a(raw, cfg, depth=0):
                     body = argv[i + 1]
                     break
             if body:
-                recurse(body)
+                recurse(body, in_loop)
             continue
         if head == 'eval':
-            recurse(' '.join(argv[1:]))
+            recurse(' '.join(argv[1:]), in_loop)
             continue
         # Basename the head so `/usr/bin/tail -f` still matches `^tail`.
         seg_str = ' '.join([head] + argv[1:])
@@ -877,7 +920,7 @@ def analyze_class_a(raw, cfg, depth=0):
         for body in heredoc_substitutions(expanded):
             recurse(body)
 
-    if state['loop'] and loop_sleep:
+    if loop_sleep:
         # Loop-with-sleep: the canonical foreground poll. Any sleep duration
         # counts — the loop multiplies it. Subsumes the per-sleep findings.
         findings.append(finding_loop(cfg))
@@ -901,7 +944,7 @@ def analyze_class_a(raw, cfg, depth=0):
             findings.append(finding_sandwich(cfg))
         findings += sleep_findings
 
-    return findings, state['override']
+    return findings, state['override'], state['slept']
 
 
 # ---------------------------------------------------------------------------
@@ -980,7 +1023,7 @@ def simple_commands(raw, depth=0):
         return []
     expanded = []
     masked, bodies, marker_re = mask_substitutions(
-        strip_heredoc_bodies(raw, expanded))
+        strip_heredoc_bodies(raw, expanded), raw)
     tokens = tokenize(masked)
     if tokens is None:
         return None
@@ -990,7 +1033,7 @@ def simple_commands(raw, depth=0):
         if sub is None:
             return None
         out += sub
-    state = {'loop': False, 'override': None}
+    state = {'override': None}
     bg_flags = []
     segments = split_segments(tokens, bg_flags)
     for (group, _term), bg in zip(segments, bg_flags):
@@ -1105,6 +1148,10 @@ def main():
         data = json.load(sys.stdin)
     except ValueError:
         return  # unparseable input: fail-open
+    # Matched by name so a Monitor arrives as itself and defers here. From
+    # Claude Code 2.1.321 a bare "Bash" matcher also catches Monitor, with
+    # tool_name rewritten to "Bash" and only command and description kept,
+    # so the advised Monitor until-loop read as a foreground poll.
     if data.get('tool_name') != 'Bash':
         return
     tool_input = data.get('tool_input') or {}
@@ -1121,7 +1168,7 @@ def main():
     # Class A analysis always runs: it is also the only place the
     # FOREGROUND_GUARD_OVERRIDE=<reason> prefix is parsed, and the override
     # must still clear a Class B block when poll is disabled.
-    findings, override = analyze_class_a(command, cfg)
+    findings, override, _ = analyze_class_a(command, cfg)
     # The agent has asserted the wait is wanted, and a wrong assertion costs
     # waiting and nothing else. Defer rather than route it at a human: an
     # approved prompt would add a context switch and no information. Not an

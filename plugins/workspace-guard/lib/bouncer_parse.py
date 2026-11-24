@@ -130,8 +130,8 @@ def _skip_balanced_parens(text, start):
     """Step over a run of balanced parens beginning at ``start`` (a ``(``).
 
     Returns the index just past the matching close, or end-of-string on
-    imbalance. Used to skip ``$((…))`` arithmetic expansion, which contains no
-    command to guard.
+    imbalance. Used to skip an extglob group; arithmetic is ``_arith_end``'s,
+    since a quoted paren there counts for nothing.
     """
     i, n, depth = start, len(text), 0
     while i < n:
@@ -407,7 +407,8 @@ def strip_comments(cmd):
     A `!(` in command position is a negated subshell instead, which is what
     bash runs it as unless `shopt -s extglob` has run. Inside `[[ … ]]` a `#`
     still starts a comment after a blank or a grouping `(`; only in a `=~`
-    operand is one not after a blank text, as in `[[ a =~ (#x) ]]`. Holding
+    operand is one not after a blank text, as in `[[ a =~ (#x) ]]`. A `[[`
+    opens a test only in command position; `echo [[` is a word. Holding
     the whole `[[` span instead keeps a comment bash strips, and a `'` in one
     then hides the lines after it. A `(( … ))` arithmetic command holds no
     comment either: `(( 1 #2 )); id` fails its arithmetic and runs `id`. bash
@@ -429,6 +430,8 @@ def strip_comments(cmd):
             in_single = c != "'"
             i += 1
             continue
+        if regex is not None and not in_double and i >= quiet:
+            regex = _regex_step(regex, cmd, i)
         if not in_double and c == "'":
             in_single = True
             out.append(c); i += 1
@@ -470,20 +473,11 @@ def strip_comments(cmd):
                     cmd[i-1] == '!' and _at_command_start(out[:-1])):
                 quiet = _skip_balanced_parens(cmd, i)       # extglob group
                 closes.add(quiet - 1)
-            elif at_word and cmd.startswith('((', i) and \
-                    _skip_balanced_parens(cmd, i + 1) == \
-                    _skip_balanced_parens(cmd, i) - 1:
-                quiet = _skip_balanced_parens(cmd, i)       # `(( … ))`
-            elif regex == 'op':
-                regex = 'next' if c in ' \t\n' else 'op'
-            elif regex is not None and c not in ' \t\n':
-                depth = 0 if regex == 'next' else regex
-                regex = depth + (c == '(') - (c == ')' and depth > 0)
-            elif regex == 0:
-                regex = None                         # the operand ends
+            elif at_word and cmd.startswith('((', i) and _arith_end(cmd, i) > 0:
+                quiet = _arith_end(cmd, i)                  # `(( … ))`
             if at_word and cmd[i+2:i+3] in ('', ' ', '\t', '\n'):
                 if cmd.startswith('[[', i):
-                    dbracket = True
+                    dbracket = dbracket or _command_position(cmd, i, closes)
                 elif dbracket and cmd.startswith('=~', i):
                     regex = 'op'
             if dbracket and regex is None and at_word \
@@ -512,6 +506,56 @@ def _at_command_start(out):
     nothing yet, or a separator or an opening `(` or `{` before any blanks."""
     text = ''.join(out).rstrip(' \t')
     return not text or text[-1] in ';&|(\n{'
+
+_COMMAND_WORDS = frozenset(('!', '{', 'coproc', 'do', 'elif', 'else', 'if',
+                            'then', 'time', 'until', 'while'))
+
+def _command_position(text, i, closes=()):
+    """Whether a word at ``i`` in raw ``text`` is in command position: after a
+    separator, a `(`, a `)` that ends a case pattern, or a reserved word that
+    is itself in command position, so `if ! [[` opens a test and `echo [[`
+    does not (Q346). A name counts before a `{` or `[[` body when `function`
+    or `coproc` leads it. ``closes`` holds the index of each `)` that closes a
+    substitution or an extglob group, after which the word is an argument."""
+    after, need = '[[', None      # the word just passed; what must lead it
+    while True:
+        j = i
+        while j and (text[j-1] in ' \t' or text[j-2:j] == '\\\n'):
+            j -= 1 if text[j-1] in ' \t' else 2
+        if not j or text[j-1] in ';&|\n(':
+            return need is None
+        if text[j-1] == ')':
+            return need is None and j - 1 not in closes
+        k = j
+        while k and text[k-1] not in ' \t\n;&|()<>':
+            k -= 1
+        word = text[k:j]
+        if need:
+            if word not in need:
+                return False
+            need = None
+        elif word == '-p':
+            need = ('time',)
+        elif word not in _COMMAND_WORDS:
+            if after not in ('{', '[['):
+                return False
+            need = ('function', 'coproc')
+        after, i = word, k
+
+def _regex_step(state, text, i):
+    """The `=~` operand state after ``text[i]``, for the `[[` comment rule:
+    'op' on the operator, 'next' once a blank follows it, then the paren depth
+    until a blank at depth 0 ends the operand (None). A caller steps it ahead
+    of its quote and substitution branches, since those start an operand too.
+    An extglob `(` is not counted, since the scanners skip its group whole."""
+    c = text[i]
+    if state == 'op':
+        return 'next' if c in ' \t\n' else 'op'
+    if c in ' \t\n':
+        return None if state == 0 else state
+    depth = 0 if state == 'next' else state
+    opens = c == '(' and not (i and text[i-1] in '?*+@!')
+    return depth + opens - (c == ')' and depth > 0)
 
 def _scan_heredoc_delim(text, i):
     """Read a heredoc delimiter at ``i`` -- the index just past the ``<<``.
@@ -624,7 +668,8 @@ def strip_heredoc_bodies(cmd, expanded=None, unterminated=None,
     re-scanning the raw string for substitution bodies needs both halves: the
     top level's data gone, since an apostrophe in one opens a quoted run that
     swallows the rest of the scan, and each body whole, since its terminator is
-    what lets the next strip disarm it cleanly (Q119). The returned string is
+    what lets the next strip disarm it cleanly (Q119). A funsub is copied
+    through whole for the same reason (Q357). The returned string is
     not itself re-strippable — the top level's own `<<WORD` comes back disarmed,
     as it does by default — so re-scan the bodies, never the result. The default
     strips every level, because the callers that hand it to shlex need all of it
@@ -659,9 +704,16 @@ def strip_heredoc_bodies(cmd, expanded=None, unterminated=None,
             elif cmd[i-1] != '\n':                # a continuation joins words
                 last = c                          # `\ ` opens no word (Q324)
             continue
+        # A funsub's heredocs are its own as much as a `$(…)` body's are.
+        end = _brace_end(cmd, i) if own_level_only and _funsub_at(cmd, i) \
+            else -1
+        if end > 0:
+            out.append(cmd[i:end]); last = 'x'; i = end
+            continue
         # A substitution body is parsed in its own quote context, so these two
         # openers are recognised whether or not a `"` is still open.
-        if c == '$' and i + 2 < n and cmd[i+1] == '(' and cmd[i+2] != '(':
+        if c == '$' and i + 2 < n and cmd[i+1] == '(' and (
+                cmd[i+2] != '(' or _arith_end(cmd, i + 1) < 0):
             stack.append((')', in_double, pending, depth))
             in_double = False; pending = []; depth = 0
             out.append('$('); last = SUBST_OPEN; i += 2
@@ -696,8 +748,8 @@ def strip_heredoc_bodies(cmd, expanded=None, unterminated=None,
                 out.append(cmd[i]); i += 1
             last = ')'                            # arbitrary non-word-start char
             continue
-        if c == '(' and i + 1 < n and cmd[i+1] == '(':
-            end = _skip_balanced_parens(cmd, i)   # `((…))` / `$((…))` arithmetic
+        end = _arith_end(cmd, i) if cmd.startswith('((', i) else -1
+        if end > 0:                               # `((…))` / `$((…))` arithmetic
             out.append(cmd[i:end]); last = ')'; i = end
             continue
         if c == '(':
@@ -791,6 +843,29 @@ def _scan_case_pattern(text, start):
     return None
 
 
+def _trampoline(steps):
+    """Run a ``*_steps`` generator to its return value.
+
+    Each one yields a nested scan it needs the result of, and is sent that
+    result back, so a nested ``${`` or ``$(`` costs a list entry rather than
+    a Python frame. Recursing, a thousand nested ``${y:-`` raised
+    ``RecursionError`` and the hook exited 1, which Claude Code reads as no
+    decision (Q337).
+    """
+    stack, result = [steps], None
+    while True:
+        try:
+            nested = stack[-1].send(result)
+        except StopIteration as done:
+            stack.pop()
+            if not stack:
+                return done.value
+            result = done.value
+            continue
+        stack.append(nested)
+        result = None
+
+
 def _scan_dollar_paren(text, start):
     """Scan a ``$(`` body from ``start`` (just past ``$(``) to its matching ``)``.
 
@@ -855,12 +930,16 @@ def _scan_dollar_paren(text, start):
     quotes is scanned as a body of its own (Q325), so the ``"`` in
     ``"$(echo "$(echo ")")" ; cmd)"`` closes nothing. Its state is pushed on
     ``frames`` rather than recursed into, because any depth cap leaves a
-    reading past it that misplaces the close. A ``$((…))`` there is not
-    stepped over: a paren in double quotes closes nothing anyway, and counting
-    its parens flat would miscount a quoted one in a ``$(…)`` inside it.
+    reading past it that misplaces the close. A ``$((…))`` there is stepped
+    over to the close ``_arith_end`` finds, and one it reads as ``$( (`` is
+    pushed like any ``$(`` (Q338).
     """
+    return _trampoline(_scan_dollar_paren_steps(text, start))
+
+def _scan_dollar_paren_steps(text, start, brace=False):
     i, n = start, len(text)
     in_single = in_double = False
+    braces = 0 if brace else None   # open `{` groups in a funsub body
     cmd_pos = True        # bash reads a command just past the `$(`
     clauses = []          # one entry per open `case`: 'in' | 'pat' | 'body'
     pending = []          # heredoc delimiters armed, awaiting their bodies
@@ -879,16 +958,22 @@ def _scan_dollar_paren(text, start):
             if c == '\\':
                 i += 2
                 continue
+            end = -1
             if c == '"':
                 in_double = False
-            elif text.startswith('$(', i) and not text.startswith('$((', i):
-                frames.append((cmd_pos, clauses, pending, parens, brk, dollar))
+            elif text.startswith('$((', i):
+                end = yield _arith_end_steps(text, i + 1)
+            if end < 0 and text.startswith('$(', i):
+                frames.append((cmd_pos, clauses, pending, parens, brk, dollar,
+                               braces))
                 in_double = False
                 cmd_pos = brk = True
                 clauses, pending, parens, dollar = [], [], [], -2
+                braces = None
                 i += 2
                 continue
-            end = _brace_end(text, i) if text.startswith('${', i) else -1
+            if text.startswith('${', i):
+                end = yield _brace_end_steps(text, i)
             if end < 0 and c == '`':
                 end = _scan_backticks(text, i + 1)[1]
             i = max(end, i + 1)
@@ -933,7 +1018,7 @@ def _scan_dollar_paren(text, start):
             continue
         end = _ansi_c_end(text, i)
         if end < 0 and text.startswith('${', i):
-            end = _brace_end(text, i)
+            end = yield _brace_end_steps(text, i)
         elif end < 0 and c == '`':
             end = _scan_backticks(text, i + 1)[1]
         if end > 0:
@@ -980,10 +1065,12 @@ def _scan_dollar_paren(text, start):
             i = m.end()
             continue
         if c == '(' and i + 1 < n and text[i+1] == '(':
-            brk = dollar != i - 1                 # `$((1))#x` is one word
-            i = _skip_balanced_parens(text, i)    # `((…))` / `$((…))` arithmetic
-            cmd_pos = False
-            continue
+            end = yield _arith_end_steps(text, i)
+            if end > 0:                           # `((…))` / `$((…))` arithmetic
+                brk = dollar != i - 1             # `$((1))#x` is one word
+                i = end
+                cmd_pos = False
+                continue
         if c == '(':
             parens.append(dollar == i - 1 or text[i-1:i] in ('<', '>'))
             cmd_pos = True
@@ -991,11 +1078,14 @@ def _scan_dollar_paren(text, start):
             continue
         if c == ')':
             if not parens and frames:
-                cmd_pos, clauses, pending, parens, brk, dollar = frames.pop()
+                (cmd_pos, clauses, pending, parens, brk, dollar,
+                 braces) = frames.pop()
                 in_double = True
                 i += 1
                 continue
             if not parens:
+                if braces is not None:
+                    return (None, start)          # `${ echo ); }`
                 return (text[start:i], i + 1)
             brk = not parens.pop()                # `$(a)#b` is one word too
             cmd_pos = True
@@ -1012,6 +1102,14 @@ def _scan_dollar_paren(text, start):
             continue
         if c == '$':
             dollar = i
+        if braces is not None and cmd_pos and not parens and (
+                c == '}' or c == '{' and text[i+1:i+2] in ('', ' ', '\t', '\n')):
+            if c == '{':
+                braces += 1
+            elif braces:
+                braces -= 1
+            else:
+                return (text[start:i], i + 1)     # `}b` closes too
         # only standing alone in command position: `echo {` and `!case` are words
         cmd_pos = c in '&|' or (cmd_pos and c in _PUNCT_KEYWORDS
                                 and text[i+1:i+2] in ('', ' ', '\t', '\n'))
@@ -1041,7 +1139,29 @@ def _brace_end(text, i):
     or not (``"${x:-'}'}"`` prints ``'}'``), and a nested ``${``, ``$(`` or
     backtick holds its own. A bare ``{`` does not nest -- ``${x:-{a}`` ends at
     the first ``}``.
+
+    A bash 5.3 funsub, ``${ list; }`` or ``${| list; }``, is a list rather
+    than a parameter (Q357), so it is scanned as a ``$(…)`` body is and ends at
+    the ``}`` standing in command position: ``${ echo }; }`` prints ``}``, and
+    ``${ { echo a; }; }`` holds its own group.
     """
+    return _trampoline(_brace_end_steps(text, i))
+
+def _funsub_at(text, i):
+    """Whether a funsub opens at ``text[i]``: ``${`` followed by a blank, a
+    newline or ``|``. Before bash 5.3 the same text is a bad substitution."""
+    return text.startswith('${', i) and text[i+2:i+3] in (' ', '\t', '\n', '|')
+
+def _funsub_body_start(text, i):
+    """Where the list of the funsub at ``text[i]`` starts: past the ``|`` of
+    ``${|``, which substitutes ``$REPLY`` rather than the output."""
+    return i + 3 if text[i+2:i+3] == '|' else i + 2
+
+def _brace_end_steps(text, i):
+    if _funsub_at(text, i):
+        start = _funsub_body_start(text, i)
+        body, end = yield _scan_dollar_paren_steps(text, start, brace=True)
+        return -1 if body is None else end
     i, n = i + 2, len(text)
     in_double = False
     while i < n:
@@ -1058,13 +1178,15 @@ def _brace_end(text, i):
             pass
         elif c == "'" and not in_double:
             end = text.find("'", i + 1) + 1 or -1
-        elif text.startswith('$((', i):
-            end = _skip_balanced_parens(text, i + 1)
         elif text.startswith('$(', i):
-            end = _scan_dollar_paren(text, i + 2)[1]
-            end = -1 if end == i + 2 else end
+            end = -1
+            if text.startswith('$((', i):
+                end = yield _arith_end_steps(text, i + 1)
+            if end < 0:
+                end = (yield _scan_dollar_paren_steps(text, i + 2))[1]
+                end = -1 if end == i + 2 else end
         elif text.startswith('${', i):
-            end = _brace_end(text, i)
+            end = yield _brace_end_steps(text, i)
         elif c == '`':
             end = _scan_backticks(text, i + 1)[1]
             end = -1 if end == i + 1 else end
@@ -1077,6 +1199,70 @@ def _brace_end(text, i):
             return -1
         i = end
     return -1
+
+def _arith_end(text, i):
+    """The index just past the ``))`` closing the ``((`` at ``text[i]``, -1
+    when bash reads the ``((`` as two parens instead, or ``len(text)`` when
+    nothing closes it.
+
+    bash decides by the delimiter, not by whether the text is arithmetic
+    (Q338). It counts parens from past the ``((``, and the first ``)`` with
+    none open to close ends the scan: followed by ``)`` it closes arithmetic,
+    and followed by anything else the ``((`` was a subshell, or ``$(`` opening
+    on one. Driven on bash 5.3.15, ``echo $((echo x))`` is an arithmetic error
+    and ``echo $((1)+(2))`` runs ``(1)+(2)`` as a command. A paren in a quote,
+    a backtick span or a nested ``$(…)`` is not counted (Q361), and one in a
+    ``${…}`` is. Unquoted, a ``#`` starts no comment. In double quotes bash
+    does start one, so ``"$(( 1 # ))⏎) ; cmd)"`` runs ``cmd``, and this scan
+    does not model that.
+    """
+    return _trampoline(_arith_end_steps(text, i))
+
+def _arith_end_steps(text, i):
+    i, n = i + 2, len(text)
+    depth, in_double = 0, False
+    while i < n:
+        c = text[i]
+        if c == '\\':
+            i += 2
+            continue
+        if c == '"':
+            in_double = not in_double
+            i += 1
+            continue
+        end = -1 if in_double else _ansi_c_end(text, i)
+        if end > 0:
+            pass
+        elif c == "'" and not in_double:
+            end = text.find("'", i + 1) + 1 or n
+        elif text.startswith('$(', i):
+            end = -1
+            if text.startswith('$((', i):
+                end = yield _arith_end_steps(text, i + 1)
+            if end < 0:
+                end = (yield _scan_dollar_paren_steps(text, i + 2))[1]
+                end = n if end == i + 2 else end
+        elif text.startswith('${', i) and in_double:
+            end = yield _brace_end_steps(text, i)
+            end = n if end < 0 else end
+        elif c == '`':
+            end = _scan_backticks(text, i + 1)[1]
+            end = n if end == i + 1 else end
+        elif in_double or c not in '()':
+            i += 1
+            continue
+        elif c == '(':
+            depth += 1
+            i += 1
+            continue
+        elif depth:
+            depth -= 1
+            i += 1
+            continue
+        else:
+            return i + 2 if text.startswith('))', i) else -1
+        i = end
+    return n
 
 def _dq_expansion_end(text, i):
     """The index just past the ``$(…)``, backtick span or ``${…}`` opening at
@@ -1112,7 +1298,7 @@ def _unescape_backticks(body, in_double):
     return ''.join(out)
 
 
-def command_substitutions(text, quotes=True, spans=None):
+def command_substitutions(text, quotes=True, spans=None, funsubs=None):
     """Extract the command-substitution bodies bash would evaluate in ``text``.
 
     Returns the inner command string of each ``$(…)`` and backtick ``` `…` ```
@@ -1153,6 +1339,11 @@ def command_substitutions(text, quotes=True, spans=None):
     The span covers the substitution rather than the body so the caller can
     replace the whole construct, which is what keeps the body out of a tokenizer
     that would otherwise read its text as the enclosing command's own.
+
+    A bash 5.3 funsub, ``${ list; }`` or ``${| list; }``, is returned like any
+    other body (Q357). It alone runs in the CURRENT shell, so a `cd` in it
+    moves the commands after it; pass a list as ``funsubs`` to collect, per
+    returned body, whether it came from one.
     """
     bodies = []
     i, n = 0, len(text)
@@ -1163,6 +1354,7 @@ def command_substitutions(text, quotes=True, spans=None):
     pending = []          # heredoc delimiters armed, awaiting their bodies
     dbracket = False      # inside `[[ … ]]`
     regex = None          # a `=~` operand: None, 'op', 'next', paren depth
+    closes = set()        # indices of the `)` that end a word
     while i < n:
         c = text[i]
         if in_single:
@@ -1171,13 +1363,7 @@ def command_substitutions(text, quotes=True, spans=None):
             i += 1
             continue
         if regex is not None and quotes and not in_double and i >= quiet:
-            if regex == 'op':                      # ahead of the quote and
-                regex = 'next' if c in ' \t\n' else 'op'   # substitution steps,
-            elif c not in ' \t\n':                 # which also start an operand
-                depth = 0 if regex == 'next' else regex
-                regex = depth + (c == '(') - (c == ')' and depth > 0)
-            elif regex == 0:
-                regex = None
+            regex = _regex_step(regex, text, i)
         if c == '\\':                              # escapes next char (not in '')
             brk = brk and text[i+1:i+2] == '\n'    # a continuation joins words
             i += 2
@@ -1197,17 +1383,34 @@ def command_substitutions(text, quotes=True, spans=None):
             brk = False
             i += 1
             continue
+        if c == '$' and _funsub_at(text, i):
+            end = _brace_end(text, i)
+            if end < 0:
+                break                              # unterminated -> stop
+            bodies.append(text[_funsub_body_start(text, i):end - 1])
+            if spans is not None:
+                spans.append((i, end))
+            if funsubs is not None:
+                funsubs.append(True)
+            brk = False
+            i = end
+            continue
         if c == '$' and i + 1 < n and text[i + 1] == '(':
             brk = False                            # `$(a)#b` is one word
-            if i + 2 < n and text[i + 2] == '(':
-                i = _skip_balanced_parens(text, i + 1)   # $((…)) arithmetic
+            end = _arith_end(text, i + 1) if text[i+2:i+3] == '(' else -1
+            if end > 0:
+                closes.add(end - 1)
+                i = end                            # $((…)) arithmetic
                 continue
             body, end = _scan_dollar_paren(text, i + 2)
             if body is None:
                 break                              # unterminated -> stop
+            closes.add(end - 1)
             bodies.append(body)
             if spans is not None:
                 spans.append((i, end))
+            if funsubs is not None:
+                funsubs.append(False)
             i = end
             continue
         if c == '`':
@@ -1217,6 +1420,8 @@ def command_substitutions(text, quotes=True, spans=None):
             bodies.append(_unescape_backticks(body, in_double))
             if spans is not None:
                 spans.append((i, end))
+            if funsubs is not None:
+                funsubs.append(False)
             brk = False
             i = end
             continue
@@ -1224,7 +1429,8 @@ def command_substitutions(text, quotes=True, spans=None):
             if i >= quiet:                         # strip_comments' `[[` rule
                 if brk and text[i+2:i+3] in ('', ' ', '\t', '\n'):
                     if text.startswith('[[', i):
-                        dbracket = True
+                        dbracket = dbracket or _command_position(
+                            text, i, closes)
                     elif dbracket and text.startswith('=~', i):
                         regex = 'op'
                 if dbracket and regex is None and brk \
@@ -1241,6 +1447,8 @@ def command_substitutions(text, quotes=True, spans=None):
                 parens.append(i > 0 and text[i-1] in '<>?*+@!')
             elif c == ')':
                 brk = not (parens and parens.pop())    # `<(a)#b`, `@(a)#b` too
+                if not brk:
+                    closes.add(i)
                 i += 1
                 continue
             elif text.startswith('<<', i) and i >= quiet:
@@ -1288,7 +1496,9 @@ def _comment_free_end(text, i, brk):
         end = _subscript_end(text, i + 1)
         return len(text) if end < 0 else end
     if text.startswith('((', i) and text[i-1:i] != '$':
-        return _skip_balanced_parens(text, i)
+        end = _arith_end(text, i)
+        if end > 0:
+            return end
     if text.startswith('(', i) and i > 0 and text[i-1] in '?*+@!':
         return _skip_balanced_parens(text, i)      # an extglob group
     m = _WORD_RE.match(text, i) if brk else None
@@ -1340,8 +1550,9 @@ def process_substitutions(text, spans=None):
             i += 1
             continue
         if c == '$' and i + 1 < n and text[i + 1] == '(':
-            if i + 2 < n and text[i + 2] == '(':
-                i = _skip_balanced_parens(text, i + 1)
+            end = _arith_end(text, i + 1) if text[i+2:i+3] == '(' else -1
+            if end > 0:
+                i = end
                 continue
             body, end = _scan_dollar_paren(text, i + 2)
             if body is None:
@@ -1673,8 +1884,9 @@ def _skip_quoted(text, i):
                 continue
             i += 1
         return -1
-    if text.startswith('$((', i):
-        return _skip_balanced_parens(text, i + 1)
+    end = _arith_end(text, i + 1) if text.startswith('$((', i) else -1
+    if end > 0:
+        return end
     if text.startswith('$(', i):
         body, end = _scan_dollar_paren(text, i + 2)
         return -1 if body is None else end
@@ -1742,15 +1954,18 @@ def is_assignment(token):
     carries a quote and assigns, so only where the quoting starts separates it
     from `'SP=/x'`.
 
-    A plain `str` carries no such record, so it is read as written plain -- the
-    pre-Q170 behaviour, and fail-open in this direction: it arms an override on
-    a word bash would not have assigned. Provenance survives slicing and
-    reordering and dies at anything that builds a new string, which happens on
-    live paths and not only in hand-built token lists: `substitute_vars`
-    returns a new `str` for a token carrying `$`, `glue_dollar_paren`
-    concatenates, and prod-guard's `expand_argv` rebuilds every token. Every
-    command-position caller in that file runs above its boundary. The other
-    guards have not been swept.
+    A plain `str` carries no such record, so it is read as written plain, the
+    pre-Q170 behaviour. What that costs depends on the reader. An override
+    armed on a word bash would not have assigned gets no more than writing it
+    plainly would; a variable a later expansion reads resolves to a value bash
+    never set, which is fail-open. Provenance survives slicing, reordering and
+    `glue_dollar_paren`, whose append moves no offset, and dies at a rebuild
+    that changes the text: `substitute_vars` returns a new `str` for a token
+    carrying `$`, and prod-guard's `expand_argv` rebuilds every token. So
+    decide what a word is on the token the lexer produced, and carry the record
+    only through a rebuild that leaves the word's prefix intact. prod-guard
+    reads command position above `expand_argv`, and workspace-guard decides
+    its peels on the raw tokens (Q175).
 
     A subscript is the exception to "quoting before the `=` disarms": bash
     peels `FOO["0"]=x` and `FOO['a']=x`. So quoting that starts strictly
@@ -1889,11 +2104,19 @@ def glue_dollar_paren(tokens):
     which EXPANSION_RE recognises as a runtime expansion, while the `(` is
     kept in the stream so group splitting (and checking of guarded commands
     *inside* the substitution) is unchanged.
+
+    The glued word keeps its `QuotedStr` record (Q175). Appending leaves every
+    offset into the word where it was, so `quoted_from` still says whether
+    the word was an assignment as written: `'FOO='$(x)` is a command.
     """
     out = []
     for t in tokens:
         if t == '(' and out and out[-1].endswith('$'):
-            out[-1] += '('
+            word = out[-1] + '('
+            if isinstance(out[-1], QuotedStr):
+                word = QuotedStr(word)
+                vars(word).update(vars(out[-1]))
+            out[-1] = word
         out.append(t)
     return out
 

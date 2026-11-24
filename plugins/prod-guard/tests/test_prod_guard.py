@@ -21,6 +21,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -788,6 +789,14 @@ class CommandSubstitutionDecisionTests(unittest.TestCase):
             with self.subTest(shape=shape):
                 self.assertEqual(self.decide(shape % self.K), "deny")
 
+    def test_a_dollar_double_paren_closed_by_one_paren_is_judged(self):
+        # bash runs `$((echo x) ; cmd)` as a substitution around a subshell,
+        # not arithmetic; the nested double-quoted form deferred (Q338).
+        for shape in ('echo $((echo x) ; %s)', 'x=$((echo x) ; %s)',
+                      'echo "$(echo "$((echo x) ; %s)")"'):
+            with self.subTest(shape=shape):
+                self.assertEqual(self.decide(shape % self.K), "deny")
+
     def test_single_quoted_substitution_stays_literal(self):
         for shape in ("echo '`%s`'", "echo '$(%s)'", "echo '\"$(%s)\"'",
                       'echo "\\$(%s)"', 'echo hi # "$(%s)"'):
@@ -829,6 +838,53 @@ class CommandSubstitutionDecisionTests(unittest.TestCase):
         tokens = guard.tokenize('echo "\ue000x$(true)\ue001"')
         self.assertEqual(guard.split_simple_commands(tokens),
                          [["true"], ["echo", "\ue000x$(true)\ue001"]])
+
+    @staticmethod
+    def nest(k, inner):
+        for _ in range(k):
+            inner = 'echo "$(%s)"' % inner
+        return inner
+
+    def test_nesting_past_the_cap_asks(self):
+        # Unbounded, the recursion raised RecursionError near 500 levels and
+        # the hook deferred (Q342). Past the cap a body is read afresh, so a
+        # production target still denies there, down to the 545 levels the
+        # budget reaches, and everything else past the cap asks (Q396).
+        cap = guard.MAX_SUBST_DEPTH
+        reach = (cap + 1) * (guard._DEEP_BODY_BUDGET + 1) - 1
+        prod = "kubectl --context gke_acme_prod-us delete ns payments"
+        dev = "kubectl --context kind-ci delete ns payments"
+        for k, inner, want in ((1, prod, "deny"), (cap, prod, "deny"),
+                               (cap + 1, prod, "deny"), (500, prod, "deny"),
+                               (reach, prod, "deny"), (reach + 1, prod, "ask"),
+                               (cap + 1, dev, "ask"), (500, dev, "ask"),
+                               (cap, "true", None), (cap + 1, "true", "ask")):
+            with self.subTest(k=k, inner=inner):
+                decision, reason = run_hook(
+                    self.nest(k, inner), home=make_home(kubeconfig=KUBECONFIG_PROD))
+                self.assertEqual(decision, want)
+                if want == "ask":
+                    self.assertIn("nested more than %d levels" % cap, reason)
+
+    def test_alternating_nest_past_the_old_limit_does_not_defer(self):
+        # 1,000 levels alternating `${…}` and `$( )` crashed the unbounded
+        # recursion. The production target 500 substitutions down is read.
+        def alt(inner):
+            for i in range(1000):
+                inner = ('echo ${X:-%s}' if i % 2 else 'echo $(%s)') % inner
+            return inner
+        for inner, want in (
+                ("kubectl --context gke_acme_prod-us delete ns payments", "deny"),
+                ("kubectl --context kind-ci delete ns payments", "ask")):
+            with self.subTest(want=want):
+                self.assertEqual(run_hook(alt(inner))[0], want)
+
+    def test_shallow_command_beside_a_deep_nest_is_still_judged(self):
+        # The row's trap: the kubectl sits at depth 1, after 500 levels the
+        # guard stops reading.
+        trap = ('echo "$(' + self.nest(500, 'echo ")"')
+                + ' ; kubectl --context gke_acme_prod-us delete ns payments)"')
+        self.assertEqual(self.decide(trap), "deny")
 
     def test_substitution_is_hoisted_ahead_of_its_command(self):
         tokens = guard.tokenize('a; X=1 echo "x$(%s)y" z && b' % self.K)
@@ -876,8 +932,8 @@ class VariableExpansionDecisionTests(unittest.TestCase):
     friction source and closes a hole where a prod target behind a variable
     downgraded from deny to ask."""
 
-    def test_inline_nonprod_var_defers(self):
-        decision, _ = run_hook("CTX=kind-ci kubectl --context $CTX delete ns x")
+    def test_assigned_nonprod_var_defers(self):
+        decision, _ = run_hook("CTX=kind-ci; kubectl --context $CTX delete ns x")
         self.assertIsNone(decision)
 
     def test_inline_prod_var_denies(self):
@@ -896,7 +952,7 @@ class VariableExpansionDecisionTests(unittest.TestCase):
     def test_chained_nested_braces_nonprod_defers(self):
         decision, _ = run_hook(
             "P=acme_dev; Z=z; C=c; "
-            "CTX=gke_${P}_${Z}_${C} kubectl --context $CTX delete ns x")
+            "CTX=gke_${P}_${Z}_${C}; kubectl --context $CTX delete ns x")
         self.assertIsNone(decision)
 
     def test_export_persists_across_segments(self):
@@ -970,6 +1026,147 @@ class VariableExpansionDecisionTests(unittest.TestCase):
         decision, _ = run_hook(
             "CTX=gke_acme_prod-us; bash -c 'kubectl --context '\"$CTX\"' delete ns x'")
         self.assertEqual(decision, "ask")
+
+    # --- Q348: a `$` the parent leaves as text expands in the child ---------
+    # `"\$X"` and `"$"X` hand the child `$X`, as a live `"$X"` would not, and
+    # the child never sees an unexported X. bash 5.3.15 with X=parent prints
+    # `[]` for `bash -c "echo [\$X]"` and `bash -c "echo [$""X]"`.
+
+    def test_escaped_dollar_in_child_body_reads_the_childs_value(self):
+        decision, reason = run_hook(
+            'X=kind-ci; bash -c "\\$X kubectl --context=gke_acme_prod-us '
+            'delete pod x"')
+        self.assertEqual(decision, "deny")
+        self.assertIn("gke_acme_prod-us", reason)
+
+    def test_dollar_ended_by_a_quote_in_child_body_reads_the_childs_value(self):
+        decision, _ = run_hook(
+            'X=kind-ci; bash -c "$""X kubectl --context=gke_acme_prod-us '
+            'delete pod x"')
+        self.assertEqual(decision, "deny")
+
+    def test_escaped_context_in_child_body_is_unknown(self):
+        # The child reads an empty `--context=`, which is the current context.
+        decision, _ = run_hook(
+            'C=kind-ci; bash -c "kubectl --context=\\$C delete pod x"')
+        self.assertEqual(decision, "ask")
+
+    def test_escaped_dollar_of_an_exported_name_still_defers(self):
+        # The child has the exported value, so both readings agree.
+        decision, _ = run_hook(
+            'export C=kind-ci; bash -c "kubectl --context=\\$C delete pod x"')
+        self.assertIsNone(decision)
+
+    def test_live_dollar_in_child_body_keeps_the_parents_value(self):
+        # Only a command holding a left-alone `$` takes the child's reading,
+        # so a live `"$X"` still runs `kind-ci`.
+        decision, _ = run_hook(
+            'X=kind-ci; bash -c "$X kubectl --context=gke_acme_prod-us '
+            'delete pod x"')
+        self.assertIsNone(decision)
+
+    # --- Q365: a `$NAME` written in single quotes is text -------------------
+    # bash 5.3.15 with C=p hands the child `$C` for `B='$C'; bash -c "…$B…"`
+    # and for `bash -c "…$(echo '$C')…"`, and the child expands an unexported
+    # C to nothing.
+
+    def test_single_quoted_name_reaches_the_child_unexpanded(self):
+        k = 'bash -c "kubectl --context=%s delete pod x"'
+        for cmd in ("C=kind-ci; B='$C'; " + k % '$B',
+                    "C=kind-ci; export B='$C'; " + k % '$B',
+                    "C=kind-ci; B='$C' bash -c 'kubectl --context=$B "
+                    "delete pod x'",
+                    "C=kind-ci; " + k % "$(echo '$C')",
+                    "C=kind-ci; " + k % "`echo '$C'`",
+                    # Mixed quoting: the guard cannot place the run, so it
+                    # also takes the literal reading.
+                    "C=kind-ci; B=x'$C'; " + k % '$B',
+                    "C=kind-ci; B='$C'\"\"; " + k % '$B',
+                    "C=kind-ci; B=\"$C\"'y'; " + k % '$B'):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(run_hook(cmd)[0], "ask")
+
+    def test_single_quoted_name_keeps_the_value_a_child_may_expand(self):
+        # The child reads C wherever it has it, which the guard cannot always
+        # see, so a production value still denies (#357 review). bash 5.3.15
+        # passes the production context in each of these.
+        p = "C=gke_acme_prod-us; "
+        k = 'bash -c "kubectl --context=%s delete pod x"'
+        for cmd in (p + "B='$C'; " + k % '$B',
+                    p + "export C; B='$C'; " + k % '$B',
+                    "set -a; " + p + "B='$C'; " + k % '$B',
+                    p + "B='$C'; eval \"kubectl --context=$B delete pod x\"",
+                    "export " + p + k % "$(echo '$C')",
+                    "export " + p + k % "`echo '$C'`",
+                    "export " + p + "export B='$C'; bash -c 'eval "
+                    "\"kubectl --context=$B delete pod x\"'"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(run_hook(cmd)[0], "deny")
+
+    def test_quoted_names_the_shell_expands_still_resolve(self):
+        k = 'bash -c "kubectl --context=%s delete pod x"'
+        for cmd in ('C=kind-ci; B="$C"; ' + k % '$B',
+                    "export C=kind-ci; B='$C'; " + k % '$B',
+                    "C=kind-ci; " + k % '$(echo $C)',
+                    # Inside double quotes a `'` is text, so bash expands.
+                    "C=kind-ci; " + k % "'$C'"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(run_hook(cmd)[0])
+        self.assertEqual(run_hook(
+            "C=gke_acme_prod-us; B=\"$C\"; " + k % '$B')[0], "deny")
+
+    # --- Q321: a prefix is applied after its command's words expand ---------
+    # bash 5.3.15: `CTX=p /bin/echo "[$CTX]"` prints `[]`, and `[q]` after
+    # `CTX=q`. A double-quoted `bash -c`, `eval` or `env -S` string expands
+    # in the parent the same way; quoted singly, or as `\$CTX`, it gets `p`.
+
+    def test_prefix_does_not_resolve_its_own_commands_words(self):
+        decision, _ = run_hook(
+            'CTX=kind-dev kubectl --context=$CTX delete pod x')
+        self.assertEqual(decision, "ask")
+
+    def test_prefix_words_take_the_shells_value(self):
+        decision, _ = run_hook(
+            'CTX=gke_acme_prod-us; CTX=kind-dev kubectl --context=$CTX '
+            'delete pod x')
+        self.assertEqual(decision, "deny")
+
+    def test_prefix_reading_still_prompts_beside_a_resolved_shell_value(self):
+        decision, _ = run_hook(
+            'CTX=kind-dev; CTX=$UNSET kubectl --context=$CTX delete pod x')
+        self.assertEqual(decision, "ask")
+
+    def test_prefix_does_not_resolve_a_double_quoted_child_body(self):
+        decision, _ = run_hook(
+            'CTX=kind-dev bash -c "kubectl --context=$CTX delete pod x"')
+        self.assertEqual(decision, "ask")
+
+    def test_prefix_does_not_name_a_double_quoted_child_command(self):
+        # The parent's empty `$X` vanishes, so the child runs kubectl.
+        decision, _ = run_hook(
+            'X=kind-ci bash -c "$X kubectl --context=gke_acme_prod-us '
+            'delete pod x"')
+        self.assertEqual(decision, "deny")
+
+    def test_prefix_does_not_resolve_a_double_quoted_eval_body(self):
+        decision, _ = run_hook(
+            'CTX=kind-dev eval "kubectl --context=$CTX delete pod x"')
+        self.assertEqual(decision, "ask")
+
+    def test_prefix_does_not_resolve_a_double_quoted_env_split_string(self):
+        decision, _ = run_hook(
+            'CTX=kind-dev env -S "kubectl --context=$CTX delete pod x"')
+        self.assertEqual(decision, "ask")
+
+    def test_prefix_still_reaches_what_its_command_expands(self):
+        for command in (
+                "CTX=kind-dev bash -c 'kubectl --context=$CTX delete pod x'",
+                'CTX=kind-dev bash -c "kubectl --context=\\$CTX delete pod x"',
+                "CTX=kind-dev eval 'kubectl --context=$CTX delete pod x'",
+                "CTX=kind-dev env -S 'kubectl --context=${CTX} delete pod x'"):
+            with self.subTest(command=command):
+                decision, _ = run_hook(command)
+                self.assertIsNone(decision)
 
     # --- Q151: an `eval` body runs in the CURRENT shell --------------------
     # `eval` starts no child, so quoting decides nothing: bash expands the body
@@ -3068,10 +3265,28 @@ class BypassBatteryTests(unittest.TestCase):
             "bash -c \"sh -c 'kubectl --context gke_acme_prod-us delete ns x'\"")
         self.assertEqual(decision, "deny")
 
+    def test_a_shell_body_past_the_depth_bound_asks(self):
+        # bash 5.3.15 runs the fourth body, so it is not read and asks (Q340).
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        def nest(cmd, n):
+            for _ in range(n):
+                cmd = "bash -c " + shlex.quote(cmd)
+            return cmd
+        k = "kubectl --context gke_acme_prod-us delete pod x"
+        for cmd in (nest(k, 4), nest(k, 5), nest("echo hi", 4),
+                    nest("sh -c " + shlex.quote(k), 3),
+                    nest("env bash -c " + shlex.quote(k), 3)):
+            with self.subTest(cmd=cmd):
+                decision, reason = run_hook(cmd, home=home)
+                self.assertEqual(decision, "ask")
+                self.assertIn("nested deeper than the guard reads", reason)
+        self.assertEqual(run_hook(nest(k, 3), home=home)[0], "deny")
+        self.assertIsNone(run_hook(nest("bash -c ''", 3), home=home)[0])
+
     def test_recursion_depth_bound_is_a_known_limit(self):
-        # Beyond depth 3 the evaluator stops recursing — a DOCUMENTED false
-        # negative (README Limitations). This test locks the bound so a
-        # change to it is a conscious decision, not drift.
+        # Beyond depth 3 the evaluator stops recursing; the caller asks for a
+        # body it would hand past the bound (Q299, Q340). This test locks the
+        # bound so a change to it is a conscious decision, not drift.
         guard._PATTERNS = None
         findings, override, _session = guard.evaluate_command_string(
             "kubectl --context gke_acme_prod-us delete ns x", {"cwd": "/"}, depth=4)
@@ -3830,6 +4045,72 @@ class SpecialCaseTests(unittest.TestCase):
                     "C=kind-ci; %s; %s" % (mid, k), home=home)[0])
         self.assertIsNone(run_hook(
             "C=kind-ci bash -c '%s'" % k, home=home)[0])
+
+    def test_a_command_after_source_may_be_a_function_that_sets_any_name(self):
+        # With x.sh defining `f`, `echo` and `kubectl` to set C, bash 5.3.15
+        # prints the file's value at the mutation for each of these (Q336).
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        k = "kubectl --context $C delete ns x"
+        for mid in ("f", "echo hi", "kubectl get pods",
+                    "if true; then f; fi", "eval f"):
+            for src in ("source x.sh", ". x.sh"):
+                with self.subTest(src=src, mid=mid):
+                    self.assertEqual(run_hook(
+                        "%s; C=kind-ci; %s; %s" % (src, mid, k),
+                        home=home)[0], "ask")
+        self.assertEqual(run_hook(
+            "C=kind-ci; BASH_ENV=x.sh bash -c 'C=kind-ci; f; %s'" % k,
+            home=home)[0], "ask")
+        # A call that runs apart reaches nothing, a name assigned after the
+        # call stands, and with no source a call sets nothing.
+        for cmd in ("source x.sh; C=kind-ci; f | cat; " + k,
+                    "source x.sh; C=kind-ci; (f); " + k,
+                    "source x.sh; f; C=kind-ci; " + k,
+                    "(source x.sh); C=kind-ci; f; " + k,
+                    "C=kind-ci; f; " + k,
+                    "C=kind-ci bash -c 'C=kind-ci; f; %s'" % k):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(run_hook(cmd, home=home)[0])
+
+    def test_a_production_value_held_across_a_source_still_denies(self):
+        # The sourced file may leave the name alone, so the held value is
+        # one reading and unset the other (Q377). The kind-ci controls above
+        # still ask on the unset reading.
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        k = "kubectl --context $C delete ns x"
+        d = "kubectl --context $D delete ns x"
+        p = "C=gke_acme_prod-us; "
+        for cmd in ("source x.sh; %sf; %s" % (p, k),
+                    "source x.sh; %sls; %s" % (p, k),
+                    "source x.sh; %seval f; %s" % (p, k),
+                    p + "source x.sh; " + k,
+                    p + ". x.sh; " + k,
+                    p + "if x; then source x.sh; fi; " + k,
+                    p + "f() { source x.sh; }; f; " + k,
+                    p + "eval 'source x.sh'; " + k,
+                    # More names held than readings the guard judges: only
+                    # the ones a segment reads are forked.
+                    "A=1; B=2; D=3; E=4; %ssource x.sh; %s" % (p, k),
+                    "export C=gke_acme_prod-us; BASH_ENV=x.sh bash -c '%s'" % k,
+                    "C=gke_acme_prod-us BASH_ENV=x.sh bash -c 'f; %s'" % k,
+                    p + "source x.sh; export D=$C; " + d,
+                    "C=gke_acme_prod-us; x && C=kind-ci; export D=$C; " + d):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(run_hook(cmd, home=home)[0], "deny")
+        # A builtin's operand carries both readings on, as a bare assignment
+        # does (#356 review).
+        for b in ("export", "declare", "readonly"):
+            with self.subTest(b=b):
+                self.assertEqual(run_hook(
+                    "C=kind-ci; source x.sh; %s D=$C; %s" % (b, d),
+                    home=home)[0], "ask")
+        for cmd in ('C=kind-ci; source x.sh; export D="$C"; ' + d,
+                    "C=kind-ci; source x.sh; export D=$C; bash -c '%s'" % d,
+                    "source x.sh; C=kind-ci; f; export D=$C; " + d):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(run_hook(cmd, home=home)[0], "ask")
+        self.assertIsNone(run_hook("C=kind-ci; export D=$C; " + d,
+                                   home=home)[0])
 
     def test_a_function_body_is_judged_again_where_it_is_called(self):
         # The call's prefix, and a value assigned after the definition, are

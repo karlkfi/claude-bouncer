@@ -79,7 +79,8 @@ import sys
 # plugin's `lib/` is vendored from the repository root; see scripts/sync-lib.py.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 from bouncer_parse import (                                    # noqa: E402
-    ASSIGN_APPEND, ASSIGN_SUBSCRIPT, ASSIGNMENT_RE, PUNCT_CHARS, QuotedStr,
+    ASSIGN_APPEND, ASSIGN_SUBSCRIPT, ASSIGNMENT_RE, MAX_SUBST_DEPTH, PUNCT_CHARS,
+    QuotedStr,
     QuoteTrackingLexer, command_substitutions, is_assignment, is_reserved_word,
     split_assignment, strip_comments, strip_heredoc_bodies, strip_sh_keywords,
 )
@@ -386,7 +387,61 @@ def _unescape(m):
 _LIVE_BACKTICK = re.compile(r'(?<!\\)((?:\\\\)*)`')
 
 
+class _Tokens(list):
+    """A token stream that records whether a substitution body nested past
+    ``MAX_SUBST_DEPTH`` was left unread (Q342)."""
+    too_deep = False
+
+
+class _DeepBody(str):
+    """Stands in the token stream for a substitution body found at
+    ``MAX_SUBST_DEPTH``, until `tokenize` reads it afresh and splices it in."""
+
+
+# How many bodies past the cap `tokenize` reads afresh. Each read reaches 26
+# levels deeper, so a single chain is read 545 levels down, past the ~500
+# where unbounded recursion used to fail. Reading costs time quadratic in the
+# depth, so anything past the budget is left unread, and the command asks.
+_DEEP_BODY_BUDGET = 20
+
+
+def _tokenize_body(body, depth, deep):
+    """Tokenize a substitution body found at ``depth``, or past the cap leave
+    a `_DeepBody` for `tokenize` to read, noting that in ``deep``. Unbounded,
+    the recursion exhausted Python's stack near 500 levels and the hook
+    deferred (Q342)."""
+    if depth >= MAX_SUBST_DEPTH:
+        deep.append(body)
+        return [_DeepBody(body)]
+    tokens = _tokenize(body, depth + 1)
+    if getattr(tokens, 'too_deep', False):
+        deep.append(body)
+    return tokens
+
+
 def tokenize(raw):
+    """Tokenize ``raw`` (see `_tokenize`), then read each body left at the
+    depth cap from a fresh stack and splice it in where it would have gone,
+    until none is left or `_DEEP_BODY_BUDGET` is spent. The recursion is
+    bounded per read, so a production target nested hundreds of levels deep
+    is still judged where it sits (Q396). A body past the budget, or one that
+    does not lex, is dropped, and ``too_deep`` stays set so the command asks."""
+    tokens = _tokenize(raw, 0)
+    budget = _DEEP_BODY_BUDGET
+    while tokens is not None and tokens.too_deep:
+        at = [i for i, t in enumerate(tokens) if isinstance(t, _DeepBody)]
+        if not at:
+            break
+        for i in reversed(at):
+            body = None
+            if budget > 0:
+                budget -= 1
+                body = _tokenize(tokens[i], 0)
+            tokens[i:i + 1] = body or []
+    return tokens
+
+
+def _tokenize(raw, depth=0):
     """shlex-tokenize with POSIX quoting and punctuation grouping. Newlines
     are rewritten to `;` first, because shlex treats a newline as plain
     whitespace, which would merge `true\ncmd` into one segment. Comments are
@@ -406,9 +461,13 @@ def tokenize(raw):
     lexer, which drops the backslash as bash does: inside double quotes it
     reaches a `bash -c` body as the substitution the child runs (Q322).
 
+    A body nested deeper than ``MAX_SUBST_DEPTH`` is not tokenized here: a
+    `_DeepBody` holds its place, and the stream returned says so in
+    ``too_deep``. What sits beside it at a shallower depth is still read.
+
     Returns None on unbalanced quotes (caller defers: fail-open on parse
     errors)."""
-    expanded, unterminated = [], []
+    expanded, unterminated, deep = [], [], []
     raw = _strip_comments(strip_heredoc_bodies(raw, expanded, unterminated))
     spans = []
     bodies = command_substitutions(raw, spans=spans)[:_SUBST_MAX]
@@ -416,8 +475,9 @@ def tokenize(raw):
     masked = _mask_substitutions(raw, spans[:len(bodies)], sentinels)
     masked = _LIVE_BACKTICK.sub(r'\1;', masked).replace('\n', ';')
     try:
-        tokens = _hoist_substitutions(_lex_semicolons(masked), raw, spans,
-                                      bodies, sentinels)
+        tokens = _Tokens(_hoist_substitutions(_lex_semicolons(masked), raw,
+                                              spans, bodies, sentinels, depth,
+                                              deep))
         # Every body is stripped above, so the ones this guard still has to see
         # come back through the out-lists and are appended as their own
         # segments: the ones bash would EXPAND, and the ones whose terminator
@@ -450,7 +510,7 @@ def tokenize(raw):
             if unescape:
                 subs += command_substitutions(text)
             for sub in subs:
-                sub_tokens = tokenize(sub)
+                sub_tokens = _tokenize_body(sub, depth, deep)
                 if sub_tokens:
                     tokens.append(';')
                     tokens.extend(sub_tokens)
@@ -462,6 +522,7 @@ def tokenize(raw):
                 continue
             tokens.append(';')
             tokens.extend(body_tokens)
+        tokens.too_deep = bool(deep)
         return tokens
     except ValueError:
         return None
@@ -525,7 +586,7 @@ class _HoistSep(str):
 _HOISTED = _HoistSep(';')
 
 
-def _hoist_substitutions(tokens, raw, spans, bodies, sentinels):
+def _hoist_substitutions(tokens, raw, spans, bodies, sentinels, depth, deep):
     """Restore every masked word and insert each substitution body it held,
     tokenized, ahead of the simple command the word belongs to. A marker
     inside a comment never reaches a token, so a commented-out substitution
@@ -545,7 +606,8 @@ def _hoist_substitutions(tokens, raw, spans, bodies, sentinels):
             continue
         if sentinels[0] in t:
             for m in marker.finditer(t):
-                sub_tokens = tokenize(bodies[ord(m.group(1)) - _SUBST_BASE])
+                sub_tokens = _tokenize_body(
+                    bodies[ord(m.group(1)) - _SUBST_BASE], depth, deep)
                 if sub_tokens:
                     out[seg_start:seg_start] = ['('] + sub_tokens + [')',
                                                                       _HOISTED]
@@ -788,11 +850,18 @@ def _assign(values, defining, maybe, functions, *scopes, unknown=()):
 def _forget(names, *scopes):
     """Drop `names` from every scope: assigned where bash may not have run the
     assignment, the value is unknown, so the target prompts rather than
-    resolving to a value the command may never see. `EVERY_NAME` drops all
-    of them."""
+    resolving to a value the command may never see. `EVERY_NAME` is a script
+    the guard cannot read, which may have left a name alone: a name the
+    command assigned keeps its value as one reading beside unset, so a
+    production value still denies (Q377), and the inherited ones are
+    dropped."""
     for scope in scopes:
         if EVERY_NAME in names:
-            scope.clear()
+            for name, value in list(scope.items()):
+                if os.environ.get(name) == value:
+                    del scope[name]
+                else:
+                    scope[name] = Readings.of(value, {None})
         for name in names:
             scope.pop(name, None)
 
@@ -887,9 +956,13 @@ def extract_env_prefix(argv, base_env=None):
             prior = env.get(name)
             if prior is None:
                 prior = base_env.get(name, '')
-            env[name] = prior + expand_vars(value, {**base_env, **env})
+            word = expand_word(argv[i], {**base_env, **env},
+                               len(argv[i]) - len(value))
+            env[name] = Readings.of(prior + word, {
+                prior + o for o in getattr(word, 'others', ())})
         else:
-            env[name] = expand_vars(value, {**base_env, **env})
+            env[name] = expand_word(argv[i], {**base_env, **env},
+                                    len(argv[i]) - len(value))
         i += 1
     return env, argv[i:]
 
@@ -902,6 +975,63 @@ def extract_env_prefix(argv, base_env=None):
 # immediately after the name, and positional/special params (`$1`, `$@`, `$$`,
 # `$?`) because the bare branch requires a letter/underscore right after `$`.
 VAR_REF_RE = re.compile(r'\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))')
+# Every name a word may read, over-reading: any `$NAME` or `${NAME`.
+_REFERENCED_RE = re.compile(r'\$\{?([A-Za-z_][A-Za-z0-9_]*)')
+# A `$` the shell leaves as text, which the lexer hands on as a bare `$`: one
+# escaped, or one a closing quote ends (`"$"X`). Driven on bash 5.3.15.
+_LEFT_DOLLAR_RE = re.compile(r'\\\$|\$"')
+
+
+def _expanded_by_parent(names, words, texts):
+    """The `names` a word not quoted singly references live, as `$NAME` rather
+    than `\\$NAME`. The shell expands those before a prefix assignment applies,
+    so they take its value and not the prefix's (Q321)."""
+    def live(n, s):
+        return re.search(r'(?<!\\)\$(?:\{%s\}|%s(?![A-Za-z0-9_]))' % (n, n), s)
+    return {n for n in names
+            if any(live(n, str(w)) for w in words
+                   if "'" not in getattr(w, 'quotes', frozenset("'")))
+            and any(live(n, s) for s in texts)}
+
+
+def _single_quoted_in_bodies(value):
+    """The (start, end) spans of `value`'s substitution bodies that the body's
+    own shell reads in single quotes, each from one quote to the other."""
+    if "'" not in value or ('$(' not in value and '`' not in value):
+        return ()
+    spans, held = [], []
+    for body, (start, end) in zip(
+            command_substitutions(value, quotes=False, spans=spans), spans):
+        at = value.find(body, start, end)
+        if at < 0:
+            continue
+        i, double = 0, False
+        while i < len(body):
+            c = body[i]
+            if c == '\\':
+                i += 1
+            elif c == '"':
+                double = not double
+            elif c == "'" and not double:
+                j = body.find("'", i + 1)
+                if j < 0:
+                    break
+                held.append((at + i, at + j))
+                i = j
+            i += 1
+    return held
+
+
+def expand_word(tok, env, start=0):
+    """`expand_vars` for `tok[start:]`, where `tok` is a lexed word. bash
+    leaves a `$NAME` it read in single quotes as text, which a shell that
+    re-reads it may expand to the same value, so the word takes the text as
+    written beside the expanded one (Q365). The lexer records which quotes a
+    word used, not where each run sat, so the whole word is the text."""
+    text = tok[start:]
+    if "'" not in getattr(tok, 'quotes', ()) or not VAR_REF_RE.search(text):
+        return expand_vars(text, env)
+    return Readings.of(expand_vars(text, env), {text})
 
 
 def expand_vars(value, env):
@@ -911,16 +1041,32 @@ def expand_vars(value, env):
     stays `$CTX`) rather than blanked, so an unresolvable target stays UNKNOWN
     and still prompts — expansion only ever makes classification *more*
     specific, never silently allows. `env` values are assumed already resolved
-    (extract_env_prefix folds them left-to-right), so one pass suffices."""
+    (extract_env_prefix folds them left-to-right), so one pass suffices.
+
+    A reference a substitution body holds in single quotes is that body's
+    text, which the shell running the body may expand again, so the value
+    takes both readings (Q365)."""
+    held = _single_quoted_in_bodies(value)
+    out = _expand(value, env, held)
+    if held:
+        out = Readings.of(out, _choices(_expand(value, env, ())))
+    return out
+
+
+def _expand(value, env, held):
+    def live(m):
+        return not any(a < m.start() < b for a, b in held)
+
     def sub(env):
         def repl(m):
             name = m.group(1) or m.group(2)
-            return env[name] if name in env else m.group(0)
+            return env[name] if name in env and live(m) else m.group(0)
         return VAR_REF_RE.sub(repl, value)
     out = sub(env)
     # A name with several readings gives a value with several (Q301).
     forked = sorted({m.group(1) or m.group(2) for m in VAR_REF_RE.finditer(value)
-                     if isinstance(env.get(m.group(1) or m.group(2)), Readings)})
+                     if live(m) and isinstance(
+                         env.get(m.group(1) or m.group(2)), Readings)})
     if not forked:
         return out
     alts = _alternatives(env, forked)
@@ -1057,7 +1203,10 @@ def expand_argv(argv, env):
     each word that may expand to nothing as a `MayVanish`."""
     out = []
     for tok in argv:
-        word = expand_vars(tok, env)
+        # Only an assignment's value persists for a later word to re-expand;
+        # an `env -S` string relies on the parent having expanded it.
+        word = expand_word(tok, env) if ASSIGNMENT_RE.match(tok) \
+            else expand_vars(tok, env)
         if (tok and getattr(tok, 'quoted_from', None) is None
                 and _VAR_REFS_RE.fullmatch(tok)
                 and _VAR_REFS_RE.fullmatch(word)):
@@ -3202,7 +3351,7 @@ def _runs_in_one_shell(raw):
 
 
 def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
-                            out=None, tokens=None, known=None):
+                            out=None, tokens=None, known=None, reading=None):
     """Findings for a full command string: tokenize, split into simple
     commands, evaluate each. Recurses (bounded) into `sh -c '...'` and
     `eval ...` bodies so a quoted nested command can't ride past the guard.
@@ -3223,6 +3372,14 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
         tokens = tokenize(raw)
     if tokens is None:
         return findings, override, session_reason  # unparseable: fail-open
+    if getattr(tokens, 'too_deep', False):
+        # Past `_DEEP_BODY_BUDGET` a body is not read at all, and `tokenize`
+        # cannot say which deep body went unread, so this asks on depth alone.
+        # A deny found in what was read still wins (Q342, Q396).
+        findings.append((ASK, 'prod-guard: a command substitution is nested '
+                         'more than %d levels deep, deeper than the guard '
+                         'reads reliably, so what it runs may be unknown. '
+                         'Confirm it is safe.' % MAX_SUBST_DEPTH, None))
     if raw is None:
         raw = ' '.join(tokens)
     # Two scopes, both seeded from what this shell inherited (os.environ at the
@@ -3324,7 +3481,11 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
             maybe, defining = 'apart', None
         if not group:
             continue
-        forked = sorted(n for n in set(shell_env) | set(exported)
+        # Only the names this segment can read: the exported ones and those
+        # its words reference. The rest wait for a segment that reads them,
+        # so they do not count toward the cap (Q377).
+        read = set(exported) | set(_REFERENCED_RE.findall(' '.join(group)))
+        forked = sorted(n for n in (set(shell_env) | set(exported)) & read
                         if isinstance(shell_env.get(n, exported.get(n)), Readings))
         if forked:
             # Judge the command once more under each other reading (Q301).
@@ -3346,6 +3507,17 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
         seg_inline = dict(seg_env)
         same_shell = {**shell_env, **seg_inline}   # for this command's args
         child_env = {**exported, **seg_inline}     # for its `eval` body
+        # bash expands the words before the prefix applies, so a word naming
+        # a prefixed name gets the shell's value. The segment is judged under
+        # that reading too, and the prefix's reading stands (Q321).
+        prefixed = {k for k, v in seg_inline.items() if shell_env.get(k) != v}
+        words_env = shell_env if reading == 'shell' else same_shell
+        if reading is None and _expanded_by_parent(
+                prefixed, argv_raw, (ctx.get('command') or '', raw)):
+            findings += evaluate_command_string(
+                None, ctx, depth, dict(exported), dict(shell_env),
+                tokens=list(group), known=(functions, bodies),
+                reading='shell')[0]
         # What the command behind the wrappers inherits: child_env as `env`
         # and `sudo` reshape it. Not merged into same_shell, which the parent
         # expands the arguments against before `env` runs (Q269).
@@ -3353,7 +3525,7 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
         # Expanded view for classification; raw view (nested-body extraction)
         # is left unexpanded so the child re-expands it against `child`.
         alternates = []
-        argv = strip_wrappers(expand_argv(argv_raw, same_shell), seg_inline,
+        argv = strip_wrappers(expand_argv(argv_raw, words_env), seg_inline,
                               alternates, child)
         argv_raw = strip_wrappers(list(argv_raw), {})
         for alt, alt_env in alternates:
@@ -3363,7 +3535,7 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
             # So it downgrades this reading's denies and reaches nothing else.
             sub_f, sub_o, sub_s = evaluate_command_string(
                 shlex.join(alt), ctx, depth + 1, alt_env,
-                same_shell)
+                words_env)
             if sub_o or sub_s is not None:
                 sub_f = [(ASK if sev == DENY else sev,
                           'prod-guard: override acknowledged in one reading '
@@ -3391,6 +3563,9 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
             _unset(reassigned_names(tool, argv[1:])
                    if tool in REASSIGN_BUILTINS else {EVERY_NAME},
                    defining, maybe, functions, shell_env, exported)
+            if tool in SOURCE_BUILTINS and maybe != 'apart':
+                # And it may define any command as a function (Q336).
+                functions.setdefault(EVERY_NAME, set())
             continue
         if tool in ('for', 'select') and group[0] == tool \
                 and getattr(group[0], 'quoted_from', None) is None:
@@ -3407,10 +3582,22 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
             for tok in argv[1:]:
                 if not tok.startswith('-') and ASSIGNMENT_RE.match(tok):
                     name, form, value = split_assignment(tok)
+                    # An operand expanded from a name with several readings
+                    # assigns each of them (Q377). One that splits to another
+                    # name leaves this one unknown.
+                    others = set()
+                    for o in getattr(tok, 'others', ()):
+                        n, _, v = split_assignment(o) if ASSIGNMENT_RE.match(o) \
+                            else (None, None, None)
+                        others.add(v if n == name else None)
                     # `export NAME+=v` appends to the inherited value; unset
                     # gives just `v` (Q174).
                     if form == ASSIGN_APPEND:
-                        value = shell_env.get(name, '') + value
+                        prior = shell_env.get(name, '')
+                        value = prior + value
+                        others = {None if o is None else prior + o
+                                  for o in others}
+                    value = Readings.of(value, others)
                     _assign({name: value}, defining, maybe, functions,
                             shell_env, exported)
             continue
@@ -3421,18 +3608,22 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
             # single-quoted run was expanded by the PARENT while building the
             # argument, so its `$C` resolves against this shell's vars whether
             # or not the name was exported -- do that here and let the child
-            # re-expand what is left. Mixed quoting keeps the child's env:
+            # re-expand what is left, save a `$` the parent left as text.
+            # Mixed quoting keeps the child's env:
             # only some runs were parent-expanded, and under-expanding is the
             # safe direction (unresolved target -> prompt).
             body = first_flag_value(argv_raw, ('-c',))
+            if body and depth >= 3:
+                # A body this deep is not read, so what it runs is unknown (Q340).
+                findings.append((ASK, 'prod-guard: `%s -c` runs a body nested '
+                                 'deeper than the guard reads, so what it runs '
+                                 'is unknown. Confirm it is safe.' % tool, None))
             if body:
                 # The default stands in for a body that reached here as a
                 # plain str rather than a token (`-c=…`, which flag_values
                 # splits): unknown quoting reads as single, so it expands in
                 # the child and nothing new resolves.
                 quotes = getattr(body, 'quotes', frozenset("'"))
-                if "'" not in quotes:
-                    body = expand_vars(body, same_shell)
                 # What `env`/`sudo` add reaches the body only where the child
                 # does the expanding: a body written wholly in single quotes.
                 # Anywhere else a `$C` left over is the parent's, unknown here,
@@ -3443,12 +3634,46 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
                         == len(body)):
                     body_env = {k: v for k, v in child.items()
                                 if child_env.get(k) == v}
+                others = ()
+                if "'" not in quotes:
+                    texts = (ctx.get('command') or '', raw)
+                    # `"\$X"` and `"$"X` reach the child as `$X`, which the
+                    # lexer cannot tell from a live `"$X"`. Where the command
+                    # holds either, a name also takes the value the child
+                    # would give it (Q348).
+                    word = body
+                    if any(_LEFT_DOLLAR_RE.search(s) for s in texts):
+                        body = expand_vars(body, {
+                            k: Readings.of(v, {body_env.get(k)})
+                            for k, v in words_env.items()})
+                    else:
+                        body = expand_vars(body, words_env)
+                    others = getattr(body, 'others', ())
+                    # A live `$X` of a prefix-only name is the parent's value,
+                    # unknown here, which the child must not read as the
+                    # prefix's.
+                    if reading == 'shell':
+                        body_env = {**body_env, **{
+                            k: Readings.of(body_env[k], {None})
+                            for k in _expanded_by_parent(
+                                prefixed - set(shell_env), (word,), texts)
+                            if k in body_env}}
                 # bash runs a `BASH_ENV` file before the body, which can set
-                # any name the body reads (Q299).
+                # any name the body reads (Q299) and define any command (Q336).
+                sourced = tool == 'bash' and child.get('BASH_ENV')
+                sub_shell = None
+                if sourced:
+                    sub_shell = dict(body_env)
+                    _forget({EVERY_NAME}, sub_shell)
+                sub_known = ({EVERY_NAME: set()}, {}) if sourced else None
                 sub_f, sub_o, sub_s = evaluate_command_string(
-                    body, ctx, depth + 1, body_env,
-                    {} if tool == 'bash' and child.get('BASH_ENV') else None)
+                    body, ctx, depth + 1, body_env, sub_shell,
+                    known=sub_known)
                 findings += sub_f
+                for other in sorted(others):
+                    findings += evaluate_command_string(
+                        other, ctx, depth + 1, body_env, sub_shell,
+                        known=sub_known)[0]
                 override = override or sub_o
                 session_reason = session_reason if session_reason is not None else sub_s
             continue
@@ -3464,7 +3689,7 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
             # text itself. `child_env` rides on for a real child inside (Q151).
             left = {}
             sub_f, sub_o, sub_s = evaluate_command_string(
-                ' '.join(argv_raw[1:]), ctx, depth + 1, child_env, same_shell,
+                ' '.join(argv_raw[1:]), ctx, depth + 1, child_env, words_env,
                 left, known=(functions, bodies))
             findings += sub_f
             override = override or sub_o
@@ -3480,7 +3705,8 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
                         (shell_env, same_shell, left['shell']),
                         (exported, child_env, left['exported'])):
                     changed = {k: v for k, v in end.items()
-                               if k not in seg_inline and start.get(k) != v}
+                               if k not in seg_inline
+                               and _choices(start.get(k)) != _choices(v)}
                     gone = {k for k in start
                             if k not in end and k not in seg_inline}
                     if one_shell:
@@ -3503,6 +3729,10 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
             # runs apart, where it reaches nothing.
             if defining is None and maybe != 'apart':
                 _forget(functions[tool], shell_env, exported)
+        elif EVERY_NAME in functions:
+            # A sourced file may have defined it, so it may set any name.
+            _unset({EVERY_NAME}, defining, maybe, functions, shell_env,
+                   exported)
         evaluator = EVALUATORS.get(tool)
         if evaluator is None:
             continue  # uncovered tool: defer
@@ -3539,7 +3769,7 @@ def main():
     if os.environ.get('PROD_GUARD_DISABLE') == '1':
         return
 
-    ctx = {'cwd': data.get('cwd') or os.getcwd()}
+    ctx = {'cwd': data.get('cwd') or os.getcwd(), 'command': command}
 
     if data.get('hook_event_name') == 'PostToolUse':
         # The command RAN — so if PreToolUse downgraded a deny to an ask, the

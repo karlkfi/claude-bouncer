@@ -1,6 +1,7 @@
 # Agent reference docs
 
-Read the relevant doc before starting a task in that area. These pages are written for agents and contributors working *on* prod-guard; users of the plugin start at the [`README.md`](../../README.md) in the repository root.
+Read the relevant doc before starting a task in that area.
+These pages are written for agents and contributors working *on* prod-guard; users of the plugin start at the [`README.md`](../../README.md) in the repository root.
 
 | Doc | Covers |
 |---|---|

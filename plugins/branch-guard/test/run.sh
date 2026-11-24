@@ -3489,6 +3489,103 @@ check "[group] from main, case arm cd, next arm git commit -> ask" ask \
   "$(decision_for "$(bash_payload "case a in b) cd $GRP_FEAT;; *) git commit -m x;; esac")" "$GRP")"
 rm -rf "$GRP" "$GRP.feat"
 
+# 31. A shell's `-c` body (Q297). `sh -c 'git commit -m x'` was never lexed, so
+#     it got no decision on `main` where the bare commit asks. The body is now
+#     judged from the directory the shell starts in, with its asks and denies
+#     standing and its allows deferring, since the shell can change what the
+#     classifier never reads. A `main` checkout and a feature worktree, so the
+#     directory the body starts in, and any `cd` inside it, picks the branch.
+SHC="$(mktemp -d "$REPO_ROOT/tmp/shc.XXXXXX")"
+git -C "$SHC" init -q -b main
+git -C "$SHC" config user.name "Test"
+git -C "$SHC" config user.email "test@example.com"
+printf 'hello\n' > "$SHC/file.txt"
+git -C "$SHC" add file.txt
+git -C "$SHC" commit -q -m init
+git -C "$SHC" worktree add -q "$SHC.feat" -b claude/x
+SHC_MAIN="../$(basename "$SHC")"
+SHC_FEAT="../$(basename "$SHC.feat")"
+
+check "[sh -c] control: git commit on main -> ask" ask \
+  "$(decision_for "$(bash_payload 'git commit -m x')" "$SHC")"
+for c in "sh -c 'git commit -m x'" "bash -c 'git commit -m x'" \
+         "dash -c 'git commit -m x'" "/bin/sh -c 'git commit -m x'" \
+         "bash -lc 'git commit -m x'" "bash -e -c 'git commit -m x'" \
+         "bash -c -e 'git commit -m x'" "bash -o pipefail -c 'git commit -m x'" \
+         "bash --norc -c 'git commit -m x'" "bash --rcfile x -c 'git commit -m x'" \
+         "sh -c 'git commit -m x' argv0 a b" "sh -c -- 'git commit -m x'" \
+         "sh -c \"sh -c 'git commit -m x'\"" "timeout 5 sh -c 'git commit -m x'" \
+         "sh -c 'echo hi; git commit -m x'" "true && sh -c 'git commit -m x'" \
+         "( sh -c 'git commit -m x' )" "sh -c 'git push --force origin main'"; do
+  check "[sh -c] on main: $c -> ask" ask \
+    "$(decision_for "$(bash_payload "$c")" "$SHC")"
+done
+check "[sh -c][dontAsk] on main: sh -c 'git commit -m x' -> deny" deny \
+  "$(decision_for "$(bash_mode "sh -c 'git commit -m x'" dontAsk)" "$SHC")"
+check_text "[sh -c] the body's reason reaches the prompt" has "protected branch 'main'" \
+  "$(reason_for "$(bash_payload "sh -c 'git commit -m x'")" "$SHC")"
+
+#     The body's allow is not the command's: a commit on the feature branch,
+#     and a read-only body, defer where the bare forms allow.
+check "[sh -c] control: git commit on the feature branch -> allow" allow \
+  "$(decision_for "$(bash_payload 'git commit -m x')" "$SHC.feat")"
+for c in "sh -c 'git commit -m x'" "bash -c 'git status'" \
+         "git status && sh -c 'git status'" "git status; sh -c ''"; do
+  check "[sh -c] on the feature branch: $c -> none" none \
+    "$(decision_for "$(bash_payload "$c")" "$SHC.feat")"
+done
+
+#     The directory the body starts in: a wrapper's literal chdir is followed,
+#     a `cd` inside the body moves later body segments, and a `cd` there does
+#     not move the parent.
+check "[sh -c] feature: env -C <main> sh -c commit -> ask" ask \
+  "$(decision_for "$(bash_payload "env -C $SHC_MAIN sh -c 'git commit -m x'")" "$SHC.feat")"
+check "[sh -c] main: env -C <feature> sh -c commit -> none" none \
+  "$(decision_for "$(bash_payload "env -C $SHC_FEAT sh -c 'git commit -m x'")" "$SHC")"
+check "[sh -c] feature: cd <main> && sh -c commit -> ask" ask \
+  "$(decision_for "$(bash_payload "cd $SHC_MAIN && sh -c 'git commit -m x'")" "$SHC.feat")"
+check "[sh -c] feature: sh -c 'cd <main> && commit' -> ask" ask \
+  "$(decision_for "$(bash_payload "sh -c 'cd $SHC_MAIN && git commit -m x'")" "$SHC.feat")"
+check "[sh -c] main: sh -c 'cd <feature> && commit' -> none" none \
+  "$(decision_for "$(bash_payload "sh -c 'cd $SHC_FEAT && git commit -m x'")" "$SHC")"
+check "[sh -c] main: sh -c 'cd <feature>'; git commit -> ask" ask \
+  "$(decision_for "$(bash_payload "sh -c 'cd $SHC_FEAT'; git commit -m x")" "$SHC")"
+#     A repository named only by the shell, or exported to it, is no branch the
+#     hook can read, so the commit asks from the feature branch (Q331).
+for c in "env -C \"\$X\" sh -c 'git commit -m x'" \
+         "GIT_DIR=$SHC_MAIN/.git sh -c 'git commit -m x'" \
+         "env GIT_DIR=$SHC_MAIN/.git sh -c 'git commit -m x'"; do
+  check "[sh -c] feature: $c -> ask" ask \
+    "$(decision_for "$(bash_payload "$c")" "$SHC.feat")"
+done
+
+#     A body is read only where the shell runs one: an unlexable body, `-c` with
+#     no string, a script operand and stdin all defer, and so does a body
+#     nested past MAX_BODY_DEPTH. Four levels is the deepest still read.
+for c in "sh -c" "sh -c 'git commit -m \"x'" "bash script.sh 'git commit -m x'" \
+         "sh -s 'git commit -m x'"; do
+  check "[sh -c] on main: $c -> none" none \
+    "$(decision_for "$(bash_payload "$c")" "$SHC")"
+done
+nest() { local b='git commit -m x' n; for ((n = 0; n < $1; n++)); do
+  b="sh -c $(printf '%q' "$b")"; done; printf '%s' "$b"; }
+check "[sh -c] on main: 4 nested bodies -> ask" ask \
+  "$(decision_for "$(bash_payload "$(nest 4)")" "$SHC")"
+check "[sh -c] on main: 5 nested bodies -> none" none \
+  "$(decision_for "$(bash_payload "$(nest 5)")" "$SHC")"
+
+#     The break-glass does not reach into a body: what it lifts is measured on
+#     the command it prefixes, and a shell between the two is the gap. A dirty
+#     worktree makes the reset a plain, liftable ask.
+printf 'dirty\n' > "$SHC.feat/file.txt"
+check "[sh -c][dontAsk] control: git reset --hard dirty on feature -> deny" deny \
+  "$(decision_for "$(bash_mode 'git reset --hard' dontAsk)" "$SHC.feat")"
+check "[sh -c][dontAsk] control: OVERRIDE git reset --hard dirty on feature -> allow" allow \
+  "$(decision_for "$(bash_mode 'BRANCH_GUARD_OVERRIDE=r git reset --hard' dontAsk)" "$SHC.feat")"
+check "[sh -c][dontAsk] OVERRIDE sh -c 'git reset --hard' dirty on feature -> deny" deny \
+  "$(decision_for "$(bash_mode "BRANCH_GUARD_OVERRIDE=r sh -c 'git reset --hard'" dontAsk)" "$SHC.feat")"
+rm -rf "$SHC" "$SHC.feat"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 
 # A FLOOR, not an exact count. The suite used to assert its own size against a
