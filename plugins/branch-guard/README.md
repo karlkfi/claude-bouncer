@@ -6,22 +6,17 @@
 
 ![branch-guard: branch-aware git permissions for Claude Code](docs/img/social-preview.png)
 
-> Let Claude commit and push all day on feature branches. Pause it at `main`.
+> Let Claude commit and push all day on feature branches.
+> Pause it at `main`.
 
-Claude finishes a task and runs `git add -A && git commit -m "fix" && git push` —
-straight onto whatever branch is checked out. Most of the time that's a throwaway
-`claude/*` branch and you want it to just happen. Once in a while it's `main`, or
-it's `git reset --hard`, or `git push origin HEAD:main`. The default
-`Bash(git commit:*)` permission rules can't tell these apart — they either trust
-every git command or prompt on every one.
+Claude finishes a task and runs `git add -A && git commit -m "fix" && git push` — straight onto whatever branch is checked out.
+Most of the time that's a throwaway `claude/*` branch and you want it to just happen.
+Once in a while it's `main`, or it's `git reset --hard`, or `git push origin HEAD:main`.
+The default `Bash(git commit:*)` permission rules can't tell these apart — they either trust every git command or prompt on every one.
 
-branch-guard is a `PreToolUse` hook that classifies each `git`/`gh` command,
-**auto-approves the safe ones** (read-only, staging, branch/worktree creation,
-commits and pushes on a feature branch), and **prompts** before anything that
-touches a protected branch (`main`/`master`, plus any you add) or is destructive.
-One destructive case it can settle itself it **denies** instead, handing the
-model the check rather than spending your attention on it. Everything else
-defers to your normal permission settings.
+branch-guard is a `PreToolUse` hook that classifies each `git`/`gh` command, **auto-approves the safe ones** (read-only, staging, branch/worktree creation, commits and pushes on a feature branch), and **prompts** before anything that touches a protected branch (`main`/`master`, plus any you add) or is destructive.
+One destructive case it can settle itself it **denies** instead, handing the model the check rather than spending your attention on it.
+Everything else defers to your normal permission settings.
 
 ## Contents
 
@@ -45,37 +40,23 @@ defers to your normal permission settings.
 The hook produces one of four outcomes per command:
 
 - **allow** — the command runs without a prompt.
-- **ask** — Claude Code shows its standard permission prompt. You approve or
-  reject. In a mode with no prompt to show, this becomes **deny** (see
-  [Configuration](#configuration)).
-- **deny** — the command is refused and the reason goes to the model rather than
-  to you. Used where the missing input is a fact the session can establish for
-  itself, so the reason carries the check that settles it. Today that is two
-  cases: a `git reset --hard` onto a tip the guard has proved nothing else
-  reaches and proved to be carrying more than a reproducible merge or a
-  published rebase, and a push
-  onto a base that has moved into this branch's own lines.
+- **ask** — Claude Code shows its standard permission prompt.
+  You approve or reject.
+  In a mode with no prompt to show, this becomes **deny** (see [Configuration](#configuration)).
+- **deny** — the command is refused and the reason goes to the model rather than to you.
+  Used where the missing input is a fact the session can establish for itself, so the reason carries the check that settles it.
+  Today that is two cases: a `git reset --hard` onto a tip the guard has proved nothing else reaches and proved to be carrying more than a reproducible merge or a published rebase, and a push onto a base that has moved into this branch's own lines.
   Asking there would spend your attention on a `gh pr view` or a `git rebase`.
 - **defer** — the hook stays silent; your normal permission settings apply.
 
-It guards the `Bash` tool (for `git` and `gh` commands) and the `Edit`, `Write`,
-`MultiEdit`, and `NotebookEdit` tools (for the branch a file's repository is on).
+It guards the `Bash` tool (for `git` and `gh` commands) and the `Edit`, `Write`, `MultiEdit`, and `NotebookEdit` tools (for the branch a file's repository is on).
 
 ## Behavior
 
-For a Bash command, every segment is classified and the command-level decision
-is: **any segment needs `ask` → ask; else every segment is recognized-safe →
-allow; else defer.** A segment counts as recognized-safe if it's a safe git/gh
-invocation, a pure read-only filter (a pager like `head`/`tail`/`wc`) piped after
-one, a side-effect-free label/no-op (`echo`/`printf`/`true`/`pwd`), *or* a `cd`
-whose literal target stays in this worktree — so `git log | head`,
-`git log … ; echo "---" ; git log …` and `cd . && git status` auto-approve, but a
-non-git, non-filter, non-benign command can never ride along into an approval. A
-segment that writes a file via an output redirect (`git log > f`, `echo x > f`;
-`/dev/null` and the standard streams don't count) is downgraded out of `allow`.
+For a Bash command, every segment is classified and the command-level decision is: **any segment needs `ask` → ask; else every segment is recognized-safe → allow; else defer.** A segment counts as recognized-safe if it's a safe git/gh invocation, a pure read-only filter (a pager like `head`/`tail`/`wc`) piped after one, a side-effect-free label/no-op (`echo`/`printf`/`true`/`pwd`), *or* a `cd` whose literal target stays in this worktree — so `git log | head`, `git log … ; echo "---" ; git log …` and `cd . && git status` auto-approve, but a non-git, non-filter, non-benign command can never ride along into an approval.
+A segment that writes a file via an output redirect (`git log > f`, `echo x > f`; `/dev/null` and the standard streams don't count) is downgraded out of `allow`.
 
-The table below assumes the worktree is on a feature branch (`claude/x`) under
-the default `strict` [push policy](#push-guard).
+The table below assumes the worktree is on a feature branch (`claude/x`) under the default `strict` [push policy](#push-guard).
 
 | Command | Decision |
 | --- | --- |
@@ -168,61 +149,36 @@ the default `strict` [push policy](#push-guard).
 | `gh api -X DELETE user/following/x` / `gh api -X DELETE repos/o/r/issues/comments/1` *(non-repo API delete — not a recognized destructive endpoint)* | defer |
 | `ls -la` *(not a git/gh command)* | defer |
 
-A few rows show the design's caution. `git status && rm -rf foo` **defers** rather
-than allowing: auto-approval requires *every* segment to be a recognized-safe
-git/gh invocation, so a trailing command can't ride along. The substitution rows
-defer for the same reason a level down — `` `…` ``, `$(…)`, and `<(…)`/`>(…)` run
-a command the classifier never sees (even inside a quoted argument or a redirect
-target like `` git diff > `evil` ``), so a would-be `allow` is downgraded to defer.
+A few rows show the design's caution.
+`git status && rm -rf foo` **defers** rather than allowing: auto-approval requires *every* segment to be a recognized-safe git/gh invocation, so a trailing command can't ride along.
+The substitution rows defer for the same reason a level down — `` `…` ``, `$(…)`, and `<(…)`/`>(…)` run a command the classifier never sees (even inside a quoted argument or a redirect target like `` git diff > `evil` ``), so a would-be `allow` is downgraded to defer.
 (A tiny registry of provably pure substitutions is the one exception — see below.)
-An output redirect to a real file (`git log > out`, `echo x > out`) is treated the
-same way — it's a write side-effect the classifier can't otherwise see, so the
-segment is downgraded out of `allow`. This both hardens the read commands (a
-redirected `git log --format=…` can't silently write attacker-influenced content)
-and keeps a ride-along filter/label from sneaking a write through. Redirects to
-`/dev/null` or the standard streams, and fd-duplications like `2>&1`, write no
-file and keep allowing (`git fetch 2>/dev/null` stays auto-approved).
-`git checkout file.txt` **defers** because `checkout` is ambiguous — it could
-switch branches or discard a file's changes — and the hook defers on ambiguity
-rather than guess. Only the unambiguous branch-create form (`git checkout -b`)
-auto-approves, and not with `-f`, which discards working changes on the way
-as `git switch -f` onto another commit does. Its force-create form,
-`git checkout -B`, resets a branch that already exists, so it is judged with
-`git switch -C` and `git worktree add -B` as the `git branch -f` it amounts
-to — see the next section.
+An output redirect to a real file (`git log > out`, `echo x > out`) is treated the same way — it's a write side-effect the classifier can't otherwise see, so the segment is downgraded out of `allow`.
+This both hardens the read commands (a redirected `git log --format=…` can't silently write attacker-influenced content) and keeps a ride-along filter/label from sneaking a write through.
+Redirects to `/dev/null` or the standard streams, and fd-duplications like `2>&1`, write no file and keep allowing (`git fetch 2>/dev/null` stays auto-approved).
+`git checkout file.txt` **defers** because `checkout` is ambiguous — it could switch branches or discard a file's changes — and the hook defers on ambiguity rather than guess.
+Only the unambiguous branch-create form (`git checkout -b`) auto-approves, and not with `-f`, which discards working changes on the way as `git switch -f` onto another commit does.
+Its force-create form, `git checkout -B`, resets a branch that already exists, so it is judged with `git switch -C` and `git worktree add -B` as the `git branch -f` it amounts to — see the next section.
 
 ### `git branch`: what the session owns, not how the verb looks
 
-`git branch` is the one subcommand judged by its **target** rather than by its
-verb. Deleting a scratch ref you created ten minutes ago and deleting a branch
-nobody else can recover are the same command, and gating both prompts constantly
-for the first while adding nothing to the second. So a target is auto-approved
-when it is both:
+`git branch` is the one subcommand judged by its **target** rather than by its verb.
+Deleting a scratch ref you created ten minutes ago and deleting a branch nobody else can recover are the same command, and gating both prompts constantly for the first while adding nothing to the second.
+So a target is auto-approved when it is both:
 
-- **recoverable** — its tip is reachable from a remote-tracking branch or from
-  local `main`/`master`, so the commits survive the branch and the worst case is
-  `git reset --hard <sha>`; and
-- **private** — not in the protected set. A protected branch is shared, so it
-  always asks.
+- **recoverable** — its tip is reachable from a remote-tracking branch or from local `main`/`master`, so the commits survive the branch and the worst case is `git reset --hard <sha>`; and
+- **private** — not in the protected set.
+  A protected branch is shared, so it always asks.
 
-These are independent questions, and the protected one is asked first for every
-spelling. The non-force spellings need no *recoverability* check, because git
-already enforces that one itself: `git branch -d` refuses to delete unmerged
-work, and `git branch -m` and `-c` refuse to overwrite an existing destination.
-Only the force spellings — `-D`, `-M`, `-C`, `-f`, and `-d --force` — can lose
-commits, so only those are checked for recoverability. But git has no notion of
-which branches you consider shared, so `git branch -d main` prompts exactly like
-`git branch -D main`, as does any branch matching
-[`BRANCH_GUARD_PROTECTED_BRANCHES`](#configuration). `git branch -f backup claude/x` creating a new ref
-loses nothing and auto-approves; the same command pointed at a ref that already
-exists is judged on what that ref currently points at. `git switch -C`,
-`git checkout -B` and `git worktree add -B` make the same overwrite when the
-name exists, so they take the same two checks: a protected name asks, and a
-private one is judged on what it would orphan.
+These are independent questions, and the protected one is asked first for every spelling.
+The non-force spellings need no *recoverability* check, because git already enforces that one itself: `git branch -d` refuses to delete unmerged work, and `git branch -m` and `-c` refuse to overwrite an existing destination.
+Only the force spellings — `-D`, `-M`, `-C`, `-f`, and `-d --force` — can lose commits, so only those are checked for recoverability.
+But git has no notion of which branches you consider shared, so `git branch -d main` prompts exactly like `git branch -D main`, as does any branch matching [`BRANCH_GUARD_PROTECTED_BRANCHES`](#configuration).
+`git branch -f backup claude/x` creating a new ref loses nothing and auto-approves; the same command pointed at a ref that already exists is judged on what that ref currently points at.
+`git switch -C`, `git checkout -B` and `git worktree add -B` make the same overwrite when the name exists, so they take the same two checks: a protected name asks, and a private one is judged on what it would orphan.
 
-A force-delete has one more way to be in bounds, because "the tip survives" and
-"nothing is lost" turn out not to be the same question. Consider a scratch
-branch that merged an integration ref to see what would happen:
+A force-delete has one more way to be in bounds, because "the tip survives" and "nothing is lost" turn out not to be the same question.
+Consider a scratch branch that merged an integration ref to see what would happen:
 
 ```bash
 git switch -c tmp-basecheck
@@ -231,168 +187,83 @@ git switch -
 git branch -D tmp-basecheck
 ```
 
-Its tip is unreachable *because* it merged — the merge commit is new, so no
-remote-tracking ref can contain it — while what the delete orphans is that one
-commit, both of whose parents stay exactly where they were. So the hook re-runs
-the merge: `git merge-tree` recomputes a tree from the two parents, and if it
-matches the tree the commit records, the commit holds nothing a plain
-`git merge` wouldn't produce again. A merge whose conflicts you settled by hand
-does **not** reproduce — that tree is authored work living nowhere else — so it
-keeps prompting, as does a branch carrying any ordinary commit of its own, an
-octopus merge, or a git too old for `merge-tree --write-tree` (2.38, 2022).
-Every force form gets this: `-D` and `--delete --force`, and `-f`/`-M`/`-C`
-when the ref they overwrite is the one whose tip survives nowhere.
+Its tip is unreachable *because* it merged — the merge commit is new, so no remote-tracking ref can contain it — while what the delete orphans is that one commit, both of whose parents stay exactly where they were.
+So the hook re-runs the merge: `git merge-tree` recomputes a tree from the two parents, and if it matches the tree the commit records, the commit holds nothing a plain `git merge` wouldn't produce again.
+A merge whose conflicts you settled by hand does **not** reproduce — that tree is authored work living nowhere else — so it keeps prompting, as does a branch carrying any ordinary commit of its own, an octopus merge, or a git too old for `merge-tree --write-tree` (2.38, 2022).
+Every force form gets this: `-D` and `--delete --force`, and `-f`/`-M`/`-C` when the ref they overwrite is the one whose tip survives nowhere.
 
-The checks are local `git` queries and never touch the network. They can
-only ever turn a prompt into an approval, and only on a positive answer — if git
-can't be reached, the branch won't resolve, or the hook can't tell which working
-tree the command runs in (a `--git-dir`/`--work-tree` option or the `GIT_DIR`/
-`GIT_WORK_TREE` variable that spells it, a `cd` or a `-C` whose target only
-the shell can compute), the command asks exactly as it did before.
+The checks are local `git` queries and never touch the network.
+They can only ever turn a prompt into an approval, and only on a positive answer — if git can't be reached, the branch won't resolve, or the hook can't tell which working tree the command runs in (a `--git-dir`/`--work-tree` option or the `GIT_DIR`/ `GIT_WORK_TREE` variable that spells it, a `cd` or a `-C` whose target only the shell can compute), the command asks exactly as it did before.
 
-One caveat worth knowing: "reachable from a remote-tracking branch" trusts your
-last `git fetch`. A stale `refs/remotes/origin/x` left behind after the branch
-was deleted on the remote still reads as recoverable. Like the rest of the hook
-this is best-effort friction reduction, not a guarantee — see
-[Limitations](#limitations).
+One caveat worth knowing: "reachable from a remote-tracking branch" trusts your last `git fetch`.
+A stale `refs/remotes/origin/x` left behind after the branch was deleted on the remote still reads as recoverable.
+Like the rest of the hook this is best-effort friction reduction, not a guarantee — see [Limitations](#limitations).
 
-`git reset --hard` gets the same test, but only when it has nothing else to
-destroy. The command does two things: it moves the current branch pointer, and
-it throws away uncommitted changes to tracked files. Uncommitted work exists in
-no ref, so nothing can show it's recoverable — which is why a **dirty worktree
-always prompts**. With a clean worktree the command is just the pointer move,
-and the ordinary test applies: an unprotected branch whose tip survives
-elsewhere auto-approves, because putting it back costs one
-`git reset --hard <sha>`.
+`git reset --hard` gets the same test, but only when it has nothing else to destroy.
+The command does two things: it moves the current branch pointer, and it throws away uncommitted changes to tracked files.
+Uncommitted work exists in no ref, so nothing can show it's recoverable — which is why a **dirty worktree always prompts**.
+With a clean worktree the command is just the pointer move, and the ordinary test applies: an unprotected branch whose tip survives elsewhere auto-approves, because putting it back costs one `git reset --hard <sha>`.
 
-Where the probe comes back the other way — the tip is reachable from nothing
-else — the same second question `git branch -D` asks applies, and for the same
-reason: a scratch ref whose only unshared commit is a merge git can reproduce
-has an unreachable tip *because* it merged, and loses nothing when the pointer
-moves off it. That check is about a ref move rather than about a verb, so it
-runs on all three: the delete, this reset, and the `-f`/`-M`/`-C` overwrite. It
-costs nothing on the auto-approved path, because a surviving tip has already
-returned above it.
+Where the probe comes back the other way — the tip is reachable from nothing else — the same second question `git branch -D` asks applies, and for the same reason: a scratch ref whose only unshared commit is a merge git can reproduce has an unreachable tip *because* it merged, and loses nothing when the pointer moves off it.
+That check is about a ref move rather than about a verb, so it runs on all three: the delete, this reset, and the `-f`/`-M`/`-C` overwrite.
+It costs nothing on the auto-approved path, because a surviving tip has already returned above it.
 
-All three ask one more. Rebasing a branch and pushing the result under another
-name gives every commit a new object name, so the old tip is unreachable while
-`origin` already holds its changes. The guard compares the patch-ids of
-the commits the move would orphan against the newest 200 commits on your
-remote-tracking branches (local `main` and `master` included), and allows when every
-orphan has a match carrying the same commit message, since a rebase keeps each
-message as it was. Whitespace counts, so a local re-indent of a pushed commit
-is not a match, and neither is a local reword of one. Two cases still deny: a base that moved *inside* the lines
-around your change, which alters the diff itself so nothing can match, and a
-republish older than those 200 commits.
+All three ask one more.
+Rebasing a branch and pushing the result under another name gives every commit a new object name, so the old tip is unreachable while `origin` already holds its changes.
+The guard compares the patch-ids of the commits the move would orphan against the newest 200 commits on your remote-tracking branches (local `main` and `master` included), and allows when every orphan has a match carrying the same commit message, since a rebase keeps each message as it was.
+Whitespace counts, so a local re-indent of a pushed commit is not a match, and neither is a local reword of one.
+Two cases still deny: a base that moved *inside* the lines around your change, which alters the diff itself so nothing can match, and a republish older than those 200 commits.
 
-A branch that fails every question is denied rather than prompted, in every
-permission mode — the one command here that is. The usual reason for an
-unreachable tip is a squash merge, which leaves a spent branch's tip unreachable
-by construction while its content sits on `main` under another object name, so
-the question is not whether you want the commits: it is whether they are already
-saved, and `gh pr view <n> --json state,mergeCommit` answers that without you.
-A scratch branch that never opened a pull request is the other half of that set,
-and there the same command answers too — nothing found means the commits really
-are only here, so the denial also names the `git log` that shows you what the
-move would drop. Where the loss is deliberate,
-[`BRANCH_GUARD_OVERRIDE`](#break-glass-branch_guard_override) lifts it, exactly
-as it lifts the prompt this replaced.
+A branch that fails every question is denied rather than prompted, in every permission mode — the one command here that is.
+The usual reason for an unreachable tip is a squash merge, which leaves a spent branch's tip unreachable by construction while its content sits on `main` under another object name, so the question is not whether you want the commits: it is whether they are already saved, and `gh pr view <n> --json state,mergeCommit` answers that without you.
+A scratch branch that never opened a pull request is the other half of that set, and there the same command answers too — nothing found means the commits really are only here, so the denial also names the `git log` that shows you what the move would drop.
+Where the loss is deliberate, [`BRANCH_GUARD_OVERRIDE`](#break-glass-branch_guard_override) lifts it, exactly as it lifts the prompt this replaced.
 
-A probe that *cannot* answer keeps its prompt. The guard denies on a fact it
-established, never on one it failed to read.
+A probe that *cannot* answer keeps its prompt.
+The guard denies on a fact it established, never on one it failed to read.
 
-Untracked and ignored files don't count as dirty, because `reset` never deletes
-them. A stray scratch file in your worktree isn't at risk, so it doesn't earn a
-prompt.
+Untracked and ignored files don't count as dirty, because `reset` never deletes them.
+A stray scratch file in your worktree isn't at risk, so it doesn't earn a prompt.
 
-The other destructive commands stay gated by what they are, not what they
-target, because there's nothing for this test to check. `git clean -f` deletes
-untracked files, which exist in no ref by definition, and a dropped stash
-survives only in the reflog. Those prompts aren't friction to be tuned away —
-they're the cases where the work really can vanish.
+The other destructive commands stay gated by what they are, not what they target, because there's nothing for this test to check.
+`git clean -f` deletes untracked files, which exist in no ref by definition, and a dropped stash survives only in the reflog.
+Those prompts aren't friction to be tuned away — they're the cases where the work really can vanish.
 
-One narrow relaxation of the all-segments rule covers a constant AI-agent habit:
-piping read-only git/gh output through a pager. A trailing segment also counts as
-recognized-safe when it's a **pure read-only filter** — `head`, `tail`, `cat`,
-`wc`, `nl`, `sort`, `uniq`, `cut`, `column`, `less`, `more` — so
-`git log | head` and `gh pr checks 123 | head -20` auto-approve. A filter
-qualifies only when *all* hold: (1) the program is in that allowlist; (2) it has
-**no non-flag positional argument**, so it consumes stdin, not a file
-(`git log | cat file.txt` defers — reading a file is workspace-guard's domain);
-and (3) it carries no write option (`sort -o out` defers). The command must still
-contain at least one git/gh segment, so `head -5` on its own keeps deferring, and
-a protective `ask` (`git commit | head` on `main`) still wins. `sed` and `awk`
-are deliberately excluded — both can write files (`sed -i`, `awk '… > f'`) or run
-code.
+One narrow relaxation of the all-segments rule covers a constant AI-agent habit: piping read-only git/gh output through a pager.
+A trailing segment also counts as recognized-safe when it's a **pure read-only filter** — `head`, `tail`, `cat`, `wc`, `nl`, `sort`, `uniq`, `cut`, `column`, `less`, `more` — so `git log | head` and `gh pr checks 123 | head -20` auto-approve.
+A filter qualifies only when *all* hold: (1) the program is in that allowlist; (2) it has **no non-flag positional argument**, so it consumes stdin, not a file (`git log | cat file.txt` defers — reading a file is workspace-guard's domain); and (3) it carries no write option (`sort -o out` defers).
+The command must still contain at least one git/gh segment, so `head -5` on its own keeps deferring, and a protective `ask` (`git commit | head` on `main`) still wins.
+`sed` and `awk` are deliberately excluded — both can write files (`sed -i`, `awk '… > f'`) or run code.
 
-A second narrow relaxation covers the other constant habit: labelling output
-between commands. A segment also counts as recognized-safe when it's a
-**side-effect-free no-op** — `echo`, `printf`, `true`, `false`, `:`, `pwd` — so a
-label line in an all-git chain (`git log … ; echo "---" ; git status`)
-auto-approves instead of dropping the whole command to defer, and so does the
-`pwd &&` some sessions lead with. These write only to stdout (or
-just set an exit status), so the two ways they could do harm are both already
-closed: an output redirect to a real file (`echo evil > ~/.gitconfig`) downgrades
-the segment via the write check above, and a command substitution (`echo $(…)`)
-downgrades the whole command. As with filters, the command must still contain a
-git/gh segment (`echo hi` alone defers) and a protective `ask` still wins.
+A second narrow relaxation covers the other constant habit: labelling output between commands.
+A segment also counts as recognized-safe when it's a **side-effect-free no-op** — `echo`, `printf`, `true`, `false`, `:`, `pwd` — so a label line in an all-git chain (`git log … ; echo "---" ; git status`) auto-approves instead of dropping the whole command to defer, and so does the `pwd &&` some sessions lead with.
+These write only to stdout (or just set an exit status), so the two ways they could do harm are both already closed: an output redirect to a real file (`echo evil > ~/.gitconfig`) downgrades the segment via the write check above, and a command substitution (`echo $(…)`) downgrades the whole command.
+As with filters, the command must still contain a git/gh segment (`echo hi` alone defers) and a protective `ask` still wins.
 
-A third relaxation covers a constant idiom: passing a repo path or branch name to
-a git/gh command via substitution. A `$(…)` or backtick substitution normally
-downgrades the whole command to defer, but a tiny hardcoded registry of **pure
-read-only substitutions** — `$(git rev-parse --show-toplevel)`,
-`$(git branch --show-current)`, and `$(pwd)` — is exempt, so
-`gh pr view "$(git branch --show-current)"` and
-`git -C "$(git rev-parse --show-toplevel)" status` auto-approve instead of
-prompting. The match is **structural**: the command inside the substitution must
-tokenize to exactly a registry entry with no extra argument, separator, redirect,
-or nested substitution — so `$(git branch --show-current; rm -rf x)`,
-`$(git rev-parse --show-toplevel > f)`, and `$(git status)` all keep deferring.
-Because the classifier reasons about the literal tokens and never resolves a
-substitution's output, this can only lift the defer on an already-safe git/gh
-chain — it never turns a destructive verdict or a protected-branch `ask` into an
-`allow` (`git commit -m "$(pwd)"` on `main` still asks). A non-git segment still
-can't ride along, so `cd "$(git rev-parse --show-toplevel)" && git status` keeps
-deferring — the registry lifts the substitution guard, not the `cd`, whose target
-is still not a literal this hook can place.
+A third relaxation covers a constant idiom: passing a repo path or branch name to a git/gh command via substitution.
+A `$(…)` or backtick substitution normally downgrades the whole command to defer, but a tiny hardcoded registry of **pure read-only substitutions** — `$(git rev-parse --show-toplevel)`, `$(git branch --show-current)`, and `$(pwd)` — is exempt, so `gh pr view "$(git branch --show-current)"` and `git -C "$(git rev-parse --show-toplevel)" status` auto-approve instead of prompting.
+The match is **structural**: the command inside the substitution must tokenize to exactly a registry entry with no extra argument, separator, redirect, or nested substitution — so `$(git branch --show-current; rm -rf x)`, `$(git rev-parse --show-toplevel > f)`, and `$(git status)` all keep deferring. Because the classifier reasons about the literal tokens and never resolves a substitution's output, this can only lift the defer on an already-safe git/gh chain — it never turns a destructive verdict or a protected-branch `ask` into an `allow` (`git commit -m "$(pwd)"` on `main` still asks).
+A non-git segment still can't ride along, so `cd "$(git rev-parse --show-toplevel)" && git status` keeps deferring — the registry lifts the substitution guard, not the `cd`, whose target is still not a literal this hook can place.
 
-A fourth relaxation covers the habit sessions here lead with most: a `cd` before
-the real command. A `cd` counts as recognized-safe when its target is a literal
-path — no `$VAR`, no `$(…)`, no glob or `~`, and neither a bare `cd` nor `cd -` —
-**and** resolves into the same worktree the command is already being judged
-against, compared by `git rev-parse --show-toplevel`. So `cd . && git status` and
-`cd <this worktree>/sub && git status` auto-approve.
+A fourth relaxation covers the habit sessions here lead with most: a `cd` before the real command.
+A `cd` counts as recognized-safe when its target is a literal path — no `$VAR`, no `$(…)`, no glob or `~`, and neither a bare `cd` nor `cd -` — **and** resolves into the same worktree the command is already being judged against, compared by `git rev-parse --show-toplevel`.
+So `cd . && git status` and `cd <this worktree>/sub && git status` auto-approve.
 
 Worktree identity is the test, not repository identity and not path containment.
-Two worktrees of one repository share a `--git-common-dir` and differ in
-`--show-toplevel`, and a linked worktree often sits *inside* the primary
-checkout's directory tree — so either weaker test would call a sibling worktree
-"here" and approve a command against a branch this session never checked out. A
-`cd` anywhere else, or one this hook cannot place, stays outside the safe set and
-the command defers (or keeps its prompt) exactly as before.
+Two worktrees of one repository share a `--git-common-dir` and differ in `--show-toplevel`, and a linked worktree often sits *inside* the primary checkout's directory tree — so either weaker test would call a sibling worktree "here" and approve a command against a branch this session never checked out.
+A `cd` anywhere else, or one this hook cannot place, stays outside the safe set and the command defers (or keeps its prompt) exactly as before.
 
-Heredoc bodies are treated as **opaque data**, not command segments. A body
-(`git commit -F- <<'EOF' … EOF`, `gh pr create --body-file - <<'EOF' … EOF`) is
-dropped before the command is lexed, so its lines can't split into foreign
-segments and drop the surrounding git chain to a prompt (or unbalance the lexer
-with an apostrophe). The operator line and anything after the terminator still
-classify normally, so a `git push origin main` after the heredoc still asks. One
-security nuance: the shell expands an **unquoted** heredoc body, so a command
-substitution in it runs (`<<EOF … $(rm -rf /) … EOF`). Such a body is *not*
-dropped — it's left in the stream so the substitution guard defers. A **quoted**
-delimiter (`<<'EOF'`, `<<"EOF"`, `<<\EOF`) suppresses all expansion, so its body
-is inert and always safe to drop. An unterminated or unparseable heredoc is left
-unchanged (the body lexes and the command defers) rather than guessed at.
+Heredoc bodies are treated as **opaque data**, not command segments.
+A body (`git commit -F- <<'EOF' … EOF`, `gh pr create --body-file - <<'EOF' … EOF`) is dropped before the command is lexed, so its lines can't split into foreign segments and drop the surrounding git chain to a prompt (or unbalance the lexer with an apostrophe).
+The operator line and anything after the terminator still classify normally, so a `git push origin main` after the heredoc still asks.
+One security nuance: the shell expands an **unquoted** heredoc body, so a command substitution in it runs (`<<EOF … $(rm -rf /) … EOF`). Such a body is *not* dropped — it's left in the stream so the substitution guard defers. A **quoted** delimiter (`<<'EOF'`, `<<"EOF"`, `<<\EOF`) suppresses all expansion, so its body is inert and always safe to drop. An unterminated or unparseable heredoc is left unchanged (the body lexes and the command defers) rather than guessed at.
 
-The **ask** rows assume a session where a prompt can be answered, which
-includes `auto`. In a mode where none can (`dontAsk`, `bypassPermissions`) the
-same commands return **deny** — equally blocking, with recoverable feedback for
-the agent instead of a prompt no one can answer. See
-[Configuration](#configuration). The **deny** rows are not mode-dependent: they
-deny wherever they fire, because the cause is a fact rather than a judgement.
+The **ask** rows assume a session where a prompt can be answered, which includes `auto`.
+In a mode where none can (`dontAsk`, `bypassPermissions`) the same commands return **deny** — equally blocking, with recoverable feedback for the agent instead of a prompt no one can answer.
+See [Configuration](#configuration).
+The **deny** rows are not mode-dependent: they deny wherever they fire, because the cause is a fact rather than a judgement.
 
-The two paths share the cause and differ in what they offer, so a denial is never
-mistaken for a prompt that is waiting to be answered:
+The two paths share the cause and differ in what they offer, so a denial is never mistaken for a prompt that is waiting to be answered:
 
 ```
 ask   branch-guard: Push targets 'v1.3.0', not the worktree branch 'claude/x'
@@ -405,57 +276,32 @@ deny  branch-guard: Push targets 'v1.3.0', not the worktree branch 'claude/x'
       permission mode.
 ```
 
-Both open with `branch-guard: `. Claude Code names neither the plugin behind a
-permission prompt nor the one behind a denial, so that opener is the only part
-of the text saying which guard wrote it — and if you run several, an
-unattributed "Targets protected branch 'main'" leaves you no way to tell who is
-asking. Sibling guards use the same shape, and foreground-guard's friction
-report reads the deny half as a cross-guard key, so a guard wording it
-differently under-counts its own denies there.
+Both open with `branch-guard: `.
+Claude Code names neither the plugin behind a permission prompt nor the one behind a denial, so that opener is the only part of the text saying which guard wrote it — and if you run several, an unattributed "Targets protected branch 'main'" leaves you no way to tell who is asking.
+Sibling guards use the same shape, and foreground-guard's friction report reads the deny half as a cross-guard key, so a guard wording it differently under-counts its own denies there.
 
-An **allow** carries no opener: it suppresses the prompt and is handed back to
-nobody, so the only thing that reads it is already holding the decision record
-that attributes it.
+An **allow** carries no opener: it suppresses the prompt and is handed back to nobody, so the only thing that reads it is already holding the decision record that attributes it.
 
-The edit check resolves the branch of **the file's own repository**
-(`git -C <dir-of-file>`), not the session's working directory — so it catches an
-edit to a file checked out on `main` (e.g. a parent repo path) even while your
-session's cwd is a feature-branch worktree. A **relative** `file_path` is first
-resolved against the session's `cwd` (from the hook payload), so an edit inside a
-nested worktree resolves to the worktree's branch even when the hook process runs
-from the parent checkout — not falsely against the parent's `main`. When the
-file's directory doesn't exist yet (a write into a new directory), the branch is
-read from the nearest existing ancestor, which sits in the same repository; a
-path under no repository still resolves to no branch and defers.
+The edit check resolves the branch of **the file's own repository** (`git -C <dir-of-file>`), not the session's working directory — so it catches an edit to a file checked out on `main` (e.g. a parent repo path) even while your session's cwd is a feature-branch worktree.
+A **relative** `file_path` is first resolved against the session's `cwd` (from the hook payload), so an edit inside a nested worktree resolves to the worktree's branch even when the hook process runs from the parent checkout — not falsely against the parent's `main`.
+When the file's directory doesn't exist yet (a write into a new directory), the branch is read from the nearest existing ancestor, which sits in the same repository; a path under no repository still resolves to no branch and defers.
 
-A **gitignored** path is exempt: writing `tmp/scratch.json` on `main` gets no
-prompt, because an ignored file holds no branch contents and the decision would
-be identical on a feature branch. The check is `git check-ignore`, run only when
-the branch is protected — so a feature-branch edit costs nothing extra — and only
-its "yes, ignored" answer withdraws the prompt. Every other answer, including
-every answer it can't give (the path is outside the worktree, the repo won't
-open, git isn't available), leaves the **ask** in place. A file that matches an
-ignore rule but is *tracked* anyway (`git add -f`) still asks: `check-ignore`
-consults the index, and edits to that file really do land on the branch. The
-probe follows symlinks and asks about the file the write lands on, so a link
-inside an ignored directory pointing at a tracked file still asks — a link to a
-genuinely ignored file stays exempt.
+A **gitignored** path is exempt: writing `tmp/scratch.json` on `main` gets no prompt, because an ignored file holds no branch contents and the decision would be identical on a feature branch.
+The check is `git check-ignore`, run only when the branch is protected — so a feature-branch edit costs nothing extra — and only its "yes, ignored" answer withdraws the prompt.
+Every other answer, including every answer it can't give (the path is outside the worktree, the repo won't open, git isn't available), leaves the **ask** in place.
+A file that matches an ignore rule but is *tracked* anyway (`git add -f`) still asks: `check-ignore` consults the index, and edits to that file really do land on the branch.
+The probe follows symlinks and asks about the file the write lands on, so a link inside an ignored directory pointing at a tracked file still asks — a link to a genuinely ignored file stays exempt.
 
 ## Break-glass: `BRANCH_GUARD_OVERRIDE`
 
-In `dontAsk` and `bypassPermissions` an **ask** becomes a **deny**, and a deny
-has no answer. (The prefix also lifts both denies that fire in every mode: the
-unreachable-tip `reset --hard`, on the same reasoning and the same local-only
-loss, and the overlap deny on a push the policy had already approved.) That is
-right for a shared branch and wrong for a scratch one: the session still has
-work to do, so it does the work some other way. A session that
-couldn't run `git restore file.txt` edited the file back to its `HEAD` content by
-hand instead — same end state, no atomicity, no guarantee the result matched
-`HEAD`, and nothing in the log to review. Where no ungated equivalent exists (you
-cannot delete a branch by editing a file), the state is simply stranded.
+In `dontAsk` and `bypassPermissions` an **ask** becomes a **deny**, and a deny has no answer.
+(The prefix also lifts both denies that fire in every mode: the unreachable-tip `reset --hard`, on the same reasoning and the same local-only loss, and the overlap deny on a push the policy had already approved.)
+That is right for a shared branch and wrong for a scratch one: the session still has work to do, so it does the work some other way.
+A session that couldn't run `git restore file.txt` edited the file back to its `HEAD` content by hand instead — same end state, no atomicity, no guarantee the result matched `HEAD`, and nothing in the log to review.
+Where no ungated equivalent exists (you cannot delete a branch by editing a file), the state is simply stranded.
 
-That session was in `auto`, which prompts now — so that example no longer plays
-out there. The prefix is for the modes that still cannot prompt.
+That session was in `auto`, which prompts now — so that example no longer plays out there.
+The prefix is for the modes that still cannot prompt.
 
 So one command prefix lifts an ask whose damage cannot leave this machine:
 
@@ -463,64 +309,36 @@ So one command prefix lifts an ask whose damage cannot leave this machine:
 BRANCH_GUARD_OVERRIDE="reverting a superseded local change" git restore file.txt
 ```
 
-The reason is **required** — a bare `BRANCH_GUARD_OVERRIDE=` lifts nothing — and
-it is echoed into the emitted decision, so the approval is on the record rather
-than silent. Behind `env` or `sudo` it also arms as an operand —
-`env BRANCH_GUARD_OVERRIDE=… git restore file.txt` — because the wrapper sets it;
-`env BRANCH_GUARD_OVERRIDE[0]=…` does not, since that exports a different name.
-It is a command prefix rather than a `settings.json` variable because
-a `PreToolUse` hook inherits Claude Code's environment, not the one the command is
-about to run in; an env-var override could only be switched on for a whole
-session, by hand, which is the opposite of scoping it to the moment.
+The reason is **required** — a bare `BRANCH_GUARD_OVERRIDE=` lifts nothing — and it is echoed into the emitted decision, so the approval is on the record rather than silent.
+Behind `env` or `sudo` it also arms as an operand — `env BRANCH_GUARD_OVERRIDE=… git restore file.txt` — because the wrapper sets it; `env BRANCH_GUARD_OVERRIDE[0]=…` does not, since that exports a different name.
+It is a command prefix rather than a `settings.json` variable because a `PreToolUse` hook inherits Claude Code's environment, not the one the command is about to run in; an env-var override could only be switched on for a whole session, by hand, which is the opposite of scoping it to the moment.
 
-**What it reaches.** These subcommands, each of which can lose local state and
-nothing else: `restore`, `switch`, `branch`, `tag`, `worktree`, `stash`,
-`reset`, `clean`, `config`, `reflog`, `filter-branch`, `gc`. Plus one verdict
-from outside that list, the [overlap deny](#push-guard) on a push the policy had
-already approved — see the exception below.
+**What it reaches.** These subcommands, each of which can lose local state and nothing else: `restore`, `switch`, `branch`, `tag`, `worktree`, `stash`, `reset`, `clean`, `config`, `reflog`, `filter-branch`, `gc`.
+Plus one verdict from outside that list, the [overlap deny](#push-guard) on a push the policy had already approved — see the exception below.
 
 **What it does not reach**, whatever reason you give:
 
-- **A protected branch.** `git reset --hard` on `main`, `git branch -D main`, a
-  commit or edit on `main` — the cause of the ask is a shared ref, and that class
-  of verdict is unliftable by construction, not by a list the override consults.
-  This includes anything you add to
-  [`BRANCH_GUARD_PROTECTED_BRANCHES`](#configuration).
-- **Anything that leaves this machine**, with one exception. Every `gh`
-  delete/disable and every `git push` the policy itself gated — a cross-name
-  push, a tag publish, a protected destination. A push publishes;
-  `gh repo delete` removes something other people can see. The exception is the
-  [overlap deny](#push-guard), where the policy had already approved the push
-  and the check withdrew that approval, so lifting it reinstates a decision
-  rather than granting a new one. It is keyed to that verdict, which is why it
-  spreads to no other push.
-- **A command that reaches further than the subcommand it was granted for.** An
-  output redirect to a file (`… > out`), a `git -c`/`--config-env` escape hatch
-  (which can run arbitrary code), and a `git -C`/`--git-dir` aimed at another
-  repository all keep the ask, as does a wrapper that changes directory
-  (`env -C`, `sudo -D`, `sudo -i`). The last two count in their environment
-  spelling too, whether set as a prefix or as an `env` or `sudo` operand:
-  `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, `GIT_INDEX_FILE` or an
-  object-directory variable, and any variable that defers an allow (a
-  `GIT_CONFIG*` variable among them). Any other wrapper is lifted with it.
-- **A command carrying anything unrecognized.** The all-segments rule applies
-  unchanged, so `BRANCH_GUARD_OVERRIDE=… git clean -fd && rm -rf junk` still asks.
-  A safe segment alongside is fine: `… git status && git clean -fd` is lifted,
-  and so is a leading `cd` that stays in this worktree —
-  `cd . && BRANCH_GUARD_OVERRIDE=… git restore file.txt`. A `cd` into a
-  *different* worktree keeps the ask: the verdict there was measured against a
-  branch this session did not check out, and the override should not lift one.
+- **A protected branch.** `git reset --hard` on `main`, `git branch -D main`, a commit or edit on `main` — the cause of the ask is a shared ref, and that class of verdict is unliftable by construction, not by a list the override consults.
+  This includes anything you add to [`BRANCH_GUARD_PROTECTED_BRANCHES`](#configuration).
+- **Anything that leaves this machine**, with one exception.
+  Every `gh` delete/disable and every `git push` the policy itself gated — a cross-name push, a tag publish, a protected destination.
+  A push publishes; `gh repo delete` removes something other people can see.
+  The exception is the [overlap deny](#push-guard), where the policy had already approved the push and the check withdrew that approval, so lifting it reinstates a decision rather than granting a new one.
+  It is keyed to that verdict, which is why it spreads to no other push.
+- **A command that reaches further than the subcommand it was granted for.** An output redirect to a file (`… > out`), a `git -c`/`--config-env` escape hatch (which can run arbitrary code), and a `git -C`/`--git-dir` aimed at another repository all keep the ask, as does a wrapper that changes directory (`env -C`, `sudo -D`, `sudo -i`).
+  The last two count in their environment spelling too, whether set as a prefix or as an `env` or `sudo` operand: `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, `GIT_INDEX_FILE` or an object-directory variable, and any variable that defers an allow (a `GIT_CONFIG*` variable among them).
+  Any other wrapper is lifted with it.
+- **A command carrying anything unrecognized.** The all-segments rule applies unchanged, so `BRANCH_GUARD_OVERRIDE=… git clean -fd && rm -rf junk` still asks.
+  A safe segment alongside is fine: `… git status && git clean -fd` is lifted, and so is a leading `cd` that stays in this worktree — `cd . && BRANCH_GUARD_OVERRIDE=… git restore file.txt`.
+  A `cd` into a *different* worktree keeps the ask: the verdict there was measured against a branch this session did not check out, and the override should not lift one.
 
-A denial that the prefix *would* lift says so, so an agent can find the route
-without being told about it in advance. A denial it would not lift doesn't
-mention it, because a hint that fails a second time is the dead end the wording
-exists to avoid. The interactive prompt never mentions it either — approving the
-prompt is the shorter path.
+A denial that the prefix *would* lift says so, so an agent can find the route without being told about it in advance.
+A denial it would not lift doesn't mention it, because a hint that fails a second time is the dead end the wording exists to avoid.
+The interactive prompt never mentions it either — approving the prompt is the shorter path.
 
 ## Push guard
 
-`git push` is evaluated according to the `BRANCH_GUARD_PUSH_POLICY` environment
-variable:
+`git push` is evaluated according to the `BRANCH_GUARD_PUSH_POLICY` environment variable:
 
 | Policy | Behavior |
 | --- | --- |
@@ -528,102 +346,56 @@ variable:
 | `protected` | **ask** before a push whose target is `main`/`master` (including `git push origin main`, `HEAD:main`, deleting `main`, and `--all`/`--mirror`). Any other push defers. Never auto-approves. |
 | `off` | Pushes are not guarded at all. |
 
-A bare `git push` / `git push origin` pushes the current branch to its same-named
-upstream: under `strict` it is auto-approved (it's the worktree branch); under
-`protected` it defers.
+A bare `git push` / `git push origin` pushes the current branch to its same-named upstream: under `strict` it is auto-approved (it's the worktree branch); under `protected` it defers.
 
-Wherever these rows say `main`/`master`, they mean the protected set — which you
-can widen with [`BRANCH_GUARD_PROTECTED_BRANCHES`](#configuration), so
-`git push origin release/2.0` asks under `protected` once `release/*` is in it.
+Wherever these rows say `main`/`master`, they mean the protected set — which you can widen with [`BRANCH_GUARD_PROTECTED_BRANCHES`](#configuration), so `git push origin release/2.0` asks under `protected` once `release/*` is in it.
 
-**Tags.** Publishing a tag isn't a push of the worktree branch, so under `strict`
-it asks — whichever way it's spelled (`git push origin v1.3.0`,
-`git push origin refs/tags/v1.3.0`, `git push --tags`). Cutting a release is
-usually the one step worth a human keystroke, and `auto` gives you one rather
-than a dead end (see [Configuration](#configuration)); creating the tag was
-never gated at all. One gap is deliberate:
-`git push --follow-tags` stays auto-approved, since it publishes only annotated
-tags already reachable from the branch being pushed, and `push.followTags` can
-turn on the same behavior from config where the hook can't see it. Under
-`protected`, tag pushes defer as before — that policy only guards `main`/`master`.
+**Tags.** Publishing a tag isn't a push of the worktree branch, so under `strict` it asks — whichever way it's spelled (`git push origin v1.3.0`, `git push origin refs/tags/v1.3.0`, `git push --tags`).
+Cutting a release is usually the one step worth a human keystroke, and `auto` gives you one rather than a dead end (see [Configuration](#configuration)); creating the tag was never gated at all.
+One gap is deliberate: `git push --follow-tags` stays auto-approved, since it publishes only annotated tags already reachable from the branch being pushed, and `push.followTags` can turn on the same behavior from config where the hook can't see it.
+Under `protected`, tag pushes defer as before — that policy only guards `main`/`master`.
 
-**Leased rewrites of another branch.** Undoing a bad rebase means rewriting one
-branch from another: fix it up on a scratch branch, then push that over the
-original. The destination is never the worktree branch, so under `strict` every
-spelling of it asked — and in a non-interactive mode an `ask` is a denial, so the
-branch could not be repaired at all.
+**Leased rewrites of another branch.** Undoing a bad rebase means rewriting one branch from another: fix it up on a scratch branch, then push that over the original.
+The destination is never the worktree branch, so under `strict` every spelling of it asked — and in a non-interactive mode an `ask` is a denial, so the branch could not be repaired at all.
 
-`--force-with-lease=<dst>` opens that path. git refuses the push unless the
-remote is still at the commit the command named, so it cannot land on top of work
-the session hasn't seen — the same reason the non-force `git branch` spellings
-need no check of their own. Under `strict`:
+`--force-with-lease=<dst>` opens that path. git refuses the push unless the remote is still at the commit the command named, so it cannot land on top of work the session hasn't seen — the same reason the non-force `git branch` spellings need no check of their own.
+Under `strict`:
 
 ```bash
 git push --force-with-lease=claude/topic origin HEAD:claude/topic
 ```
 
-is auto-approved when the lease **names the destination**, the destination isn't
-protected, and the source is either the worktree branch or the destination
-itself:
+is auto-approved when the lease **names the destination**, the destination isn't protected, and the source is either the worktree branch or the destination itself:
 
 ```bash
 git push --force-with-lease=claude/topic origin claude/topic
 ```
 
-That second form names the target three times, so it states its intent at least
-as clearly as the first. Everything else still asks: a bare `--force-with-lease`
-(it names no ref), a lease naming some other branch, a deletion (`--delete`, or
-an empty source as in `origin :other`), a source that is neither the worktree
-branch nor the destination, and `--no-force-with-lease` cancelling an earlier
-lease. Under `protected` nothing changes — that policy never auto-approves a
-push.
+That second form names the target three times, so it states its intent at least as clearly as the first.
+Everything else still asks: a bare `--force-with-lease` (it names no ref), a lease naming some other branch, a deletion (`--delete`, or an empty source as in `origin :other`), a source that is neither the worktree branch nor the destination, and `--no-force-with-lease` cancelling an earlier lease.
+Under `protected` nothing changes — that policy never auto-approves a push.
 
-What a lease proves is that the remote hasn't moved, not that the branch is
-yours alone. Sharedness stays branch-guard's own question, answered by the
-protected set: `git push --force-with-lease=main origin HEAD:main` asks like any
-other push at `main`, and widening
-[`BRANCH_GUARD_PROTECTED_BRANCHES`](#configuration) withdraws the auto-approve
-for whatever you add.
+What a lease proves is that the remote hasn't moved, not that the branch is yours alone.
+Sharedness stays branch-guard's own question, answered by the protected set: `git push --force-with-lease=main origin HEAD:main` asks like any other push at `main`, and widening [`BRANCH_GUARD_PROTECTED_BRANCHES`](#configuration) withdraws the auto-approve for whatever you add.
 
-**Branches this session created.** A session that makes a branch with
-`git branch <new>`, `git switch -c`, `git checkout -b` or `git worktree add -b`
-and then pushes it from another worktree branch used to be asked, because the
-guard could not tell that branch from a peer's. Creation is the one moment
-that shows ownership, so branch-guard records it: the `PreToolUse` hook notes
-each name the command is about to create that has no local branch and no
-remote-tracking ref, and the `PostToolUse` hook for that same tool call (matched
-by `tool_use_id`) grants the ones that exist afterwards, for 8 hours and for that session only, under
-`~/.claude/branch-guard/session-grants/`. A push to a granted branch then
-allows like the worktree branch's, from the worktree branch or from itself;
-a deletion, a third branch as the source, a protected name, and another
-session still ask. A creation behind a `cd` records nothing, since the guard
-does not follow it to the repository it lands in. The residual is a peer's
-branch of the same name that this clone has not fetched: the name looks free,
-and a force push of it would overwrite the peer's, as a force push of the
-worktree branch would.
+**Branches this session created.** A session that makes a branch with `git branch <new>`, `git switch -c`, `git checkout -b` or `git worktree add -b` and then pushes it from another worktree branch used to be asked, because the guard could not tell that branch from a peer's.
+Creation is the one moment that shows ownership, so branch-guard records it: the `PreToolUse` hook notes each name the command is about to create that has no local branch and no remote-tracking ref, and the `PostToolUse` hook for that same tool call (matched by `tool_use_id`) grants the ones that exist afterwards, for 8 hours and for that session only, under `~/.claude/branch-guard/session-grants/`.
+A push to a granted branch then allows like the worktree branch's, from the worktree branch or from itself; a deletion, a third branch as the source, a protected name, and another session still ask.
+A creation behind a `cd` records nothing, since the guard does not follow it to the repository it lands in.
+The residual is a peer's branch of the same name that this clone has not fetched: the name looks free, and a force push of it would overwrite the peer's, as a force push of the worktree branch would.
 
-**Queue-id claims.** `git push --force-with-lease=refs/queue-ids/QN: origin
-<src>:refs/queue-ids/QN` allows. The empty expectation tells the remote the
-ref must not exist, so the push cannot overwrite a claim. Every other spelling
-into the namespace asks, including the ones that defeat the lease: a `+`
-refspec, `--force`, `-f` (bundled too), a lease expecting a commit, and a
-second lease after a first one naming the same ref, since git applies the
-first.
+**Queue-id claims.** `git push --force-with-lease=refs/queue-ids/QN: origin <src>:refs/queue-ids/QN` allows.
+The empty expectation tells the remote the ref must not exist, so the push cannot overwrite a claim.
+Every other spelling into the namespace asks, including the ones that defeat the lease: a `+` refspec, `--force`, `-f` (bundled too), a lease expecting a commit, and a second lease after a first one naming the same ref, since git applies the first.
 
-Both of these allows, a claim and a push of a branch the session created,
-also ask when the push carries a long option the guard does not read. An
-abbreviation git accepts is read as the option it names, so `--force-w=` is
-the lease it spells; one git would refuse as ambiguous, or one the guard has
-no rule for (`--force-if-includes`), asks. Before abbreviations were written
-out, `--force-w=` ahead of the create-only lease was a lease the guard did not
-see, and it overwrote an existing claim (git 2.55).
+Both of these allows, a claim and a push of a branch the session created, also ask when the push carries a long option the guard does not read.
+An abbreviation git accepts is read as the option it names, so `--force-w=` is the lease it spells; one git would refuse as ambiguous, or one the guard has no rule for (`--force-if-includes`), asks.
+Before abbreviations were written out, `--force-w=` ahead of the create-only lease was a lease the guard did not see, and it overwrote an existing claim (git 2.55).
 
-**Overlap with a moved base.** An auto-approved push is in bounds. That says
-nothing about the branch still being built on what it thinks it is. When the base
-has moved into the same *lines* this branch edits, the merge is going to come out
-wrong — and under a merge queue it comes out wrong late, after the queue has
-validated the candidate and spent a whole check cycle on it. So the auto-approve
-is withdrawn and the push is refused, naming the files and the fix:
+**Overlap with a moved base.** An auto-approved push is in bounds.
+That says nothing about the branch still being built on what it thinks it is.
+When the base has moved into the same *lines* this branch edits, the merge is going to come out wrong — and under a merge queue it comes out wrong late, after the queue has validated the candidate and spent a whole check cycle on it.
+So the auto-approve is withdrawn and the push is refused, naming the files and the fix:
 
 ```
 branch-guard: 'origin/main' has moved since this branch left it, and its new
@@ -636,80 +408,44 @@ mode. Re-run it prefixed with `BRANCH_GUARD_OVERRIDE=<reason>` if you mean to
 proceed anyway.
 ```
 
-**Why this refuses rather than prompts.** The reason on an `ask` reaches the
-person at the keyboard and stops there — Claude Code uses it as the prompt's
-text and hands the model nothing. So the prompt asked you to answer a question
-whose answer was a command, and approving it pushed onto the stale base the
-prompt had just named. A refusal inverts that: the reason goes to the model,
-which can run the rebase, and your attention is not spent on a decision that was
-never yours to make.
+**Why this refuses rather than prompts.** The reason on an `ask` reaches the person at the keyboard and stops there — Claude Code uses it as the prompt's text and hands the model nothing.
+So the prompt asked you to answer a question whose answer was a command, and approving it pushed onto the stale base the prompt had just named.
+A refusal inverts that: the reason goes to the model, which can run the rebase, and your attention is not spent on a decision that was never yours to make.
 
-**Where the overlap is yours to merge**, the break-glass lifts it —
-`BRANCH_GUARD_OVERRIDE="<reason>" git push`. This is the one push form the
-prefix reaches, and it is keyed to the *verdict*, not to `push`: the policy had
-already approved this exact push, and the check withdrew that approval. Every
-other push it gates — a cross-name push, a tag publish, anything at a protected
-branch — stays outside the break-glass, as
-[below](#break-glass-branch_guard_override).
+**Where the overlap is yours to merge**, the break-glass lifts it — `BRANCH_GUARD_OVERRIDE="<reason>" git push`.
+This is the one push form the prefix reaches, and it is keyed to the *verdict*, not to `push`: the policy had already approved this exact push, and the check withdrew that approval.
+Every other push it gates — a cross-name push, a tag publish, anything at a protected branch — stays outside the break-glass, as [below](#break-glass-branch_guard_override).
 
-Both sides are diffed from the fork point, so both sets of line numbers are
-counted in that shared ancestor and can be compared at all. Hunks are read with
-`-U0` and widened by the three lines of context a hunk carries, so edits within
-six lines of each other meet and edits seven apart do not — sharing a *file* is
-not sharing an edit.
+Both sides are diffed from the fork point, so both sets of line numbers are counted in that shared ancestor and can be compared at all.
+Hunks are read with `-U0` and widened by the three lines of context a hunk carries, so edits within six lines of each other meet and edits seven apart do not — sharing a *file* is not sharing an edit.
 
-It measures the tree the push runs from, which is not always the session's. A
-literal `cd` moves that tree for everything after it and a literal `git -C` for
-one command, so both are followed; a target only the shell can compute is not,
-and the check stands down rather than measuring a tree the push is not coming
-from. Getting this wrong went both ways — a rebase demanded for an overlap that
-belonged to another worktree's branch, and a `git -C` push waved through when it
-carried the overlap outright.
+It measures the tree the push runs from, which is not always the session's.
+A literal `cd` moves that tree for everything after it and a literal `git -C` for one command, so both are followed; a target only the shell can compute is not, and the check stands down rather than measuring a tree the push is not coming from.
+Getting this wrong went both ways — a rebase demanded for an overlap that belonged to another worktree's branch, and a `git -C` push waved through when it carried the overlap outright.
 
-The check runs only where a push would otherwise be auto-approved, so `protected`
-and `off` never reach it. Every probe fails silent: a detached HEAD, a shallow
-clone, an unresolvable base ref, a git too old for `merge-tree --write-tree`, or
-no `origin` at all costs a missed catch rather than a blocked push. `--dry-run`
-and `--delete` land nothing on the base, so neither is checked.
+The check runs only where a push would otherwise be auto-approved, so `protected` and `off` never reach it.
+Every probe fails silent: a detached HEAD, a shallow clone, an unresolvable base ref, a git too old for `merge-tree --write-tree`, or no `origin` at all costs a missed catch rather than a blocked push.
+`--dry-run` and `--delete` land nothing on the base, so neither is checked.
 
-Release branches are skipped by name — `release/*`, `hotfix-*`, `v2.1` and the
-rest of `BRANCH_GUARD_RELEASE_BRANCHES`. One is cut from the base and left
-diverged on purpose, so telling it to rebase would publish everything merged
-since the tag: a wrong answer rather than a noisy one. Nothing in the commit graph
-tells a release branch from a stale topic branch — both sit behind the base and
-ahead of the fork point — so the name is the only signal there is.
+Release branches are skipped by name — `release/*`, `hotfix-*`, `v2.1` and the rest of `BRANCH_GUARD_RELEASE_BRANCHES`.
+One is cut from the base and left diverged on purpose, so telling it to rebase would publish everything merged since the tag: a wrong answer rather than a noisy one.
+Nothing in the commit graph tells a release branch from a stale topic branch — both sit behind the base and ahead of the fork point — so the name is the only signal there is.
 
-Three settings tune it, all under [Configuration](#configuration):
-`BRANCH_GUARD_BASE_REF` (unset derives it from the clone's own `origin/HEAD`, so a
-`master`-default repo needs no config), `BRANCH_GUARD_OVERLAP_IGNORE` for paths a
-merge driver owns, and `BRANCH_GUARD_PUSH_OVERLAP_ENABLED=false` to switch the
-check off.
+Three settings tune it, all under [Configuration](#configuration): `BRANCH_GUARD_BASE_REF` (unset derives it from the clone's own `origin/HEAD`, so a `master`-default repo needs no config), `BRANCH_GUARD_OVERLAP_IGNORE` for paths a merge driver owns, and `BRANCH_GUARD_PUSH_OVERLAP_ENABLED=false` to switch the check off.
 
-This check came from [pipe-guard](https://github.com/karlkfi/claude-pipe-guard),
-which shipped it first. branch-guard parses `push` to destination-ref depth, so it
-lives here; pipe-guard keeps the matching `gh pr create` check.
+This check came from [pipe-guard](https://github.com/karlkfi/claude-pipe-guard), which shipped it first. branch-guard parses `push` to destination-ref depth, so it lives here; pipe-guard keeps the matching `gh pr create` check.
 
-The push guard is **best-effort**: it parses the Bash command Claude runs (so it
-only governs Claude's `Bash` tool), and unusual refspecs may not be classified —
-in which case it asks under `strict` / defers under `protected`, never silently
-allowing. For a hard guarantee that no push reaches a protected branch —
-regardless of how it's invoked or from which machine — pair it with a git
-`pre-push` hook and/or server-side branch protection.
+The push guard is **best-effort**: it parses the Bash command Claude runs (so it only governs Claude's `Bash` tool), and unusual refspecs may not be classified — in which case it asks under `strict` / defers under `protected`, never silently allowing.
+For a hard guarantee that no push reaches a protected branch — regardless of how it's invoked or from which machine — pair it with a git `pre-push` hook and/or server-side branch protection.
 
-**Auto-allowed pushes and session wake-ups.** Under `strict`, a push of the
-worktree branch runs without a prompt. If a session can be woken by
-third-party-writable input — e.g. Claude Desktop's **Autofix pull requests**
-setting, which resumes a session on PR review comments, a public-repo injection
-channel — that same auto-allowed push is the permission an injected wake-up would
-use to push commits unattended. This is bounded: the push lands on an unmerged
-topic branch and is reversible, so the effective security boundary shifts to
-**PR-merge review**. With autofix enabled, keep auto-merge off and treat human
-merge review as the control this auto-allow leans on.
+**Auto-allowed pushes and session wake-ups.** Under `strict`, a push of the worktree branch runs without a prompt.
+If a session can be woken by third-party-writable input — e.g. Claude Desktop's **Autofix pull requests** setting, which resumes a session on PR review comments, a public-repo injection channel — that same auto-allowed push is the permission an injected wake-up would use to push commits unattended.
+This is bounded: the push lands on an unmerged topic branch and is reversible, so the effective security boundary shifts to **PR-merge review**.
+With autofix enabled, keep auto-merge off and treat human merge review as the control this auto-allow leans on.
 
 ## Install
 
-Install on any Claude Code surface that runs plugin `PreToolUse` hooks — the CLI,
-the IDE extensions, or **Claude Code for Claude Desktop**.
+Install on any Claude Code surface that runs plugin `PreToolUse` hooks — the CLI, the IDE extensions, or **Claude Code for Claude Desktop**.
 
 **Claude Code (CLI or IDE extension)** — run the slash commands:
 
@@ -722,29 +458,21 @@ the IDE extensions, or **Claude Code for Claude Desktop**.
 
 1. Open the **Customize** tab and go to its plugins / marketplaces section.
 2. Add `karlkfi/claude-bouncer` as a marketplace.
-3. Find **branch-guard** in that marketplace, install it, and make sure it's
-   enabled.
+3. Find **branch-guard** in that marketplace, install it, and make sure it's enabled.
 
 After installing with either method:
 
-- Requires Python 3 and `git` on your PATH. The hook is launched through
-  `hooks/run-python-hook.cmd`, which resolves an interpreter by trying `py -3`,
-  `python`, then `python3` (on Windows) or `python3`, then `python` (elsewhere),
-  so a working Python under any of those names is enough. If none of them runs,
-  the guard reports the problem on stderr rather than failing silently.
+- Requires Python 3 and `git` on your PATH.
+  The hook is launched through `hooks/run-python-hook.cmd`, which resolves an interpreter by trying `py -3`, `python`, then `python3` (on Windows) or `python3`, then `python` (elsewhere), so a working Python under any of those names is enough.
+  If none of them runs, the guard reports the problem on stderr rather than failing silently.
 - Restart Claude Code so the hook is registered.
-- **Won't fire where plugin `PreToolUse` hooks don't run** (e.g. surfaces that
-  don't yet run plugin hooks); there the guard never fires.
+- **Won't fire where plugin `PreToolUse` hooks don't run** (e.g. surfaces that don't yet run plugin hooks); there the guard never fires.
 
-To verify, ask Claude to run `git commit -m test` on a checkout sitting on `main`
-— you should see a permission prompt citing the protected branch. Then ask it to
-commit on a `claude/*` or feature branch; it should run without prompting.
+To verify, ask Claude to run `git commit -m test` on a checkout sitting on `main` — you should see a permission prompt citing the protected branch.
+Then ask it to commit on a `claude/*` or feature branch; it should run without prompting.
 
-**Keep it up to date — turn on auto-update (recommended).** Claude Code
-auto-updates official Anthropic marketplaces only; third-party ones like this
-never refresh on their own, so an install pins its version until you act. Install
-time is the moment to decide — add the marketplace with `autoUpdate` on in
-`~/.claude/settings.json` and new releases install themselves at startup:
+**Keep it up to date — turn on auto-update (recommended).** Claude Code auto-updates official Anthropic marketplaces only; third-party ones like this never refresh on their own, so an install pins its version until you act.
+Install time is the moment to decide — add the marketplace with `autoUpdate` on in `~/.claude/settings.json` and new releases install themselves at startup:
 
 ```json
 {
@@ -757,16 +485,14 @@ time is the moment to decide — add the marketplace with `autoUpdate` on in
 }
 ```
 
-Prefer to update by hand? Leave it off and pull new versions manually — see
-[Upgrade](#upgrade).
+Prefer to update by hand?
+Leave it off and pull new versions manually — see [Upgrade](#upgrade).
 
-**Already installed?** New releases don't install themselves — see
-[Upgrade](#upgrade) to enable auto-update or pull the latest version.
+**Already installed?** New releases don't install themselves — see [Upgrade](#upgrade) to enable auto-update or pull the latest version.
 
 ### Local install (development)
 
-To run the plugin straight from a checkout instead of the GitHub marketplace,
-add it as a `directory` marketplace in `~/.claude/settings.json`:
+To run the plugin straight from a checkout instead of the GitHub marketplace, add it as a `directory` marketplace in `~/.claude/settings.json`:
 
 ```json
 {
@@ -783,20 +509,14 @@ add it as a `directory` marketplace in `~/.claude/settings.json`:
 
 ## Upgrade
 
-branch-guard installs from a GitHub marketplace, which Claude Code tracks at the
-repository's default branch (`main`). Claude Code auto-updates official Anthropic
-marketplaces only; third-party ones like this have auto-update **off by default**,
-so an install pins its version until you either turn auto-update on or update
-manually. Either way, a running session won't pick up a newer release on its own:
-auto-update is applied at startup and the installed version stays fixed for the
-life of the session, so even after a new version is published you stay on the
-loaded one until you update and reload.
+branch-guard installs from a GitHub marketplace, which Claude Code tracks at the repository's default branch (`main`).
+Claude Code auto-updates official Anthropic marketplaces only; third-party ones like this have auto-update **off by default**, so an install pins its version until you either turn auto-update on or update manually.
+Either way, a running session won't pick up a newer release on its own: auto-update is applied at startup and the installed version stays fixed for the life of the session, so even after a new version is published you stay on the loaded one until you update and reload.
 
 ### Set-and-forget: enable auto-update (recommended)
 
-Turn on auto-update for the marketplace so new releases install at startup. Add
-this to `~/.claude/settings.json` (the same block works from the
-[Install](#install) step — it's here too so existing users can drop it in):
+Turn on auto-update for the marketplace so new releases install at startup.
+Add this to `~/.claude/settings.json` (the same block works from the [Install](#install) step — it's here too so existing users can drop it in):
 
 ```json
 {
@@ -809,14 +529,13 @@ this to `~/.claude/settings.json` (the same block works from the
 }
 ```
 
-Claude Code then refreshes the marketplace and installs newer releases when it
-starts. A restart (or `/reload-plugins` on the CLI/IDE) is still needed for a
-freshly fetched version to become the one that runs, since the hook is registered
-at startup.
+Claude Code then refreshes the marketplace and installs newer releases when it starts.
+A restart (or `/reload-plugins` on the CLI/IDE) is still needed for a freshly fetched version to become the one that runs, since the hook is registered at startup.
 
 ### Manual update
 
-Left auto-update off? Pull new versions by hand.
+Left auto-update off?
+Pull new versions by hand.
 
 **Claude Code (CLI or IDE extension)** — run the slash commands:
 
@@ -826,19 +545,15 @@ Left auto-update off? Pull new versions by hand.
 /plugin install branch-guard@claude-bouncer
 ```
 
-The first command re-fetches the marketplace manifest from the repo; the
-reinstall picks up the new version.
+The first command re-fetches the marketplace manifest from the repo; the reinstall picks up the new version.
 
 **Claude Code for Claude Desktop (macOS)** — the update control is tucked away:
 
 1. Open **Customize > Plugins > Code**.
-2. Click the **3-dot (⋯) menu next to the plugin name** (`branch-guard`) and
-   choose **Check for updates**.
+2. Click the **3-dot (⋯) menu next to the plugin name** (`branch-guard`) and choose **Check for updates**.
 3. If an update is offered, apply it.
 
-Desktop has no `/plugin` slash command, but the `claude` CLI shares Desktop's
-plugin state, so you can update headlessly from a terminal instead of hunting for
-the menu:
+Desktop has no `/plugin` slash command, but the `claude` CLI shares Desktop's plugin state, so you can update headlessly from a terminal instead of hunting for the menu:
 
 ```bash
 claude plugin marketplace update claude-bouncer
@@ -847,10 +562,8 @@ claude plugin update branch-guard@claude-bouncer
 
 Restart the Desktop app afterward to load the new version.
 
-**Restart Claude Code after updating** (on any surface). The `PreToolUse` hook is
-registered at startup, so the new `branch-guard.py` only becomes the one that
-actually runs once Claude Code reloads — on the CLI/IDE `/reload-plugins` will
-re-register the hook without a full restart; on Desktop, restart the app.
+**Restart Claude Code after updating** (on any surface).
+The `PreToolUse` hook is registered at startup, so the new `branch-guard.py` only becomes the one that actually runs once Claude Code reloads — on the CLI/IDE `/reload-plugins` will re-register the hook without a full restart; on Desktop, restart the app.
 
 To verify the new version is active, check the installed manifest and cache:
 
@@ -862,116 +575,42 @@ python3 -m json.tool ~/.claude/plugins/installed_plugins.json | grep -A6 branch-
 ls ~/.claude/plugins/cache/branch-guard/branch-guard/
 ```
 
-The `installed_plugins.json` entry should report the new `version` and a
-`gitCommitSha` matching the release tag's commit, and a directory for the new
-version should exist under
-`~/.claude/plugins/cache/branch-guard/branch-guard/`. If the `version` or
-`gitCommitSha` still shows the old release, the update didn't land — re-run the
-update step and restart.
+The `installed_plugins.json` entry should report the new `version` and a `gitCommitSha` matching the release tag's commit, and a directory for the new version should exist under `~/.claude/plugins/cache/branch-guard/branch-guard/`.
+If the `version` or `gitCommitSha` still shows the old release, the update didn't land — re-run the update step and restart.
 
 ## How it works
 
-0. **Strip heredoc bodies** first, quote-aware, so a heredoc's (data) contents
-   aren't lexed as command segments (`git commit -F- <<'EOF' … EOF`). A quoted
-   delimiter makes the body inert and always safe to drop; an unquoted body that
-   the shell would expand (a command substitution in it runs) is kept so the
-   substitution guard still defers; an unterminated one is left unchanged.
-1. **Tokenize** the command with Python's `shlex` (POSIX mode, punctuation
-   grouping) so quotes are respected and shell operators (`|`, `|&`, `&&`, `>`,
-   `;`, newlines) become their own tokens. shlex glues adjacent operators into one
-   token, so a run made only of separators (`);`, `)&&`, `))`) is split back
-   into them. A run holding a redirect or an unknown operator (`<>`) stays
-   whole, and step 5 defers on it.
-2. **Split** into simple-command segments on those operators and drop redirect
-   targets aside, including fd-redirect forms (`git push … 2>&1`,
-   `git log 2>/dev/null`) — the leading fd digit and the operator's target are
-   both stripped so they aren't read as command arguments. Leading reserved
-   words (`{`, `if`, `then`, `!`, `do`, `function NAME`) are dropped too, so
-   `{ git push --force origin main; } 2>&1`, a conditional, a loop body and a
-   function body are each judged by the command inside them. They also scope
-   the working directory: a `cd` inside `{ … }`, an `if` or a loop moves what
-   follows, as bash runs those in the current shell, while one inside `( … )`,
-   in a pipeline stage, or in a backgrounded list — bare or inside a group — is
-   undone when that fork ends. A `cd` in a body that may not run — a
-   conditional, a loop, a `case` arm, a function — leaves the directory after
-   it unknown, and the command is judged against the session's own checkout.
-3. **Parse** each segment with `parse_invocation`: strip leading
-   `NAME=VALUE` env prefixes (`GIT_AUTHOR_NAME=x git …`), command wrappers
-   (`env`, `sudo`, `timeout`, `nice`, `nohup`, `command`, `stdbuf`, `setsid`,
-   `time`, `exec`, with their own options), and program global options
-   (`git -C path`, `-c k=v`) to find the `git`/`gh` subcommand and its
-   arguments. Combined short flags (`git clean -fd`) are decomposed, and an
-   abbreviated long option is written out the way git expands it
-   (`git branch --forc` is `--force`; `git switch --forc` is ambiguous between
-   `--force` and `--force-create`, so git refuses it and it is left as typed).
-   cherry-pick and revert expand no abbreviation, so none is read there. A
-   wrapped
-   command gets every `ask` and `deny` the bare one would, but is never
-   auto-approved: the wrapper can change the user or the environment, neither
-   of which the classifier reads. The break-glass does lift through one, since
-   the loss is the one measured, unless the wrapper changes directory. A
-   literal directory (`env -C dir`, `sudo -D dir`) is followed the way
-   `git -C dir` is, so the branch judged is the one checked out there; a
-   directory only the shell can compute (`env -C "$DIR"`), a `sudo -R`
-   chroot, and a `sudo -i` login shell leave the command judged against the
-   session's own checkout. A shell run on a `-c` string (`sh -c '…'`,
-   `bash -lc '…'`, and `dash`, `zsh`, `ksh`) has the string judged as a
-   command of its own, from the directory the shell starts in, so
-   `sh -c 'git commit -m x'` on `main` asks as the bare commit does. Like a
-   wrapper's, the body's `ask`s and `deny`s stand and its `allow`s defer, and
-   the break-glass does not reach through the shell. A body that won't lex,
-   or one nested more than four shells deep, defers.
-4. **Classify** each segment as `allow` / `ask` / `deny` / `defer` / non-git:
-   read-only git and gh and harmless mutations (`add`, `restore --staged`,
-   `switch -c`, `worktree add`, branch/tag create) allow on any branch;
-   branch-sensitive mutations (`commit`, `merge`, `rebase`, `cherry-pick`,
-   `stash`, `push`) allow on a feature branch and ask on a protected one;
-   destructive commands (`reset --hard`, `clean -f`, `branch -D`, and gh
-   deletes/disables — a branch via `gh pr close --delete-branch` or
-   `gh api -X DELETE …/git/refs/heads/…`; a repo via `gh repo delete` or
-   `gh api -X DELETE repos/{o}/{r}`; a label via `gh label delete` /
-   `gh api -X DELETE …/labels/…`; a release/secret/variable/gist/cache via
-   `gh <sub> delete` (`secret`/`variable` also accept `remove`; a release asset
-   via `gh release delete-asset`); a workflow via
-   `gh workflow disable`) ask, except a clean-worktree `reset --hard` onto a
-   tip proved unreachable that is also proved to orphan more than a
-   reproducible merge or a published rebase, which denies; unknown or
-   ambiguous forms defer. The branch is resolved with
-   `git symbolic-ref`, in the tree the segment acts on — for Bash the session
-   cwd, walked through a literal `cd` or `git -C`; for edits the file's own repo.
-5. **Combine** the segment verdicts: any `deny` → deny; else any `ask` → ask;
-   else every segment must be
-   recognized-safe → allow; else defer. A segment is recognized-safe when it's a
-   git/gh `allow` or a **pure read-only filter** piped after one — `head`,
-   `tail`, `cat`, `wc`, `nl`, `sort`, `uniq`, `cut`, `column`, `less`, `more`
-   with no file positional and no write option (`git log | head -20`). At least
-   one git/gh segment is still required (`head -5` alone defers). Two things
-   downgrade a would-be `allow` to defer
-   without ever weakening a protective `ask`: an inline-config escape hatch
-   (`git -c core.pager='!sh …' log`, or a `GIT_CONFIG*` variable carrying the
-   same config) or any prefix variable outside the short list of data git and
-   gh only read (`GIT_EXTERNAL_DIFF`, `GIT_SSH_COMMAND`, `PATH`, `HOME`,
-   `LD_PRELOAD`, an editor or pager set to anything but `true`, `:` or `cat`),
-   and a hidden command/process substitution
-   in the raw token stream (`` `…` ``, `$(…)`, `<(…)`/`>(…)`, or an unrecognized
-   operator run like `<>`) — checked over the raw tokens, before redirect targets
-   are dropped, so `` git diff > `evil` `` is caught too. A small registry of
-   provably pure substitutions (`$(git rev-parse --show-toplevel)`,
-   `$(git branch --show-current)`, `$(pwd)`) is exempt from that second downgrade
-   — matched structurally, so only the exact read-only command qualifies.
-6. **Fail safe** where no prompt can be shown (`dontAsk`, `bypassPermissions`):
-   a would-be `ask` is emitted as `deny`, since no human is present to answer it.
-   The reason names the mode and says retrying won't help, so the agent hands off
-   instead of re-running a command that can't be approved from the session. This
-   is the only route by which an `ask` becomes a `deny`; the step-4 deny above is
-   already one in every mode, and its reason names the check rather than the
-   mode.
+0. **Strip heredoc bodies** first, quote-aware, so a heredoc's (data) contents aren't lexed as command segments (`git commit -F- <<'EOF' … EOF`).
+   A quoted delimiter makes the body inert and always safe to drop; an unquoted body that the shell would expand (a command substitution in it runs) is kept so the substitution guard still defers; an unterminated one is left unchanged.
+1. **Tokenize** the command with Python's `shlex` (POSIX mode, punctuation grouping) so quotes are respected and shell operators (`|`, `|&`, `&&`, `>`, `;`, newlines) become their own tokens. shlex glues adjacent operators into one token, so a run made only of separators (`);`, `)&&`, `))`) is split back into them.
+   A run holding a redirect or an unknown operator (`<>`) stays whole, and step 5 defers on it.
+2. **Split** into simple-command segments on those operators and drop redirect targets aside, including fd-redirect forms (`git push … 2>&1`, `git log 2>/dev/null`) — the leading fd digit and the operator's target are both stripped so they aren't read as command arguments.
+   Leading reserved words (`{`, `if`, `then`, `!`, `do`, `function NAME`) are dropped too, so `{ git push --force origin main; } 2>&1`, a conditional, a loop body and a function body are each judged by the command inside them.
+   They also scope the working directory: a `cd` inside `{ … }`, an `if` or a loop moves what follows, as bash runs those in the current shell, while one inside `( … )`, in a pipeline stage, or in a backgrounded list — bare or inside a group — is undone when that fork ends.
+   A `cd` in a body that may not run — a conditional, a loop, a `case` arm, a function — leaves the directory after it unknown, and the command is judged against the session's own checkout.
+3. **Parse** each segment with `parse_invocation`: strip leading `NAME=VALUE` env prefixes (`GIT_AUTHOR_NAME=x git …`), command wrappers (`env`, `sudo`, `timeout`, `nice`, `nohup`, `command`, `stdbuf`, `setsid`, `time`, `exec`, with their own options), and program global options (`git -C path`, `-c k=v`) to find the `git`/`gh` subcommand and its arguments.
+   Combined short flags (`git clean -fd`) are decomposed, and an abbreviated long option is written out the way git expands it (`git branch --forc` is `--force`; `git switch --forc` is ambiguous between `--force` and `--force-create`, so git refuses it and it is left as typed). cherry-pick and revert expand no abbreviation, so none is read there.
+   A wrapped command gets every `ask` and `deny` the bare one would, but is never auto-approved: the wrapper can change the user or the environment, neither of which the classifier reads.
+   The break-glass does lift through one, since the loss is the one measured, unless the wrapper changes directory.
+   A literal directory (`env -C dir`, `sudo -D dir`) is followed the way `git -C dir` is, so the branch judged is the one checked out there; a directory only the shell can compute (`env -C "$DIR"`), a `sudo -R` chroot, and a `sudo -i` login shell leave the command judged against the session's own checkout.
+   A shell run on a `-c` string (`sh -c '…'`, `bash -lc '…'`, and `dash`, `zsh`, `ksh`) has the string judged as a command of its own, from the directory the shell starts in, so `sh -c 'git commit -m x'` on `main` asks as the bare commit does.
+   Like a wrapper's, the body's `ask`s and `deny`s stand and its `allow`s defer, and the break-glass does not reach through the shell.
+   A body that won't lex, or one nested more than four shells deep, defers.
+4. **Classify** each segment as `allow` / `ask` / `deny` / `defer` / non-git: read-only git and gh and harmless mutations (`add`, `restore --staged`, `switch -c`, `worktree add`, branch/tag create) allow on any branch; branch-sensitive mutations (`commit`, `merge`, `rebase`, `cherry-pick`, `stash`, `push`) allow on a feature branch and ask on a protected one; destructive commands (`reset --hard`, `clean -f`, `branch -D`, and gh deletes/disables — a branch via `gh pr close --delete-branch` or `gh api -X DELETE …/git/refs/heads/…`; a repo via `gh repo delete` or `gh api -X DELETE repos/{o}/{r}`; a label via `gh label delete` / `gh api -X DELETE …/labels/…`; a release/secret/variable/gist/cache via `gh <sub> delete` (`secret`/`variable` also accept `remove`; a release asset via `gh release delete-asset`); a workflow via `gh workflow disable`) ask, except a clean-worktree `reset --hard` onto a tip proved unreachable that is also proved to orphan more than a reproducible merge or a published rebase, which denies; unknown or ambiguous forms defer.
+   The branch is resolved with `git symbolic-ref`, in the tree the segment acts on — for Bash the session cwd, walked through a literal `cd` or `git -C`; for edits the file's own repo.
+5. **Combine** the segment verdicts: any `deny` → deny; else any `ask` → ask; else every segment must be recognized-safe → allow; else defer.
+   A segment is recognized-safe when it's a git/gh `allow` or a **pure read-only filter** piped after one — `head`, `tail`, `cat`, `wc`, `nl`, `sort`, `uniq`, `cut`, `column`, `less`, `more` with no file positional and no write option (`git log | head -20`).
+   At least one git/gh segment is still required (`head -5` alone defers).
+   Two things downgrade a would-be `allow` to defer without ever weakening a protective `ask`: an inline-config escape hatch (`git -c core.pager='!sh …' log`, or a `GIT_CONFIG*` variable carrying the same config) or any prefix variable outside the short list of data git and gh only read (`GIT_EXTERNAL_DIFF`, `GIT_SSH_COMMAND`, `PATH`, `HOME`, `LD_PRELOAD`, an editor or pager set to anything but `true`, `:` or `cat`), and a hidden command/process substitution in the raw token stream (`` `…` ``, `$(…)`, `<(…)`/`>(…)`, or an unrecognized operator run like `<>`) — checked over the raw tokens, before redirect targets are dropped, so `` git diff > `evil` `` is caught too. A small registry of provably pure substitutions (`$(git rev-parse --show-toplevel)`, `$(git branch --show-current)`, `$(pwd)`) is exempt from that second downgrade — matched structurally, so only the exact read-only command qualifies.
+6. **Fail safe** where no prompt can be shown (`dontAsk`, `bypassPermissions`): a would-be `ask` is emitted as `deny`, since no human is present to answer it.
+   The reason names the mode and says retrying won't help, so the agent hands off instead of re-running a command that can't be approved from the session.
+   This is the only route by which an `ask` becomes a `deny`; the step-4 deny above is already one in every mode, and its reason names the check rather than the mode.
 
 ## Agent guidance: avoiding prompts
 
-Most branch-guard prompts are intentional — they fire when Claude touches a
-protected branch or runs something destructive. But a few habits keep work
-flowing. Paste the block below into your project's `CLAUDE.md` (or `AGENTS.md`):
+Most branch-guard prompts are intentional — they fire when Claude touches a protected branch or runs something destructive.
+But a few habits keep work flowing.
+Paste the block below into your project's `CLAUDE.md` (or `AGENTS.md`):
 
 ```markdown
 ## Avoiding branch-guard permission prompts
@@ -1038,55 +677,41 @@ protected branch (main/master) or destructive git commands. To keep work flowing
 
 ## Configuration
 
-- **Push policy** — set `BRANCH_GUARD_PUSH_POLICY` to `strict` (default),
-  `protected`, or `off` (see [Push guard](#push-guard)). Set it in
-  `~/.claude/settings.json` (all projects) or a project's
-  `.claude/settings.json`:
+- **Push policy** — set `BRANCH_GUARD_PUSH_POLICY` to `strict` (default), `protected`, or `off` (see [Push guard](#push-guard)).
+  Set it in `~/.claude/settings.json` (all projects) or a project's `.claude/settings.json`:
 
   ```json
   { "env": { "BRANCH_GUARD_PUSH_POLICY": "protected" } }
   ```
 
-- **Worktree grants** — off by default. Set `BRANCH_GUARD_WORKTREE_GRANTS=1` and
-  `git worktree add` asks once instead of being auto-approved. Approving it
-  records the created checkout for the session, which is what lets
-  [workspace-guard](https://github.com/karlkfi/claude-bouncer/tree/main/plugins/workspace-guard)
-  stop prompting on reads inside it and stop blocking writes to it. The ask is
-  not about danger — creating a checkout is safe — it is the only moment that
-  identifies the new tree as *yours* rather than a peer session's.
+- **Worktree grants** — off by default.
+  Set `BRANCH_GUARD_WORKTREE_GRANTS=1` and `git worktree add` asks once instead of being auto-approved.
+  Approving it records the created checkout for the session, which is what lets [workspace-guard](https://github.com/karlkfi/claude-bouncer/tree/main/plugins/workspace-guard) stop prompting on reads inside it and stop blocking writes to it.
+  The ask is not about danger — creating a checkout is safe — it is the only moment that identifies the new tree as *yours* rather than a peer session's.
 
-  **It needs `WORKSPACE_GUARD_SESSION_GRANTS=1` on the other side to be worth
-  anything**: this half only adds a prompt, and that half is what spends it. In
-  a mode where no prompt can be shown (`dontAsk`, `bypassPermissions`) the ask is
-  skipped and `git worktree add` is auto-approved as before — no human, no grant,
-  and denying a safe command to capture an approval nobody can give would only
-  block the work.
+  **It needs `WORKSPACE_GUARD_SESSION_GRANTS=1` on the other side to be worth anything**: this half only adds a prompt, and that half is what spends it.
+  In a mode where no prompt can be shown (`dontAsk`, `bypassPermissions`) the ask is skipped and `git worktree add` is auto-approved as before — no human, no grant, and denying a safe command to capture an approval nobody can give would only block the work.
 
   ```json
   { "env": { "BRANCH_GUARD_WORKTREE_GRANTS": "1" } }
   ```
 
-- **Protected branches** — `main` and `master` are always protected. Protect more
-  by setting `BRANCH_GUARD_PROTECTED_BRANCHES` to a comma-separated list of glob
-  patterns, in the same `settings.json`:
+- **Protected branches** — `main` and `master` are always protected.
+  Protect more by setting `BRANCH_GUARD_PROTECTED_BRANCHES` to a comma-separated list of glob patterns, in the same `settings.json`:
 
   ```json
   { "env": { "BRANCH_GUARD_PROTECTED_BRANCHES": "release/*,integration" } }
   ```
 
-  Each pattern matches a whole branch name, case-sensitively, and `*` spans `/` —
-  so `release/*` covers both `release/2.0` and `release/2.0/rc`. Empty and
-  whitespace-only entries are ignored.
+  Each pattern matches a whole branch name, case-sensitively, and `*` spans `/` — so `release/*` covers both `release/2.0` and `release/2.0/rc`.
+  Empty and whitespace-only entries are ignored.
 
-  The list **extends** the defaults rather than replacing them. There is no way
-  to configure `main` or `master` out of the protected set, so a typo (or a
-  value the hook can't make sense of) can only ever protect more than you meant,
-  never less. The setting reaches every place the guard consults a branch:
-  commits and branch-sensitive mutations, the `Edit`/`Write` check, and the push
-  guard's protected-target rule under both `strict` and `protected`.
+  The list **extends** the defaults rather than replacing them.
+  There is no way to configure `main` or `master` out of the protected set, so a typo (or a value the hook can't make sense of) can only ever protect more than you meant, never less.
+  The setting reaches every place the guard consults a branch: commits and branch-sensitive mutations, the `Edit`/`Write` check, and the push guard's protected-target rule under both `strict` and `protected`.
 
-- **Push overlap** — on by default (see [Push guard](#push-guard)). Four knobs,
-  all optional:
+- **Push overlap** — on by default (see [Push guard](#push-guard)).
+  Four knobs, all optional:
 
   ```json
   {
@@ -1099,190 +724,105 @@ protected branch (main/master) or destructive git commands. To keep work flowing
   }
   ```
 
-  `BRANCH_GUARD_BASE_REF` names the integration ref this branch is measured
-  against. Leave it unset and the clone's own `origin/HEAD` answers it, so a
-  `master`-default repo works without configuration; a ref that doesn't resolve
-  switches the check off rather than blocking anything.
+  `BRANCH_GUARD_BASE_REF` names the integration ref this branch is measured against.
+  Leave it unset and the clone's own `origin/HEAD` answers it, so a `master`-default repo works without configuration; a ref that doesn't resolve switches the check off rather than blocking anything.
 
-  `BRANCH_GUARD_OVERLAP_IGNORE` is a comma-separated glob list for paths whose
-  overlap is expected — a changelog, or anything a custom merge driver owns, which
-  nearly every branch touches and which would otherwise fire on every push. The
-  discount is **conditional**: such a path still counts when `git merge-tree` says
-  the merge genuinely conflicts there, so an ignore entry suppresses the noise
-  without hiding a real collision.
+  `BRANCH_GUARD_OVERLAP_IGNORE` is a comma-separated glob list for paths whose overlap is expected — a changelog, or anything a custom merge driver owns, which nearly every branch touches and which would otherwise fire on every push.
+  The discount is **conditional**: such a path still counts when `git merge-tree` says the merge genuinely conflicts there, so an ignore entry suppresses the noise without hiding a real collision.
 
-  `BRANCH_GUARD_RELEASE_BRANCHES` **extends** the built-in release-branch globs
-  rather than replacing them, the same way `BRANCH_GUARD_PROTECTED_BRANCHES` does.
+  `BRANCH_GUARD_RELEASE_BRANCHES` **extends** the built-in release-branch globs rather than replacing them, the same way `BRANCH_GUARD_PROTECTED_BRANCHES` does.
 
-  `BRANCH_GUARD_PUSH_OVERLAP_ENABLED` switches the check off when set to `false`,
-  `0`, `no`, or `off`. Any other value — including one nobody meant as false —
-  leaves it on, so a typo costs a prompt somebody can answer rather than a guard
-  that quietly stopped running.
+  `BRANCH_GUARD_PUSH_OVERLAP_ENABLED` switches the check off when set to `false`, `0`, `no`, or `off`.
+  Any other value — including one nobody meant as false — leaves it on, so a typo costs a prompt somebody can answer rather than a guard that quietly stopped running.
 
-- **Non-interactive modes** — in `dontAsk` and `bypassPermissions` an `ask` is
-  automatically emitted as `deny` so the guard fails safe when no human is
-  present. (Two verdicts deny in every mode regardless — see
-  [What it does](#what-it-does) — and are unaffected by this.) The denial says
-  so plainly (see [Behavior](#behavior)): there is no
-  confirmation to grant in this mode, so the way through is to run the command
-  yourself, re-run the session interactively, or — for the narrow set of asks it
-  covers — use the
-  [`BRANCH_GUARD_OVERRIDE` break-glass](#break-glass-branch_guard_override).
-  (Claude Code ignores hook decisions entirely under `bypassPermissions`, so a
-  hard guarantee there still needs a git `pre-push` hook or server-side branch
-  protection.)
+- **Non-interactive modes** — in `dontAsk` and `bypassPermissions` an `ask` is automatically emitted as `deny` so the guard fails safe when no human is present.
+  (Two verdicts deny in every mode regardless — see [What it does](#what-it-does) — and are unaffected by this.)
+  The denial says so plainly (see [Behavior](#behavior)): there is no confirmation to grant in this mode, so the way through is to run the command yourself, re-run the session interactively, or — for the narrow set of asks it covers — use the [`BRANCH_GUARD_OVERRIDE` break-glass](#break-glass-branch_guard_override).
+  (Claude Code ignores hook decisions entirely under `bypassPermissions`, so a hard guarantee there still needs a git `pre-push` hook or server-side branch protection.)
 
-  **`auto` is not one of them.** The name suggests an unattended session and it
-  usually isn't one: an `ask` in `auto` reaches a real prompt, which somebody
-  answers. Denying it there removed the human rather than protecting them — a
-  session could create an annotated release tag and then never publish it, so
-  tagging always finished in a terminal instead.
+  **`auto` is not one of them.** The name suggests an unattended session and it usually isn't one: an `ask` in `auto` reaches a real prompt, which somebody answers.
+  Denying it there removed the human rather than protecting them — a session could create an annotated release tag and then never publish it, so tagging always finished in a terminal instead.
 
-- **Break-glass** — `BRANCH_GUARD_OVERRIDE=<reason>` as a command prefix lifts an
-  ask whose damage stops at this machine. It is deliberately *not* a
-  `settings.json` variable, and it reaches no protected branch, no `gh` deletion,
-  and no push except the overlap deny. See
-  [Break-glass: `BRANCH_GUARD_OVERRIDE`](#break-glass-branch_guard_override).
+- **Break-glass** — `BRANCH_GUARD_OVERRIDE=<reason>` as a command prefix lifts an ask whose damage stops at this machine.
+  It is deliberately *not* a `settings.json` variable, and it reaches no protected branch, no `gh` deletion, and no push except the overlap deny.
+  See [Break-glass: `BRANCH_GUARD_OVERRIDE`](#break-glass-branch_guard_override).
 
 ## Limitations
 
-- The guard only governs Claude's `Bash`/`Edit`/`Write`/`MultiEdit`/`NotebookEdit`
-  tools. It does **not** intercept file mutations done through other Bash
-  commands — e.g. `sed -i`, `>` redirects, or `rm` — on a protected branch.
-  [workspace-guard](#companion-plugins), a companion plugin, guards those Bash
-  file commands on a path boundary.
-- It auto-approves a *safe* set of `git`/`gh` subcommands and asks on a
-  *destructive* set (denying within it only where the cause is a fact the model
-  can check); anything outside both (an unknown subcommand, a `git config`
-  form it can't classify, most `gh` mutations) **defers** to the normal
-  permission flow rather than guessing.
-- Auto-approval is only ever withheld, never granted, by the shell-construct
-  check: a command carrying a command/process substitution (`` `…` ``, `$(…)`,
-  `<(…)`/`>(…)`) or an unrecognized operator run **defers** instead of
-  auto-approving, since those run code the classifier can't see. The one
-  exception is a tiny hardcoded registry of provably pure, read-only
-  substitutions (`$(git rev-parse --show-toplevel)`, `$(git branch --show-current)`,
-  `$(pwd)`), matched structurally so nothing else rides in. It is a best-effort
-  lexical check, not a sandbox — the filesystem boundary is workspace-guard's
-  job, and a hard guarantee belongs in a git `pre-push` hook or server-side
-  branch protection.
-- A `cd` is scoped by `( )`, `{ }`, conditionals, loops, pipes and `&`, but
-  not by `&&` or `||`. So `false && cd ../other; git commit` is judged in
-  `../other`, where bash commits in the current tree.
-- Command wrappers are read from a fixed list. One outside it (`xargs`, whose
-  arguments arrive on stdin, or a site-specific launcher) hides the `git`
-  behind it, and the command defers to the normal permission flow. A shell is
-  read only through its `-c` string: a script file, a script on stdin, and a
-  body that runs its own arguments (`sh -c '"$@"' _ git commit`) defer the
-  same way.
-- The push guard parses the command string, so unusual refspecs may not be
-  classified (it asks/defers rather than allowing). Auto-approval is a
-  convenience layer, not a security boundary — for hard guarantees use a git
-  `pre-push` hook and/or server-side branch protection.
-- A `--force-with-lease` rewrite of another branch is auto-approved on git's
-  guarantee that the remote hasn't moved, which says nothing about who else uses
-  that branch. Add anything shared to
-  [`BRANCH_GUARD_PROTECTED_BRANCHES`](#configuration); a branch with an open PR
-  is not shared as far as the guard is concerned.
-- The [break-glass](#break-glass-branch_guard_override) is self-served: the agent
-  writes its own reason, and the guard checks only that one was given. It buys
-  legibility over the ungated alternative — the operation stays atomic and the
-  reason is recorded — not a second opinion. What keeps it bounded is its scope,
-  so treat "could this reach past this machine?" as the question when considering
-  a new entry.
-- The [push overlap check](#push-guard) reads local refs, so it trusts your last
-  `git fetch` — a base that moved since then looks unmoved, and the push is
-  auto-approved. It also compares line *ranges*, not semantics: two edits six
-  lines apart are reported as meeting whether or not they interact, and a rename
-  or a moved function reads as unrelated. Treat it as a cheap reason to rebase,
-  not proof the merge is clean — and where you have read the overlap and want the
-  push anyway, the break-glass is the answer rather than a rebase you do not
-  need. One shape is deliberately excluded: a release branch is skipped on its
-  *name*, so a topic branch named like a release (`hotfix-typo`) is never
-  checked.
-- The [`git branch` recoverability check](#git-branch-what-the-session-owns-not-how-the-verb-looks)
-  reads local refs only, so it trusts your last `git fetch`. A remote-tracking
-  ref left stale after the branch was deleted upstream still counts as
-  recoverable, and a branch pushed since the last fetch may not. It also has no
-  notion of a branch being shared beyond the protected set — a branch with an
-  open PR is not treated as shared, though deleting it locally leaves both the
-  remote branch and the PR intact.
+- The guard only governs Claude's `Bash`/`Edit`/`Write`/`MultiEdit`/`NotebookEdit` tools.
+  It does **not** intercept file mutations done through other Bash commands — e.g. `sed -i`, `>` redirects, or `rm` — on a protected branch.
+  [workspace-guard](#companion-plugins), a companion plugin, guards those Bash file commands on a path boundary.
+- It auto-approves a *safe* set of `git`/`gh` subcommands and asks on a *destructive* set (denying within it only where the cause is a fact the model can check); anything outside both (an unknown subcommand, a `git config` form it can't classify, most `gh` mutations) **defers** to the normal permission flow rather than guessing.
+- Auto-approval is only ever withheld, never granted, by the shell-construct check: a command carrying a command/process substitution (`` `…` ``, `$(…)`, `<(…)`/`>(…)`) or an unrecognized operator run **defers** instead of auto-approving, since those run code the classifier can't see. The one exception is a tiny hardcoded registry of provably pure, read-only substitutions (`$(git rev-parse --show-toplevel)`, `$(git branch --show-current)`, `$(pwd)`), matched structurally so nothing else rides in.
+  It is a best-effort lexical check, not a sandbox — the filesystem boundary is workspace-guard's job, and a hard guarantee belongs in a git `pre-push` hook or server-side branch protection.
+- A `cd` is scoped by `( )`, `{ }`, conditionals, loops, pipes and `&`, but not by `&&` or `||`.
+  So `false && cd ../other; git commit` is judged in `../other`, where bash commits in the current tree.
+- Command wrappers are read from a fixed list.
+  One outside it (`xargs`, whose arguments arrive on stdin, or a site-specific launcher) hides the `git` behind it, and the command defers to the normal permission flow.
+  A shell is read only through its `-c` string: a script file, a script on stdin, and a body that runs its own arguments (`sh -c '"$@"' _ git commit`) defer the same way.
+- The push guard parses the command string, so unusual refspecs may not be classified (it asks/defers rather than allowing).
+  Auto-approval is a convenience layer, not a security boundary — for hard guarantees use a git `pre-push` hook and/or server-side branch protection.
+- A `--force-with-lease` rewrite of another branch is auto-approved on git's guarantee that the remote hasn't moved, which says nothing about who else uses that branch.
+  Add anything shared to [`BRANCH_GUARD_PROTECTED_BRANCHES`](#configuration); a branch with an open PR is not shared as far as the guard is concerned.
+- The [break-glass](#break-glass-branch_guard_override) is self-served: the agent writes its own reason, and the guard checks only that one was given.
+  It buys legibility over the ungated alternative — the operation stays atomic and the reason is recorded — not a second opinion.
+  What keeps it bounded is its scope, so treat "could this reach past this machine?" as the question when considering a new entry.
+- The [push overlap check](#push-guard) reads local refs, so it trusts your last `git fetch` — a base that moved since then looks unmoved, and the push is auto-approved.
+  It also compares line *ranges*, not semantics: two edits six lines apart are reported as meeting whether or not they interact, and a rename or a moved function reads as unrelated.
+  Treat it as a cheap reason to rebase, not proof the merge is clean — and where you have read the overlap and want the push anyway, the break-glass is the answer rather than a rebase you do not need.
+  One shape is deliberately excluded: a release branch is skipped on its *name*, so a topic branch named like a release (`hotfix-typo`) is never checked.
+- The [`git branch` recoverability check](#git-branch-what-the-session-owns-not-how-the-verb-looks) reads local refs only, so it trusts your last `git fetch`.
+  A remote-tracking ref left stale after the branch was deleted upstream still counts as recoverable, and a branch pushed since the last fetch may not.
+  It also has no notion of a branch being shared beyond the protected set — a branch with an open PR is not treated as shared, though deleting it locally leaves both the remote branch and the PR intact.
 
 ## Companion plugins
 
-branch-guard watches the **git history** boundary — which branch you're on, and
-whether a `git`/`gh` command is destructive. Its siblings guard other axes
-with the same secure-by-default design:
+branch-guard watches the **git history** boundary — which branch you're on, and whether a `git`/`gh` command is destructive.
+Its siblings guard other axes with the same secure-by-default design:
 
-- [**workspace-guard**](https://github.com/karlkfi/claude-bouncer) — the
-  **filesystem** boundary: prompts before guarded file commands
-  (`grep`/`sed`/`cat`/`cp`/`rm`/…) read or write paths outside the project root.
-- [**prod-guard**](https://github.com/karlkfi/claude-bouncer) — the
-  **infrastructure blast-radius** boundary: denies mutations aimed at production
-  contexts.
-- [**exit-status-guard**](https://github.com/karlkfi/claude-bouncer) — the
-  **evidence** boundary: catches a gate whose failure reads as success — piped
-  into a filter, backgrounded behind an `echo`, or sequenced before a state
-  change with `;`.
-- [**foreground-guard**](https://github.com/karlkfi/claude-bouncer) — the
-  **liveness** boundary: keeps polling, watching, and blocking commands from
-  stalling the session's main thread.
-- [**pr-sentinel**](https://github.com/karlkfi/claude-pr-sentinel) — the
-  **review** boundary: watches a PR to green without merging it, and denies a
-  `gh pr create` whose branch edits lines an open PR already changes.
+- [**workspace-guard**](https://github.com/karlkfi/claude-bouncer) — the **filesystem** boundary: prompts before guarded file commands (`grep`/`sed`/`cat`/`cp`/`rm`/…) read or write paths outside the project root.
+- [**prod-guard**](https://github.com/karlkfi/claude-bouncer) — the **infrastructure blast-radius** boundary: denies mutations aimed at production contexts.
+- [**exit-status-guard**](https://github.com/karlkfi/claude-bouncer) — the **evidence** boundary: catches a gate whose failure reads as success — piped into a filter, backgrounded behind an `echo`, or sequenced before a state change with `;`.
+- [**foreground-guard**](https://github.com/karlkfi/claude-bouncer) — the **liveness** boundary: keeps polling, watching, and blocking commands from stalling the session's main thread.
+- [**pr-sentinel**](https://github.com/karlkfi/claude-pr-sentinel) — the **review** boundary: watches a PR to green without merging it, and denies a `gh pr create` whose branch edits lines an open PR already changes.
 
 They run side by side; each defers to normal permissions outside its own axis.
-The guards share one marketplace —
-[`karlkfi/claude-bouncer`](https://github.com/karlkfi/claude-bouncer#install)
-lists the install line for each — and pr-sentinel ships from its own.
+The guards share one marketplace — [`karlkfi/claude-bouncer`](https://github.com/karlkfi/claude-bouncer#install) lists the install line for each — and pr-sentinel ships from its own.
 
 ### The pairing with workspace-guard
 
-branch-guard and workspace-guard divide one job along two axes, and don't
-overlap:
+branch-guard and workspace-guard divide one job along two axes, and don't overlap:
 
 | Plugin | Guards | Boundary |
 | --- | --- | --- |
 | **branch-guard** | `git`/`gh` commands and `Edit`/`Write`/`MultiEdit`/`NotebookEdit` | the **branch** (`main`/`master` vs. a feature branch) |
 | **workspace-guard** | file readers/writers like `grep`, `sed`, `cat`, `rm`, `cp`, `mv`, `tee`, `dd` | the **path** (inside vs. outside the project root) |
 
-This closes part of branch-guard's first [limitation](#limitations): the raw
-Bash file mutations branch-guard never sees (`sed -i`, `>` redirects, `rm`) are
-exactly what workspace-guard catches — when they touch a path outside your
-workspace. Run both for coverage across both dimensions. (Neither catches an
-in-repo `sed -i` on a protected branch; for a hard guarantee there, use a git
-`pre-commit`/`pre-push` hook or server-side branch protection.)
+This closes part of branch-guard's first [limitation](#limitations): the raw Bash file mutations branch-guard never sees (`sed -i`, `>` redirects, `rm`) are exactly what workspace-guard catches — when they touch a path outside your workspace.
+Run both for coverage across both dimensions.
+(Neither catches an in-repo `sed -i` on a protected branch; for a hard guarantee there, use a git `pre-commit`/`pre-push` hook or server-side branch protection.)
 
 ## Privacy
 
-The hook runs entirely on your machine and has no network access, telemetry, or
-analytics. It reads the pending Bash/edit command and asks `git` a few read-only
-questions about the repository — the current branch (`symbolic-ref`), whether a
-branch exists and where its commits survive (`show-ref`, `for-each-ref`), and
-whether a path is ignored (`check-ignore`) — then decides in memory. It never
-opens the contents of the file being edited and never writes anything to disk.
+The hook runs entirely on your machine and has no network access, telemetry, or analytics.
+It reads the pending Bash/edit command and asks `git` a few read-only questions about the repository — the current branch (`symbolic-ref`), whether a branch exists and where its commits survive (`show-ref`, `for-each-ref`), and whether a path is ignored (`check-ignore`) — then decides in memory.
+It never opens the contents of the file being edited and never writes anything to disk.
 
 ## Contributing
 
-Bugs, ideas, and questions go in
-[GitHub Issues](https://github.com/karlkfi/claude-bouncer/issues).
+Bugs, ideas, and questions go in [GitHub Issues](https://github.com/karlkfi/claude-bouncer/issues).
 
-Run the test suite (spins up a throwaway git repo under `tmp/` and asserts the
-decision for each command/branch combination):
+Run the test suite (spins up a throwaway git repo under `tmp/` and asserts the decision for each command/branch combination):
 
 ```bash
 ./test/run.sh
 ```
 
-It needs Python 3 and `git`, plus `jq` to read the hook's JSON output. On
-Windows, run it from Git Bash — that is the shell Claude Code's Bash tool uses
-there, and it is how CI runs the suite on `windows-latest`.
+It needs Python 3 and `git`, plus `jq` to read the hook's JSON output.
+On Windows, run it from Git Bash — that is the shell Claude Code's Bash tool uses there, and it is how CI runs the suite on `windows-latest`.
 
-Each case invokes the hook the same way Claude Code does, through
-`hooks/run-python-hook.cmd`, so the launcher is exercised by the whole suite
-rather than only in real use. Git Bash routes a `.cmd` through the Windows
-command processor, so the `windows-latest` job covers the batch half of the
-launcher and the Linux jobs cover the POSIX half.
+Each case invokes the hook the same way Claude Code does, through `hooks/run-python-hook.cmd`, so the launcher is exercised by the whole suite rather than only in real use.
+Git Bash routes a `.cmd` through the Windows command processor, so the `windows-latest` job covers the batch half of the launcher and the Linux jobs cover the POSIX half.
 
 ## License
 

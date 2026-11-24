@@ -6,22 +6,18 @@
 
 ![workspace-guard: workspace-boundary shell permissions for Claude Code](docs/img/social-preview.png)
 
-> Stop approving every in-repo grep. Start catching the one that reads `/etc/passwd`.
+> Stop approving every in-repo grep.
+> Start catching the one that reads `/etc/passwd`.
 
-You ask Claude to "find that auth error." It runs `grep -r token /var/log`. Or
-`cat ~/.aws/credentials` while "checking the environment." Or pipes a file from
-outside your repo into `jq`. The default `Bash(grep:*)` permission rules can't
-tell these apart from the dozens of in-repo greps Claude runs every session —
-they either trust every invocation or prompt on every one.
+You ask Claude to "find that auth error."
+It runs `grep -r token /var/log`.
+Or `cat ~/.aws/credentials` while "checking the environment."
+Or pipes a file from outside your repo into `jq`.
+The default `Bash(grep:*)` permission rules can't tell these apart from the dozens of in-repo greps Claude runs every session — they either trust every invocation or prompt on every one.
 
-workspace-guard is a `PreToolUse` hook for the shell tools (`Bash` and
-`PowerShell`) — and for Claude's native file tools (`Read`, `Grep`, `Glob`,
-`Edit`, `Write`, …) — that parses the command, finds its file arguments, and
-asks for confirmation only when a path resolves outside your project root
-(`$CLAUDE_PROJECT_DIR`). In-repo reads and pure pipelines run silently. A path is
-the main way out of that boundary but not the only one, so the same rule covers
-`pkill` and `Stop-Process`, which reach another checkout's processes by pattern
-instead.
+workspace-guard is a `PreToolUse` hook for the shell tools (`Bash` and `PowerShell`) — and for Claude's native file tools (`Read`, `Grep`, `Glob`, `Edit`, `Write`, …) — that parses the command, finds its file arguments, and asks for confirmation only when a path resolves outside your project root (`$CLAUDE_PROJECT_DIR`).
+In-repo reads and pure pipelines run silently.
+A path is the main way out of that boundary but not the only one, so the same rule covers `pkill` and `Stop-Process`, which reach another checkout's processes by pattern instead.
 
 ![Claude Code's permission prompt when grep targets a file outside the project root](docs/img/ask-prompt.png)
 
@@ -45,81 +41,37 @@ instead.
 The hook produces one of four outcomes:
 
 - **allow** — the command runs without a prompt.
-- **ask** — Claude Code shows its standard permission prompt for the command
-  (as above). You approve or reject.
-- **deny** — the command is blocked with a constructive reason. This is the
-  default for **host-wide temp** paths (`/tmp`, `/var/tmp`, `$TMPDIR`, `%TMP%`): they're
-  shared across every session and worktree and live outside the project root, so
-  instead of prompting, the hook steers you to a repo-local gitignored scratch
-  dir (`./tmp/`). It's also the default for **writes into a sibling checkout of
-  the same repo** when the session runs in a git worktree, and for a
-  **process kill that names no path in this workspace** — whether the pattern is
-  the kill's own (`pkill -f`) or reached it through a `pgrep` or a `ps` pipeline
-  (all below). Configurable down to `ask`; see [Configuration](#configuration).
-  It is also the default for an argument the hook **could not read** — a
-  `$VAR`/`$(…)`/`` `…` ``/`~user` token, or a relative path after a `cd` it couldn't
-  follow. That is the hook failing to parse rather than a boundary question, so
-  the reason carries the literal-path rewrite and the agent applies it without
-  anyone being prompted (see [Unreadable arguments deny](#unreadable-arguments-deny)).
-  Both blocking reasons — `ask` and `deny` — open with `workspace-guard: `, so
-  either one names the hook that produced it. Claude Code names the plugin in
-  neither the prompt nor the text handed back from a refusal, so without the
-  opener there is nothing to tell you which of your installed hooks stopped the
-  command. `allow` reasons stay bare: they reach neither a prompt nor the agent.
+- **ask** — Claude Code shows its standard permission prompt for the command (as above).
+  You approve or reject.
+- **deny** — the command is blocked with a constructive reason.
+  This is the default for **host-wide temp** paths (`/tmp`, `/var/tmp`, `$TMPDIR`, `%TMP%`): they're shared across every session and worktree and live outside the project root, so instead of prompting, the hook steers you to a repo-local gitignored scratch dir (`./tmp/`). It's also the default for **writes into a sibling checkout of the same repo** when the session runs in a git worktree, and for a **process kill that names no path in this workspace** — whether the pattern is the kill's own (`pkill -f`) or reached it through a `pgrep` or a `ps` pipeline (all below). Configurable down to `ask`; see [Configuration](#configuration). It is also the default for an argument the hook **could not read** — a `$VAR`/`$(…)`/`` `…` ``/`~user` token, or a relative path after a `cd` it couldn't follow.
+  That is the hook failing to parse rather than a boundary question, so the reason carries the literal-path rewrite and the agent applies it without anyone being prompted (see [Unreadable arguments deny](#unreadable-arguments-deny)).
+  Both blocking reasons — `ask` and `deny` — open with `workspace-guard: `, so either one names the hook that produced it.
+  Claude Code names the plugin in neither the prompt nor the text handed back from a refusal, so without the opener there is nothing to tell you which of your installed hooks stopped the command.
+  `allow` reasons stay bare: they reach neither a prompt nor the agent.
 - **defer** — the hook stays silent; your normal permission settings apply.
-  That is protection only where those settings prompt. In `auto`, `acceptEdits`
-  and `bypassPermissions` they pre-approve, so a defer runs — which is why a
-  silence the hook chose *because it could not read the command* escalates in
-  those three instead (see
-  [Suppression escalation](#suppression-escalation-in-pre-approving-modes)).
+  That is protection only where those settings prompt.
+  In `auto`, `acceptEdits` and `bypassPermissions` they pre-approve, so a defer runs — which is why a silence the hook chose *because it could not read the command* escalates in those three instead (see [Suppression escalation](#suppression-escalation-in-pre-approving-modes)).
 
-Guarded commands: `grep` (and `egrep`, `fgrep`), `rg`, `sed` (and `gsed`), `awk` (and
-`gawk`, `mawk`), `jq`, `yq`, `cat`, `head`, `tail`, `sort`, `wc`, `diff`,
-`file`, `hexdump`, `cut`, `base64` (whose BSD `-o OUT` is treated as a write,
-like `sort -o`), `uniq`, `xxd` (whose optional second positional is an
-*output* file and is treated as a write), plus the cat-shape readers `less`,
-`more`, `tac`, `rev`, `nl`, `od`, `strings`, `cmp`, and
-`zcat`/`gzcat`/`bzcat`/`xzcat`.
-On the write side: `cp`, `mv`, `tee`, `rm`, `unlink`, `ln` (both its source and
-the link it creates), `dd`, and `mktemp` (whose default
-location is host temp — see below). These are the file-reading and file-writing
-commands Claude reaches for most often. `ls` isn't covered yet, and `find` and
-`xargs` are judged by the commands they run rather than as commands of their
-own (see the [shared backlog](https://github.com/karlkfi/claude-bouncer/blob/main/docs/queue/README.md)). A **redirect**
-target (`> file`) is checked on *any* command, guarded or not — it's a write the
-shell performs regardless of the command word.
+Guarded commands: `grep` (and `egrep`, `fgrep`), `rg`, `sed` (and `gsed`), `awk` (and `gawk`, `mawk`), `jq`, `yq`, `cat`, `head`, `tail`, `sort`, `wc`, `diff`, `file`, `hexdump`, `cut`, `base64` (whose BSD `-o OUT` is treated as a write, like `sort -o`), `uniq`, `xxd` (whose optional second positional is an *output* file and is treated as a write), plus the cat-shape readers `less`, `more`, `tac`, `rev`, `nl`, `od`, `strings`, `cmp`, and `zcat`/`gzcat`/`bzcat`/`xzcat`.
+On the write side: `cp`, `mv`, `tee`, `rm`, `unlink`, `ln` (both its source and the link it creates), `dd`, and `mktemp` (whose default location is host temp — see below).
+These are the file-reading and file-writing commands Claude reaches for most often.
+`ls` isn't covered yet, and `find` and `xargs` are judged by the commands they run rather than as commands of their own (see the [shared backlog](https://github.com/karlkfi/claude-bouncer/blob/main/docs/queue/README.md)).
+A **redirect** target (`> file`) is checked on *any* command, guarded or not — it's a write the shell performs regardless of the command word.
 
-Process kills are guarded too, though they touch no file: `pkill`/`killall`,
-PowerShell's `Stop-Process`, and Windows' `taskkill` signal a process by
-*pattern* or by *name*, which reaches every checkout on the host — and so does a
-`kill` fed pids by a `pgrep` or by a `ps` pipeline, whatever it filters with. See
-[Unanchored process-kill deny](#unanchored-process-kill-deny).
+Process kills are guarded too, though they touch no file: `pkill`/`killall`, PowerShell's `Stop-Process`, and Windows' `taskkill` signal a process by *pattern* or by *name*, which reaches every checkout on the host — and so does a `kill` fed pids by a `pgrep` or by a `ps` pipeline, whatever it filters with.
+See [Unanchored process-kill deny](#unanchored-process-kill-deny).
 
-The same outside-workspace check also runs on Claude's **native file tools**, so
-the guard can't be sidestepped by switching from a bash command to the
-equivalent tool — `Read`-ing `/etc/passwd` prompts exactly like `cat /etc/passwd`
-would. `Read`, `Grep`, and `Glob` are treated as reads (they keep the self-read
-exemptions below); `Edit`, `Write`, `MultiEdit`, and `NotebookEdit` are treated
-as writes. See [Beyond Bash](#beyond-bash-native-file-tools).
+The same outside-workspace check also runs on Claude's **native file tools**, so the guard can't be sidestepped by switching from a bash command to the equivalent tool — `Read`-ing `/etc/passwd` prompts exactly like `cat /etc/passwd` would.
+`Read`, `Grep`, and `Glob` are treated as reads (they keep the self-read exemptions below); `Edit`, `Write`, `MultiEdit`, and `NotebookEdit` are treated as writes.
+See [Beyond Bash](#beyond-bash-native-file-tools).
 
-It also stays quiet for paths that aren't really "outside your project":
-`/dev/null` and friends, and the session's **own** Claude-managed scratch tree
-under `/tmp/claude-<uid>/…/<session>/…` — both the background-task output the
-agent polls with `cat`/`tail`/`grep` and the `scratchpad/` dir Claude Code
-points the session at for temp files. That whole tree is exempt for **reads and
-writes alike**: Claude Code chose the path and cleans it up, so a throwaway that
-shouldn't outlive the session belongs there. Sessions that spawn and manage
-background work therefore aren't spammed with prompts for reading their own
-output — in real usage that one case accounted for ~37% of all prompts.
-Read-only commands may also poll a **sibling** session's output under the same
-project's scratch dir — the dispatcher-tails-workers pattern of parallel
-dispatch. Writing into another session's scratch is **denied**, with this
-session's own scratchpad named in the refusal, because the usual cause is a
-path the agent carried across a resume or a compaction — each mints a new
-session id and a new scratch dir, leaving the remembered path pointing at the
-old one. Reads reach a session in any other checkout of the same repository
-too, since Claude Code files each worktree under its own scratch dir; a
-different repository's scratch still asks entirely.
+It also stays quiet for paths that aren't really "outside your project": `/dev/null` and friends, and the session's **own** Claude-managed scratch tree under `/tmp/claude-<uid>/…/<session>/…` — both the background-task output the agent polls with `cat`/`tail`/`grep` and the `scratchpad/` dir Claude Code points the session at for temp files.
+That whole tree is exempt for **reads and writes alike**: Claude Code chose the path and cleans it up, so a throwaway that shouldn't outlive the session belongs there.
+Sessions that spawn and manage background work therefore aren't spammed with prompts for reading their own output — in real usage that one case accounted for ~37% of all prompts.
+Read-only commands may also poll a **sibling** session's output under the same project's scratch dir — the dispatcher-tails-workers pattern of parallel dispatch.
+Writing into another session's scratch is **denied**, with this session's own scratchpad named in the refusal, because the usual cause is a path the agent carried across a resume or a compaction — each mints a new session id and a new scratch dir, leaving the remembered path pointing at the old one.
+Reads reach a session in any other checkout of the same repository too, since Claude Code files each worktree under its own scratch dir; a different repository's scratch still asks entirely.
 
 | Command                              | Decision |
 | ------------------------------------ | -------- |
@@ -283,59 +235,34 @@ different repository's scratch still asks entirely.
 | `mktemp --version` (creates nothing) | defer    |
 | `echo '$(mktemp -d)'` (single-quoted, no subst) | defer |
 
-Note the `jq` row: `.a/.b` is a jq program, not a filesystem path. The hook
-knows the difference because it parses each command against a per-command spec
-of which positions are programs, which are files, and which flags take values.
-A naive string match would either miss real file arguments or false-positive on
-program syntax.
+Note the `jq` row: `.a/.b` is a jq program, not a filesystem path.
+The hook knows the difference because it parses each command against a per-command spec of which positions are programs, which are files, and which flags take values.
+A naive string match would either miss real file arguments or false-positive on program syntax.
 
-The **deny** rows bar one are **host-wide temp** paths — at or under `/tmp`, `/var/tmp`,
-`$TMPDIR`, or the platform's own temp dir (`%TMP%` on Windows) after symlink
-resolution. They're classified from the *same*
-resolved paths the hook already extracts, so `/tmp` appearing only as text (a
-grep pattern, a commit message, an `echo` string) is never matched. The deny is
-the default and can be softened to `ask` or narrowed with an allowlist — see
-[Configuration](#configuration). Beyond guarded-command file arguments, two more
-shapes reach host temp and are covered: a **redirect** target from *any* command
-(`echo secret > /tmp/out`), and **`mktemp`**, whose default location is host temp
-(a bare `mktemp`, `mktemp -d`, or `mktemp -t`/`-p /tmp` all write there) — an
-explicit in-workspace target (`mktemp -p ./scratch …`) is allowed like any other
-in-root write.
+The **deny** rows bar one are **host-wide temp** paths — at or under `/tmp`, `/var/tmp`, `$TMPDIR`, or the platform's own temp dir (`%TMP%` on Windows) after symlink resolution.
+They're classified from the *same* resolved paths the hook already extracts, so `/tmp` appearing only as text (a grep pattern, a commit message, an `echo` string) is never matched.
+The deny is the default and can be softened to `ask` or narrowed with an allowlist — see [Configuration](#configuration).
+Beyond guarded-command file arguments, two more shapes reach host temp and are covered: a **redirect** target from *any* command (`echo secret > /tmp/out`), and **`mktemp`**, whose default location is host temp (a bare `mktemp`, `mktemp -d`, or `mktemp -t`/`-p /tmp` all write there) — an explicit in-workspace target (`mktemp -p ./scratch …`) is allowed like any other in-root write.
 
-The one that is not, `sed -i '' '/^#/d'`, is a token macOS sed reads as the
-script and GNU sed as a file; it denies with the `-e` rewrite, which both seds
-read the same way (see [Limitations](#limitations)).
+The one that is not, `sed -i '' '/^#/d'`, is a token macOS sed reads as the script and GNU sed as a file; it denies with the `-e` rewrite, which both seds read the same way (see [Limitations](#limitations)).
 
-The **ask** rows are the ones that ask a *person* something: this path resolves
-outside the root — is that intended? The rows that deny on an unreadable
-argument ask nobody, because the operator at a prompt sees the same unexpanded
-string the agent does.
+The **ask** rows are the ones that ask a *person* something: this path resolves outside the root — is that intended?
+The rows that deny on an unreadable argument ask nobody, because the operator at a prompt sees the same unexpanded string the agent does.
 
-The **ask** rows assume an interactive or `default`-mode session. In full-auto
-`bypassPermissions` mode (`--dangerously-skip-permissions`) those same paths
-return `deny` instead — equally blocking, with recoverable feedback for the
-agent. See [Configuration](#configuration).
+The **ask** rows assume an interactive or `default`-mode session.
+In full-auto `bypassPermissions` mode (`--dangerously-skip-permissions`) those same paths return `deny` instead — equally blocking, with recoverable feedback for the agent.
+See [Configuration](#configuration).
 
 ### The PowerShell tool
 
-Claude Code ships two shell tools, and a Windows session gets `PowerShell`
-rather than `Bash` whenever Git for Windows isn't installed — as does any
-session with `CLAUDE_CODE_USE_POWERSHELL_TOOL=1`. Both are hooked, but
-PowerShell gets its own parser and its own table. It isn't a POSIX shell: its
-escape character is a backtick, so a native path run through the POSIX tokenizer
-comes out as `C:Usersbobx` — a name that resolves *inside* the project root.
-Reads and writes are cmdlets with their own parameter grammar, and several of
-their aliases (`cat`, `rm`, `cp`, `mv`, `tee`, `sc`) collide with POSIX command
-names that take entirely different flags.
+Claude Code ships two shell tools, and a Windows session gets `PowerShell` rather than `Bash` whenever Git for Windows isn't installed — as does any session with `CLAUDE_CODE_USE_POWERSHELL_TOOL=1`.
+Both are hooked, but PowerShell gets its own parser and its own table.
+It isn't a POSIX shell: its escape character is a backtick, so a native path run through the POSIX tokenizer comes out as `C:Usersbobx` — a name that resolves *inside* the project root.
+Reads and writes are cmdlets with their own parameter grammar, and several of their aliases (`cat`, `rm`, `cp`, `mv`, `tee`, `sc`) collide with POSIX command names that take entirely different flags.
 
-Guarded cmdlets: `Get-Content`, `Select-String`, `Import-Csv`, `Import-Clixml`,
-`Set-Content`, `Add-Content`, `Out-File`, `Tee-Object`, `Export-Csv`,
-`Export-Clixml`, `Copy-Item`, `Move-Item`, `Remove-Item`, `Rename-Item`,
-`New-Item`, and their aliases — plus `mkdir` and `md`, which are *functions*
-over `New-Item` rather than aliases of it and so carry a row of their own.
+Guarded cmdlets: `Get-Content`, `Select-String`, `Import-Csv`, `Import-Clixml`, `Set-Content`, `Add-Content`, `Out-File`, `Tee-Object`, `Export-Csv`, `Export-Clixml`, `Copy-Item`, `Move-Item`, `Remove-Item`, `Rename-Item`, `New-Item`, and their aliases — plus `mkdir` and `md`, which are *functions* over `New-Item` rather than aliases of it and so carry a row of their own.
 Output redirects (`>`, `>>`, `2>`) are checked on any command.
-`Stop-Process` (and `kill`, `spps`) is guarded as well, as a process kill, as is
-Windows' own `taskkill`.
+`Stop-Process` (and `kill`, `spps`) is guarded as well, as a process kill, as is Windows' own `taskkill`.
 
 | Command                                        | Decision |
 | ---------------------------------------------- | -------- |
@@ -371,45 +298,25 @@ Windows' own `taskkill`.
 | `Get-ChildItem C:\out` (not a guarded cmdlet)  | defer    |
 | `Get-Content "unterminated` (unparseable)      | defer    |
 
-Parameters bind the way PowerShell binds them: by name first — including
-unambiguous prefixes (`-Pat` is `-Path`) and the colon form (`-Path:C:\x`) —
-and only then into whatever positional slots are left, so
-`Select-String -Pattern foo C:\x` puts the file in `-Path` however the two are
-ordered. `Set-Location` and `Push-Location` are followed so a later relative
-operand resolves against the right directory, including one inside a later
-`$(…)`; anything the hook can't follow
-(a bare `cd`, a `$var` target, `Pop-Location`) drops tracking and prompts on
-relative operands rather than guessing.
+Parameters bind the way PowerShell binds them: by name first — including unambiguous prefixes (`-Pat` is `-Path`) and the colon form (`-Path:C:\x`) — and only then into whatever positional slots are left, so `Select-String -Pattern foo C:\x` puts the file in `-Path` however the two are ordered.
+`Set-Location` and `Push-Location` are followed so a later relative operand resolves against the right directory, including one inside a later `$(…)`; anything the hook can't follow (a bare `cd`, a `$var` target, `Pop-Location`) drops tracking and prompts on relative operands rather than guessing.
 
-`New-Item` is the one row whose operand roles depend on another parameter. Its
-`-Value` is the new file's content for every item type but a link, and for
-`SymbolicLink`, `HardLink` or `Junction` the FileSystem provider takes it — and
-its `-Target` alias — as the path the link will point at. So the link's own path
-and its target are both checked, both as writes, which is the rule `ln` gets on
-the bash side: a hard link hands the source inode a second name inside the
-workspace, and a later write through that name resolves to a path that reads as
-in-workspace. A `SymbolicLink`'s target drops to a read only where the
-`New-Item` is the whole command, its `-Path` is the link itself (no `-Name`, not
-an existing directory), and that path is already blocked. With no staging, any
-other segment could write through the new link. An `-ItemType` the hook cannot expand is read as a link, since
-that costs a prompt on content rather than losing a target. Unlike `ln`, the new
-link's resolved path is **not** staged, so a read *through* it later in the same
-string is not yet caught.
+`New-Item` is the one row whose operand roles depend on another parameter.
+Its `-Value` is the new file's content for every item type but a link, and for `SymbolicLink`, `HardLink` or `Junction` the FileSystem provider takes it — and its `-Target` alias — as the path the link will point at.
+So the link's own path and its target are both checked, both as writes, which is the rule `ln` gets on the bash side: a hard link hands the source inode a second name inside the workspace, and a later write through that name resolves to a path that reads as in-workspace.
+A `SymbolicLink`'s target drops to a read only where the `New-Item` is the whole command, its `-Path` is the link itself (no `-Name`, not an existing directory), and that path is already blocked.
+With no staging, any other segment could write through the new link.
+An `-ItemType` the hook cannot expand is read as a link, since that costs a prompt on content rather than losing a target.
+Unlike `ln`, the new link's resolved path is **not** staged, so a read *through* it later in the same string is not yet caught.
 
-`Stop-Process` and `taskkill` are guarded as process kills rather than as file
-operations — see [Unanchored process-kill deny](#unanchored-process-kill-deny)
-for the rule and the rewrites each deny recommends.
+`Stop-Process` and `taskkill` are guarded as process kills rather than as file operations — see [Unanchored process-kill deny](#unanchored-process-kill-deny) for the rule and the rewrites each deny recommends.
 
-A cmdlet that isn't in the table is **not checked**, and neither is a .NET call
-or a native `.exe`. See [Limitations](#limitations) for why that's the posture
-and what it costs.
+A cmdlet that isn't in the table is **not checked**, and neither is a .NET call or a native `.exe`.
+See [Limitations](#limitations) for why that's the posture and what it costs.
 
 ### Beyond Bash: native file tools
 
-The hook is registered for Claude's native file tools as well as the shell
-tools, and runs the *same* path check on them — a native tool receives a
-structured path argument, so there's no command to parse, just a path to resolve
-and classify.
+The hook is registered for Claude's native file tools as well as the shell tools, and runs the *same* path check on them — a native tool receives a structured path argument, so there's no command to parse, just a path to resolve and classify.
 
 | Tool call                                         | Decision |
 | ------------------------------------------------- | -------- |
@@ -422,85 +329,51 @@ and classify.
 | `Write` under `/tmp`, `/var/tmp`                   | **deny** |
 | `Write` into a sibling checkout (in a worktree)   | **deny** |
 
-The read/write split matters: `Read`, `Grep`, and `Glob` get the read-only
-exemptions (the session's own and sibling workers' task output, and any
-[`WORKSPACE_GUARD_READ_ALLOW_PREFIXES`](#configuration)), so the agent reading
-back its own output is never prompted. `Edit`, `Write`, `MultiEdit`, and
-`NotebookEdit` are writes, so they also pick up the sibling-checkout deny below.
+The read/write split matters: `Read`, `Grep`, and `Glob` get the read-only exemptions (the session's own and sibling workers' task output, and any [`WORKSPACE_GUARD_READ_ALLOW_PREFIXES`](#configuration)), so the agent reading back its own output is never prompted.
+`Edit`, `Write`, `MultiEdit`, and `NotebookEdit` are writes, so they also pick up the sibling-checkout deny below.
 
-A path the hook can't resolve without a shell — one containing `$VAR` or a
-`~user` prefix — **defers** on these tools, since they don't shell-expand. Full
-command parsing (pipelines, redirects, location tracking) belongs to the shell
-tools; the native handlers are a straight path-in, decision-out check.
+A path the hook can't resolve without a shell — one containing `$VAR` or a `~user` prefix — **defers** on these tools, since they don't shell-expand.
+Full command parsing (pipelines, redirects, location tracking) belongs to the shell tools; the native handlers are a straight path-in, decision-out check.
 
 ### Worktree-aware sibling-checkout deny
 
-When your session runs inside a **git worktree**, a write that lands in a
-*sibling checkout of the same repo* — the primary checkout or another worktree —
-is a distinct, high-consequence mistake: the edit silently lands on the wrong
-branch (often `main`, or another session's in-flight branch). This is easy to do
-by absolute path (`<repo>/cmd/main.go` instead of
-`<repo>/.worktrees/mine/cmd/main.go`).
+When your session runs inside a **git worktree**, a write that lands in a *sibling checkout of the same repo* — the primary checkout or another worktree — is a distinct, high-consequence mistake: the edit silently lands on the wrong branch (often `main`, or another session's in-flight branch).
+This is easy to do by absolute path (`<repo>/cmd/main.go` instead of `<repo>/.worktrees/mine/cmd/main.go`).
 
-The hook treats "sibling checkout" as a recognized tier of the outside-workspace
-check and **denies writes into it** — upgraded from the generic outside-workspace
-`ask`, because a deny self-heals in one agent round trip instead of relying on a
-human to notice and retype the path. The message names the offending checkout,
-its checked-out branch, and the corrected path under your session's checkout
-(same relative path).
+The hook treats "sibling checkout" as a recognized tier of the outside-workspace check and **denies writes into it** — upgraded from the generic outside-workspace `ask`, because a deny self-heals in one agent round trip instead of relying on a human to notice and retype the path.
+The message names the offending checkout, its checked-out branch, and the corrected path under your session's checkout (same relative path).
 
-It then names **both** ways out, and says which case each is for: write to the
-corrected path if this session's tree is the one you meant, or set
-`WORKSPACE_GUARD_OVERRIDE=<reason>` if the other one is. Which case it is turns
-on intent the hook cannot read, and a session that made the second worktree on
-purpose is the one the corrected path is wrong for — so the message asks rather
-than guessing. This applies to:
+It then names **both** ways out, and says which case each is for: write to the corrected path if this session's tree is the one you meant, or set `WORKSPACE_GUARD_OVERRIDE=<reason>` if the other one is.
+Which case it is turns on intent the hook cannot read, and a session that made the second worktree on purpose is the one the corrected path is wrong for — so the message asks rather than guessing.
+This applies to:
 
-- **Bash writes and redirect targets** — `cp`/`mv`/`tee`/`rm`/`dd` operands and
-  `> file` targets that resolve inside a sibling checkout.
-- **The `Edit`, `Write`, `MultiEdit`, and `NotebookEdit` tools** — a write into a
-  sibling checkout through these tools denies too (they are guarded as writes;
-  see [Beyond Bash](#beyond-bash-native-file-tools)).
+- **Bash writes and redirect targets** — `cp`/`mv`/`tee`/`rm`/`dd` operands and `> file` targets that resolve inside a sibling checkout.
+- **The `Edit`, `Write`, `MultiEdit`, and `NotebookEdit` tools** — a write into a sibling checkout through these tools denies too (they are guarded as writes; see [Beyond Bash](#beyond-bash-native-file-tools)).
 
-**Reads keep today's behavior** — reading a sibling checkout risks staleness,
-not damage, so it stays an `ask`. Detection is a no-op when the session isn't in
-a worktree, and a path in an *unrelated* git repo is never treated as a sibling
-(it shares no git common-dir with your repo). For deliberate cross-checkout work,
-`WORKSPACE_GUARD_OVERRIDE=<reason>` downgrades the deny to `ask`; see
-[Configuration](#configuration).
+**Reads keep today's behavior** — reading a sibling checkout risks staleness, not damage, so it stays an `ask`.
+Detection is a no-op when the session isn't in a worktree, and a path in an *unrelated* git repo is never treated as a sibling (it shares no git common-dir with your repo).
+For deliberate cross-checkout work, `WORKSPACE_GUARD_OVERRIDE=<reason>` downgrades the deny to `ask`; see [Configuration](#configuration).
 
-**An operand that is itself a symlink is judged by the link, not its target**,
-for the commands that act on the name rather than the contents: the operands of
-`rm` and `unlink`, and `mv`'s sources. `rm link` unlinks the link and cannot
-write what it points
-at, so `rm ~/.claude/skills/<name>`, where that name is a symlink into a repo
-you have a worktree of, is an ordinary outside-workspace `ask` rather than a
-sibling deny. Everything above the last component still resolves, so
-`rm <link-to-checkout>/main.go` is a real file inside the sibling and still
-denies. `mv`'s **destination** keeps resolving too, because `mv x <link>` writes
-into the directory the link names.
+**An operand that is itself a symlink is judged by the link, not its target**, for the commands that act on the name rather than the contents: the operands of `rm` and `unlink`, and `mv`'s sources.
+`rm link` unlinks the link and cannot write what it points at, so `rm ~/.claude/skills/<name>`, where that name is a symlink into a repo you have a worktree of, is an ordinary outside-workspace `ask` rather than a sibling deny.
+Everything above the last component still resolves, so `rm <link-to-checkout>/main.go` is a real file inside the sibling and still denies.
+`mv`'s **destination** keeps resolving too, because `mv x <link>` writes into the directory the link names.
 
 ### Unanchored process-kill deny
 
-Every check above is about *paths*. `pkill -f` addresses a process by **pattern**
-instead, which is a write to another session's work through the one door the
-workspace boundary can't see:
+Every check above is about *paths*.
+`pkill -f` addresses a process by **pattern** instead, which is a write to another session's work through the one door the workspace boundary can't see:
 
 ```
 pkill -f "make check"      # every checkout on this host running make check
 pkill -f ginkgo            # every checkout on this host running ginkgo
 ```
 
-Run several worktrees of one repo in parallel and a bare-program pattern reaches
-all of them. Measured across one developer's session transcripts: 38 `pkill`
-targets, 2 of which carried anything identifying the worktree that started them.
-One of the other 36 did the damage — a load harness cleaned up with
-`pkill -f 'make scripts-test'` killed the verification run in its own worktree
-and recorded a passing suite as a failure.
+Run several worktrees of one repo in parallel and a bare-program pattern reaches all of them.
+Measured across one developer's session transcripts: 38 `pkill` targets, 2 of which carried anything identifying the worktree that started them.
+One of the other 36 did the damage — a load harness cleaned up with `pkill -f 'make scripts-test'` killed the verification run in its own worktree and recorded a passing suite as a failure.
 
-So `pkill` and `killall` are **denied** unless some operand **anchors** the
-pattern to this workspace — the project root's directory name appearing as a
-whole path component, with a path separator on at least one side:
+So `pkill` and `killall` are **denied** unless some operand **anchors** the pattern to this workspace — the project root's directory name appearing as a whole path component, with a path separator on at least one side:
 
 ```
 pkill -f "issue-125-a1b2/.build/ginkgo"   # anchored -> defer
@@ -511,30 +384,20 @@ killall node                              # -> deny (a process name can't anchor
 pkill -u karl                             # -> deny (no pattern at all)
 ```
 
-A bare word doesn't count however distinctive it looks: the pattern is a
-substring match against a command line, not a path, and the hook can't judge
-whether a given word excludes a sibling. Component bounds treat `-`, `.` and `_`
-as name characters, so a root named `repo` does not anchor inside
-`repo-branch1`. A token still carrying an unresolved expansion never anchors
-either — bash decides at runtime where `$HOME/repo/bin` lands, so the `/repo/` in
-it proves nothing.
+A bare word doesn't count however distinctive it looks: the pattern is a substring match against a command line, not a path, and the hook can't judge whether a given word excludes a sibling.
+Component bounds treat `-`, `.` and `_` as name characters, so a root named `repo` does not anchor inside `repo-branch1`.
+A token still carrying an unresolved expansion never anchors either — bash decides at runtime where `$HOME/repo/bin` lands, so the `/repo/` in it proves nothing.
 
-**Deny rather than ask**, because 36 of those 38 kills would have raised a
-prompt: an `ask` on nearly every kill trains reflexive approval, which is the
-failure it exists to prevent. The two rewrites the message names cost nothing in
-the normal case — run `pgrep -fl <pattern>` and kill the pid(s) you meant, or put
-the workspace path in the pattern. For a deliberate cross-workspace kill,
-`WORKSPACE_GUARD_OVERRIDE=<reason>` downgrades it to `ask`.
+**Deny rather than ask**, because 36 of those 38 kills would have raised a prompt: an `ask` on nearly every kill trains reflexive approval, which is the failure it exists to prevent.
+The two rewrites the message names cost nothing in the normal case — run `pgrep -fl <pattern>` and kill the pid(s) you meant, or put the workspace path in the pattern.
+For a deliberate cross-workspace kill, `WORKSPACE_GUARD_OVERRIDE=<reason>` downgrades it to `ask`.
 
-An **anchored** kill *defers* rather than emitting `allow`: it's out of this
-hook's scope, and an `allow` would short-circuit your own permission settings on
-a destructive command. `kill <pid>` is untouched — killing by pid is the rewrite
-the deny recommends, not a hazard.
+An **anchored** kill *defers* rather than emitting `allow`: it's out of this hook's scope, and an `allow` would short-circuit your own permission settings on a destructive command.
+`kill <pid>` is untouched — killing by pid is the rewrite the deny recommends, not a hazard.
 
 #### Kills fed by a pattern, not by a name
 
-The same blind kill dodges a rule that keys on the *command* by deriving pids
-from a pattern instead:
+The same blind kill dodges a rule that keys on the *command* by deriving pids from a pattern instead:
 
 ```
 kill $(pgrep -f ginkgo)
@@ -543,21 +406,14 @@ ps -eo pid,command | grep ginkgo | grep -v grep | awk '{print $1}' | xargs -r ki
 for p in $(pgrep -f ginkgo); do kill $p; done
 ```
 
-Every one of these kills exactly what `pkill -f ginkgo` kills. The third was the
-worst case: `grep` and `awk` are clean guarded commands, so the hook used to emit
-its blanket `allow` for the whole string *including the kill* — actively
-green-lighting it rather than merely missing it.
+Every one of these kills exactly what `pkill -f ginkgo` kills.
+The third was the worst case: `grep` and `awk` are clean guarded commands, so the hook used to emit its blanket `allow` for the whole string *including the kill* — actively green-lighting it rather than merely missing it.
 
-Two rules close that. First, **a clean guarded command never speaks for a kill**:
-if anything in the command string signals a process, the hook emits nothing
-instead of `allow`, so your own permission settings still get their say. Second,
-the **source that produced the pids is checked as if its pattern were the kill's
-own** — and a launderable kill whose sources all fail the anchor test is denied
-with the same message and the same override.
+Two rules close that.
+First, **a clean guarded command never speaks for a kill**: if anything in the command string signals a process, the hook emits nothing instead of `allow`, so your own permission settings still get their say.
+Second, the **source that produced the pids is checked as if its pattern were the kill's own** — and a launderable kill whose sources all fail the anchor test is denied with the same message and the same override.
 
-What counts as *launderable* is the narrow part: a `kill` whose operands are all
-literal pids or job specs was demonstrably not fed by a pattern, so it stays out
-of the rule even when it shares a command string with a `pgrep`.
+What counts as *launderable* is the narrow part: a `kill` whose operands are all literal pids or job specs was demonstrably not fed by a pattern, so it stays out of the rule even when it shares a command string with a `pgrep`.
 
 ```
 pgrep -f ginkgo | xargs -r kill              # -> deny
@@ -566,13 +422,10 @@ pgrep -f ginkgo; kill 1234                   # literal pid -> defer
 kill $pid                                    # no pattern in the string -> defer
 ```
 
-A **`kill -0` sends no signal** — it's the liveness probe behind a wait loop — so
-where its pids came from doesn't matter either. Both spellings are exempt, `-0`
-and the POSIX `-s 0`/`-n 0`. A *second* signal selector forfeits the exemption,
-because which one wins depends on how it's spelled: a later `-s`/`-n` overrides
-an earlier bare spec, while a later bare spec is read as a pid instead. Rather
-than model that per shell, the hook takes the exemption only when there's nothing
-to arbitrate.
+A **`kill -0` sends no signal** — it's the liveness probe behind a wait loop — so where its pids came from doesn't matter either.
+Both spellings are exempt, `-0` and the POSIX `-s 0`/`-n 0`.
+A *second* signal selector forfeits the exemption, because which one wins depends on how it's spelled: a later `-s`/`-n` overrides an earlier bare spec, while a later bare spec is read as a pid instead.
+Rather than model that per shell, the hook takes the exemption only when there's nothing to arbitrate.
 
 ```
 while kill -0 $(pgrep -f ginkgo); do sleep 1; done   # -> defer
@@ -581,10 +434,8 @@ kill -0 -s 9 $(pgrep -f ginkgo)                      # -s 9 wins -> deny
 pgrep -f ginkgo | xargs -0 kill                      # xargs' NUL flag -> deny
 ```
 
-The pid sources are `pgrep`'s pattern operands and **`ps` itself** — not the
-command filtering it. A `ps` feeding a kill is a pid source whose selection the
-hook can't read, so it denies whatever the filter is, and denies with no filter
-at all:
+The pid sources are `pgrep`'s pattern operands and **`ps` itself** — not the command filtering it.
+A `ps` feeding a kill is a pid source whose selection the hook can't read, so it denies whatever the filter is, and denies with no filter at all:
 
 ```
 ps -eo pid,command | awk '/ginkgo/ {print $1}' | xargs kill   # -> deny
@@ -593,41 +444,27 @@ ps -eo pid= | xargs kill                                      # -> deny
 kill $(ps -eo pid= | head -1)                                 # -> deny
 ```
 
-A **`grep` in the same pipeline is readable**, so its pattern can still anchor
-one: `ps aux | grep "<this-root>/bin/x" | awk '{print $1}' | xargs kill` defers.
-That is the rewrite to reach for. An awk program is not read even when it looks
-anchored — reading one would be unsafe rather than merely imprecise, because an
-inverting program (`awk '!/<this-root>/ {print $1}'`) would scan as anchored
-while killing every *other* checkout.
+A **`grep` in the same pipeline is readable**, so its pattern can still anchor one: `ps aux | grep "<this-root>/bin/x" | awk '{print $1}' | xargs kill` defers. That is the rewrite to reach for. An awk program is not read even when it looks anchored — reading one would be unsafe rather than merely imprecise, because an inverting program (`awk '!/<this-root>/ {print $1}'`) would scan as anchored while killing every *other* checkout.
 
-The pids have to be able to reach the kill: a `ps` counts in the kill's own
-pipeline, or inside a command substitution the kill consumes. So the everyday
-debugging idiom is untouched, because its `ps` consumes a pid rather than
-producing one:
+The pids have to be able to reach the kill: a `ps` counts in the kill's own pipeline, or inside a command substitution the kill consumes.
+So the everyday debugging idiom is untouched, because its `ps` consumes a pid rather than producing one:
 
 ```
 ./run.sh & pid=$!; kill $pid; ps -p $pid    # -> defer
 ```
 
-An **exclusion** can't anchor a pipeline: `grep -v` removes the pids it matches
-rather than selecting them, so `ps … | grep ginkgo | grep -v "<this-root>/skip"`
-still denies — what reaches the kill is every *other* checkout's `ginkgo`. A
-pattern the hook can't read (`grep -f patterns.txt`) can't clear a pipeline
-either; it reports as unreadable rather than as absent.
+An **exclusion** can't anchor a pipeline: `grep -v` removes the pids it matches rather than selecting them, so `ps … | grep ginkgo | grep -v "<this-root>/skip"` still denies — what reaches the kill is every *other* checkout's `ginkgo`.
+A pattern the hook can't read (`grep -f patterns.txt`) can't clear a pipeline either; it reports as unreadable rather than as absent.
 
-Provenance here is co-occurrence within one pipeline or command string, not
-dataflow: the hook doesn't prove the pids the kill receives came from the source
-it found. The literal-pid rule removes the case where that would matter, and
-`WORKSPACE_GUARD_OVERRIDE=<reason>` covers the remainder.
+Provenance here is co-occurrence within one pipeline or command string, not dataflow: the hook doesn't prove the pids the kill receives came from the source it found.
+The literal-pid rule removes the case where that would matter, and `WORKSPACE_GUARD_OVERRIDE=<reason>` covers the remainder.
 
 #### `sh -c` bodies
 
-A shell `-c` operand is a whole command string inside one token. Two separate
-things happen to it.
+A shell `-c` operand is a whole command string inside one token.
+Two separate things happen to it.
 
-**It is checked, when this host is the one that runs it.** The body goes back
-through the hook as its own command string, so it gets the same answer it would
-written unwrapped — wrapping something in `sh -c` doesn't exempt it.
+**It is checked, when this host is the one that runs it.** The body goes back through the hook as its own command string, so it gets the same answer it would written unwrapped — wrapping something in `sh -c` doesn't exempt it.
 
 ```
 sh -c 'cat /etc/hosts'                  # -> ask   (same as `cat /etc/hosts`)
@@ -636,14 +473,9 @@ sh -c 'pkill -f ginkgo'                 # -> deny  (unanchored kill)
 cd /etc && sh -c 'cat hosts'            # -> ask   (the `cd` ran first)
 ```
 
-This covers `sh`, `bash`, `zsh`, `dash` and `ksh`, under the wrappers that
-actually appear — `timeout 5 bash -c …`, `xargs -I{} sh -c …`,
-`find … -exec sh -c … \;`, `env FOO=1 sh -c …`, `nohup`, `nice`, `stdbuf`.
+This covers `sh`, `bash`, `zsh`, `dash` and `ksh`, under the wrappers that actually appear — `timeout 5 bash -c …`, `xargs -I{} sh -c …`, `find … -exec sh -c … \;`, `env FOO=1 sh -c …`, `nohup`, `nice`, `stdbuf`.
 
-**It never earns the string an `allow`.** That holds whether or not the body was
-checked, because plenty of bodies don't run here at all — a path inside a
-container is not a path on this disk — and a body the hook declines to read is
-exactly the case where vouching is indefensible.
+**It never earns the string an `allow`.** That holds whether or not the body was checked, because plenty of bodies don't run here at all — a path inside a container is not a path on this disk — and a body the hook declines to read is exactly the case where vouching is indefensible.
 
 ```
 docker exec c sh -c 'cat /var/lib/x'    # -> defer (a container path, unchecked)
@@ -652,13 +484,10 @@ cat in.txt; sh -c 'cat in.txt'          # -> defer (clean body, still no vouch)
 cat in.txt; bash --version              # allow    (no -c body at all)
 ```
 
-The unchecked list is everything that isn't a local wrapper: container runtimes
-(`docker`, `podman`, `kubectl exec`, …), `ssh`, and anything else the hook
-doesn't recognize. `sudo` is read through like the other wrappers below, so
-`sudo sh -c '…'` is checked, and `sudo docker exec c sh -c '…'` is not. Naming the local wrappers rather than the remote ones is
-deliberate — a runtime nobody has heard of yet reads as remote, and its body is
-left alone rather than judged against paths it never touches. See
-[Limitations](#limitations).
+The unchecked list is everything that isn't a local wrapper: container runtimes (`docker`, `podman`, `kubectl exec`, …), `ssh`, and anything else the hook doesn't recognize.
+`sudo` is read through like the other wrappers below, so `sudo sh -c '…'` is checked, and `sudo docker exec c sh -c '…'` is not.
+Naming the local wrappers rather than the remote ones is deliberate — a runtime nobody has heard of yet reads as remote, and its body is left alone rather than judged against paths it never touches.
+See [Limitations](#limitations).
 
 #### PowerShell: `Stop-Process`
 
@@ -672,30 +501,21 @@ Stop-Process -Id 1234                       # defer  (by pid, the safe rewrite)
 Get-Process | Where-Object { $_.Path -like '<this-root>\*' } | Stop-Process   # defer
 ```
 
-`-Id` with literal pids is the `kill <pid>` case and is untouched. `-Name` is
-denied outright and *cannot* be rescued by an anchor: a process name carries no
-path, so nothing written around it scopes it to this workspace. Everything else —
-`-InputObject`, or processes arriving over the pipeline — is anchored by the rest
-of the **statement**, which is why the `Where-Object` filter two segments
-upstream counts. A statement ends at `;`, a newline, `&&`, `||` or `&`; `|`,
-parentheses and script-block braces all stay inside it.
+`-Id` with literal pids is the `kill <pid>` case and is untouched.
+`-Name` is denied outright and *cannot* be rescued by an anchor: a process name carries no path, so nothing written around it scopes it to this workspace.
+Everything else — `-InputObject`, or processes arriving over the pipeline — is anchored by the rest of the **statement**, which is why the `Where-Object` filter two segments upstream counts.
+A statement ends at `;`, a newline, `&&`, `||` or `&`; `|`, parentheses and script-block braces all stay inside it.
 
-Covering the pipeline form is what keeps the rule honest. Guard only `-Name` and
-the deny teaches the agent to reach for `Get-Process node | Stop-Process`
-instead — the same host-wide kill, one keystroke further away.
+Covering the pipeline form is what keeps the rule honest.
+Guard only `-Name` and the deny teaches the agent to reach for `Get-Process node | Stop-Process` instead — the same host-wide kill, one keystroke further away.
 
-A clean cmdlet in the same string doesn't speak for the kill either. A
-`Stop-Process` or a `taskkill` anywhere in the string — including one inside a
-`$(…)` body — suppresses the blanket `allow` a `Get-Content` would otherwise
-earn, so `Get-Content .\in.txt; Stop-Process -Id 1234` emits nothing and your own
-permission settings decide. That covers the kills this rule leaves alone, by
-literal pid or anchored: they were never the hook's to green-light.
+A clean cmdlet in the same string doesn't speak for the kill either.
+A `Stop-Process` or a `taskkill` anywhere in the string — including one inside a `$(…)` body — suppresses the blanket `allow` a `Get-Content` would otherwise earn, so `Get-Content .\in.txt; Stop-Process -Id 1234` emits nothing and your own permission settings decide.
+That covers the kills this rule leaves alone, by literal pid or anchored: they were never the hook's to green-light.
 
 #### Windows: `taskkill`
 
-`taskkill` is the same kill again, and it reaches both shells — Git Bash spawns
-it as a native executable, PowerShell as a native command — so it is checked in
-both:
+`taskkill` is the same kill again, and it reaches both shells — Git Bash spawns it as a native executable, PowerShell as a native command — so it is checked in both:
 
 ```
 taskkill /IM node.exe                       # -> deny (this is `killall`)
@@ -706,22 +526,16 @@ taskkill /PID 1234                          # defer  (by pid, the safe rewrite)
 taskkill /?                                 # defer  (kills nothing)
 ```
 
-Flags bind whichever prefix you write — `/IM`, `-IM`, or the `//IM` that Git
-Bash's path mangling requires — and their names are case-insensitive, as is the
-command word (`TASKKILL.EXE` is `taskkill`). The rewrite the deny names is this
-command's own: `tasklist /FI "IMAGENAME eq <name>"` to find the process, then
-`taskkill /PID <pid>` to kill just that one.
+Flags bind whichever prefix you write — `/IM`, `-IM`, or the `//IM` that Git Bash's path mangling requires — and their names are case-insensitive, as is the command word (`TASKKILL.EXE` is `taskkill`).
+The rewrite the deny names is this command's own: `tasklist /FI "IMAGENAME eq <name>"` to find the process, then `taskkill /PID <pid>` to kill just that one.
 
-Unlike `Stop-Process`, a `taskkill` is judged on **its own arguments**, not on
-the whole statement. It reads no pipeline — its selection is entirely in its own
-flags — so an anchor written upstream of it isn't what picks the processes, and
-counting one would clear a kill it has nothing to do with.
+Unlike `Stop-Process`, a `taskkill` is judged on **its own arguments**, not on the whole statement.
+It reads no pipeline — its selection is entirely in its own flags — so an anchor written upstream of it isn't what picks the processes, and counting one would clear a kill it has nothing to do with.
 
 ## Install
 
-Install on any Claude Code surface that runs plugin `PreToolUse` hooks — the
-CLI, the IDE extensions, or **Claude Code for Claude Desktop**. Both methods add
-the same marketplace and plugin.
+Install on any Claude Code surface that runs plugin `PreToolUse` hooks — the CLI, the IDE extensions, or **Claude Code for Claude Desktop**.
+Both methods add the same marketplace and plugin.
 
 **Claude Code (CLI or IDE extension)** — run the slash commands:
 
@@ -734,14 +548,10 @@ the same marketplace and plugin.
 
 1. Open the **Customize** tab and go to its plugins / marketplaces section.
 2. Add `karlkfi/claude-bouncer` as a marketplace.
-3. Find **workspace-guard** in that marketplace, install it, and make sure it's
-   enabled.
+3. Find **workspace-guard** in that marketplace, install it, and make sure it's enabled.
 
-**Turn on auto-update while you're here (recommended).** This is a third-party
-git marketplace, so Claude Code won't refresh it on its own — an install pins its
-version until you act (see [Upgrade](#upgrade)). Install time is the decision
-point: add the marketplace to `~/.claude/settings.json` with `autoUpdate: true`
-so new releases reach you automatically.
+**Turn on auto-update while you're here (recommended).** This is a third-party git marketplace, so Claude Code won't refresh it on its own — an install pins its version until you act (see [Upgrade](#upgrade)).
+Install time is the decision point: add the marketplace to `~/.claude/settings.json` with `autoUpdate: true` so new releases reach you automatically.
 
 ```json
 "extraKnownMarketplaces": {
@@ -752,40 +562,28 @@ so new releases reach you automatically.
 }
 ```
 
-Without this you're on the manual update path documented under
-[Upgrade](#upgrade).
+Without this you're on the manual update path documented under [Upgrade](#upgrade).
 
 After installing with either method:
 
-- Requires Python 3 on your PATH. The hook is launched through
-  `scripts/run-python-hook.cmd`, which resolves an interpreter by trying `py -3`,
-  `python`, then `python3` (on Windows) or `python3`, then `python` (elsewhere),
-  so a working Python under any of those names is enough. If none of them runs,
-  the guard reports the problem on stderr rather than failing silently.
+- Requires Python 3 on your PATH.
+  The hook is launched through `scripts/run-python-hook.cmd`, which resolves an interpreter by trying `py -3`, `python`, then `python3` (on Windows) or `python3`, then `python` (elsewhere), so a working Python under any of those names is enough.
+  If none of them runs, the guard reports the problem on stderr rather than failing silently.
 - Restart Claude Code so the hook is registered.
-- **Won't fire where plugin `PreToolUse` hooks don't run.** Claude Cowork and
-  Claude Desktop's *native* assistant don't run them yet, so the guard never
-  fires in those
-  ([anthropics/claude-code#45514](https://github.com/anthropics/claude-code/issues/45514)).
+- **Won't fire where plugin `PreToolUse` hooks don't run.** Claude Cowork and Claude Desktop's *native* assistant don't run them yet, so the guard never fires in those ([anthropics/claude-code#45514](https://github.com/anthropics/claude-code/issues/45514)).
 
-To verify, ask Claude to run `grep root /etc/passwd` — you should see a
-permission prompt citing the outside-workspace path. Then ask it to `grep` a
-file in your repo; it should run without prompting.
+To verify, ask Claude to run `grep root /etc/passwd` — you should see a permission prompt citing the outside-workspace path.
+Then ask it to `grep` a file in your repo; it should run without prompting.
 
 ## Upgrade
 
-workspace-guard installs from a GitHub marketplace, which Claude Code tracks at
-the repository's default branch (`main`). Claude Code auto-updates **official
-Anthropic marketplaces only** — a third-party git marketplace like this one does
-**not** refresh on its own, so an install pins its version until you either turn
-on auto-update or update manually. (Concretely: it's easy to sit on an old
-release for weeks while fixes ship — a friction-cutting parsing fix can be
-invisible to anyone still pinned to the version they first installed.)
+workspace-guard installs from a GitHub marketplace, which Claude Code tracks at the repository's default branch (`main`).
+Claude Code auto-updates **official Anthropic marketplaces only** — a third-party git marketplace like this one does **not** refresh on its own, so an install pins its version until you either turn on auto-update or update manually.
+(Concretely: it's easy to sit on an old release for weeks while fixes ship — a friction-cutting parsing fix can be invisible to anyone still pinned to the version they first installed.)
 
 ### Recommended: turn on auto-update (set-and-forget)
 
-Add the marketplace to `~/.claude/settings.json` with `autoUpdate: true`, then
-restart Claude Code:
+Add the marketplace to `~/.claude/settings.json` with `autoUpdate: true`, then restart Claude Code:
 
 ```json
 "extraKnownMarketplaces": {
@@ -796,14 +594,12 @@ restart Claude Code:
 }
 ```
 
-From then on Claude Code refreshes the marketplace and updates the plugin for
-you — no per-release action. This is the same block shown under
-[Install](#install); set it once at install time and you're done.
+From then on Claude Code refreshes the marketplace and updates the plugin for you — no per-release action.
+This is the same block shown under [Install](#install); set it once at install time and you're done.
 
 ### Manual update
 
-If you'd rather update on demand, refresh the marketplace and update the plugin
-yourself.
+If you'd rather update on demand, refresh the marketplace and update the plugin yourself.
 
 **Claude Code (CLI or IDE extension)** — run the slash commands:
 
@@ -813,512 +609,186 @@ yourself.
 /plugin install workspace-guard@claude-bouncer
 ```
 
-The first command re-fetches the marketplace manifest from the repo; the
-reinstall picks up the new version. Refreshing the catalog alone does **not**
-upgrade an already-installed plugin — hence the explicit reinstall.
+The first command re-fetches the marketplace manifest from the repo; the reinstall picks up the new version.
+Refreshing the catalog alone does **not** upgrade an already-installed plugin — hence the explicit reinstall.
 
-**Claude Code for Claude Desktop / headless** — Claude Desktop doesn't expose the
-`/plugin` slash commands, but the `claude` CLI does the same thing and shares
-Desktop's plugin state, so it works there and in any headless run:
+**Claude Code for Claude Desktop / headless** — Claude Desktop doesn't expose the `/plugin` slash commands, but the `claude` CLI does the same thing and shares Desktop's plugin state, so it works there and in any headless run:
 
 ```
 claude plugin marketplace update claude-bouncer
 claude plugin update workspace-guard@claude-bouncer
 ```
 
-`claude plugin update` updates in place (no uninstall/reinstall needed); it
-prints "restart required to apply".
+`claude plugin update` updates in place (no uninstall/reinstall needed); it prints "restart required to apply".
 
 After upgrading either way:
 
-- Run `/reload-plugins` to activate the updated hook without restarting, or
-  restart Claude Code.
-- Confirm the new version is live: the `/plugin` menu lists the installed
-  version — compare it against the
-  [latest release](https://github.com/karlkfi/claude-bouncer/releases?q=workspace-guard).
+- Run `/reload-plugins` to activate the updated hook without restarting, or restart Claude Code.
+- Confirm the new version is live: the `/plugin` menu lists the installed version — compare it against the [latest release](https://github.com/karlkfi/claude-bouncer/releases?q=workspace-guard).
 
 ## How it works
 
-These steps describe the `Bash` frontend. The `PowerShell` tool has its own
-tokenizer, cmdlet table, and path resolution — backslash is a path character
-there, not an escape (see [The PowerShell tool](#the-powershell-tool)) — and
-rejoins this one at the classification steps (9–13), so both reach a decision
-through the same boundary rules and produce the same reasons. Symlink staging
-(step 7) has no PowerShell equivalent yet.
+These steps describe the `Bash` frontend.
+The `PowerShell` tool has its own tokenizer, cmdlet table, and path resolution — backslash is a path character there, not an escape (see [The PowerShell tool](#the-powershell-tool)) — and rejoins this one at the classification steps (9–13), so both reach a decision through the same boundary rules and produce the same reasons.
+Symlink staging (step 7) has no PowerShell equivalent yet.
 
-1. **Tokenize** the command with Python's `shlex` (POSIX mode, punctuation
-   grouping) so quotes are respected and shell operators (`|`, `&&`, `>`, `;`)
-   become their own tokens. Heredoc body lines (everything between a `<<TAG`
-   redirection and a line matching `TAG`, `<<-` included) are dropped from the
-   raw command string *before* it reaches `shlex`, so body content — HTML like
-   `</div>`, a script, prose with apostrophes, an unbalanced quote — is never
-   tokenized as commands or file arguments and can't abort the parse; the
-   `<<TAG` operator and any trailing `> file` redirect on the command line are
-   kept. A `$(…)` or backtick body is scanned in its own quoting context, so a
-   heredoc opened inside a substitution is dropped too even when the
-   substitution sits in double quotes. Unquoted `#` comments are stripped
-   next, keeping the newline that ends
-   each one so the next line stays its own command group.
-   A newline outside quotes is also a command
-   separator — like `;` — so a guarded command on a line after another is
-   classified on its own rather than merged into its neighbour. `shlex` returns
-   a run of adjacent operators as a single token (`(cd x); …` → `);`, `((cat …`
-   → `((`); each such run is split by longest match back into its individual
-   operators so the command boundary isn't lost and the guarded command inside
-   a subshell or group is still classified.
-2. **Split** into simple commands on those operators and collect each redirect
-   target (`> file`) into the command group it belongs to, so it's later
-   resolved against that group's cwd (see step 6). A redirect target is a write
-   the shell performs regardless of the command word, so it's checked even when
-   the command itself is unguarded — `echo secret > /tmp/out` and `ls >
-   /etc/out.txt` are honored on their targets. The token after `<<`
-   (heredoc delimiter) or `<<<` (here-string content) is skipped — it isn't a
-   path — though a substitution inside a here-string is still analysed, from
-   the cwd its command runs in. An fd number written before a redirect (`2>file`) and an
-   fd-duplication or close (`2>&1`, `2>&-`) are recognised so the digit and the
-   dup target don't leak as phantom file arguments; `>&file` (a redirect to a
-   file, not a dup) still has its target checked.
-3. **Strip** leading shell reserved words (`until grep …`, `if cat …`, `do
-   tail …`, `! grep …`, `time cat …`) and then POSIX `NAME=VALUE` command-prefix
-   assignments (`LC_ALL=C cat …` → `cat …`) from each simple command, in that
-   order, so neither a keyword nor an inline assignment masks the command-name
-   lookup. Quoting disarms both, because bash decides what a word is before it
-   removes the quotes: `'if' cat …` and `'LC_ALL=C' cat …` are programs it
-   looks for and fails to find, so neither is stripped and the `cat` behind
-   them is an argument, not the command.
-4. **Resolve** literal in-command variable assignments (one-pass constant
-   propagation). A standalone `NAME=value` or `export NAME=value` command
-   whose value survives quote removal as a plain literal — non-empty, no `$`,
-   backticks, glob characters, whitespace, or `:` — is remembered, and later
-   plain `$NAME`/`${NAME}` uses in the *same* command string are substituted
-   before the workspace check. So `SP=./out; tail -5 $SP/run.csv` resolves
-   and allows instead of blocking as runtime-expanded, and
-   `f=/etc/passwd; cat $f` prompts on the *resolved* path. This evaluates
-   exactly the expansion bash will perform, using only text already inside
-   the command; the substituted path still goes through every step below.
-   Anything uncertain — a value built from another expansion, a variable
-   later touched by `read`/`eval`/`declare`/`unset` (or by `printf`, but only
-   in its assigning `-v NAME` form), an assignment inside a
-   subshell, pipeline segment, or backgrounded command — drops the variable
-   and keeps the runtime-expanded `deny`. Those rules read the command
-   stripped by step 3, so a reserved word or an inline assignment in front of
-   the mutation (`while read f`, `LC_ALL=C read f`) doesn't hide it. As a
-   side effect, a guarded
-   command reached *through* a variable (`C=cat; $C file`) is now recognised
-   and guarded too.
+1. **Tokenize** the command with Python's `shlex` (POSIX mode, punctuation grouping) so quotes are respected and shell operators (`|`, `&&`, `>`, `;`) become their own tokens.
+   Heredoc body lines (everything between a `<<TAG` redirection and a line matching `TAG`, `<<-` included) are dropped from the raw command string *before* it reaches `shlex`, so body content — HTML like `</div>`, a script, prose with apostrophes, an unbalanced quote — is never tokenized as commands or file arguments and can't abort the parse; the `<<TAG` operator and any trailing `> file` redirect on the command line are kept.
+   A `$(…)` or backtick body is scanned in its own quoting context, so a heredoc opened inside a substitution is dropped too even when the substitution sits in double quotes.
+   Unquoted `#` comments are stripped next, keeping the newline that ends each one so the next line stays its own command group.
+   A newline outside quotes is also a command separator — like `;` — so a guarded command on a line after another is classified on its own rather than merged into its neighbour.
+   `shlex` returns a run of adjacent operators as a single token (`(cd x); …` → `);`, `((cat …` → `((`); each such run is split by longest match back into its individual operators so the command boundary isn't lost and the guarded command inside a subshell or group is still classified.
+2. **Split** into simple commands on those operators and collect each redirect target (`> file`) into the command group it belongs to, so it's later resolved against that group's cwd (see step 6).
+   A redirect target is a write the shell performs regardless of the command word, so it's checked even when the command itself is unguarded — `echo secret > /tmp/out` and `ls > /etc/out.txt` are honored on their targets.
+   The token after `<<` (heredoc delimiter) or `<<<` (here-string content) is skipped — it isn't a path — though a substitution inside a here-string is still analysed, from the cwd its command runs in.
+   An fd number written before a redirect (`2>file`) and an fd-duplication or close (`2>&1`, `2>&-`) are recognised so the digit and the dup target don't leak as phantom file arguments; `>&file` (a redirect to a file, not a dup) still has its target checked.
+3. **Strip** leading shell reserved words (`until grep …`, `if cat …`, `do tail …`, `! grep …`, `time cat …`) and then POSIX `NAME=VALUE` command-prefix assignments (`LC_ALL=C cat …` → `cat …`) from each simple command, in that order, so neither a keyword nor an inline assignment masks the command-name lookup.
+   Quoting disarms both, because bash decides what a word is before it removes the quotes: `'if' cat …` and `'LC_ALL=C' cat …` are programs it looks for and fails to find, so neither is stripped and the `cat` behind them is an argument, not the command.
+4. **Resolve** literal in-command variable assignments (one-pass constant propagation).
+   A standalone `NAME=value` or `export NAME=value` command whose value survives quote removal as a plain literal — non-empty, no `$`, backticks, glob characters, whitespace, or `:` — is remembered, and later plain `$NAME`/`${NAME}` uses in the *same* command string are substituted before the workspace check. So `SP=./out; tail -5 $SP/run.csv` resolves and allows instead of blocking as runtime-expanded, and `f=/etc/passwd; cat $f` prompts on the *resolved* path. This evaluates exactly the expansion bash will perform, using only text already inside the command; the substituted path still goes through every step below. Anything uncertain — a value built from another expansion, a variable later touched by `read`/`eval`/`declare`/`unset` (or by `printf`, but only in its assigning `-v NAME` form), an assignment inside a subshell, pipeline segment, or backgrounded command — drops the variable and keeps the runtime-expanded `deny`. Those rules read the command stripped by step 3, so a reserved word or an inline assignment in front of the mutation (`while read f`, `LC_ALL=C read f`) doesn't hide it. As a side effect, a guarded command reached *through* a variable (`C=cat; $C file`) is now recognised and guarded too.
 
-   A `for VAR in <list>` loop is resolved the same way when every item in the
-   list is a plain literal: instead of poisoning `VAR`, the hook records its
-   candidate value set, and a later `$VAR` in a file argument is expanded to
-   *every* candidate and checked. All candidates in-root → allow; any candidate
-   outside (or host-temp) → prompt, naming the offending resolved path. Since
-   bash visits every value, one outside item taints the whole loop — which is
-   exactly the decision the hook reaches. A glob item (`for f in docs/*.md`) is
-   recorded as the pattern itself: `*`, `?` and `[…]` never match `/`, so every
-   path bash expands the pattern into resolves against the same directory as
-   the pattern does — which is already how a glob written straight into a file
-   argument is treated, so `cat docs/*.md` and the loop over it now agree. A
-   pattern that escapes (`../*.md`, `/etc/*.conf`) resolves outside and prompts
-   like any other outside path.
+   A `for VAR in <list>` loop is resolved the same way when every item in the list is a plain literal: instead of poisoning `VAR`, the hook records its candidate value set, and a later `$VAR` in a file argument is expanded to *every* candidate and checked.
+   All candidates in-root → allow; any candidate outside (or host-temp) → prompt, naming the offending resolved path.
+   Since bash visits every value, one outside item taints the whole loop — which is exactly the decision the hook reaches.
+   A glob item (`for f in docs/*.md`) is recorded as the pattern itself: `*`, `?` and `[…]` never match `/`, so every path bash expands the pattern into resolves against the same directory as the pattern does — which is already how a glob written straight into a file argument is treated, so `cat docs/*.md` and the loop over it now agree.
+   A pattern that escapes (`../*.md`, `/etc/*.conf`) resolves outside and prompts like any other outside path.
 
-   A list item may also be built from an *enclosing* loop's variable, so nested
-   surveys resolve too: in `for d in docs/*; do for f in "$d"/*.md`, the inner
-   variable binds one candidate per (outer candidate, item) pair — here the
-   single pattern `docs/*/*.md`. That cross product is what bash actually
-   visits, and each pair keeps the segment structure of every path it expands
-   to, so the same reasoning applies at any nesting depth. An outside outer
-   candidate carries into every inner candidate built from it and prompts,
-   naming the resolved path. Two limits keep the work bounded as depth
-   multiplies: a variable is poisoned rather than bound when its candidate set
-   would exceed 256 values, and a file argument naming several loop variables
-   keeps its runtime-expanded `deny` when their cross product would. Both
-   poison rather than truncate — a checked prefix would say nothing about the
-   candidates past it.
+   A list item may also be built from an *enclosing* loop's variable, so nested surveys resolve too: in `for d in docs/*; do for f in "$d"/*.md`, the inner variable binds one candidate per (outer candidate, item) pair — here the single pattern `docs/*/*.md`.
+   That cross product is what bash actually visits, and each pair keeps the segment structure of every path it expands to, so the same reasoning applies at any nesting depth.
+   An outside outer candidate carries into every inner candidate built from it and prompts, naming the resolved path.
+   Two limits keep the work bounded as depth multiplies: a variable is poisoned rather than bound when its candidate set would exceed 256 values, and a file argument naming several loop variables keeps its runtime-expanded `deny` when their cross product would.
+   Both poison rather than truncate — a checked prefix would say nothing about the candidates past it.
 
-   The binding also reaches into a **command substitution** inside the loop, so
-   `for f in docs/*.md; do echo "$(wc -l < "$f")"; done` resolves the same `$f`
-   the loop body would. That scan runs once for the whole command string and
-   has no position to snapshot at, so where two loops bind one name it answers
-   for the *union* of both value sets — a superset of either, which can only
-   find more paths, never fewer. A name that is reassigned as a scalar, re-bound
-   by `read`, or bound to a list the hook can't read is not carried at all:
-   once no binding describes it, leaving the token unexpanded is what blocks it.
+   The binding also reaches into a **command substitution** inside the loop, so `for f in docs/*.md; do echo "$(wc -l < "$f")"; done` resolves the same `$f` the loop body would.
+   That scan runs once for the whole command string and has no position to snapshot at, so where two loops bind one name it answers for the *union* of both value sets — a superset of either, which can only find more paths, never fewer.
+   A name that is reassigned as a scalar, re-bound by `read`, or bound to a list the hook can't read is not carried at all: once no binding describes it, leaving the token unexpanded is what blocks it.
 
-   Lists with a non-literal item (a `$` the hook can't resolve, command
-   substitution, or brace like `{a,b}` — brace-expanded by bash, so the literal
-   string isn't a stand-in for the real paths), the `for VAR; do …` ("$@")
-   form, the `for ((…))` arithmetic form, and a loop variable reassigned in the
-   body all keep today's poison behavior.
-5. **Classify** each token using a per-command spec table that knows which flags
-   take values (`grep -e PAT`), which flag-values are themselves files
-   (`grep -f`, `jq --slurpfile`), and how many leading positionals are the
-   program/pattern to skip. A `sed` script is read for the files it names
-   itself: `w`/`W` and an `s` command's `w` flag write one and `r`/`R` read
-   one, so `sed '/x/w ../leak' f` is judged like `cp f ../leak`. GNU and BSD sed
-   disagree about which word is the script after `-i` or `-l` and about whether
-   a `[…]` hides the delimiter, so the script and the operands are read every
-   way and the files unioned. A double-quoted script is read with the literals
-   the same command assigns substituted in, a loop variable's once per value.
+   Lists with a non-literal item (a `$` the hook can't resolve, command substitution, or brace like `{a,b}` — brace-expanded by bash, so the literal string isn't a stand-in for the real paths), the `for VAR; do …` ("$@") form, the `for ((…))` arithmetic form, and a loop variable reassigned in the body all keep today's poison behavior.
+5. **Classify** each token using a per-command spec table that knows which flags take values (`grep -e PAT`), which flag-values are themselves files (`grep -f`, `jq --slurpfile`), and how many leading positionals are the program/pattern to skip.
+   A `sed` script is read for the files it names itself: `w`/`W` and an `s` command's `w` flag write one and `r`/`R` read one, so `sed '/x/w ../leak' f` is judged like `cp f ../leak`.
+   GNU and BSD sed disagree about which word is the script after `-i` or `-l` and about whether a `[…]` hides the delimiter, so the script and the operands are read every way and the files unioned.
+   A double-quoted script is read with the literals the same command assigns substituted in, a loop variable's once per value.
    Any other expansion in it — `$(…)`, a `${…}` operator, `$1`, `$_` — denies.
-   An `awk` program is read for the files it opens: `print` or `printf` with
-   `>`/`>>` writes one, and `getline <` and gawk's `@include` read one. A target
-   written as string literals is judged as the file awk opens, concatenated as
-   awk concatenates it and read both ways where macOS awk, gawk and mawk
-   disagree (an escape like `\q`, a `getline < "a" "b"`). A target named any
-   other way — a variable, a field, a concatenation with one, or a write to
-   `ARGV`/`ARGC` — asks, since the data decides it. `dd` is handled separately because its operands are
-   all `KEY=VALUE` pairs — `if=PATH` and `of=PATH` are the file operands; the
-   rest (`bs=`, `count=`, `conv=`, `iflag=`, `oflag=`, …) are values, not paths.
-   `mktemp` is handled separately too, because its *default* location is host
-   temp: a bare `mktemp`, `mktemp -d`, or `mktemp -t`/bare `--tmpdir` resolves to
-   `$TMPDIR`/`/tmp`, while `-p DIR`/`--tmpdir=DIR` and a slashed template
-   (`mktemp /tmp/x.XXXX`, `./x.XXXX`) name their own location. Short flags may be
-   clustered — `-dp DIR` is decoded as `-d -p DIR`. The GNU/BSD `-t` arity split
-   is sidestepped — `-t` lands in host temp on both. A literal inline
-   `TMPDIR=<dir>` prefix relocates that default location, so `TMPDIR=./scratch
-   mktemp` resolves in-workspace (allow); an explicit `-p`/`--tmpdir=` still wins
-   over it, and a `$`-bearing value degrades to the host-temp default.
-6. **Track** cwd shifts across the chain. A `cd`/`pushd` in an earlier group
-   re-roots relative file paths — including relative redirect targets — in
-   later guarded groups (so `cd /etc && cat passwd` flags `passwd` as
-   `/etc/passwd`, and `cd /tmp && cat in.txt > evil` flags `evil` as
-   `/tmp/evil`). A `cd` inside `( … )` or a bare `$( … )` moves only the
-   commands in that subshell, and leaving it restores the cwd it was entered
-   with, because that is all bash's `cd` reaches there. A `cd` that is itself a
-   pipeline stage or backgrounded (`cd sub | …`, `cd sub &`) moves nothing.
-   A `cd` in a function body moves only the rest of that body, because
-   defining a function runs none of it; a later call to that function leaves
-   the cwd unknown, so a relative path after `f() { cd sub; }; f` gets the
-   untracked-`cd` `deny` below. So does `eval`, `source` or `.`, a `trap`
-   that can fire before the shell exits (any signal but `EXIT`), and a
-   `mapfile -C` callback: each runs code in this shell that the string does not
-   spell out, and that code can `cd` (`source env.sh; cat x` denies). A trap
-   whose action is written out in the string is read instead, and loses the
-   cwd only when that body could move it inline, so
-   `trap 'rm -f ./tmp/k' EXIT INT; cat x` is judged as usual while
-   `trap 'cd ..' INT` and `trap "$t" INT` still deny what follows. A bash
-   5.3 `${ …; }` or `${| …; }` substitution runs in this shell too, and its
-   body is read: a `cd` there moves the command it sits in and everything
-   after (`echo ${ cd ..; }; cat x` asks on `../x`), and a function it defines
-   or a name it may assign is handled as `eval`'s are. A `{ … }` group, loop or `if` that is piped
-   or backgrounded as a whole runs in a subshell as well, so a `cd` inside it
-   moves only the rest of it (`{ cd sub; } | cat; cat ../x` asks). Once
-   `shopt -s lastpipe` may be on, bash runs a pipeline's last stage in the
-   current shell, so the cwd after any last stage is unknown and later
-   relative paths deny; a `shopt -u lastpipe` written unconditionally at the
-   top level turns that off again. A `case` pattern's `)` closes no subshell,
-   so `(case x in x) ;; esac; cd sub); cat ../x` still asks. A
-   `cd`/`pushd` target that is a propagated literal variable (step 4)
-   re-roots the same way (`d=sub; cd $d && cat x.txt`). Two pure,
-   deterministic command substitutions are also recognised as `cd`/`pushd`
-   targets and resolved from the tracked cwd instead of dropping tracking:
-   `$(git rev-parse --show-toplevel)` (computed by walking up to the nearest
-   `.git` entry — git is never executed) and `$(pwd)` (the identity). The
-   whitelist is closed and matched on the exact whitespace-normalized token —
-   there is no general `$( )` evaluation. When the new cwd can't be resolved at
-   hook time — bare `cd`, `cd -`, `cd $HOME`, `popd`, any other substitution —
-   later relative paths short-circuit to `deny`, naming the literal-target
-   rewrite (the hook couldn't read the `cd`, and neither could you).
-7. **Check and stage** `ln`. Its own operands — every source, plus the link or
-   the `-t DIR` the links land in — are checked like any other file argument,
-   in write context, so an `ln` that names a path outside the root answers for
-   it whether or not anything later reads through the link. The one exception
-   is `ln -s SRC LINK` where `LINK` is itself blocked and is not an existing
-   directory: its source is only a string stored in the link, so it is judged
-   as a read, and installing a link outside the root that points into a
-   sibling checkout asks on the link rather than denying as a sibling write.
-   That link is staged, so a later write through it is still judged where it
-   lands. The `-t DIR` and multi-source forms, and a `LINK` that is a
-   directory, put the link at `DIR/basename(SRC)`, which is never staged, so
-   their sources stay writes. A relative source of `ln -s` is resolved from
-   the directory the link lands in, as the kernel reads it, not from the cwd;
-   where `LINK` is a link to a directory, or a directory under BSD's `-F`,
-   from both the directory it points at and the one it sits in, since `-n`
-   and `-F` decide which. A hard link's source
-   stays relative to the cwd. On top of that,
-   symlinks *and* hard links created by an earlier `ln OUTSIDE LINK` in the
-   chain (with or without `-s`) are **staged**: `LINK`'s resolved path is
-   recorded so a later `cat LINK` is flagged too — bash hasn't materialised the
-   link yet at hook time, so a naive `realpath` would otherwise place `LINK`
-   lexically inside the workspace and let it through. Staging covers the
-   `ln SRC LINK` and `ln SRC` forms, where the link's path is a token in the
-   command; under `-t DIR`, and in the multi-source form, the link lands at
-   `DIR/basename(SRC)` and there is no such token to record.
-8. **Resolve** every file argument against `$CLAUDE_PROJECT_DIR` with
-   `realpath`, collapsing `../` and following symlinks. The exception is an
-   operand naming a directory *entry* rather than file contents — the operands
-   of `rm` and `unlink`, and `mv`'s sources, which unlink or rename the name
-   they are given and never write through it. Those resolve every component but
-   the last, so
-   the link rather than its target is what gets checked. Anything that resolves
-   outside the root yields `ask`; otherwise `allow`. A token the hook cannot
-   resolve at all yields `deny` with the rewrite instead. A leading `~` or `~/…` is
-   expanded to your home directory first (bash does this deterministically), so
-   a home path inside the root is allowed instead of needlessly prompted. The
-   home comes from the same lookup Claude Code itself uses, not from `$HOME`,
-   which is unset on Windows. Tokens that bash would still expand unpredictably
-   at runtime — `~user`/`~+`/`~-`, or a `$` that introduces an expansion
-   (`$VAR`, `${VAR}`, `$(...)`, `$1`, `$?`), or a backtick substitution —
-   short-circuit to `ask`, since `realpath` would otherwise lexically place
-   them inside `cwd`.
-   The two whitelisted pure substitutions from step 6
-   (`$(git rev-parse --show-toplevel)`, `$(pwd)`) are the exception: when one
-   *leads* a file operand or redirect target it is resolved against the tracked
-   cwd first — the same value bash computes — and the remainder is concatenated
-   verbatim (bash inserts no separator), so `cp x "$(git rev-parse --show-toplevel)/backup/"`
-   classifies the real in-repo destination instead of asking. Any `$`/`~` left
-   in the remainder, a non-whitelisted substitution, or an untracked cwd keeps
-   the `ask`.
-   A `$` bash keeps literal — trailing (`foo$`) or before a non-name char
-   (`a$.b`) — is treated as part of the filename and resolved normally.
-   On Windows a leading-slash path is read through Git Bash's mount table
-   before `realpath`, since that is what the shell will do with it: `/c/…` is
-   the C: drive, `/tmp` is `%TMP%`, `/bin` is `<git>\usr\bin`, and anything
-   else sits under the Git install dir. Without it the guard named a directory
-   on whichever drive happened to be current. The native `Read`/`Edit` tools
-   are *not* the shell and keep the drive-relative reading they themselves use.
-   Well-known
-   device paths (`/dev/null`, `/dev/stdin`, `/dev/stdout`, `/dev/stderr`,
-   `/dev/zero`, `/dev/tty`, `/dev/random`, `/dev/urandom`, `/dev/fd/N`) are
-   allowlisted and skip the workspace check.
-9. **Allow** the current session's own Claude-managed scratch — and, for
-   read-only commands, sibling sessions of the same project. Claude Code writes
-   each background task's output to
-   `/tmp/claude-<uid>/<encoded-project>/<session-uuid>/tasks/<id>.output`, and
-   the agent reads it back with `cat`/`tail`/`grep`. The same `<session-uuid>`
-   dir holds the `scratchpad/` Claude Code hands the session for temp files.
+   An `awk` program is read for the files it opens: `print` or `printf` with `>`/`>>` writes one, and `getline <` and gawk's `@include` read one.
+   A target written as string literals is judged as the file awk opens, concatenated as awk concatenates it and read both ways where macOS awk, gawk and mawk disagree (an escape like `\q`, a `getline < "a" "b"`).
+   A target named any other way — a variable, a field, a concatenation with one, or a write to `ARGV`/`ARGC` — asks, since the data decides it.
+   `dd` is handled separately because its operands are all `KEY=VALUE` pairs — `if=PATH` and `of=PATH` are the file operands; the rest (`bs=`, `count=`, `conv=`, `iflag=`, `oflag=`, …) are values, not paths.
+   `mktemp` is handled separately too, because its *default* location is host temp: a bare `mktemp`, `mktemp -d`, or `mktemp -t`/bare `--tmpdir` resolves to `$TMPDIR`/`/tmp`, while `-p DIR`/`--tmpdir=DIR` and a slashed template (`mktemp /tmp/x.XXXX`, `./x.XXXX`) name their own location. Short flags may be clustered — `-dp DIR` is decoded as `-d -p DIR`. The GNU/BSD `-t` arity split is sidestepped — `-t` lands in host temp on both. A literal inline `TMPDIR=<dir>` prefix relocates that default location, so `TMPDIR=./scratch mktemp` resolves in-workspace (allow); an explicit `-p`/`--tmpdir=` still wins over it, and a `$`-bearing value degrades to the host-temp default.
+6. **Track** cwd shifts across the chain.
+   A `cd`/`pushd` in an earlier group re-roots relative file paths — including relative redirect targets — in later guarded groups (so `cd /etc && cat passwd` flags `passwd` as `/etc/passwd`, and `cd /tmp && cat in.txt > evil` flags `evil` as `/tmp/evil`).
+   A `cd` inside `( … )` or a bare `$( … )` moves only the commands in that subshell, and leaving it restores the cwd it was entered with, because that is all bash's `cd` reaches there. A `cd` that is itself a pipeline stage or backgrounded (`cd sub | …`, `cd sub &`) moves nothing. A `cd` in a function body moves only the rest of that body, because defining a function runs none of it; a later call to that function leaves the cwd unknown, so a relative path after `f() { cd sub; }; f` gets the untracked-`cd` `deny` below. So does `eval`, `source` or `.`, a `trap` that can fire before the shell exits (any signal but `EXIT`), and a `mapfile -C` callback: each runs code in this shell that the string does not spell out, and that code can `cd` (`source env.sh; cat x` denies). A trap whose action is written out in the string is read instead, and loses the cwd only when that body could move it inline, so `trap 'rm -f ./tmp/k' EXIT INT; cat x` is judged as usual while `trap 'cd ..' INT` and `trap "$t" INT` still deny what follows.
+   A bash 5.3 `${ …; }` or `${| …; }` substitution runs in this shell too, and its body is read: a `cd` there moves the command it sits in and everything after (`echo ${ cd ..; }; cat x` asks on `../x`), and a function it defines or a name it may assign is handled as `eval`'s are. A `{ … }` group, loop or `if` that is piped or backgrounded as a whole runs in a subshell as well, so a `cd` inside it moves only the rest of it (`{ cd sub; } | cat; cat ../x` asks). Once `shopt -s lastpipe` may be on, bash runs a pipeline's last stage in the current shell, so the cwd after any last stage is unknown and later relative paths deny; a `shopt -u lastpipe` written unconditionally at the top level turns that off again. A `case` pattern's `)` closes no subshell, so `(case x in x) ;; esac; cd sub); cat ../x` still asks. A `cd`/`pushd` target that is a propagated literal variable (step 4) re-roots the same way (`d=sub; cd $d && cat x.txt`).
+   Two pure, deterministic command substitutions are also recognised as `cd`/`pushd` targets and resolved from the tracked cwd instead of dropping tracking: `$(git rev-parse --show-toplevel)` (computed by walking up to the nearest `.git` entry — git is never executed) and `$(pwd)` (the identity).
+   The whitelist is closed and matched on the exact whitespace-normalized token — there is no general `$( )` evaluation. When the new cwd can't be resolved at hook time — bare `cd`, `cd -`, `cd $HOME`, `popd`, any other substitution — later relative paths short-circuit to `deny`, naming the literal-target rewrite (the hook couldn't read the `cd`, and neither could you).
+7. **Check and stage** `ln`.
+   Its own operands — every source, plus the link or the `-t DIR` the links land in — are checked like any other file argument, in write context, so an `ln` that names a path outside the root answers for it whether or not anything later reads through the link.
+   The one exception is `ln -s SRC LINK` where `LINK` is itself blocked and is not an existing directory: its source is only a string stored in the link, so it is judged as a read, and installing a link outside the root that points into a sibling checkout asks on the link rather than denying as a sibling write.
+   That link is staged, so a later write through it is still judged where it lands.
+   The `-t DIR` and multi-source forms, and a `LINK` that is a directory, put the link at `DIR/basename(SRC)`, which is never staged, so their sources stay writes.
+   A relative source of `ln -s` is resolved from the directory the link lands in, as the kernel reads it, not from the cwd; where `LINK` is a link to a directory, or a directory under BSD's `-F`, from both the directory it points at and the one it sits in, since `-n` and `-F` decide which.
+   A hard link's source stays relative to the cwd.
+   On top of that, symlinks *and* hard links created by an earlier `ln OUTSIDE LINK` in the chain (with or without `-s`) are **staged**: `LINK`'s resolved path is recorded so a later `cat LINK` is flagged too — bash hasn't materialised the link yet at hook time, so a naive `realpath` would otherwise place `LINK` lexically inside the workspace and let it through.
+   Staging covers the `ln SRC LINK` and `ln SRC` forms, where the link's path is a token in the command; under `-t DIR`, and in the multi-source form, the link lands at `DIR/basename(SRC)` and there is no such token to record.
+8. **Resolve** every file argument against `$CLAUDE_PROJECT_DIR` with `realpath`, collapsing `../` and following symlinks. The exception is an operand naming a directory *entry* rather than file contents — the operands of `rm` and `unlink`, and `mv`'s sources, which unlink or rename the name they are given and never write through it. Those resolve every component but the last, so the link rather than its target is what gets checked. Anything that resolves outside the root yields `ask`; otherwise `allow`. A token the hook cannot resolve at all yields `deny` with the rewrite instead. A leading `~` or `~/…` is expanded to your home directory first (bash does this deterministically), so a home path inside the root is allowed instead of needlessly prompted. The home comes from the same lookup Claude Code itself uses, not from `$HOME`, which is unset on Windows.
+   Tokens that bash would still expand unpredictably at runtime — `~user`/`~+`/`~-`, or a `$` that introduces an expansion (`$VAR`, `${VAR}`, `$(...)`, `$1`, `$?`), or a backtick substitution — short-circuit to `ask`, since `realpath` would otherwise lexically place them inside `cwd`.
+   The two whitelisted pure substitutions from step 6 (`$(git rev-parse --show-toplevel)`, `$(pwd)`) are the exception: when one *leads* a file operand or redirect target it is resolved against the tracked cwd first — the same value bash computes — and the remainder is concatenated verbatim (bash inserts no separator), so `cp x "$(git rev-parse --show-toplevel)/backup/"` classifies the real in-repo destination instead of asking. Any `$`/`~` left in the remainder, a non-whitelisted substitution, or an untracked cwd keeps the `ask`.
+   A `$` bash keeps literal — trailing (`foo$`) or before a non-name char (`a$.b`) — is treated as part of the filename and resolved normally.
+   On Windows a leading-slash path is read through Git Bash's mount table before `realpath`, since that is what the shell will do with it: `/c/…` is the C: drive, `/tmp` is `%TMP%`, `/bin` is `<git>\usr\bin`, and anything else sits under the Git install dir.
+   Without it the guard named a directory on whichever drive happened to be current.
+   The native `Read`/`Edit` tools are *not* the shell and keep the drive-relative reading they themselves use.
+   Well-known device paths (`/dev/null`, `/dev/stdin`, `/dev/stdout`, `/dev/stderr`, `/dev/zero`, `/dev/tty`, `/dev/random`, `/dev/urandom`, `/dev/fd/N`) are allowlisted and skip the workspace check.
+9. **Allow** the current session's own Claude-managed scratch — and, for read-only commands, sibling sessions of the same project.
+   Claude Code writes each background task's output to `/tmp/claude-<uid>/<encoded-project>/<session-uuid>/tasks/<id>.output`, and the agent reads it back with `cat`/`tail`/`grep`.
+   The same `<session-uuid>` dir holds the `scratchpad/` Claude Code hands the session for temp files.
    Neither is the boundary this hook guards, so:
-   - a path under `/tmp/claude-<uid>/` that carries the **current** session's id
-     as a path segment is allowed for any guarded command, **read or write** —
-     this check runs before the read/write split, so the session's whole scratch
-     tree is writable, not just readable; and
-   - for **read-only** commands, a path under the current project's scratch dir
-     (`/tmp/claude-<uid>/<encoded-project>/`) is allowed even when it belongs to
-     a *different* session — the dispatcher-tails-workers pattern of parallel
-     dispatch. The hook finds that project dir by scanning the temp root for the
-     slug that holds the current `session_id`, so it never depends on Claude's
-     undocumented slug encoding (which differs between a worktree and the main
-     checkout); if it can't be located, the read simply keeps prompting.
-     Because every worktree gets a slug of its own, the same read is allowed
-     for a session that ran in any other checkout of this repository, so a
-     dispatcher in one worktree can tail workers in others. Where that session
-     ran is the `cwd` Claude Code recorded in its transcript under
-     `~/.claude/projects/`, and its repository is found by walking up from
-     there to a `.git` — never by reading the slug, whose encoding collides
-     (`other.repo` and `other-repo`). A session with no transcript, or one
-     that ran in another repository, still asks.
+   - a path under `/tmp/claude-<uid>/` that carries the **current** session's id as a path segment is allowed for any guarded command, **read or write** — this check runs before the read/write split, so the session's whole scratch tree is writable, not just readable; and
+   - for **read-only** commands, a path under the current project's scratch dir (`/tmp/claude-<uid>/<encoded-project>/`) is allowed even when it belongs to a *different* session — the dispatcher-tails-workers pattern of parallel dispatch.
+     The hook finds that project dir by scanning the temp root for the slug that holds the current `session_id`, so it never depends on Claude's undocumented slug encoding (which differs between a worktree and the main checkout); if it can't be located, the read simply keeps prompting.
+     Because every worktree gets a slug of its own, the same read is allowed for a session that ran in any other checkout of this repository, so a dispatcher in one worktree can tail workers in others.
+     Where that session ran is the `cwd` Claude Code recorded in its transcript under `~/.claude/projects/`, and its repository is found by walking up from there to a `.git` — never by reading the slug, whose encoding collides (`other.repo` and `other-repo`).
+     A session with no transcript, or one that ran in another repository, still asks.
 
-   The write half of that second rule is **denied** rather than allowed, and the
-   refusal names this session's own `scratchpad/`. The usual cause is a path the
-   agent carried across a resume or a compaction — each mints a new session id
-   and a new scratch dir under the same project slug, so the remembered path now
-   names a sibling's — and that is indistinguishable here from a deliberate
-   cross-session write, which is what `WORKSPACE_GUARD_OVERRIDE=<reason>` is for.
-   Where the session's own `scratchpad/` isn't on disk to steer at, the message
-   falls back to the repo-local scratch dir.
+   The write half of that second rule is **denied** rather than allowed, and the refusal names this session's own `scratchpad/`.
+   The usual cause is a path the agent carried across a resume or a compaction — each mints a new session id and a new scratch dir under the same project slug, so the remembered path now names a sibling's — and that is indistinguishable here from a deliberate cross-session write, which is what `WORKSPACE_GUARD_OVERRIDE=<reason>` is for.
+   Where the session's own `scratchpad/` isn't on disk to steer at, the message falls back to the repo-local scratch dir.
 
-   `/tmp/claude-<uid>` is the POSIX root; on Windows there is no per-UID suffix
-   because the temp dir is already per-user, so the root is `%LOCALAPPDATA%\Temp\claude`.
+   `/tmp/claude-<uid>` is the POSIX root; on Windows there is no per-UID suffix because the temp dir is already per-user, so the root is `%LOCALAPPDATA%\Temp\claude`.
 
-   Any access to a *different project's* scratch still prompts. Because these
-   allows match on the resolved `realpath` — and run *after* the `ln`-staging
-   check — a symlink planted in the scratch dir that escapes the root is still
-   flagged.
-10. **Allow reads of Claude-owned project data.** For read-only commands (`cat`,
-   `head`, `tail`, `grep`, `rg`, `sed`, `awk`, `jq`, `yq`, `diff`, `sort`,
-   `wc`, `file`, `hexdump`, `cut`, `base64`, and their aliases), a path whose
-   resolved
-   `realpath` is under `~/.claude/projects/` is allowed silently. That
-   directory is written exclusively by the Claude Code harness (session
-   metadata, sub-agent data, workflow journals) and reading it back is not
-   the boundary this hook guards. Write commands (`cp`, `mv`, `tee`, `rm`,
-   `unlink`) are **not** exempt — they must still pass the workspace check,
-   and neither do `ln`'s operands, which are judged in write context for the
-   same reason `cp`'s sources are — bar a symbolic link's source when the
-   link is blocked anyway (step 7). Nor is a read command invoked with a
-   write-mode flag (`sed -i` /
-   `--in-place`, gawk `-i` / `--include`, `yq -i` / `--inplace`, `sort -o`
-   / `--output`, BSD `base64 -o`): any of these flips the whole invocation into
-   write mode.
-   The second positional of `uniq IN OUT` / `xxd IN OUT` is an output file
-   and is checked as a write (the `IN` operand keeps the exemption).
-   The exemption also does not apply to redirect targets, since the hook
-   cannot verify redirect direction without running the command. Users can
-   extend the list with `WORKSPACE_GUARD_READ_ALLOW_PREFIXES`; see
-   [Configuration](#configuration).
-11. **Deny** host-wide temp. After the steps above, any *remaining*
-   outside-workspace file argument whose resolved `realpath` is at or under a
-   host-temp root (`/tmp`, `/var/tmp`, `$TMPDIR`, and the platform's own temp
-   dir — `%TMP%` on Windows, which the POSIX names don't cover — all resolved
-   first, so macOS's `/tmp → /private/tmp` and a `$TMPDIR` under
-   `/var/folders/…` are caught; on Windows a command's own `/tmp/x` resolves to
-   `%TMP%` too, so it lands on the same root) is
-   reclassified from `ask` to `deny`, with a message steering to a repo-local
-   gitignored scratch dir — and, when the session's `scratchpad/` from step 9 is
-   on disk, naming that too as the place for a throwaway that shouldn't outlive
-   the session. Because this runs on the already-resolved file
-   arguments, a `/tmp` that appears only as text (a grep pattern, an `echo`
-   string) is never matched. The Claude-managed temp root from step 9 is
-   excluded — another session's task output keeps its `ask`, or the step 9
-   verdict where that applies (allow for a same-project read, deny for a
-   same-project write), rather than this steer-to-`./tmp/` deny.
-   The action, scratch-dir name, extra roots,
-   and an allowlist escape hatch are all configurable; see
-   [Configuration](#configuration).
-12. **Deny** writes into a sibling checkout of the same repo. When the session
-   root is inside a git worktree, the hook resolves the enclosing git checkout of
-   each *write* path (walking up from the path itself to the nearest `.git`,
-   reading only tiny git metadata) and compares its shared `--git-common-dir` to
-   the session's. A path
-   inside *or equal to* a *different* checkout of the *same* repo (same
-   common-dir, different root) is reclassified to `deny`, naming the checkout,
-   its branch, and the
-   corrected in-session path. Removing a whole sibling worktree is therefore the
-   same decision as removing one file inside it. Only writes upgrade — reads
-   keep step 8's `ask`.
-   A path in an unrelated repo has a different common-dir and stays a generic
-   outside `ask`. The same rule is the sole active check on the `Edit`, `Write`,
-   `MultiEdit`, and `NotebookEdit` tools. `WORKSPACE_GUARD_OVERRIDE=<reason>`
-   downgrades it to `ask`; see [Configuration](#configuration).
-13. **Deny** a process kill with no workspace anchor. `pkill` and `killall`
-   address a process by pattern rather than by path, so they reach every checkout
-   on the host. Value-taking flags come off (`-u karl`, `--signal TERM`), `--`
-   ends options, and a signal flag (`-9`, `-TERM`) is skipped like any other
-   flag; what remains are the pattern operands. Unless one of them contains the
-   project root's directory name as a whole path component *with a path
-   separator on at least one side*, the command is `deny`ed with the two safe
-   rewrites. Both misparse directions land on `deny`, so a flag table that
-   lags an implementation's options costs friction, never a hole. An anchored
-   kill emits nothing — it **defers** rather than `allow`ing, leaving your own
-   permission settings in charge of a destructive command.
-   `WORKSPACE_GUARD_OVERRIDE=<reason>` downgrades the deny to `ask`. PowerShell's
-   `Stop-Process` runs the same check with its own selection rules — the anchor is
-   looked for across the whole statement there, since the anchored form is a
-   `Where-Object` filter upstream in the pipeline. Windows' `taskkill` runs it in
-   *both* frontends, on its own arguments only: it reads no pipeline, so nothing
-   upstream selects what it kills. A literal `/PID` defers, `/IM` and `/FI` deny,
-   and `/?` kills nothing so it defers too. See
-   [Unanchored process-kill deny](#unanchored-process-kill-deny).
-   The same step covers a kill fed by a pattern rather than named by one, in the
-   Bash tool. Any signalling command in the string (`kill`, `pkill`, `killall`,
-   `taskkill`, directly or as an `xargs` command word) suppresses the blanket
-   `allow` a clean guarded command would otherwise earn, so a `grep` can never
-   carry an `xargs kill` past your permission settings — `allow` speaks for the
-   whole string. A shell `-c` body suppresses it the same way: it arrives as one
-   token, and even once step 15 has read it the hook has no basis to vouch for a
-   construct it reads at one remove. **Interpreter code suppresses it on the same
-   grounds** — `python3 -c`, `python3 -m <module>`, `perl -e`, a heredoc fed to
-   `python3`, a script resolving outside the root, GNU sed's `e` command and
-   `s///e` flag, or an awk program's `system()`, pipes and gawk `@load`, in the
-   Bash tool. A `-m`
-   operand is a module name resolved on `sys.path`, so it is code the hook
-   cannot read rather than a file beside the cwd. Interpreters are not guarded
-   commands and a bare `python3 x.py` still defers to your own permission rules;
-   what the hook withdraws is only its willingness to *vouch* for them, so
-   `cat README.md && python3 -c '…'` no longer runs silently. A script path that
-   resolves **inside** the workspace is exempt — that is repo-resident code the
-   boundary already trusts — unless the same string also writes it (a redirect,
-   `tee`, `cp`/`mv`/`ln` onto it, `sed -i`), since then it is code the agent has
-   just authored: `cat > t.sh <<'EOF' … EOF; bash t.sh` defers, and so does
-   `./t.sh` or `source t.sh` after the same write. An interpreter run on another
-   filesystem (`ssh`, `docker exec`, `kubectl exec`) and a `--version`/`--help`
-   query are exempt too.
-   A `Stop-Process` or a `taskkill` suppresses
-   the PowerShell `allow` too,
-   including one this step had no cause to deny and one written inside a `$(…)`
-   body. The pid *sources* then go through the anchor test above: `pgrep`'s
-   pattern operands, and **`ps`** — which is the source in a pipeline, rather
-   than whatever filters it. A `ps` contributes an unreadable pattern that can
-   never anchor, so the pipeline is caught whatever the filter is (`awk`, `sed`,
-   `cut`) and with no filter at all; a `grep` in the same pipeline is readable,
-   so its pattern can still anchor. A `kill` whose operands aren't all literal
-   pids, with no anchoring pattern, is `deny`ed as one. `ps` counts only where
-   its pids can reach the kill — the same pipeline, or a substitution the kill
-   consumes — so `run & p=$!; kill $p; ps -p $p` is untouched. An inverting
-   `grep -v` and a pattern read from a `-f` file contribute nothing that can
-   anchor.
-14. **Recurse into command substitutions.** A guarded command hidden in a
-   `"$(…)"` or backtick `` `…` `` substitution — `echo "$(mktemp -p /tmp x)"`,
-   `` x=`grep secret /etc/passwd` `` — isn't tokenized as its own command by the
-   step-1 lexer (the metacharacters are inside quotes), so its file ops would be
-   invisible. The hook scans the *raw* command for substitution bodies in
-   unquoted or double-quoted context (single-quoted `'$(…)'` is a bash literal
-   and is skipped; `$((…))` arithmetic has no command) and runs each body back
-   through steps 1–15. Heredoc bodies leave the command line first and are
-   scanned on their own: a quoted-delimiter body is literal to bash and is
-   dropped, an unquoted one is scanned with quoting turned off, because bash
-   applies none inside it — so the apostrophe in a `don't` there is text, not
-   the start of a quoted run that would hide a live `$(…)` after it. Only
-   *offenders* bubble up: a clean guarded command inside
-   a substitution never turns a deferring outer command into an `allow` — this
-   step can only add friction. (The bare unquoted `$(…)` form was already caught,
-   because its `(`/`)` split the inner command into its own group.) Nesting is
-   followed 25 levels deep; see Limitations for what the bound costs.
+   Any access to a *different project's* scratch still prompts.
+   Because these allows match on the resolved `realpath` — and run *after* the `ln`-staging check — a symlink planted in the scratch dir that escapes the root is still flagged.
+10. **Allow reads of Claude-owned project data.** For read-only commands (`cat`, `head`, `tail`, `grep`, `rg`, `sed`, `awk`, `jq`, `yq`, `diff`, `sort`, `wc`, `file`, `hexdump`, `cut`, `base64`, and their aliases), a path whose resolved `realpath` is under `~/.claude/projects/` is allowed silently.
+    That directory is written exclusively by the Claude Code harness (session metadata, sub-agent data, workflow journals) and reading it back is not the boundary this hook guards.
+    Write commands (`cp`, `mv`, `tee`, `rm`, `unlink`) are **not** exempt — they must still pass the workspace check, and neither do `ln`'s operands, which are judged in write context for the same reason `cp`'s sources are — bar a symbolic link's source when the link is blocked anyway (step 7).
+    Nor is a read command invoked with a write-mode flag (`sed -i` / `--in-place`, gawk `-i` / `--include`, `yq -i` / `--inplace`, `sort -o` / `--output`, BSD `base64 -o`): any of these flips the whole invocation into write mode.
+    The second positional of `uniq IN OUT` / `xxd IN OUT` is an output file and is checked as a write (the `IN` operand keeps the exemption).
+    The exemption also does not apply to redirect targets, since the hook cannot verify redirect direction without running the command.
+    Users can extend the list with `WORKSPACE_GUARD_READ_ALLOW_PREFIXES`; see [Configuration](#configuration).
+11. **Deny** host-wide temp.
+    After the steps above, any *remaining* outside-workspace file argument whose resolved `realpath` is at or under a host-temp root (`/tmp`, `/var/tmp`, `$TMPDIR`, and the platform's own temp dir — `%TMP%` on Windows, which the POSIX names don't cover — all resolved first, so macOS's `/tmp → /private/tmp` and a `$TMPDIR` under `/var/folders/…` are caught; on Windows a command's own `/tmp/x` resolves to `%TMP%` too, so it lands on the same root) is reclassified from `ask` to `deny`, with a message steering to a repo-local gitignored scratch dir — and, when the session's `scratchpad/` from step 9 is on disk, naming that too as the place for a throwaway that shouldn't outlive the session.
+    Because this runs on the already-resolved file arguments, a `/tmp` that appears only as text (a grep pattern, an `echo` string) is never matched.
+    The Claude-managed temp root from step 9 is excluded — another session's task output keeps its `ask`, or the step 9 verdict where that applies (allow for a same-project read, deny for a same-project write), rather than this steer-to-`./tmp/` deny.
+    The action, scratch-dir name, extra roots, and an allowlist escape hatch are all configurable; see [Configuration](#configuration).
+12. **Deny** writes into a sibling checkout of the same repo.
+    When the session root is inside a git worktree, the hook resolves the enclosing git checkout of each *write* path (walking up from the path itself to the nearest `.git`, reading only tiny git metadata) and compares its shared `--git-common-dir` to the session's.
+    A path inside *or equal to* a *different* checkout of the *same* repo (same common-dir, different root) is reclassified to `deny`, naming the checkout, its branch, and the corrected in-session path.
+    Removing a whole sibling worktree is therefore the same decision as removing one file inside it.
+    Only writes upgrade — reads keep step 8's `ask`.
+    A path in an unrelated repo has a different common-dir and stays a generic outside `ask`.
+    The same rule is the sole active check on the `Edit`, `Write`, `MultiEdit`, and `NotebookEdit` tools.
+    `WORKSPACE_GUARD_OVERRIDE=<reason>` downgrades it to `ask`; see [Configuration](#configuration).
+13. **Deny** a process kill with no workspace anchor.
+    `pkill` and `killall` address a process by pattern rather than by path, so they reach every checkout on the host.
+    Value-taking flags come off (`-u karl`, `--signal TERM`), `--` ends options, and a signal flag (`-9`, `-TERM`) is skipped like any other flag; what remains are the pattern operands.
+    Unless one of them contains the project root's directory name as a whole path component *with a path separator on at least one side*, the command is `deny`ed with the two safe rewrites.
+    Both misparse directions land on `deny`, so a flag table that lags an implementation's options costs friction, never a hole.
+    An anchored kill emits nothing — it **defers** rather than `allow`ing, leaving your own permission settings in charge of a destructive command.
+    `WORKSPACE_GUARD_OVERRIDE=<reason>` downgrades the deny to `ask`.
+    PowerShell's `Stop-Process` runs the same check with its own selection rules — the anchor is looked for across the whole statement there, since the anchored form is a `Where-Object` filter upstream in the pipeline.
+    Windows' `taskkill` runs it in *both* frontends, on its own arguments only: it reads no pipeline, so nothing upstream selects what it kills.
+    A literal `/PID` defers, `/IM` and `/FI` deny, and `/?` kills nothing so it defers too.
+    See [Unanchored process-kill deny](#unanchored-process-kill-deny).
+    The same step covers a kill fed by a pattern rather than named by one, in the Bash tool.
+    Any signalling command in the string (`kill`, `pkill`, `killall`, `taskkill`, directly or as an `xargs` command word) suppresses the blanket `allow` a clean guarded command would otherwise earn, so a `grep` can never carry an `xargs kill` past your permission settings — `allow` speaks for the whole string.
+    A shell `-c` body suppresses it the same way: it arrives as one token, and even once step 15 has read it the hook has no basis to vouch for a construct it reads at one remove.
+    **Interpreter code suppresses it on the same grounds** — `python3 -c`, `python3 -m <module>`, `perl -e`, a heredoc fed to `python3`, a script resolving outside the root, GNU sed's `e` command and `s///e` flag, or an awk program's `system()`, pipes and gawk `@load`, in the Bash tool.
+    A `-m` operand is a module name resolved on `sys.path`, so it is code the hook cannot read rather than a file beside the cwd.
+    Interpreters are not guarded commands and a bare `python3 x.py` still defers to your own permission rules; what the hook withdraws is only its willingness to *vouch* for them, so `cat README.md && python3 -c '…'` no longer runs silently.
+    A script path that resolves **inside** the workspace is exempt — that is repo-resident code the boundary already trusts — unless the same string also writes it (a redirect, `tee`, `cp`/`mv`/`ln` onto it, `sed -i`), since then it is code the agent has just authored: `cat > t.sh <<'EOF' … EOF; bash t.sh` defers, and so does `./t.sh` or `source t.sh` after the same write.
+    An interpreter run on another filesystem (`ssh`, `docker exec`, `kubectl exec`) and a `--version`/`--help` query are exempt too.
+    A `Stop-Process` or a `taskkill` suppresses the PowerShell `allow` too, including one this step had no cause to deny and one written inside a `$(…)` body. The pid *sources* then go through the anchor test above: `pgrep`'s pattern operands, and **`ps`** — which is the source in a pipeline, rather than whatever filters it. A `ps` contributes an unreadable pattern that can never anchor, so the pipeline is caught whatever the filter is (`awk`, `sed`, `cut`) and with no filter at all; a `grep` in the same pipeline is readable, so its pattern can still anchor. A `kill` whose operands aren't all literal pids, with no anchoring pattern, is `deny`ed as one. `ps` counts only where its pids can reach the kill — the same pipeline, or a substitution the kill consumes — so `run & p=$!; kill $p; ps -p $p` is untouched.
+    An inverting `grep -v` and a pattern read from a `-f` file contribute nothing that can anchor.
+14. **Recurse into command substitutions.** A guarded command hidden in a `"$(…)"` or backtick `` `…` `` substitution — `echo "$(mktemp -p /tmp x)"`, `` x=`grep secret /etc/passwd` `` — isn't tokenized as its own command by the step-1 lexer (the metacharacters are inside quotes), so its file ops would be invisible.
+    The hook scans the *raw* command for substitution bodies in unquoted or double-quoted context (single-quoted `'$(…)'` is a bash literal and is skipped; `$((…))` arithmetic has no command) and runs each body back through steps 1–15.
+    Heredoc bodies leave the command line first and are scanned on their own: a quoted-delimiter body is literal to bash and is dropped, an unquoted one is scanned with quoting turned off, because bash applies none inside it — so the apostrophe in a `don't` there is text, not the start of a quoted run that would hide a live `$(…)` after it. Only *offenders* bubble up: a clean guarded command inside a substitution never turns a deferring outer command into an `allow` — this step can only add friction. (The bare unquoted `$(…)` form was already caught, because its `(`/`)` split the inner command into its own group.)
+    Nesting is followed 25 levels deep; see Limitations for what the bound costs.
 
-   The words after a substitution's close stay with the command it sits in, so
-   `cat <(echo a) /outside/f` is a read and `echo $(date) cat /outside/f`, which
-   opens nothing, is not. That holds only where the command is a plain literal
-   name. A substitution can expand to nothing, so at the head, straight after a
-   wrapper's own options, behind `eval`, or behind `$X`, the words after it are
-   read as a command of their own: `env $(true) cat /outside/f` runs the `cat`,
-   and asks. A wrapper that already named its command resumes like the command
-   itself, so `env -u X grep -v <(echo x) /outside/f` asks too. A `<(…)` or
-   `>(…)` is read as the `/dev/fd/63` bash passes in its place, so it still
-   fills a pattern or program slot: in `grep -v <(echo x) /outside/f` the file
-   is the file operand, and asks.
+    The words after a substitution's close stay with the command it sits in, so `cat <(echo a) /outside/f` is a read and `echo $(date) cat /outside/f`, which opens nothing, is not. That holds only where the command is a plain literal name. A substitution can expand to nothing, so at the head, straight after a wrapper's own options, behind `eval`, or behind `$X`, the words after it are read as a command of their own: `env $(true) cat /outside/f` runs the `cat`, and asks.
+    A wrapper that already named its command resumes like the command itself, so `env -u X grep -v <(echo x) /outside/f` asks too.
+    A `<(…)` or `>(…)` is read as the `/dev/fd/63` bash passes in its place, so it still fills a pattern or program slot: in `grep -v <(echo x) /outside/f` the file is the file operand, and asks.
 
-   A body starts from the enclosing string's propagated literal variables
-   (step 4), since bash's substitution inherits them: without that,
-   `f=docs/x; grep -c p "$(echo "$f")"` would prompt on an unresolvable `$f`
-   where the same command without the `$( )` is allowed. The scan runs once for
-   the whole string, after step 4 has finished, so it has no position at which
-   to snapshot the map — it therefore gets only the names holding *one* literal
-   at every point in the string. A name reassigned to a different value, or
-   dropped anywhere by a poisoning command, is withheld for good and its `$f`
-   stays a runtime-expanded `deny`, so a value from later in the string can never
-   stand in for the one the body actually sees.
-15. **Recurse into shell `-c` bodies.** A body is an ordinary command string that
-   happened to arrive inside one token, so it runs back through steps 1–16 and
-   its offenders fold in — but only when this host is what executes it. The
-   group's command word has to be a shell or a local wrapper (`timeout`, `env`,
-   `xargs`, `find`, `nohup`, `nice`, `ionice`, `stdbuf`, `setsid`, `time`);
-   anything else is treated as remote and the body is left alone, because the
-   paths in `docker exec c sh -c '…'` or `ssh h sh -c '…'` are not this
-   filesystem's. The `-c` must be the shell's own option, found in the option run
-   right after the shell word — otherwise a `bash run.sh | grep -c '^FAIL'` would
-   hand the tokenizer a grep pattern and get offenders invented out of it. Each
-   body resolves against its group's cwd, so a preceding `cd` moves it; once the
-   hook has lost track of the cwd the body is skipped, since a relative path
-   would otherwise resolve against a stale directory and read as in-workspace.
-   Like step 14 this only *adds* friction: the body's own `guarded` is dropped,
-   so a body reading nothing but workspace files still leaves the string
-   deferring. The 25-level nesting bound covers these too.
-16. **Recurse into the commands `find` runs.** Each `-exec`, `-execdir`, `-ok`
-   and `-okdir` command, up to its `;` or the `+` after a `{}`, is rebuilt as a
-   command string and goes back through steps 1–16 like a `-c` body: offenders
-   fold in, `guarded` is dropped. `{}` is filled in by find at runtime, so it is
-   replaced by each start point rather than read as a file name — every match
-   is a start or sits under one. A `-execdir` command runs in its match's
-   directory, so its relative operands are resolved from the start, from the
-   directory part of the start's spelling (where GNU findutils runs the start
-   entry), and from find's own cwd (where BSD find does). `-delete` makes the
-   start points writes, and `-fprint`, `-fprint0`, `-fprintf` and `-fls` name a
-   file find writes itself. Start points read from `-files0-from`, or appended
-   by an `xargs`, are ones the hook cannot see, so `{}` or `-delete` behind them
-   withholds `allow`. A bare `find /etc -name x` lists names the way `ls -R`
-   does, and is no more judged than `ls`.
+    A body starts from the enclosing string's propagated literal variables (step 4), since bash's substitution inherits them: without that, `f=docs/x; grep -c p "$(echo "$f")"` would prompt on an unresolvable `$f` where the same command without the `$( )` is allowed.
+    The scan runs once for the whole string, after step 4 has finished, so it has no position at which to snapshot the map — it therefore gets only the names holding *one* literal at every point in the string.
+    A name reassigned to a different value, or dropped anywhere by a poisoning command, is withheld for good and its `$f` stays a runtime-expanded `deny`, so a value from later in the string can never stand in for the one the body actually sees.
+15. **Recurse into shell `-c` bodies.** A body is an ordinary command string that happened to arrive inside one token, so it runs back through steps 1–16 and its offenders fold in — but only when this host is what executes it.
+    The group's command word has to be a shell or a local wrapper (`timeout`, `env`, `xargs`, `find`, `nohup`, `nice`, `ionice`, `stdbuf`, `setsid`, `time`); anything else is treated as remote and the body is left alone, because the paths in `docker exec c sh -c '…'` or `ssh h sh -c '…'` are not this filesystem's.
+    The `-c` must be the shell's own option, found in the option run right after the shell word — otherwise a `bash run.sh | grep -c '^FAIL'` would hand the tokenizer a grep pattern and get offenders invented out of it.
+    Each body resolves against its group's cwd, so a preceding `cd` moves it; once the hook has lost track of the cwd the body is skipped, since a relative path would otherwise resolve against a stale directory and read as in-workspace.
+    Like step 14 this only *adds* friction: the body's own `guarded` is dropped, so a body reading nothing but workspace files still leaves the string deferring.
+    The 25-level nesting bound covers these too.
+16. **Recurse into the commands `find` runs.** Each `-exec`, `-execdir`, `-ok` and `-okdir` command, up to its `;` or the `+` after a `{}`, is rebuilt as a command string and goes back through steps 1–16 like a `-c` body: offenders fold in, `guarded` is dropped.
+    `{}` is filled in by find at runtime, so it is replaced by each start point rather than read as a file name — every match is a start or sits under one.
+    A `-execdir` command runs in its match's directory, so its relative operands are resolved from the start, from the directory part of the start's spelling (where GNU findutils runs the start entry), and from find's own cwd (where BSD find does).
+    `-delete` makes the start points writes, and `-fprint`, `-fprint0`, `-fprintf` and `-fls` name a file find writes itself.
+    Start points read from `-files0-from`, or appended by an `xargs`, are ones the hook cannot see, so `{}` or `-delete` behind them withholds `allow`.
+    A bare `find /etc -name x` lists names the way `ls -R` does, and is no more judged than `ls`.
 
 ## Agent guidance: avoiding prompts
 
-When the hook prompts, its reason now tells the agent how to avoid the prompt
-next time — naming the offending path and the fix (use an in-root path, drop a
-`$VAR`/`~`, or — for the false-positive categories — switch to the Read/Grep
-tools). But some habits avoid prompts entirely, and the hook can't surface
-them because it *allows* those paths silently — there's no prompt on which to
-attach advice.
+When the hook prompts, its reason now tells the agent how to avoid the prompt next time — naming the offending path and the fix (use an in-root path, drop a `$VAR`/`~`, or — for the false-positive categories — switch to the Read/Grep tools).
+But some habits avoid prompts entirely, and the hook can't surface them because it *allows* those paths silently — there's no prompt on which to attach advice.
 
-Paste the block below into your project's `CLAUDE.md` (or `AGENTS.md`) so the
-agent follows them from the start. They're framed as instructions to the agent:
+Paste the block below into your project's `CLAUDE.md` (or `AGENTS.md`) so the agent follows them from the start.
+They're framed as instructions to the agent:
 
 ```markdown
 ## Avoiding workspace-guard permission prompts
@@ -1430,18 +900,11 @@ flowing, avoid triggering it:
   nothing. Write the command directly.
 ```
 
-The plugin also ships a **`reduce-workspace-guard-prompts`** skill: ask Claude
-"why am I getting so many permission prompts?" and it will diagnose the cause —
-grounding itself in your real prompt history via the bundled
-`scripts/friction-report.py` analyzer — and walk through these fixes.
+The plugin also ships a **`reduce-workspace-guard-prompts`** skill: ask Claude "why am I getting so many permission prompts?" and it will diagnose the cause — grounding itself in your real prompt history via the bundled `scripts/friction-report.py` analyzer — and walk through these fixes.
 
-For the "just show me the numbers" case, the **`/workspace-guard:friction-report`**
-slash command runs that analyzer directly and prints the ranked report — no
-diagnosis, no fixes. The `workspace-guard:` prefix disambiguates it from the
-identically-named commands shipped by the companion guards (prod-guard,
-foreground-guard); if none of those are installed, the bare `/friction-report`
-also resolves. It passes its arguments straight through to the script, so the
-same flags work:
+For the "just show me the numbers" case, the **`/workspace-guard:friction-report`** slash command runs that analyzer directly and prints the ranked report — no diagnosis, no fixes.
+The `workspace-guard:` prefix disambiguates it from the identically-named commands shipped by the companion guards (prod-guard, foreground-guard); if none of those are installed, the bare `/friction-report` also resolves.
+It passes its arguments straight through to the script, so the same flags work:
 
 ```
 /workspace-guard:friction-report                  # last 7 days, this project
@@ -1451,55 +914,42 @@ same flags work:
 
 ## Session grants: stop re-answering the same prompt
 
-Off by default. With `WORKSPACE_GUARD_SESSION_GRANTS=1`, a prompt you approve is
-not asked again for the rest of that session.
+Off by default.
+With `WORKSPACE_GUARD_SESSION_GRANTS=1`, a prompt you approve is not asked again for the rest of that session.
 
-The guard cannot see your answer — a `PreToolUse` hook returns `ask` and is never
-told what you said — so nothing is recorded when it asks. A `PostToolUse` hook
-fires only when the command actually ran, which means you approved it, and *that*
-is what records the grant. Decline, and nothing is written.
+The guard cannot see your answer — a `PreToolUse` hook returns `ask` and is never told what you said — so nothing is recorded when it asks.
+A `PostToolUse` hook fires only when the command actually ran, which means you approved it, and *that* is what records the grant.
+Decline, and nothing is written.
 
 Two things follow from how it is keyed, both deliberate:
 
-- **A grant covers the directory, not the one file.** Approving a read of
-  `~/.claude/CLAUDE.md` also covers `~/.claude/settings.json`. Keying on the file
-  would re-ask for every neighbour, which is most of the repetition.
-- **A covered call defers; it is never upgraded to `allow`.** The guard withdraws
-  its own objection and hands the decision back to your normal permission rules,
-  rather than speaking for the whole command.
+- **A grant covers the directory, not the one file.** Approving a read of `~/.claude/CLAUDE.md` also covers `~/.claude/settings.json`.
+  Keying on the file would re-ask for every neighbour, which is most of the repetition.
+- **A covered call defers; it is never upgraded to `allow`.** The guard withdraws its own objection and hands the decision back to your normal permission rules, rather than speaking for the whole command.
 
-Grants are per session, expire after 8 hours, and live in
-`~/.claude/workspace-guard/session-grants/`. Delete that directory at any time.
-A `deny` is never recorded and never suppressed: nobody was asked, so there is no
-approval to remember.
+Grants are per session, expire after 8 hours, and live in `~/.claude/workspace-guard/session-grants/`.
+Delete that directory at any time.
+A `deny` is never recorded and never suppressed: nobody was asked, so there is no approval to remember.
 
 ### Worktree grants
 
-A second checkout of your own repository — `git worktree add` for a review, a
-bisect, a build against another commit — is outside this session's workspace, so
-reads of it prompt and writes to it are blocked as sibling-checkout writes.
+A second checkout of your own repository — `git worktree add` for a review, a bisect, a build against another commit — is outside this session's workspace, so reads of it prompt and writes to it are blocked as sibling-checkout writes.
 
-With this setting on, and `BRANCH_GUARD_WORKTREE_GRANTS=1` set for
-[branch-guard](https://github.com/karlkfi/claude-bouncer/tree/main/plugins/branch-guard),
-the `git worktree add` itself asks once. Approving it records the checkout, and
-the whole tree is then readable and writable for the rest of the session.
+With this setting on, and `BRANCH_GUARD_WORKTREE_GRANTS=1` set for [branch-guard](https://github.com/karlkfi/claude-bouncer/tree/main/plugins/branch-guard), the `git worktree add` itself asks once.
+Approving it records the checkout, and the whole tree is then readable and writable for the rest of the session.
 
-**Both settings are needed.** branch-guard asks and records; workspace-guard is
-what honours the record. Turning on only the first adds a prompt and nothing
-else; only the second changes nothing at all.
+**Both settings are needed.** branch-guard asks and records; workspace-guard is what honours the record.
+Turning on only the first adds a prompt and nothing else; only the second changes nothing at all.
 
 ## Configuration
 
-The set of guarded commands lives in the `SPEC` and `ALIASES` tables at the top
-of `scripts/bash-workspace-guard.py`. Add a row to guard another command.
+The set of guarded commands lives in the `SPEC` and `ALIASES` tables at the top of `scripts/bash-workspace-guard.py`.
+Add a row to guard another command.
 
 ### Host-wide temp (`/tmp`) deny
 
-A guarded file argument that resolves at or under a host-temp root is **denied**
-by default and steered to the two destinations that are allowed: a repo-local
-gitignored scratch dir, and this session's own `scratchpad/` (named only when it
-exists on disk). Four environment
-variables tune this — all read at hook time, so no restart is needed:
+A guarded file argument that resolves at or under a host-temp root is **denied** by default and steered to the two destinations that are allowed: a repo-local gitignored scratch dir, and this session's own `scratchpad/` (named only when it exists on disk).
+Four environment variables tune this — all read at hook time, so no restart is needed:
 
 | Env var | Default | Effect |
 | --- | --- | --- |
@@ -1508,27 +958,19 @@ variables tune this — all read at hook time, so no restart is needed:
 | `WORKSPACE_GUARD_TMP_ROOTS` | (empty) | Extra host-temp roots, separated by the platform list separator (`:` on POSIX, `;` on Windows) or a comma. **Additive** — it extends the built-in `/tmp`, `/var/tmp`, `$TMPDIR`, and the platform temp dir (`%TMP%` on Windows); it can't shrink them. |
 | `WORKSPACE_GUARD_TMP_ALLOW` | (empty) | Allowlist of exact-prefix or glob paths (same separators) that **escape** the deny — for the rare tool that genuinely needs `/tmp`. |
 
-`WORKSPACE_GUARD_TMP_ALLOW` is the one knob that *loosens* the guard, so it's
-empty by default and opt-in: an allowlisted host-temp path is allowed silently
-rather than denied. Scope each entry tightly (an exact path or a narrow glob like
-`/tmp/myapp-*`), since anything it matches bypasses the boundary. The deny itself
-is the secure default — softening to `ask` (`WORKSPACE_GUARD_TMP_ACTION=ask`) is
-the gentler way to keep a human in the loop.
+`WORKSPACE_GUARD_TMP_ALLOW` is the one knob that *loosens* the guard, so it's empty by default and opt-in: an allowlisted host-temp path is allowed silently rather than denied.
+Scope each entry tightly (an exact path or a narrow glob like `/tmp/myapp-*`), since anything it matches bypasses the boundary.
+The deny itself is the secure default — softening to `ask` (`WORKSPACE_GUARD_TMP_ACTION=ask`) is the gentler way to keep a human in the loop.
 
 ### Supervising posture
 
-Four classes are **denied** rather than prompted: a host-temp path, a write into
-a sibling checkout, a write into another session's scratch dir, and an unanchored
-`pkill`/`Stop-Process`. Each denies because the fix is mechanical and the reason
-carries it, so the agent rewrites the command instead of spending your attention
-on it.
+Four classes are **denied** rather than prompted: a host-temp path, a write into a sibling checkout, a write into another session's scratch dir, and an unanchored `pkill`/`Stop-Process`.
+Each denies because the fix is mechanical and the reason carries it, so the agent rewrites the command instead of spending your attention on it.
 
-That argument is worth checking rather than taking on trust, and `supervise`
-is how: it turns those denies into prompts so you can watch them land.
+That argument is worth checking rather than taking on trust, and `supervise` is how: it turns those denies into prompts so you can watch them land.
 
-`WORKSPACE_GUARD_POSTURE` is `enforce` by default; `supervise` moves all four
-categories to `ask`, and any other value falls back to `enforce`. Each category
-also has a variable of its own, defaulting to whatever the posture says:
+`WORKSPACE_GUARD_POSTURE` is `enforce` by default; `supervise` moves all four categories to `ask`, and any other value falls back to `enforce`.
+Each category also has a variable of its own, defaulting to whatever the posture says:
 
 | Env var | Category |
 | --- | --- |
@@ -1537,70 +979,39 @@ also has a variable of its own, defaulting to whatever the posture says:
 | `WORKSPACE_GUARD_CROSSSESSION_ACTION` | Writes into another session's scratch dir. |
 | `WORKSPACE_GUARD_KILL_ACTION` | Unanchored `pkill`, `killall`, `Stop-Process`, `taskkill`. |
 
-The category's own variable wins, so you can supervise everything except the
-kill:
+The category's own variable wins, so you can supervise everything except the kill:
 
 ```sh
 WORKSPACE_GUARD_POSTURE=supervise WORKSPACE_GUARD_KILL_ACTION=deny
 ```
 
-Each takes `deny` or `ask`, and anything else reads as `deny` — a typo fails
-toward the boundary rather than away from it. A supervised prompt keeps the
-deny's fix text and adds a line naming the knob that softened it.
+Each takes `deny` or `ask`, and anything else reads as `deny` — a typo fails toward the boundary rather than away from it.
+A supervised prompt keeps the deny's fix text and adds a line naming the knob that softened it.
 
-This is not `WORKSPACE_GUARD_OVERRIDE`. The override is per-command and stands
-the guard aside; the posture leaves every decision in place and changes only the
-verdict it emits. Three limits:
+This is not `WORKSPACE_GUARD_OVERRIDE`.
+The override is per-command and stands the guard aside; the posture leaves every decision in place and changes only the verdict it emits.
+Three limits:
 
-- **It cannot turn a block into a run.** No permission mode auto-approves an
-  `ask` ([permission modes](docs/permission-modes.md)), so the posture picks
-  which blocking verdict you get and who can lift it, never whether the boundary
-  holds.
-- **`bypassPermissions` is unaffected.** Nobody is there to answer a prompt, so
-  the deny stands whatever the posture says.
-- **It does not reach the `$VAR`/`$(...)` deny.** That one blocks because the
-  operator at the prompt sees the same unexpanded token the hook did, and so has
-  nothing the hook lacked to judge it with.
+- **It cannot turn a block into a run.** No permission mode auto-approves an `ask` ([permission modes](docs/permission-modes.md)), so the posture picks which blocking verdict you get and who can lift it, never whether the boundary holds.
+- **`bypassPermissions` is unaffected.** Nobody is there to answer a prompt, so the deny stands whatever the posture says.
+- **It does not reach the `$VAR`/`$(...)` deny.** That one blocks because the operator at the prompt sees the same unexpanded token the hook did, and so has nothing the hook lacked to judge it with.
 
 ### Allowed read prefixes
 
-A set of path prefixes are always allowed for **read-only** guarded commands
-(`cat`, `head`, `tail`, `grep`, `rg`, `sed`, `awk`, `jq`, `yq`, `diff`,
-`sort`, `wc`, `file`, `hexdump`, `cut`, `base64`, and their aliases). Write
-commands (`cp`,
-`mv`, `tee`, `rm`, `unlink`), every operand of `ln` (bar a symbolic link's source
-where the link is blocked anyway), redirect targets, read
-commands carrying a
-write-mode flag (`sed -i`, gawk `-i inplace`, `yq -i`, `sort -o`, BSD
-`base64 -o`), and the
-positional output file of `uniq IN OUT` / `xxd IN OUT` are never exempt.
+A set of path prefixes are always allowed for **read-only** guarded commands (`cat`, `head`, `tail`, `grep`, `rg`, `sed`, `awk`, `jq`, `yq`, `diff`, `sort`, `wc`, `file`, `hexdump`, `cut`, `base64`, and their aliases).
+Write commands (`cp`, `mv`, `tee`, `rm`, `unlink`), every operand of `ln` (bar a symbolic link's source where the link is blocked anyway), redirect targets, read commands carrying a write-mode flag (`sed -i`, gawk `-i inplace`, `yq -i`, `sort -o`, BSD `base64 -o`), and the positional output file of `uniq IN OUT` / `xxd IN OUT` are never exempt.
 
-The built-in defaults are `~/.claude/projects/` (Claude Code's own session and
-sub-agent data) and `~/.claude/plugins/` + `~/.claude/skills/` (installed
-extension code). The extension dirs rest on the same trust boundary as the
-plugin itself — that code is installed by the user, deliberately — and they are
-load-bearing rather than a convenience: a hook or skill routinely launches its
-own scripts by absolute path, so without the exemption every such launch would
-prompt.
+The built-in defaults are `~/.claude/projects/` (Claude Code's own session and sub-agent data) and `~/.claude/plugins/` + `~/.claude/skills/` (installed extension code).
+The extension dirs rest on the same trust boundary as the plugin itself — that code is installed by the user, deliberately — and they are load-bearing rather than a convenience: a hook or skill routinely launches its own scripts by absolute path, so without the exemption every such launch would prompt.
 
-File arguments are compared after `realpath`, so a skill you wrote yourself
-would fall outside those dirs: you install one by symlinking the repo it lives
-in (`~/.claude/skills/foo -> ~/workspace/skills/foo`, a common layout), and the
-files resolve to the repo. The entries of `~/.claude/skills/` are therefore
-resolved one level deep and their targets exempted too, so a skill you wrote is
-as quiet as one you installed from someone else.
+File arguments are compared after `realpath`, so a skill you wrote yourself would fall outside those dirs: you install one by symlinking the repo it lives in (`~/.claude/skills/foo -> ~/workspace/skills/foo`, a common layout), and the files resolve to the repo.
+The entries of `~/.claude/skills/` are therefore resolved one level deep and their targets exempted too, so a skill you wrote is as quiet as one you installed from someone else.
 
-Only the directory's own entries are followed, and only to a target holding a
-`SKILL.md` — what makes a directory a skill in the first place. So the exempt
-set is exactly the skills installed right now: uninstalling one drops its
-exemption, a symlink deeper inside a skill's tree widens nothing, and an entry
-pointing at somewhere that is not a skill (`~/.claude/skills/x -> /etc`) gets
-no exemption at all.
+Only the directory's own entries are followed, and only to a target holding a `SKILL.md` — what makes a directory a skill in the first place.
+So the exempt set is exactly the skills installed right now: uninstalling one drops its exemption, a symlink deeper inside a skill's tree widens nothing, and an entry pointing at somewhere that is not a skill (`~/.claude/skills/x -> /etc`) gets no exemption at all.
 
-Claude Code's `/tmp/claude-<uid>/bundled-skills/` and the desktop app's
-`~/Library/Application Support/Claude/side-session-notes/` (the hook input does
-not name a session's added directories) are exempt too. A root that is a
-symlink is not.
+Claude Code's `/tmp/claude-<uid>/bundled-skills/` and the desktop app's `~/Library/Application Support/Claude/side-session-notes/` (the hook input does not name a session's added directories) are exempt too.
+A root that is a symlink is not.
 
 You can extend the defaults with additional prefixes:
 
@@ -1608,75 +1019,50 @@ You can extend the defaults with additional prefixes:
 | --- | --- | --- |
 | `WORKSPACE_GUARD_READ_ALLOW_PREFIXES` | (empty) | Extra read-exempt prefixes, separated by the platform list separator (`:` on POSIX, `;` on Windows) or a comma. **Additive** — it extends the built-in list. |
 
-The Go standard library is not a default, because vendoring never brings it
-into a project and finding it would mean running the first `go` on `PATH`,
-which can be any file a session wrote. A Go user opts in with the two trees
-`go env GOROOT GOMODCACHE` prints, as literal paths:
-`<GOROOT>/src:<GOMODCACHE>/golang.org` — for an official install,
-`/usr/local/go/src:/Users/me/go/pkg/mod/golang.org`. The second covers each
-downloaded toolchain's `src`, and the `golang.org/x` modules beside them.
+The Go standard library is not a default, because vendoring never brings it into a project and finding it would mean running the first `go` on `PATH`, which can be any file a session wrote.
+A Go user opts in with the two trees `go env GOROOT GOMODCACHE` prints, as literal paths: `<GOROOT>/src:<GOMODCACHE>/golang.org` — for an official install, `/usr/local/go/src:/Users/me/go/pkg/mod/golang.org`.
+The second covers each downloaded toolchain's `src`, and the `golang.org/x` modules beside them.
 
 Each entry is run through `realpath` so platform symlinks resolve correctly.
-Scope entries tightly: anything under a configured prefix is silently allowed
-for read commands without a confirmation prompt.
+Scope entries tightly: anything under a configured prefix is silently allowed for read commands without a confirmation prompt.
 
-A relative entry is resolved against the tool's working directory, the same base
-the command's own file arguments resolve against. On Windows an entry with a
-leading slash is first read the way Git Bash reads it, so `/c/Users/me/shared`
-means `C:\Users\me\shared` — as it does in a command — rather than a `c` folder
-on whichever drive is current. Both rules apply to every configured path: the
-host-temp roots and allowlist above, and these prefixes.
+A relative entry is resolved against the tool's working directory, the same base the command's own file arguments resolve against.
+On Windows an entry with a leading slash is first read the way Git Bash reads it, so `/c/Users/me/shared` means `C:\Users\me\shared` — as it does in a command — rather than a `c` folder on whichever drive is current.
+Both rules apply to every configured path: the host-temp roots and allowlist above, and these prefixes.
 
 ### Cross-workspace denies
 
-Two denies fire on work that reaches past this session's own checkout: a write
-into a sibling checkout of the same repo (see
-[Worktree-aware sibling-checkout deny](#worktree-aware-sibling-checkout-deny)),
-and a process kill with no workspace anchor (see
-[Unanchored process-kill deny](#unanchored-process-kill-deny)). One name tunes
-both, and it is read from two places:
+Two denies fire on work that reaches past this session's own checkout: a write into a sibling checkout of the same repo (see [Worktree-aware sibling-checkout deny](#worktree-aware-sibling-checkout-deny)), and a process kill with no workspace anchor (see [Unanchored process-kill deny](#unanchored-process-kill-deny)).
+One name tunes both, and it is read from two places:
 
 | Where | Reaches | Effect |
 | --- | --- | --- |
 | `WORKSPACE_GUARD_OVERRIDE=<reason>` as a command prefix | that one Bash call | Downgrades the sibling-checkout deny, the cross-session scratch-write deny, and the unanchored-kill deny to `ask`, for work that deliberately reaches another checkout or session. It downgrades the wrapper and kill escalation deny the same way (see [Suppression escalation](#suppression-escalation-in-pre-approving-modes)). The reason is echoed back in the prompt. |
 | `WORKSPACE_GUARD_OVERRIDE` in the hook's own environment | every call in the session | The same downgrade, held open for as long as it is set. |
 
-`WORKSPACE_GUARD_OVERRIDE` is the one knob that *loosens* this guard, so it's
-empty by default and opt-in. The denies are the secure default: they self-heal in
-one agent round trip, whereas an approvable prompt invites the reflexive "yes"
-that lands the change on the wrong branch, or kills the wrong process. Scope the
-override to the moment you actually need it, which is what the prefix form is
-for:
+`WORKSPACE_GUARD_OVERRIDE` is the one knob that *loosens* this guard, so it's empty by default and opt-in.
+The denies are the secure default: they self-heal in one agent round trip, whereas an approvable prompt invites the reflexive "yes" that lands the change on the wrong branch, or kills the wrong process.
+Scope the override to the moment you actually need it, which is what the prefix form is for:
 
 ```bash
 WORKSPACE_GUARD_OVERRIDE="porting a fix to the release branch" cp fix.py ../wt-b/
 ```
 
-Only a segment's **leading** assignment run counts, so the name is inert
-everywhere it is merely mentioned — quoted in a commit message, echoed into a
-pipe, or passed as a `grep` pattern — and an empty value (`WORKSPACE_GUARD_OVERRIDE=`)
-is not an override at all, because the point of the prefix is that you say why.
+Only a segment's **leading** assignment run counts, so the name is inert everywhere it is merely mentioned — quoted in a commit message, echoed into a pipe, or passed as a `grep` pattern — and an empty value (`WORKSPACE_GUARD_OVERRIDE=`) is not an override at all, because the point of the prefix is that you say why.
 
-`Edit`, `Write`, `MultiEdit` and `NotebookEdit` have no command string to carry a
-prefix. Their denies say so and point at the Bash form; the environment route
-below covers them for a whole session. The `PowerShell` tool's denies name only
-the environment route: the Bash handler judges no cmdlet and reads no `pwsh -c`
-body, so a Bash re-issue would run without a prompt rather than ask.
+`Edit`, `Write`, `MultiEdit` and `NotebookEdit` have no command string to carry a prefix.
+Their denies say so and point at the Bash form; the environment route below covers them for a whole session.
+The `PowerShell` tool's denies name only the environment route: the Bash handler judges no cmdlet and reads no `pwsh -c` body, so a Bash re-issue would run without a prompt rather than ask.
 
 ### Suppression escalation in pre-approving modes
 
-The hook has two ways of saying nothing, and only one of them means it found
-nothing to catch. The other is that it read a construct it admits it cannot
-parse — an `sh -c` body under a container or remote wrapper, a kill it could not
-scope to this workspace, interpreter code — and **withheld** the `allow` it
-would otherwise have given the string. Withholding hands the question to your
-own permission rules, which is protection in `manual`, `dontAsk` and `plan`,
-where those rules prompt. In `auto`, `acceptEdits` and `bypassPermissions` they
-pre-approve, so the command simply runs (see
-[`docs/permission-modes.md`](docs/permission-modes.md)).
+The hook has two ways of saying nothing, and only one of them means it found nothing to catch.
+The other is that it read a construct it admits it cannot parse — an `sh -c` body under a container or remote wrapper, a kill it could not scope to this workspace, interpreter code — and **withheld** the `allow` it would otherwise have given the string.
+Withholding hands the question to your own permission rules, which is protection in `manual`, `dontAsk` and `plan`, where those rules prompt.
+In `auto`, `acceptEdits` and `bypassPermissions` they pre-approve, so the command simply runs (see [`docs/permission-modes.md`](docs/permission-modes.md)).
 
-In those three modes the hook now puts the decision back. The verdict turns on
-whether the refusal can carry a rewrite the agent applies itself:
+In those three modes the hook now puts the decision back.
+The verdict turns on whether the refusal can carry a rewrite the agent applies itself:
 
 | Construct | `auto`, `acceptEdits` | `bypassPermissions` |
 | --- | --- | --- |
@@ -1685,56 +1071,31 @@ whether the refusal can carry a rewrite the agent applies itself:
 | A `sh -c` body under a container or remote wrapper, or an untracked cwd | `deny`, naming the split: the `-c` call as its own call | `deny` |
 | Interpreter code (only under `WORKSPACE_GUARD_ESCALATE=all`) | `ask` | `deny` |
 
-The first three have a mechanical fix, so asking a person would spend their
-attention on a question whose answer is already in the reason. For a `sh -c`
-body the fix is the split itself: the escalation fires only when the body shares
-a string with a guarded command, and the `docker exec` or `ssh` call on its own
-defers and runs, so an `ask` on the joined string protected nothing the split
-does not also release. Over 2026-10-02 to 2026-11-01 this machine's transcripts
-held 61 of those asks, every one a container or remote call (`docker run`,
-`docker exec`, `kubectl run`/`exec`) and none an untracked cwd. Interpreter code
-is opt-in for an operator who wants to watch it, so it asks where somebody can
-answer. Under
-`bypassPermissions` everything denies, because an `ask` there blocks and strands
-the agent while a `deny` blocks and hands back the rewrite. The other three
-modes are untouched: a defer already stops the command there, so escalating
-would buy a prompt and no protection.
+The first three have a mechanical fix, so asking a person would spend their attention on a question whose answer is already in the reason.
+For a `sh -c` body the fix is the split itself: the escalation fires only when the body shares a string with a guarded command, and the `docker exec` or `ssh` call on its own defers and runs, so an `ask` on the joined string protected nothing the split does not also release.
+Over 2026-10-02 to 2026-11-01 this machine's transcripts held 61 of those asks, every one a container or remote call (`docker run`, `docker exec`, `kubectl run`/`exec`) and none an untracked cwd.
+Interpreter code is opt-in for an operator who wants to watch it, so it asks where somebody can answer.
+Under `bypassPermissions` everything denies, because an `ask` there blocks and strands the agent while a `deny` blocks and hands back the rewrite.
+The other three modes are untouched: a defer already stops the command there, so escalating would buy a prompt and no protection.
 
-When the agent really needs a wrapper, kill or `sh -c` command as written,
-`WORKSPACE_GUARD_OVERRIDE=<reason>` downgrades the deny to `ask`, as it does for
-the [cross-workspace denies](#cross-workspace-denies). It never clears one,
-since allowing would run operands the hook has just said it cannot see, and it
-changes nothing under `bypassPermissions`, where nobody could answer the
-prompt.
+When the agent really needs a wrapper, kill or `sh -c` command as written, `WORKSPACE_GUARD_OVERRIDE=<reason>` downgrades the deny to `ask`, as it does for the [cross-workspace denies](#cross-workspace-denies).
+It never clears one, since allowing would run operands the hook has just said it cannot see, and it changes nothing under `bypassPermissions`, where nobody could answer the prompt.
 
 | Env var | Default | Effect |
 | --- | --- | --- |
 | `WORKSPACE_GUARD_ESCALATE` | `scoped` | `scoped` escalates a `sh -c` body, an unscoped kill, and a command wrapper whose operands it cannot all read. `all` adds interpreter code. `off` restores the silence every mode had before. Any other value falls back to `scoped`. |
 
-**Interpreter code is left deferring by default, and the cost is why.** Replaying
-89,133 commands from 1,962 local session transcripts through the hook's own
-analyzer (2026-09-09): 4,243 carry a withheld `allow`, and 4,160 of those —
-98.0% — are the interpreter suppression, against 64 for `sh -c` and 19 for a
-kill. Escalating all three in an attended mode raises a prompt on 4.67% of every
-command run; escalating the two this guard already judges raises one on 0.09%.
-An interpreter's own file access is a [documented non-goal](#limitations) and a
-bare `python3 -c` runs unprompted in every mode, so escalating it would fire
-only where such code shares a string with a guarded command — co-occurrence
-rather than the hazard. `WORKSPACE_GUARD_ESCALATE=all` is there for an operator
-who wants it anyway; unlike the other knobs in this section it *tightens* the
-guard, so the trade it asks you to accept is friction rather than exposure.
+**Interpreter code is left deferring by default, and the cost is why.** Replaying 89,133 commands from 1,962 local session transcripts through the hook's own analyzer (2026-09-09): 4,243 carry a withheld `allow`, and 4,160 of those — 98.0% — are the interpreter suppression, against 64 for `sh -c` and 19 for a kill.
+Escalating all three in an attended mode raises a prompt on 4.67% of every command run; escalating the two this guard already judges raises one on 0.09%.
+An interpreter's own file access is a [documented non-goal](#limitations) and a bare `python3 -c` runs unprompted in every mode, so escalating it would fire only where such code shares a string with a guarded command — co-occurrence rather than the hazard.
+`WORKSPACE_GUARD_ESCALATE=all` is there for an operator who wants it anyway; unlike the other knobs in this section it *tightens* the guard, so the trade it asks you to accept is friction rather than exposure.
 
 ### Setting these variables
 
-The hook runs as a child of Claude Code, not of the shell your commands run in,
-so **`export`ing a variable inside a session does not reach it** — each Bash call
-is its own shell and none of them is the hook's parent.
-`WORKSPACE_GUARD_OVERRIDE` is the exception, and only in its prefix form above,
-which the hook reads off the command string rather than the environment.
+The hook runs as a child of Claude Code, not of the shell your commands run in, so **`export`ing a variable inside a session does not reach it** — each Bash call is its own shell and none of them is the hook's parent.
+`WORKSPACE_GUARD_OVERRIDE` is the exception, and only in its prefix form above, which the hook reads off the command string rather than the environment.
 
-Everything else is set from outside a session: `export` it in the shell you
-launch `claude` from, or — to make one stick — put it in the `env` block of a
-Claude Code `settings.json`, which applies to sessions started after the edit.
+Everything else is set from outside a session: `export` it in the shell you launch `claude` from, or — to make one stick — put it in the `env` block of a Claude Code `settings.json`, which applies to sessions started after the edit.
 
 ```json
 {
@@ -1744,423 +1105,166 @@ Claude Code `settings.json`, which applies to sessions started after the edit.
 }
 ```
 
-Name the directory the files **really** live in. A path that only points at one
-buys nothing: entries are resolved with `realpath` before they are compared, so
-`~/.claude/skills` as a value covers a symlinked skill no better than it covers
-a bundled one — and both are built-in defaults already.
+Name the directory the files **really** live in.
+A path that only points at one buys nothing: entries are resolved with `realpath` before they are compared, so `~/.claude/skills` as a value covers a symlinked skill no better than it covers a bundled one — and both are built-in defaults already.
 
-**Scope it to the narrowest file that covers the work.** A project's
-`.claude/settings.json` (or `.claude/settings.local.json`, if it shouldn't be
-checked in) applies only to sessions in that project; `~/.claude/settings.json`
-applies to every session on the machine, permanently — a much wider surface
-than the handful of prompts it usually saves.
+**Scope it to the narrowest file that covers the work.** A project's `.claude/settings.json` (or `.claude/settings.local.json`, if it shouldn't be checked in) applies only to sessions in that project; `~/.claude/settings.json` applies to every session on the machine, permanently — a much wider surface than the handful of prompts it usually saves.
 
-Before adding one, check that the prompts aren't telling you something. A
-command that reaches outside the workspace on purpose is what this hook exists
-to surface, so exempting its prefix silences the check you are running. And a
-skill's own rules never need a prefix: invoke the skill rather than reading its
-`SKILL.md`, since the harness loads skills itself and that path never reaches
-this hook.
+Before adding one, check that the prompts aren't telling you something.
+A command that reaches outside the workspace on purpose is what this hook exists to surface, so exempting its prefix silences the check you are running.
+And a skill's own rules never need a prefix: invoke the skill rather than reading its `SKILL.md`, since the harness loads skills itself and that path never reaches this hook.
 
 ### Unreadable arguments deny
 
-A blocked command splits two ways, and only one of them is a question for a
-person.
+A blocked command splits two ways, and only one of them is a question for a person.
 
-When a file argument **resolves** to a path outside the project root, the hook
-knows exactly where it lands and you don't: whether that file is legitimately
-yours to read is a fact about your intent, so it prompts.
+When a file argument **resolves** to a path outside the project root, the hook knows exactly where it lands and you don't: whether that file is legitimately yours to read is a fact about your intent, so it prompts.
 
-When the hook **cannot read the argument at all** — `cat $TMPDIR/out.log`,
-`grep foo $f`, `cat ~someuser/notes.md`, or a relative path after a `cd` it
-couldn't follow — it has no idea where the command lands. Nor does the operator
-staring at the prompt, who is shown the same unexpanded `$f` the agent wrote.
-Prompting there spends a person's attention and returns no information, so the
-hook denies and puts the fix in the reason: write the literal path, bind the
-variable to a literal earlier in the same command, or use the Read/Grep tools.
+When the hook **cannot read the argument at all** — `cat $TMPDIR/out.log`, `grep foo $f`, `cat ~someuser/notes.md`, or a relative path after a `cd` it couldn't follow — it has no idea where the command lands.
+Nor does the operator staring at the prompt, who is shown the same unexpanded `$f` the agent wrote.
+Prompting there spends a person's attention and returns no information, so the hook denies and puts the fix in the reason: write the literal path, bind the variable to a literal earlier in the same command, or use the Read/Grep tools.
 The agent applies that in its own loop and nobody is interrupted.
 
-This does not move the boundary — it moves the question to where it can be
-answered. A rewritten literal that turns out to land outside the root comes
-back as an ordinary outside-workspace `ask`, now naming a path you can actually
-judge.
+This does not move the boundary — it moves the question to where it can be answered.
+A rewritten literal that turns out to land outside the root comes back as an ordinary outside-workspace `ask`, now naming a path you can actually judge.
 
-A command carrying both an unreadable argument *and* a resolved outside path
-denies on the unreadable one. The boundary question the outside path raises is
-still owed a human; it arrives one step later, on a command whose every token
-is literal, which is the only version a person at the prompt can judge. Asking
-first would spend their attention on a string half of which nobody there can
-resolve, and leave the rewrite unapplied. The reason names both, so the fix and
-the boundary question reach the agent in a single pass.
+A command carrying both an unreadable argument *and* a resolved outside path denies on the unreadable one.
+The boundary question the outside path raises is still owed a human; it arrives one step later, on a command whose every token is literal, which is the only version a person at the prompt can judge.
+Asking first would spend their attention on a string half of which nobody there can resolve, and leave the rewrite unapplied.
+The reason names both, so the fix and the boundary question reach the agent in a single pass.
 
-This is also what keeps the verdict monotonic: adding an offender to a command
-never softens its decision. While the deny required *every* offender to be
-unreadable, `cat $f` denied and `cat $f /etc/hosts` asked.
+This is also what keeps the verdict monotonic: adding an offender to a command never softens its decision.
+While the deny required *every* offender to be unreadable, `cat $f` denied and `cat $f /etc/hosts` asked.
 
 ### Outside-workspace ask vs. deny
 
-For outside-workspace paths the hook returns `ask` so you get a confirmation
-prompt. In full-auto runs (`--dangerously-skip-permissions`, i.e.
-`bypassPermissions` mode) it returns `deny` instead — equally blocking, but it
-feeds the reason back to the agent so it can route around the path rather than
-stall on a prompt no one can approve. To hard-block in *every* mode, drop the
-`permission_mode` check and return `"deny"` unconditionally in the script's
-final output.
+For outside-workspace paths the hook returns `ask` so you get a confirmation prompt.
+In full-auto runs (`--dangerously-skip-permissions`, i.e. `bypassPermissions` mode) it returns `deny` instead — equally blocking, but it feeds the reason back to the agent so it can route around the path rather than stall on a prompt no one can approve.
+To hard-block in *every* mode, drop the `permission_mode` check and return `"deny"` unconditionally in the script's final output.
 
 ## Limitations
 
-- **A runner this hook does not peel reads as a plain command past a
-  substitution.** `ssh $(host) cat /outside/f`, `docker exec $(id) cat /outside/f`,
-  `watch $(x) cat /outside/f`, `parallel $(x) cat /outside/f` and
-  `busybox $(x) cat /outside/f` defer, the same answer each gets spelled without
-  the substitution. The last three do read the local file.
-- **An interpreter's own file access is invisible to the hook.** `python3`,
-  `node`, `perl`, `ruby` and friends are not guarded commands: a `PreToolUse`
-  hook on the shell sees the command line, and whatever the interpreter then
-  opens happens inside its own process. So `python3 -c 'open("/etc/passwd")'`
-  is not checked against the boundary, and neither is any file a script it runs
-  touches. This is the [documented threat model](docs/design.md) rather than an
-  oversight — the plugin closes a granularity gap in *pre-approved file
-  readers*, and it does not try to model every program that can open a file.
-  What the hook *does* check is the **script path** an interpreter is told to
-  run — `python3 <path>` reads that file, so it is checked like any other read
-  and an outside-workspace script gets the usual `ask`. Installed extension code
-  is read-exempt (see [Allowed read prefixes](#allowed-read-prefixes)), which is
-  what keeps a hook launching its own script quiet.
-  Separately, interpreter code suppresses the blanket `allow` a clean guarded
-  command in the same string would otherwise earn, so the hook never vouches for
-  code it cannot read. Note the asymmetry: the path check produces a real
-  decision that blocks in every permission mode, while the suppression only
-  withholds `allow` and so protects nothing under `auto`, `acceptEdits`, or
-  `bypassPermissions` — see
-  [`docs/permission-modes.md`](docs/permission-modes.md).
-  An in-workspace script vouches only when nothing in the string writes it;
-  the writes counted are the ones the hook reads anyway — redirect targets and
-  the write operands of guarded commands, in any order and inside `$(…)` or
-  `sh -c` bodies, with a write to a directory covering every script under it.
-  Residuals, all erring toward silence: inline code (`python3 -c`, `python3 -m`,
-  a heredoc) carries no path to check; a write by a command the hook does not
-  guard (`curl -o t.sh`, `git checkout`, `tar x`) is not seen, so
-  `cat README.md; curl -o t.sh URL; bash t.sh` still allows; and the PowerShell
-  tool does not apply the same-string write check.
-- A leading `~`/`~/…` is expanded to your home directory (bash does this
-  deterministically), so a home path inside the root is allowed. Tokens that
-  bash would expand *unpredictably* at runtime — `~user`/`~+`/`~-`, or a `$`
-  that introduces an expansion (`$VAR`, `${VAR}`, `$(...)`, `$1`, `$?`) — are
-  still blocked, as a `deny` carrying the literal-path rewrite rather than a
-  prompt nobody can answer. A `$` bash keeps literal (trailing, or
-  before a non-name char like `.`/`/`) is part of the filename and resolved
-  normally, so a `price$` or `a$.b` argument no longer prompts spuriously.
-- `sed -i '' SCRIPT FILE` means two things. BSD sed (macOS) reads the `''` as
-  the backup suffix and `SCRIPT` as the script; GNU sed reads `''` as an empty
-  script and `SCRIPT` as a file. The hook keeps judging the token after the
-  `''` as a file, so a GNU file is still caught, with one exception: an `s` or
-  `y` command holding a `$` expansion (`sed -i '' "s/x/$v/" f`) is taken as the
-  script and allowed instead of denied as unexpandable. Any other script there
-  is still read as a path. Where that path is outside the root and the token
-  also reads as a sed script that names no file and runs no command
-  (`'/^#/d'`), the command denies with the `-e` rewrite rather than asking
-  about a "path"; a script that writes, reads or runs something keeps the
-  outside ask, and an expansion in another shape (`"${n}d"`) is denied as
-  unexpandable. The same deny reaches GNU's reading, `sed -i '' /outside/file`,
-  which runs an empty script over the file and changes nothing. Use
-  `sed -i '' -e SCRIPT FILE`:
-  macOS sed makes the edit, and GNU sed makes it too and then exits 2 on the
-  empty `''` operand (GNU sed 4.9, measured in a `debian:stable-slim`
-  container on 2026-10-04).
-- A `sed` script reads a plain `$NAME` as written when the command binds NAME
-  only as `NAME=$(…)`, the substitution being the whole value, or with `read`.
-  Such a value is not seen, and can give the
-  script a `w` command whose file is not judged: `b=$(cat f); sed "s/a/$b/" g`.
-  Routing a file name through a command's output takes intent, and denying
-  every such value would deny the common `v=$(git rev-parse HEAD); sed
-  "s/OLD/$v/" f`. A name bound any other way that the hook could not substitute
-  denies, and a value from the operator's environment is read as written. Nor
-  is a script loaded with `-f FILE` read: FILE is judged as a read, and its
-  contents are not the hook's to read.
-- An `awk` program is read as written, with no expansion substituted. A
-  double-quoted program holding a name the command binds, a `$(…)`, a `${…}`
-  operator or `$_` asks, since the value can add a redirection
-  (`p='{print > "../x"}'; awk "$p" f`). Three are read as written: a name the
-  command binds only as `NAME=$(…)` or with `read`, as for sed; a name it never
-  binds; and `$1`, which the hook cannot tell from the escaped field `\$1`, so
-  `set -- '{print > "../x"}'; awk "$1" f` is not judged. A loop variable asks even
-  where its values are literals. A program loaded with `-f FILE` is not read,
-  as with sed.
-- Heredoc body lines are dropped from the raw command string before parsing, so
-  path-like body content (`</div>`, `/title`), prose, or an unbalanced quote in
-  the body is never mistaken for a file argument and never aborts the parse (a
-  real outside-workspace redirect on the `<<TAG` command line is still checked).
-  The terminator is matched by an exact line (`<<-` allows leading tabs); an
-  unterminated body swallows to the end of the command (matching bash). A `<<`
-  inside quotes, inside a `#` comment, or produced by arithmetic (`$((x<<2))`,
-  `((x<<2))`) is not a heredoc and never arms a delimiter — but a `$(…)` or
-  backtick body opens a fresh quoting context, as it does in bash, so a heredoc
-  *inside* one is found even when the substitution itself sits in double quotes
-  (`git commit -F "$(cat <<'MSG' … MSG)"`, the shape a multi-paragraph commit
-  message takes). Command
-  substitutions *inside* a heredoc body follow bash's own rule: a quoted
-  delimiter (`<<'EOF'`, `<<"EOF"`, `<<\EOF`, or any partly quoted word) makes
-  the body literal, so a `$(…)` there is documentation and is ignored; an
-  unquoted `<<EOF` body is expanded by bash and is still analyzed — on its own,
-  with quoting off, since a heredoc body has none. A substitution body is then
-  taken from the *raw* command string before it is analyzed, since the stripped
-  one keeps a `<<TAG` whose body and terminator are already gone: read a second
-  time it arms again, and everything after it on the line — a guarded read
-  included — disappears as an unterminated body.
-- Literal variable propagation is deliberately narrow. Only standalone
-  `NAME=value` / `export NAME=value` assignments whose value is a plain
-  literal after quote removal (non-empty; no `$`, backticks, glob characters,
-  whitespace, or `:`) are propagated, and only into plain `$NAME`/`${NAME}`
-  uses. On Windows a leading drive prefix (`C:\`, `c:/`) is exempt from the `:`
-  rule — otherwise every absolute path there is impure and propagation never
-  fires; a second `:` anywhere in the value still rejects it, and on
-  Linux/macOS `C:/x` is just a directory named `C:` so the rule is unchanged.
-  Parameter-expansion operators (`${f:-x}`, `${f%.*}`), arrays, values
-  built from other expansions, and variables later touched by
-  `read`/`eval`/`declare`/`unset` or assigned inside a subshell,
-  pipeline segment, or backgrounded command all keep the runtime-expanded
-  `deny`. Anything that may set `IFS` disables propagation for that command
-  entirely (conservative — a changed `IFS` re-splits every later expansion, so
-  a value checked as one word can reach the command as several). A heredoc
-  (`<<`) does not: its body is dropped before parsing, so a body line shaped
-  like an assignment never reaches the map, and a value assigned before the
-  heredoc still resolves after it.
-  Setting `IFS` counts whether it is a plain `IFS=`/`export IFS=` assignment,
-  an assigning builtin naming it (`declare`, `local`, `typeset`, `readonly`,
-  `read`, `printf -v`, `for IFS in …`), or an `eval`/`source` that could set it
-  out of sight. Only `unset IFS` is exempt: bash falls back to the default
-  splitting the guard already assumes.
-  Uncertainty always falls back to blocking — propagation only ever adds allows for
-  expansions bash performs deterministically.
-- Propagation reaches *into* a command substitution (step 14) only for names
-  holding one literal throughout the string, because that scan has no position
-  at which to snapshot the map. The residual gap is a name the environment
-  already exports and the string assigns exactly once, *after* the substitution:
-  `cat "$(cat "$f")"; f=docs/ok` checks `docs/ok` where bash reads the inherited
-  `$f`. Writing the assignment before the substitution — the order bash itself
-  requires for the value to be used — resolves it correctly.
-- `for VAR in <list>` loop resolution is equally narrow. The candidate set is
-  recorded only when *every* list item is a plain literal or a glob (the
-  assignment purity test minus the glob metacharacters, plus a brace `{a,b}` is
-  rejected because a for-list item — unlike an assignment RHS — is
-  brace-expanded). A later `$VAR` in a file argument is then checked against all
-  candidates; one outside item taints the loop. Lists with any non-literal item,
-  the `for VAR; do …` ("$@") form, the `for ((…))` arithmetic form, and a loop
-  variable reassigned inside the body all keep today's behavior. As with
-  assignments, this only ever adds allows for the exact values bash iterates —
-  with one deliberate exception: a command substitution is scanned once for the
-  whole string, so a name two loops bind is checked against the union of both
-  value sets there. That errs toward finding a path, never away from one.
-- A glob item stands for its whole expansion rather than being enumerated, so a
-  loop over one is exactly as strong as the same glob written into a file
-  argument directly — no more and no less. In particular, `realpath` can't see
-  through a *matched* name that is itself a symlink out of the workspace, since
-  the pattern is resolved instead of the files: `for f in docs/*.md; do cat
-  "$f"; done` treats a `docs/link.md` → `/etc/passwd` symlink the same way
-  `cat docs/*.md` already does. Under `shopt -s globstar` a `**` matches a
-  *variable* number of path segments, including zero — `docs/**` expands to
-  `docs/` as well as `docs/sub/b.md` — so a trailing `../` in the loop body can
-  climb one level higher at runtime than the pattern shows, and a read just
-  outside the root can be allowed. Globstar is off by default in bash; with it
-  on, prefer an explicit pattern over `**` in a loop list.
-- A nested loop's list may be built from the outer loop's variable
-  (`for d in docs/*; do for f in "$d"/*.md`), and the inner variable binds the
-  cross product. A candidate set larger than 256 values poisons the variable
-  instead, so a loop over very long literal lists keeps today's prompt. The
-  same 256 cap applies to a file argument that names several loop variables at
-  once: under three nested loops of 256 literals, `cat $a/$b/$c` stands for
-  16.7 million paths, so it keeps the runtime-expanded `deny` rather than being
-  enumerated. Enumerating it ran the hook past two minutes — and because Claude
-  Code treats a failed `PreToolUse` hook as a non-blocking error, a guard that
-  never answers enforces nothing at all.
-- Command substitutions nested more than 25 deep stop being recursed into, for
-  the same reason the loop cap exists: unbounded recursion exhausts the
-  interpreter stack, and a hook that dies mid-decision is one Claude Code treats
-  as a non-blocking error — enforcing nothing. In bash the bound is on the
-  recursion, not on the analysis: the lexer does not track quote nesting through
-  `$(…)`, so an inner command past the cap generally still surfaces in an outer
-  level's tokens and is flagged there. PowerShell masks each `$(…)`/`@(…)` out of
-  the text it tokenizes, so there is no outer level to catch it: a subexpression
-  nested past the cap goes unanalyzed, and the command defers rather than
-  earning an `allow` on the strength of a body the guard never read.
-- `realpath` only follows symlinks for files that already exist; nonexistent
-  paths are normalized lexically (fine for read-style commands). A *dangling*
-  link is not that case: the link itself exists, so it is followed and the
-  missing target is what gets checked.
+- **A runner this hook does not peel reads as a plain command past a substitution.** `ssh $(host) cat /outside/f`, `docker exec $(id) cat /outside/f`, `watch $(x) cat /outside/f`, `parallel $(x) cat /outside/f` and `busybox $(x) cat /outside/f` defer, the same answer each gets spelled without the substitution.
+  The last three do read the local file.
+- **An interpreter's own file access is invisible to the hook.** `python3`, `node`, `perl`, `ruby` and friends are not guarded commands: a `PreToolUse` hook on the shell sees the command line, and whatever the interpreter then opens happens inside its own process.
+  So `python3 -c 'open("/etc/passwd")'` is not checked against the boundary, and neither is any file a script it runs touches.
+  This is the [documented threat model](docs/design.md) rather than an oversight — the plugin closes a granularity gap in *pre-approved file readers*, and it does not try to model every program that can open a file.
+  What the hook *does* check is the **script path** an interpreter is told to run — `python3 <path>` reads that file, so it is checked like any other read and an outside-workspace script gets the usual `ask`.
+  Installed extension code is read-exempt (see [Allowed read prefixes](#allowed-read-prefixes)), which is what keeps a hook launching its own script quiet.
+  Separately, interpreter code suppresses the blanket `allow` a clean guarded command in the same string would otherwise earn, so the hook never vouches for code it cannot read.
+  Note the asymmetry: the path check produces a real decision that blocks in every permission mode, while the suppression only withholds `allow` and so protects nothing under `auto`, `acceptEdits`, or `bypassPermissions` — see [`docs/permission-modes.md`](docs/permission-modes.md).
+  An in-workspace script vouches only when nothing in the string writes it; the writes counted are the ones the hook reads anyway — redirect targets and the write operands of guarded commands, in any order and inside `$(…)` or `sh -c` bodies, with a write to a directory covering every script under it.
+  Residuals, all erring toward silence: inline code (`python3 -c`, `python3 -m`, a heredoc) carries no path to check; a write by a command the hook does not guard (`curl -o t.sh`, `git checkout`, `tar x`) is not seen, so `cat README.md; curl -o t.sh URL; bash t.sh` still allows; and the PowerShell tool does not apply the same-string write check.
+- A leading `~`/`~/…` is expanded to your home directory (bash does this deterministically), so a home path inside the root is allowed.
+  Tokens that bash would expand *unpredictably* at runtime — `~user`/`~+`/`~-`, or a `$` that introduces an expansion (`$VAR`, `${VAR}`, `$(...)`, `$1`, `$?`) — are still blocked, as a `deny` carrying the literal-path rewrite rather than a prompt nobody can answer.
+  A `$` bash keeps literal (trailing, or before a non-name char like `.`/`/`) is part of the filename and resolved normally, so a `price$` or `a$.b` argument no longer prompts spuriously.
+- `sed -i '' SCRIPT FILE` means two things.
+  BSD sed (macOS) reads the `''` as the backup suffix and `SCRIPT` as the script; GNU sed reads `''` as an empty script and `SCRIPT` as a file.
+  The hook keeps judging the token after the `''` as a file, so a GNU file is still caught, with one exception: an `s` or `y` command holding a `$` expansion (`sed -i '' "s/x/$v/" f`) is taken as the script and allowed instead of denied as unexpandable.
+  Any other script there is still read as a path.
+  Where that path is outside the root and the token also reads as a sed script that names no file and runs no command (`'/^#/d'`), the command denies with the `-e` rewrite rather than asking about a "path"; a script that writes, reads or runs something keeps the outside ask, and an expansion in another shape (`"${n}d"`) is denied as unexpandable.
+  The same deny reaches GNU's reading, `sed -i '' /outside/file`, which runs an empty script over the file and changes nothing.
+  Use `sed -i '' -e SCRIPT FILE`: macOS sed makes the edit, and GNU sed makes it too and then exits 2 on the empty `''` operand (GNU sed 4.9, measured in a `debian:stable-slim` container on 2026-10-04).
+- A `sed` script reads a plain `$NAME` as written when the command binds NAME only as `NAME=$(…)`, the substitution being the whole value, or with `read`.
+  Such a value is not seen, and can give the script a `w` command whose file is not judged: `b=$(cat f); sed "s/a/$b/" g`.
+  Routing a file name through a command's output takes intent, and denying every such value would deny the common `v=$(git rev-parse HEAD); sed "s/OLD/$v/" f`.
+  A name bound any other way that the hook could not substitute denies, and a value from the operator's environment is read as written.
+  Nor is a script loaded with `-f FILE` read: FILE is judged as a read, and its contents are not the hook's to read.
+- An `awk` program is read as written, with no expansion substituted.
+  A double-quoted program holding a name the command binds, a `$(…)`, a `${…}` operator or `$_` asks, since the value can add a redirection (`p='{print > "../x"}'; awk "$p" f`).
+  Three are read as written: a name the command binds only as `NAME=$(…)` or with `read`, as for sed; a name it never binds; and `$1`, which the hook cannot tell from the escaped field `\$1`, so `set -- '{print > "../x"}'; awk "$1" f` is not judged.
+  A loop variable asks even where its values are literals.
+  A program loaded with `-f FILE` is not read, as with sed.
+- Heredoc body lines are dropped from the raw command string before parsing, so path-like body content (`</div>`, `/title`), prose, or an unbalanced quote in the body is never mistaken for a file argument and never aborts the parse (a real outside-workspace redirect on the `<<TAG` command line is still checked). The terminator is matched by an exact line (`<<-` allows leading tabs); an unterminated body swallows to the end of the command (matching bash). A `<<` inside quotes, inside a `#` comment, or produced by arithmetic (`$((x<<2))`, `((x<<2))`) is not a heredoc and never arms a delimiter — but a `$(…)` or backtick body opens a fresh quoting context, as it does in bash, so a heredoc *inside* one is found even when the substitution itself sits in double quotes (`git commit -F "$(cat <<'MSG' … MSG)"`, the shape a multi-paragraph commit message takes). Command substitutions *inside* a heredoc body follow bash's own rule: a quoted delimiter (`<<'EOF'`, `<<"EOF"`, `<<\EOF`, or any partly quoted word) makes the body literal, so a `$(…)` there is documentation and is ignored; an unquoted `<<EOF` body is expanded by bash and is still analyzed — on its own, with quoting off, since a heredoc body has none. A substitution body is then taken from the *raw* command string before it is analyzed, since the stripped one keeps a `<<TAG` whose body and terminator are already gone: read a second time it arms again, and everything after it on the line — a guarded read included — disappears as an unterminated body.
+- Literal variable propagation is deliberately narrow.
+  Only standalone `NAME=value` / `export NAME=value` assignments whose value is a plain literal after quote removal (non-empty; no `$`, backticks, glob characters, whitespace, or `:`) are propagated, and only into plain `$NAME`/`${NAME}` uses. On Windows a leading drive prefix (`C:\`, `c:/`) is exempt from the `:` rule — otherwise every absolute path there is impure and propagation never fires; a second `:` anywhere in the value still rejects it, and on Linux/macOS `C:/x` is just a directory named `C:` so the rule is unchanged. Parameter-expansion operators (`${f:-x}`, `${f%.*}`), arrays, values built from other expansions, and variables later touched by `read`/`eval`/`declare`/`unset` or assigned inside a subshell, pipeline segment, or backgrounded command all keep the runtime-expanded `deny`.
+  Anything that may set `IFS` disables propagation for that command entirely (conservative — a changed `IFS` re-splits every later expansion, so a value checked as one word can reach the command as several).
+  A heredoc (`<<`) does not: its body is dropped before parsing, so a body line shaped like an assignment never reaches the map, and a value assigned before the heredoc still resolves after it.
+  Setting `IFS` counts whether it is a plain `IFS=`/`export IFS=` assignment, an assigning builtin naming it (`declare`, `local`, `typeset`, `readonly`, `read`, `printf -v`, `for IFS in …`), or an `eval`/`source` that could set it out of sight.
+  Only `unset IFS` is exempt: bash falls back to the default splitting the guard already assumes.
+  Uncertainty always falls back to blocking — propagation only ever adds allows for expansions bash performs deterministically.
+- Propagation reaches *into* a command substitution (step 14) only for names holding one literal throughout the string, because that scan has no position at which to snapshot the map.
+  The residual gap is a name the environment already exports and the string assigns exactly once, *after* the substitution: `cat "$(cat "$f")"; f=docs/ok` checks `docs/ok` where bash reads the inherited `$f`.
+  Writing the assignment before the substitution — the order bash itself requires for the value to be used — resolves it correctly.
+- `for VAR in <list>` loop resolution is equally narrow.
+  The candidate set is recorded only when *every* list item is a plain literal or a glob (the assignment purity test minus the glob metacharacters, plus a brace `{a,b}` is rejected because a for-list item — unlike an assignment RHS — is brace-expanded).
+  A later `$VAR` in a file argument is then checked against all candidates; one outside item taints the loop. Lists with any non-literal item, the `for VAR; do …` ("$@") form, the `for ((…))` arithmetic form, and a loop variable reassigned inside the body all keep today's behavior.
+  As with assignments, this only ever adds allows for the exact values bash iterates — with one deliberate exception: a command substitution is scanned once for the whole string, so a name two loops bind is checked against the union of both value sets there.
+  That errs toward finding a path, never away from one.
+- A glob item stands for its whole expansion rather than being enumerated, so a loop over one is exactly as strong as the same glob written into a file argument directly — no more and no less.
+  In particular, `realpath` can't see through a *matched* name that is itself a symlink out of the workspace, since the pattern is resolved instead of the files: `for f in docs/*.md; do cat "$f"; done` treats a `docs/link.md` → `/etc/passwd` symlink the same way `cat docs/*.md` already does.
+  Under `shopt -s globstar` a `**` matches a *variable* number of path segments, including zero — `docs/**` expands to `docs/` as well as `docs/sub/b.md` — so a trailing `../` in the loop body can climb one level higher at runtime than the pattern shows, and a read just outside the root can be allowed.
+  Globstar is off by default in bash; with it on, prefer an explicit pattern over `**` in a loop list.
+- A nested loop's list may be built from the outer loop's variable (`for d in docs/*; do for f in "$d"/*.md`), and the inner variable binds the cross product. A candidate set larger than 256 values poisons the variable instead, so a loop over very long literal lists keeps today's prompt. The same 256 cap applies to a file argument that names several loop variables at once: under three nested loops of 256 literals, `cat $a/$b/$c` stands for 16.7 million paths, so it keeps the runtime-expanded `deny` rather than being enumerated.
+  Enumerating it ran the hook past two minutes — and because Claude Code treats a failed `PreToolUse` hook as a non-blocking error, a guard that never answers enforces nothing at all.
+- Command substitutions nested more than 25 deep stop being recursed into, for the same reason the loop cap exists: unbounded recursion exhausts the interpreter stack, and a hook that dies mid-decision is one Claude Code treats as a non-blocking error — enforcing nothing.
+  In bash the bound is on the recursion, not on the analysis: the lexer does not track quote nesting through `$(…)`, so an inner command past the cap generally still surfaces in an outer level's tokens and is flagged there. PowerShell masks each `$(…)`/`@(…)` out of the text it tokenizes, so there is no outer level to catch it: a subexpression nested past the cap goes unanalyzed, and the command defers rather than earning an `allow` on the strength of a body the guard never read.
+- `realpath` only follows symlinks for files that already exist; nonexistent paths are normalized lexically (fine for read-style commands).
+  A *dangling* link is not that case: the link itself exists, so it is followed and the missing target is what gets checked.
 - Entry-operand resolution covers `rm` and `mv` on the Bash frontend only.
-  PowerShell's `Remove-Item`/`Move-Item` bind through their own spec and still
-  resolve every component, so removing a symlink there is judged by its target.
-- Redirect targets (`> file`) are inspected on *every* command, guarded or not —
-  a redirect is a write the shell performs regardless of the command word, so
-  `echo secret > /tmp/out` (host temp → deny) and `ls > /etc/out.txt` (outside →
-  ask) are both honored on their targets. The target is resolved against the cwd
-  of the command group it appears in, so a relative target tracks `cd`-shifts the
-  same way file arguments do (`cd /tmp && cat in.txt > evil`, and equally
-  `cd /tmp && echo x > out.txt`, flag `/tmp/…`). A redirect target that is
-  in-workspace, or a *positional* argument of an unguarded command (`ls /etc`),
-  still defers — only the redirect write itself is added to the check.
-- Multi-source `ln a b destdir/` (3+ positionals, symbolic or hard) is not
-  staged. The hook recognises the one- and two-positional forms only.
-- The whitelisted `cd` substitutions are matched after quote stripping, so the
-  *single*-quoted form (`cd '$(git rev-parse --show-toplevel)'`) — which bash
-  treats literally, failing the `cd` unless a directory with that literal name
-  exists — is indistinguishable from the double-quoted form and is tracked as
-  if it substituted. The mis-track is safe: the resolved directory is derived
-  from the already-tracked cwd (the repo toplevel is an ancestor checked
-  against the same workspace boundary), so it never admits a path the
-  double-quoted form wouldn't. The unquoted form tokenizes into separate
-  groups and keeps today's untracked behavior.
-- An all-digits token immediately before a redirect operator is treated as an
-  fd prefix (`2>file`) and dropped. `shlex` discards the original spacing, so a
-  guarded command reading a file literally *named* with digits right before a
-  redirect (`cat 2 >out`, where `2` is a file) is indistinguishable from the fd
-  form and won't be checked. Such a path resolves in-root (and is allowed)
-  anyway except after a `cd` outside the root — a pathological combination.
-- The current session's own Claude-managed scratch tree
-  (`/tmp/claude-<uid>/…/<session>/…` — task output *and* `scratchpad/`) is
-  allowed silently for reads and writes alike, scoped to the session via the
-  hook's `session_id`. Read-only commands are additionally
-  allowed on a *sibling* session's output under the same project's scratch dir
-  (`/tmp/claude-<uid>/<encoded-project>/`), located by scanning the temp root
-  for the slug directory that holds the current `session_id` — the
-  dispatcher-tails-workers pattern. The `/tmp/claude-<uid>/` prefix is an
-  undocumented Claude Code convention inferred from the UID (on Windows, from
-  the per-user temp dir instead — there is no UID); if Claude Code
-  relocates the dir, these paths simply revert to `ask` (fail-safe — the allow
-  never widens the boundary). A session with no `session_id` (older CLIs)
-  disables both allows entirely.
-- In non-interactive / headless runs there is no one to answer an `ask` prompt,
-  so an `ask` still **blocks** the command (re-verified on CLI 2.1.220 across
-  all six permission modes — it does not silently allow). Under
-  `--dangerously-skip-permissions` (`bypassPermissions`) the hook emits `deny`
-  rather than `ask` for outside-workspace paths: equally blocking, but the agent
-  receives the reason and can recover instead of stalling. See
-  [Configuration](#configuration).
-- **How much the hook protects you depends on your permission mode.** No mode
-  auto-approves an `ask` or a `deny`, so neither runs on the hook's decision
-  alone. But a *deferred* command — one the hook declines to judge — runs
-  silently under `auto`, `acceptEdits`, and `bypassPermissions`, and is blocked
-  only under `manual`, `dontAsk`, and `plan`. So the mechanisms
-  that work by declining to vouch (the suppressions described in step 16) add
-  protection only in the latter group; in a pre-approving mode they hand the
-  decision back to rules that already said yes. The measured matrix, and which
-  decision is the right one per mode, are in
-  [`docs/permission-modes.md`](docs/permission-modes.md).
-- The host-temp `deny` covers guarded-command file arguments, redirect targets
-  from any command (`go test > /tmp/log`), a `cd` into host temp followed by a
-  relative write, `mktemp` (its default location is host temp), and — as of the
-  substitution recursion (step 14) — guarded commands inside `"$(…)"`/backtick
-  bodies (`echo "$(mktemp -d)"`, `` x=`mktemp` ``). A literal inline
-  `TMPDIR=<dir>` prefix is honored for `mktemp`'s default location
-  (`TMPDIR=./scratch mktemp` → allow; a `$`-bearing value can't be trusted and
-  degrades to the host-temp default), and combined `mktemp` short flags
-  (`-dp DIR`) are decoded precisely (`-d -p DIR`). One shape remains out of
-  scope and still defers: an inline `TMPDIR=/tmp cmd` that only redirects a
-  *non-`mktemp` tool's* own internal temp location (not a path the hook parses).
-- Command-substitution recursion (step 14) scans the raw command for
-  quote-context fidelity, so single-quoted `'$(…)'` is correctly skipped. Its
-  edges degrade to *defer* (never a silent allow): a body that itself contains
-  a quoted operator character (`echo "$(grep ")" f)"`) can mis-tokenize on
-  re-parse and defer; and backtick nesting via
-  `` \` `` or a no-space `$((…))`-shaped subshell isn't decoded. A process
-  substitution's body is recursed into the same way, so
-  `true >(rm -rf ../x)` asks as `rm -rf ../x` does even though `true` is
-  unguarded (Q276).
-- The sibling-checkout `deny` classifies *write-context* file arguments — the
-  same set the read-prefix exemption treats as writes: redirect targets, `dd`
-  operands, every operand of `cp`/`mv`/`tee`/`rm`/`unlink`/`ln` (a symbolic
-  link's source only while the link itself passes), every operand
-  of a read
-  command carrying a write-mode flag (`sed -i`, gawk `-i inplace`, `yq -i`,
-  `sort -o`, BSD `base64 -o`), and the positional output file of
-  `uniq IN OUT` / `xxd IN OUT`.
-  So a `cp` **source** or a
-  `dd if=` reading *from* a sibling checkout is denied too, not just the
-  destination. That's stricter than a pure "destination only" reading, in the
-  secure direction, and recoverable with `WORKSPACE_GUARD_OVERRIDE`. Pure read
-  commands (`cat`, `grep`, …) of a sibling are unaffected and keep their `ask`.
-- Sibling detection reads git worktree metadata (`.git`, `commondir`, `HEAD`)
-  under the offending path and the session root. Any read/parse failure — or a
-  session that isn't in a worktree — falls back to the normal outside `ask`
-  (fail-safe: the deny is never applied on uncertainty, so the boundary is never
-  weakened). A main-checkout session is a deliberate no-op even when worktrees
-  exist.
-- The unanchored-kill deny covers `pkill`, `killall`, and a pattern-fed `kill`
-  in the Bash tool, `Stop-Process` in the PowerShell tool, and `taskkill` in
-  both. A kill routed through something the hook doesn't parse — a script that
-  kills on your behalf — is checked in **neither**. `Get-Process -Id 1234 |
-  Stop-Process` denies even though the pid is literal — it's bound on the
-  upstream cmdlet, which the kill rule doesn't read; write `Stop-Process -Id 1234`.
-  `taskkill /FI "PID eq 1234"` denies for the same shape of reason: filter
-  expressions aren't parsed, so write `taskkill /PID 1234`.
-  Anchoring is also *lexical*, which cuts both ways: a process
-  started with a relative command line (`make check`) carries no path for `-f` to
-  match, so it can't be anchored at all and the answer there is `pgrep -fl` plus
-  a kill by pid; and a pattern naming an unrelated directory that happens to
-  share this root's basename reads as anchored. What the rule does reliably
-  exclude is a *sibling* checkout, whose directory name differs by construction.
-  A pattern naming a worktree nested under the project root (`.claude/worktrees/*`)
-  counts as in-workspace, consistent with the boundary the rest of the hook
-  draws.
-- A pattern-fed kill's pid sources are `pgrep` and `ps`, matched by command
-  word — a wrapper (`busybox ps`, a shell function, a script that kills on your
-  behalf) is not one. Because the source is `ps` and not the stage reading it,
-  the filter can be anything; the cost is that an *anchored* filter the hook
-  can't read doesn't clear the pipeline either, so
-  `ps … | awk '/<this-root>\/x/ {print $1}' | xargs kill` denies. Anchor with a
-  `grep`, or use `WORKSPACE_GUARD_OVERRIDE`. (Reading an `awk` program was
-  rejected as unsafe, not merely imprecise: an inverting `!/<this-root>/` program
-  would scan as anchored while killing every other checkout.) Provenance is
-  co-occurrence within one pipeline or command string rather than dataflow, so a
-  string that both searches by pattern and kills an unrelated non-literal pid is
-  denied though nothing was laundered; the override covers it.
-- **A shell `-c` body is only analyzed when this host runs it.** `sh -c
-  '<body>'` — and the `bash`, `zsh`, `dash`, `ksh` spellings under the local
-  wrappers (`timeout 5 bash -c …`, `xargs -I{} sh -c …`,
-  `find … -exec sh -c … \;`) — is read back through the same rules, so a kill, an
-  outside read or a redirect inside one is caught. Under anything else it is not:
-  a container runtime, `ssh`, or a wrapper the hook doesn't recognize
-  leaves the body unparsed, because the paths in `docker exec … sh -c 'cat
-  /var/lib/…'` are the container's rather than this disk's, and guessing wrong
-  there means blocking a path that was never touched. The body is also skipped
-  once the hook has lost track of the cwd (after a `cd -` or a `cd "$VAR"`),
-  where a relative path in it would resolve against a stale directory. In all
-  those cases the string still *defers* — a body never earns the blanket `allow`,
-  analyzed or not — except in `auto`, `acceptEdits` and `bypassPermissions`,
-  where a guarded command sharing the string turns it into a `deny` naming the
-  split ([suppression escalation](#suppression-escalation-in-pre-approving-modes)).
-- **A command wrapper is read through when the hook knows its grammar.** `env`,
-  `nice`, `nohup`, `timeout`, `stdbuf`, `setsid`, `ionice`, `time`, `xargs`,
-  `exec`, `command`, `builtin`, `sudo`, `doas`, `caffeinate`, `chrt`, `taskset`
-  and `flock` are peeled off by their own option tables, so
-  the command behind them gets the decision it would get typed bare, and a `cd`
-  behind `command` or `builtin` moves the tracked cwd while one behind `env`
-  does not. A flag outside a wrapper's table, or an option word the shell
-  expands, is never guessed past: the command is taken from the first later word
-  the hook judges, and the string defers rather than allowing, because a wrong
-  guess about where the command starts is how a value gets read as the command.
-  `xargs` defers for a second reason, that its operands arrive on stdin. In
-  `auto`, `acceptEdits` and `bypassPermissions` those two escalate to a deny,
-  but only when the command behind the wrapper is one the hook judges, so
-  `ls | xargs echo` stays silent. Replaying 195,692 corpus
-  commands (2026-10-04), they fired on 132 (0.067%), against 71 (0.036%) for
-  `sh -c` bodies and kills together; that count predates the last six wrappers
-  above. Their modes that run no command — `sudo -l`, `-v`, `-K`, `doas -L`,
-  `chrt -p`, `taskset -p`, a lone `flock FD` — defer. Files the wrapper opens
-  itself are checked: `sudo -e` writes its operands, `flock` creates its lock
-  file, `doas -C` reads its config. `sudo -D DIR` moves the command's cwd, and
-  `sudo -i` moves it to a home the hook cannot know, so a relative path behind
-  it denies the way one after an untracked `cd` does. Under `sudo -R` no path
-  means what it says, so nothing behind it earns `allow`. Bash's `time` keyword
-  is read with its own `-p` and `--`.
-- **A `find` command is judged against its start points, not the files find
-  matches.** The hook does not walk the tree, so a match that is a symlink out
-  of the workspace — or one `find -L` follows — reaches past what `{}` stood
-  for, the way `cat ./*` would through the same link. Where a `-execdir` start
-  is a `$VAR` the hook cannot read, a relative operand in its command is
-  reported as after an untracked `cd`, which names the right operand under the
-  wrong cause.
+  PowerShell's `Remove-Item`/`Move-Item` bind through their own spec and still resolve every component, so removing a symlink there is judged by its target.
+- Redirect targets (`> file`) are inspected on *every* command, guarded or not — a redirect is a write the shell performs regardless of the command word, so `echo secret > /tmp/out` (host temp → deny) and `ls > /etc/out.txt` (outside → ask) are both honored on their targets.
+  The target is resolved against the cwd of the command group it appears in, so a relative target tracks `cd`-shifts the same way file arguments do (`cd /tmp && cat in.txt > evil`, and equally `cd /tmp && echo x > out.txt`, flag `/tmp/…`).
+  A redirect target that is in-workspace, or a *positional* argument of an unguarded command (`ls /etc`), still defers — only the redirect write itself is added to the check.
+- Multi-source `ln a b destdir/` (3+ positionals, symbolic or hard) is not staged.
+  The hook recognises the one- and two-positional forms only.
+- The whitelisted `cd` substitutions are matched after quote stripping, so the *single*-quoted form (`cd '$(git rev-parse --show-toplevel)'`) — which bash treats literally, failing the `cd` unless a directory with that literal name exists — is indistinguishable from the double-quoted form and is tracked as if it substituted.
+  The mis-track is safe: the resolved directory is derived from the already-tracked cwd (the repo toplevel is an ancestor checked against the same workspace boundary), so it never admits a path the double-quoted form wouldn't.
+  The unquoted form tokenizes into separate groups and keeps today's untracked behavior.
+- An all-digits token immediately before a redirect operator is treated as an fd prefix (`2>file`) and dropped.
+  `shlex` discards the original spacing, so a guarded command reading a file literally *named* with digits right before a redirect (`cat 2 >out`, where `2` is a file) is indistinguishable from the fd form and won't be checked.
+  Such a path resolves in-root (and is allowed) anyway except after a `cd` outside the root — a pathological combination.
+- The current session's own Claude-managed scratch tree (`/tmp/claude-<uid>/…/<session>/…` — task output *and* `scratchpad/`) is allowed silently for reads and writes alike, scoped to the session via the hook's `session_id`.
+  Read-only commands are additionally allowed on a *sibling* session's output under the same project's scratch dir (`/tmp/claude-<uid>/<encoded-project>/`), located by scanning the temp root for the slug directory that holds the current `session_id` — the dispatcher-tails-workers pattern.
+  The `/tmp/claude-<uid>/` prefix is an undocumented Claude Code convention inferred from the UID (on Windows, from the per-user temp dir instead — there is no UID); if Claude Code relocates the dir, these paths simply revert to `ask` (fail-safe — the allow never widens the boundary).
+  A session with no `session_id` (older CLIs) disables both allows entirely.
+- In non-interactive / headless runs there is no one to answer an `ask` prompt, so an `ask` still **blocks** the command (re-verified on CLI 2.1.220 across all six permission modes — it does not silently allow).
+  Under `--dangerously-skip-permissions` (`bypassPermissions`) the hook emits `deny` rather than `ask` for outside-workspace paths: equally blocking, but the agent receives the reason and can recover instead of stalling.
+  See [Configuration](#configuration).
+- **How much the hook protects you depends on your permission mode.** No mode auto-approves an `ask` or a `deny`, so neither runs on the hook's decision alone.
+  But a *deferred* command — one the hook declines to judge — runs silently under `auto`, `acceptEdits`, and `bypassPermissions`, and is blocked only under `manual`, `dontAsk`, and `plan`.
+  So the mechanisms that work by declining to vouch (the suppressions described in step 16) add protection only in the latter group; in a pre-approving mode they hand the decision back to rules that already said yes.
+  The measured matrix, and which decision is the right one per mode, are in [`docs/permission-modes.md`](docs/permission-modes.md).
+- The host-temp `deny` covers guarded-command file arguments, redirect targets from any command (`go test > /tmp/log`), a `cd` into host temp followed by a relative write, `mktemp` (its default location is host temp), and — as of the substitution recursion (step 14) — guarded commands inside `"$(…)"`/backtick bodies (`echo "$(mktemp -d)"`, `` x=`mktemp` ``).
+  A literal inline `TMPDIR=<dir>` prefix is honored for `mktemp`'s default location (`TMPDIR=./scratch mktemp` → allow; a `$`-bearing value can't be trusted and degrades to the host-temp default), and combined `mktemp` short flags (`-dp DIR`) are decoded precisely (`-d -p DIR`).
+  One shape remains out of scope and still defers: an inline `TMPDIR=/tmp cmd` that only redirects a *non-`mktemp` tool's* own internal temp location (not a path the hook parses).
+- Command-substitution recursion (step 14) scans the raw command for quote-context fidelity, so single-quoted `'$(…)'` is correctly skipped. Its edges degrade to *defer* (never a silent allow): a body that itself contains a quoted operator character (`echo "$(grep ")" f)"`) can mis-tokenize on re-parse and defer; and backtick nesting via `` \` `` or a no-space `$((…))`-shaped subshell isn't decoded.
+  A process substitution's body is recursed into the same way, so `true >(rm -rf ../x)` asks as `rm -rf ../x` does even though `true` is unguarded (Q276).
+- The sibling-checkout `deny` classifies *write-context* file arguments — the same set the read-prefix exemption treats as writes: redirect targets, `dd` operands, every operand of `cp`/`mv`/`tee`/`rm`/`unlink`/`ln` (a symbolic link's source only while the link itself passes), every operand of a read command carrying a write-mode flag (`sed -i`, gawk `-i inplace`, `yq -i`, `sort -o`, BSD `base64 -o`), and the positional output file of `uniq IN OUT` / `xxd IN OUT`.
+  So a `cp` **source** or a `dd if=` reading *from* a sibling checkout is denied too, not just the destination.
+  That's stricter than a pure "destination only" reading, in the secure direction, and recoverable with `WORKSPACE_GUARD_OVERRIDE`.
+  Pure read commands (`cat`, `grep`, …) of a sibling are unaffected and keep their `ask`.
+- Sibling detection reads git worktree metadata (`.git`, `commondir`, `HEAD`) under the offending path and the session root.
+  Any read/parse failure — or a session that isn't in a worktree — falls back to the normal outside `ask` (fail-safe: the deny is never applied on uncertainty, so the boundary is never weakened).
+  A main-checkout session is a deliberate no-op even when worktrees exist.
+- The unanchored-kill deny covers `pkill`, `killall`, and a pattern-fed `kill` in the Bash tool, `Stop-Process` in the PowerShell tool, and `taskkill` in both.
+  A kill routed through something the hook doesn't parse — a script that kills on your behalf — is checked in **neither**.
+  `Get-Process -Id 1234 | Stop-Process` denies even though the pid is literal — it's bound on the upstream cmdlet, which the kill rule doesn't read; write `Stop-Process -Id 1234`.
+  `taskkill /FI "PID eq 1234"` denies for the same shape of reason: filter expressions aren't parsed, so write `taskkill /PID 1234`.
+  Anchoring is also *lexical*, which cuts both ways: a process started with a relative command line (`make check`) carries no path for `-f` to match, so it can't be anchored at all and the answer there is `pgrep -fl` plus a kill by pid; and a pattern naming an unrelated directory that happens to share this root's basename reads as anchored.
+  What the rule does reliably exclude is a *sibling* checkout, whose directory name differs by construction.
+  A pattern naming a worktree nested under the project root (`.claude/worktrees/*`) counts as in-workspace, consistent with the boundary the rest of the hook draws.
+- A pattern-fed kill's pid sources are `pgrep` and `ps`, matched by command word — a wrapper (`busybox ps`, a shell function, a script that kills on your behalf) is not one.
+  Because the source is `ps` and not the stage reading it, the filter can be anything; the cost is that an *anchored* filter the hook can't read doesn't clear the pipeline either, so `ps … | awk '/<this-root>\/x/ {print $1}' | xargs kill` denies.
+  Anchor with a `grep`, or use `WORKSPACE_GUARD_OVERRIDE`.
+  (Reading an `awk` program was rejected as unsafe, not merely imprecise: an inverting `!/<this-root>/` program would scan as anchored while killing every other checkout.)
+  Provenance is co-occurrence within one pipeline or command string rather than dataflow, so a string that both searches by pattern and kills an unrelated non-literal pid is denied though nothing was laundered; the override covers it.
+- **A shell `-c` body is only analyzed when this host runs it.** `sh -c '<body>'` — and the `bash`, `zsh`, `dash`, `ksh` spellings under the local wrappers (`timeout 5 bash -c …`, `xargs -I{} sh -c …`, `find … -exec sh -c … \;`) — is read back through the same rules, so a kill, an outside read or a redirect inside one is caught.
+  Under anything else it is not: a container runtime, `ssh`, or a wrapper the hook doesn't recognize leaves the body unparsed, because the paths in `docker exec … sh -c 'cat /var/lib/…'` are the container's rather than this disk's, and guessing wrong there means blocking a path that was never touched.
+  The body is also skipped once the hook has lost track of the cwd (after a `cd -` or a `cd "$VAR"`), where a relative path in it would resolve against a stale directory.
+  In all those cases the string still *defers* — a body never earns the blanket `allow`, analyzed or not — except in `auto`, `acceptEdits` and `bypassPermissions`, where a guarded command sharing the string turns it into a `deny` naming the split ([suppression escalation](#suppression-escalation-in-pre-approving-modes)).
+- **A command wrapper is read through when the hook knows its grammar.** `env`, `nice`, `nohup`, `timeout`, `stdbuf`, `setsid`, `ionice`, `time`, `xargs`, `exec`, `command`, `builtin`, `sudo`, `doas`, `caffeinate`, `chrt`, `taskset` and `flock` are peeled off by their own option tables, so the command behind them gets the decision it would get typed bare, and a `cd` behind `command` or `builtin` moves the tracked cwd while one behind `env` does not.
+  A flag outside a wrapper's table, or an option word the shell expands, is never guessed past: the command is taken from the first later word the hook judges, and the string defers rather than allowing, because a wrong guess about where the command starts is how a value gets read as the command.
+  `xargs` defers for a second reason, that its operands arrive on stdin.
+  In `auto`, `acceptEdits` and `bypassPermissions` those two escalate to a deny, but only when the command behind the wrapper is one the hook judges, so `ls | xargs echo` stays silent.
+  Replaying 195,692 corpus commands (2026-10-04), they fired on 132 (0.067%), against 71 (0.036%) for `sh -c` bodies and kills together; that count predates the last six wrappers above.
+  Their modes that run no command — `sudo -l`, `-v`, `-K`, `doas -L`, `chrt -p`, `taskset -p`, a lone `flock FD` — defer.
+  Files the wrapper opens itself are checked: `sudo -e` writes its operands, `flock` creates its lock file, `doas -C` reads its config.
+  `sudo -D DIR` moves the command's cwd, and `sudo -i` moves it to a home the hook cannot know, so a relative path behind it denies the way one after an untracked `cd` does.
+  Under `sudo -R` no path means what it says, so nothing behind it earns `allow`.
+  Bash's `time` keyword is read with its own `-p` and `--`.
+- **A `find` command is judged against its start points, not the files find matches.** The hook does not walk the tree, so a match that is a symlink out of the workspace — or one `find -L` follows — reaches past what `{}` stood for, the way `cat ./*` would through the same link.
+  Where a `-execdir` start is a `$VAR` the hook cannot read, a relative operand in its command is reported as after an untracked `cd`, which names the right operand under the wrong cause.
 - **The PowerShell tool is guarded for a known set of cmdlets, and only those.**
   Claude Code ships two shell tools. Which one a Windows session gets depends on
   whether Git for Windows is installed — without it there is no Bash tool and
@@ -2181,87 +1285,54 @@ final output.
   command; a guard that noisy gets switched off, and zero coverage is worse than
   partial. Expect this list to grow. The native file tools (`Read`, `Grep`,
   `Glob`, `Edit`, `Write`) are guarded in full either way.
-- **A custom Git Bash mount is read as an ordinary directory.** On Windows the
-  hook resolves a leading-slash path through the mount table Git for Windows
-  ships (`/c/…` is the C: drive, `/tmp` is `%TMP%`, `/bin` is `<git>\usr\bin`,
-  anything else hangs off the Git install dir). A mount you added in
-  `/etc/fstab`, and MSYS's virtual paths like `/proc`, are not in that table and
-  fall through to the last rule, so the prompt names a path under the Git
-  install dir instead. The same happens for every non-drive path if Git Bash
-  can't be located at all (the hook looks at `CLAUDE_CODE_GIT_BASH_PATH`, then
-  `bash` and `git` on `PATH`) — it keeps the older drive-relative reading
-  rather than guessing. Either way the effect is a prompt naming a path that
-  isn't quite the one being opened, never a missed one.
+- **A custom Git Bash mount is read as an ordinary directory.** On Windows the hook resolves a leading-slash path through the mount table Git for Windows ships (`/c/…` is the C: drive, `/tmp` is `%TMP%`, `/bin` is `<git>\usr\bin`, anything else hangs off the Git install dir).
+  A mount you added in `/etc/fstab`, and MSYS's virtual paths like `/proc`, are not in that table and fall through to the last rule, so the prompt names a path under the Git install dir instead.
+  The same happens for every non-drive path if Git Bash can't be located at all (the hook looks at `CLAUDE_CODE_GIT_BASH_PATH`, then `bash` and `git` on `PATH`) — it keeps the older drive-relative reading rather than guessing.
+  Either way the effect is a prompt naming a path that isn't quite the one being opened, never a missed one.
 
 ## Companion plugins
 
-workspace-guard watches the **filesystem** boundary — whether a guarded
-command reads or writes a path outside `$CLAUDE_PROJECT_DIR`. Its siblings guard other axes
-with the same secure-by-default design:
+workspace-guard watches the **filesystem** boundary — whether a guarded command reads or writes a path outside `$CLAUDE_PROJECT_DIR`.
+Its siblings guard other axes with the same secure-by-default design:
 
-- [**branch-guard**](https://github.com/karlkfi/claude-bouncer) — the **git
-  history** boundary: auto-approves safe git on feature branches, pauses commits
-  and pushes to `main` and destructive git.
-- [**prod-guard**](https://github.com/karlkfi/claude-bouncer) — the
-  **infrastructure blast-radius** boundary: denies mutations aimed at production
-  contexts.
-- [**exit-status-guard**](https://github.com/karlkfi/claude-bouncer) — the
-  **evidence** boundary: catches a gate whose failure reads as success — piped
-  into a filter, backgrounded behind an `echo`, or sequenced before a state
-  change with `;`.
-- [**foreground-guard**](https://github.com/karlkfi/claude-bouncer) — the
-  **liveness** boundary: keeps polling, watching, and blocking commands from
-  stalling the session's main thread.
-- [**pr-sentinel**](https://github.com/karlkfi/claude-pr-sentinel) — the
-  **review** boundary: watches a PR to green without merging it, and denies a
-  `gh pr create` whose branch edits lines an open PR already changes.
+- [**branch-guard**](https://github.com/karlkfi/claude-bouncer) — the **git history** boundary: auto-approves safe git on feature branches, pauses commits and pushes to `main` and destructive git.
+- [**prod-guard**](https://github.com/karlkfi/claude-bouncer) — the **infrastructure blast-radius** boundary: denies mutations aimed at production contexts.
+- [**exit-status-guard**](https://github.com/karlkfi/claude-bouncer) — the **evidence** boundary: catches a gate whose failure reads as success — piped into a filter, backgrounded behind an `echo`, or sequenced before a state change with `;`.
+- [**foreground-guard**](https://github.com/karlkfi/claude-bouncer) — the **liveness** boundary: keeps polling, watching, and blocking commands from stalling the session's main thread.
+- [**pr-sentinel**](https://github.com/karlkfi/claude-pr-sentinel) — the **review** boundary: watches a PR to green without merging it, and denies a `gh pr create` whose branch edits lines an open PR already changes.
 
 They run side by side; each defers to normal permissions outside its own axis.
-The guards share one marketplace —
-[`karlkfi/claude-bouncer`](https://github.com/karlkfi/claude-bouncer#install)
-lists the install line for each — and pr-sentinel ships from its own.
+The guards share one marketplace — [`karlkfi/claude-bouncer`](https://github.com/karlkfi/claude-bouncer#install) lists the install line for each — and pr-sentinel ships from its own.
 
 ### The pairing with branch-guard
 
-workspace-guard says nothing about *git history* — once a path is in-root, an
-in-root `git commit && git push` to `main`, a `git reset --hard`, or a
-`git clean -fd` runs without a second look. Those are exactly the operations
-that turn an in-workspace edit into an unrecoverable one.
+workspace-guard says nothing about *git history* — once a path is in-root, an in-root `git commit && git push` to `main`, a `git reset --hard`, or a `git clean -fd` runs without a second look.
+Those are exactly the operations that turn an in-workspace edit into an unrecoverable one.
 
 [**branch-guard**](https://github.com/karlkfi/claude-bouncer) covers that gap.
-Its motto: *"Let Claude commit and push all day on feature branches. Pause it at
-main."* It parses pending `git`/`gh` commands (and blocks file edits when the
-repo is on a protected branch), then:
+Its motto: *"Let Claude commit and push all day on feature branches.
+Pause it at main."* It parses pending `git`/`gh` commands (and blocks file edits when the repo is on a protected branch), then:
 
-- **asks** before committing or pushing to `main`/`master`, force-pushing, or
-  running destructive commands (`reset --hard`, `clean -fd`, `branch -D`,
-  `restore <path>`);
-- **allows** read-only git, staging, branch creation, and commits/pushes on
-  feature/worktree branches to run silently;
+- **asks** before committing or pushing to `main`/`master`, force-pushing, or running destructive commands (`reset --hard`, `clean -fd`, `branch -D`, `restore <path>`);
+- **allows** read-only git, staging, branch creation, and commits/pushes on feature/worktree branches to run silently;
 - **defers** unknown commands to your normal permission settings.
 
 ## Design
 
-For the rationale behind the approach (why a hook, why `ask`, why a static
-spec table, what alternatives were rejected), see [`docs/design.md`](docs/design.md).
-Out-of-scope security observations from audits live in
-[`docs/security-notes.md`](docs/security-notes.md).
+For the rationale behind the approach (why a hook, why `ask`, why a static spec table, what alternatives were rejected), see [`docs/design.md`](docs/design.md).
+Out-of-scope security observations from audits live in [`docs/security-notes.md`](docs/security-notes.md).
 
 ## Privacy
 
-The hook runs entirely on your machine and has no network access, telemetry,
-or analytics. It reads the pending command (or edit target) and your project
-path, decides in memory, and never opens version-controlled file contents or
-writes anything to disk. To detect sibling worktree checkouts it reads a few
-small git metadata files (`.git`, `commondir`, `HEAD`) locally. See
-[`PRIVACY.md`](PRIVACY.md) for the full policy.
+The hook runs entirely on your machine and has no network access, telemetry, or analytics.
+It reads the pending command (or edit target) and your project path, decides in memory, and never opens version-controlled file contents or writes anything to disk.
+To detect sibling worktree checkouts it reads a few small git metadata files (`.git`, `commondir`, `HEAD`) locally.
+See [`PRIVACY.md`](PRIVACY.md) for the full policy.
 
 ## Contributing
 
-Bugs, ideas, and questions go in
-[GitHub Issues](https://github.com/karlkfi/claude-bouncer/issues).
-For the development backlog and how to add new guarded commands, see the
-[shared backlog](https://github.com/karlkfi/claude-bouncer/blob/main/docs/queue/README.md).
+Bugs, ideas, and questions go in [GitHub Issues](https://github.com/karlkfi/claude-bouncer/issues).
+For the development backlog and how to add new guarded commands, see the [shared backlog](https://github.com/karlkfi/claude-bouncer/blob/main/docs/queue/README.md).
 
 ## License
 

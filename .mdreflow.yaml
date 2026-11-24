@@ -1,0 +1,15 @@
+# One sentence per source line for tracked Markdown, so a changed sentence is
+# one changed line and two branches editing a paragraph stop colliding on its
+# wrap. `make md-reflow` applies it; `make md-reflow-check` is the gate.
+mode: sentence
+# Unbounded. A width turns on clause-level breaks inside a sentence, which puts
+# the hand-wrap churn back.
+max-width: 0
+dialect: gfm
+
+exclude:
+  # Each file is a GitHub Release body, byte for byte. A release body renders
+  # every newline as a line break, and `verify-release-notes.sh` compares the
+  # shipped ones against GitHub, so reflowing one is wrong both ways. The
+  # README beside them is an ordinary page and is formatted.
+  - "plugins/*/docs/releases/v*.md"

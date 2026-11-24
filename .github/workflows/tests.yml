@@ -154,6 +154,19 @@ jobs:
           python-version: "3.13"
       - run: make backlog-claims
 
+  # ------------------------------------------------------ Markdown line breaks
+  # Its own job because it is the only gate that needs Go. Unfiltered: every
+  # plugin carries Markdown, and the check itself takes under a second.
+  md-reflow:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: tools/go.mod
+          cache-dependency-path: tools/go.sum
+      - run: make md-reflow-check
+
   # --------------------------------------------------------- workspace-guard
   workspace-guard:
     needs: [changes]

@@ -1,19 +1,27 @@
 # Design
 
-The "why" behind workspace-guard. The [`README.md`](../README.md) covers *what* the plugin does; this doc covers *why this approach* and *why not the alternatives*. Read this before proposing a structural change to the parser, the `SPEC` table, or the decision semantics.
+The "why" behind workspace-guard.
+The [`README.md`](../README.md) covers *what* the plugin does; this doc covers *why this approach* and *why not the alternatives*.
+Read this before proposing a structural change to the parser, the `SPEC` table, or the decision semantics.
 
 ## Problem
 
-Claude Code's built-in permission system matches commands as string patterns. `Bash(grep:*)` allows **every** invocation of `grep`. Users who pre-approve common file readers (`grep`, `cat`, `sed`, `head`, …) — the standard remedy for prompt fatigue — end up implicitly pre-approving `grep secret /etc/passwd` and `cat ~/.aws/credentials` along with the legitimate workspace reads.
+Claude Code's built-in permission system matches commands as string patterns.
+`Bash(grep:*)` allows **every** invocation of `grep`.
+Users who pre-approve common file readers (`grep`, `cat`, `sed`, `head`, …) — the standard remedy for prompt fatigue — end up implicitly pre-approving `grep secret /etc/passwd` and `cat ~/.aws/credentials` along with the legitimate workspace reads.
 
 The naive alternatives don't work:
 
 - Leaving the rules empty and answering every prompt destroys agent throughput.
 - Denying every outside-workspace read blocks legitimate cases (`cat /etc/os-release` for environment inspection, `man` pipelines, viewing system configs the user explicitly asked about).
 
-The right granularity is **per file argument**, not per command. That's what this plugin adds.
+The right granularity is **per file argument**, not per command.
+That's what this plugin adds.
 
-This framing assumes an operator who *has* pre-approved those readers, so the hook's job is to narrow a permission that already exists. Plenty of operators deliberately run with no permission rules at all, on the view that a glob-matched allowlist is too blunt to trust — and for them the relationship inverts: the hook's `allow` grants access nothing else granted. The hook cannot tell the two apart, so `allow` is spent as if it were a grant. See [`permission-modes.md`](permission-modes.md).
+This framing assumes an operator who *has* pre-approved those readers, so the hook's job is to narrow a permission that already exists.
+Plenty of operators deliberately run with no permission rules at all, on the view that a glob-matched allowlist is too blunt to trust — and for them the relationship inverts: the hook's `allow` grants access nothing else granted.
+The hook cannot tell the two apart, so `allow` is spent as if it were a grant.
+See [`permission-modes.md`](permission-modes.md).
 
 ## Approach
 
@@ -33,145 +41,238 @@ Because `PreToolUse` hooks run before Claude Code's permission check, a user wit
 
 ### Why a hook, not deeper integration
 
-Hooks are the only sanctioned extension point that sees structured tool input before the tool runs. A change to the permission-rule grammar in Claude Code itself would be the cleanest answer, but it requires an upstream change; this hook ships today and is per-user opt-in.
+Hooks are the only sanctioned extension point that sees structured tool input before the tool runs.
+A change to the permission-rule grammar in Claude Code itself would be the cleanest answer, but it requires an upstream change; this hook ships today and is per-user opt-in.
 
 ### Why a static `SPEC` table, not flag inference
 
-The command being parsed is adversarial input. If the parser tries to *guess* whether an unknown flag takes a value, every guess is a potential bypass. The static `SPEC` table is the contract: a command is guarded **only** if we've explicitly written down which tokens are files. Adding coverage is a one-row change. Misclassification is impossible by construction for any command not in the table.
+The command being parsed is adversarial input.
+If the parser tries to *guess* whether an unknown flag takes a value, every guess is a potential bypass.
+The static `SPEC` table is the contract: a command is guarded **only** if we've explicitly written down which tokens are files.
+Adding coverage is a one-row change.
+Misclassification is impossible by construction for any command not in the table.
 
 ### Why `ask`, not `deny`
 
-The hook is a guardrail, not a wall. False positives — legitimate reads of `/etc/os-release`, system configs, the user's `~/.zshrc` — are routine, and a `deny` default would erode trust until the user disabled the hook entirely. `ask` puts the human in the loop, which is the right cost for the rare outside-workspace read. Hard-blocking is available as a one-line local edit, documented in the README.
+The hook is a guardrail, not a wall.
+False positives — legitimate reads of `/etc/os-release`, system configs, the user's `~/.zshrc` — are routine, and a `deny` default would erode trust until the user disabled the hook entirely.
+`ask` puts the human in the loop, which is the right cost for the rare outside-workspace read.
+Hard-blocking is available as a one-line local edit, documented in the README.
 
 ### What the boundary is for, and how it moves
 
-The boundary serves two purposes and they are not equal. The larger one is keeping the session out of things it should neither read nor modify — credentials, an unrelated project's tree, machine state the work does not touch. The smaller one is keeping concurrent sessions off each other's checkouts. Where the two disagree the first wins, and a rule serving only the second is the first one to relax.
+The boundary serves two purposes and they are not equal.
+The larger one is keeping the session out of things it should neither read nor modify — credentials, an unrelated project's tree, machine state the work does not touch.
+The smaller one is keeping concurrent sessions off each other's checkouts.
+Where the two disagree the first wins, and a rule serving only the second is the first one to relax.
 
-That ranking has teeth. A second worktree of the *same* repository is inside the repo, so it does not engage the larger purpose at all; it engages the smaller one, and not even that when no peer session owns the tree.
+That ranking has teeth.
+A second worktree of the *same* repository is inside the repo, so it does not engage the larger purpose at all; it engages the smaller one, and not even that when no peer session owns the tree.
 
-Work outside the worktree is legitimate and routine — installing a tool, editing the operator's global `CLAUDE.md`, reading a machine fact the task turns on. Those are `ask` by design rather than gaps in the boundary, and an approved `ask` is the system working rather than failing.
+Work outside the worktree is legitimate and routine — installing a tool, editing the operator's global `CLAUDE.md`, reading a machine fact the task turns on.
+Those are `ask` by design rather than gaps in the boundary, and an approved `ask` is the system working rather than failing.
 
-**What is wrong is asking again.** The cost lands on the boundary being re-litigated every call, not on the boundary being drawn. So the direction of travel is to audit what denies and asks in practice, judge which of those are safe, and widen the zone of trust to cover them — without moving a boundary, wherever that is possible.
+**What is wrong is asking again.** The cost lands on the boundary being re-litigated every call, not on the boundary being drawn.
+So the direction of travel is to audit what denies and asks in practice, judge which of those are safe, and widen the zone of trust to cover them — without moving a boundary, wherever that is possible.
 
-**Ask-then-remember is what makes that possible.** A shape the operator approves is allowed for the rest of that session and asked again in the next one. The check keeps its strictness and the repetition goes, which is the only reduction that costs no boundary at all. It is session-scoped because the answer is often session-specific: whether a session may write into a given directory can legitimately differ from one run to the next, so a persistent grant would be answering a question nobody asked.
+**Ask-then-remember is what makes that possible.** A shape the operator approves is allowed for the rest of that session and asked again in the next one.
+The check keeps its strictness and the repetition goes, which is the only reduction that costs no boundary at all.
+It is session-scoped because the answer is often session-specific: whether a session may write into a given directory can legitimately differ from one run to the next, so a persistent grant would be answering a question nobody asked.
 
 ### Why a remembered approval defers rather than allowing
 
-Session grants (`WORKSPACE_GUARD_SESSION_GRANTS=1`) turn the section above into a mechanism: an approval the operator has already given is not asked again for the rest of that session. The hook cannot see the answer — `PreToolUse` returns `ask` and is never told what came back — so nothing is recorded there, and a `PostToolUse` hook, which fires only when the tool actually ran, records it instead. The failure direction falls the right way: forgetting costs one more prompt, while remembering takes positive evidence that the call went through. A `deny` is never recorded, because nobody was asked.
+Session grants (`WORKSPACE_GUARD_SESSION_GRANTS=1`) turn the section above into a mechanism: an approval the operator has already given is not asked again for the rest of that session.
+The hook cannot see the answer — `PreToolUse` returns `ask` and is never told what came back — so nothing is recorded there, and a `PostToolUse` hook, which fires only when the tool actually ran, records it instead.
+The failure direction falls the right way: forgetting costs one more prompt, while remembering takes positive evidence that the call went through.
+A `deny` is never recorded, because nobody was asked.
 
-A covered call then **defers**. Returning `allow` would be a different act — the `allow`/vouching distinction the interpreter section below makes — since it speaks for the whole command and short-circuits permission rules the operator set themselves. What they approved was one prompt, and defer is the verdict that withdraws exactly that objection and no more.
+A covered call then **defers**.
+Returning `allow` would be a different act — the `allow`/vouching distinction the interpreter section below makes — since it speaks for the whole command and short-circuits permission rules the operator set themselves.
+What they approved was one prompt, and defer is the verdict that withdraws exactly that objection and no more.
 
-The worktree grant is the one exemption that does end in `allow`, and it is not the same act. It says a path is *in this workspace*, exactly as the session scratchpad and the read prefixes do, so a command with nothing else outside allows for the ordinary reason. The grant is minted by branch-guard, which asks on the `git worktree add` that created the checkout — the only moment that identifies the tree as this session's rather than a peer's, since an approval at first use cannot tell the two apart and so could never justify granting writes.
+The worktree grant is the one exemption that does end in `allow`, and it is not the same act.
+It says a path is *in this workspace*, exactly as the session scratchpad and the read prefixes do, so a command with nothing else outside allows for the ordinary reason.
+The grant is minted by branch-guard, which asks on the `git worktree add` that created the checkout — the only moment that identifies the tree as this session's rather than a peer's, since an approval at first use cannot tell the two apart and so could never justify granting writes.
 
 ### Why defer on uncertainty
 
-Unparseable commands, commands not in `SPEC`, empty input — all return no decision. Control hands back to Claude Code's normal permission rules, i.e. the same behavior as if the hook weren't installed. This is the only fail mode that doesn't surprise the user:
+Unparseable commands, commands not in `SPEC`, empty input — all return no decision.
+Control hands back to Claude Code's normal permission rules, i.e. the same behavior as if the hook weren't installed.
+This is the only fail mode that doesn't surprise the user:
 
 - Failing closed (deny on parse error) would block legitimate work and train users to disable the hook.
 - Failing open with a silent `allow` would mask security regressions.
 - Defer is net-neutral: the user is no worse off than without the hook.
 
-**That last point is weaker than it reads, and the difference is measured.** Defer hands control back to the permission system, so it is protective only where that system would stop something. In `auto`, `acceptEdits`, and `bypassPermissions` a deferred command simply runs — so every "the hook declines to vouch, so it defers" mechanism in this plugin is inert in exactly the modes that pre-approve the most. "No worse off than without the hook" is true; in a pre-approving mode it means unprotected. See [`permission-modes.md`](permission-modes.md) for the full matrix, and treat it as a precondition when choosing any decision.
+**That last point is weaker than it reads, and the difference is measured.** Defer hands control back to the permission system, so it is protective only where that system would stop something.
+In `auto`, `acceptEdits`, and `bypassPermissions` a deferred command simply runs — so every "the hook declines to vouch, so it defers" mechanism in this plugin is inert in exactly the modes that pre-approve the most.
+"No worse off than without the hook" is true; in a pre-approving mode it means unprotected.
+See [`permission-modes.md`](permission-modes.md) for the full matrix, and treat it as a precondition when choosing any decision.
 
 This is the asymmetry behind the "secure by default" principle the plugin holds itself to: adding friction is cheap, removing it requires sign-off.
 
 ### Why only these seven commands
 
-`grep`, `sed`, `awk`, `jq`, `cat`, `head`, `tail` are the high-frequency file readers users typically pre-approve. Pre-approval is what creates the gap this hook fills. Commands nobody pre-approves (`bash -c`, `eval`, `xargs`) still go through normal prompts and don't benefit from a hook layer on top.
+`grep`, `sed`, `awk`, `jq`, `cat`, `head`, `tail` are the high-frequency file readers users typically pre-approve.
+Pre-approval is what creates the gap this hook fills.
+Commands nobody pre-approves (`bash -c`, `eval`, `xargs`) still go through normal prompts and don't benefit from a hook layer on top.
 
-The bar for adding a row to `SPEC`: **users pre-approve this command in permission settings, and it can read arbitrary files**. `cut`, `wc`, `xxd`, `od`, `strings` are reasonable candidates; `ls` is not (doesn't read file contents); `bash` is not (different threat model — see [`security-notes.md`](security-notes.md)).
+The bar for adding a row to `SPEC`: **users pre-approve this command in permission settings, and it can read arbitrary files**.
+`cut`, `wc`, `xxd`, `od`, `strings` are reasonable candidates; `ls` is not (doesn't read file contents); `bash` is not (different threat model — see [`security-notes.md`](security-notes.md)).
 
 ### Why the hook extends beyond Bash to the native file tools
 
-The filesystem boundary is really "don't touch files outside the workspace," and the native tools (`Read`/`Grep`/`Glob`, `Edit`/`Write`/`MultiEdit`/`NotebookEdit`) bypass Bash entirely. The first expansion targeted the narrowest hazard: a **write into a sibling checkout of the same repo** when the session runs in a git worktree — the edit silently lands on the wrong branch — so the write tools got a `PreToolUse` hook whose headline rule is the sibling-checkout deny. Since 1.5.0 coverage is symmetric with the Bash guard: the write tools get the full outside/host-temp/sibling classification of a bash write, and `Read`/`Grep`/`Glob` get the same check as a bash `cat` of the same path (`ask` on an outside path, with the same read exemptions). In-workspace targets defer to the builtin permission system.
+The filesystem boundary is really "don't touch files outside the workspace," and the native tools (`Read`/`Grep`/`Glob`, `Edit`/`Write`/`MultiEdit`/`NotebookEdit`) bypass Bash entirely.
+The first expansion targeted the narrowest hazard: a **write into a sibling checkout of the same repo** when the session runs in a git worktree — the edit silently lands on the wrong branch — so the write tools got a `PreToolUse` hook whose headline rule is the sibling-checkout deny.
+Since 1.5.0 coverage is symmetric with the Bash guard: the write tools get the full outside/host-temp/sibling classification of a bash write, and `Read`/`Grep`/`Glob` get the same check as a bash `cat` of the same path (`ask` on an outside path, with the same read exemptions).
+In-workspace targets defer to the builtin permission system.
 
-Detection lives in the same script the Bash hook uses (dispatched on `tool_name`), not a separate plugin: a standalone "worktree-guard" would duplicate the root detection, path resolution, and cwd tracking this plugin already has, and both hooks would fire on the same Bash calls with competing messages. `branch-guard` (which already hooks `Edit`/`Write`) was considered too, but its axis is "protected branch," and the hazard here is "wrong checkout" — it exists even when the sibling has a feature branch checked out. The worktree-aware filesystem boundary is this plugin's mission.
+Detection lives in the same script the Bash hook uses (dispatched on `tool_name`), not a separate plugin: a standalone "worktree-guard" would duplicate the root detection, path resolution, and cwd tracking this plugin already has, and both hooks would fire on the same Bash calls with competing messages.
+`branch-guard` (which already hooks `Edit`/`Write`) was considered too, but its axis is "protected branch," and the hazard here is "wrong checkout" — it exists even when the sibling has a feature branch checked out.
+The worktree-aware filesystem boundary is this plugin's mission.
 
-The deny (rather than `ask`) is the secure default here specifically because the failure mode is an approvable-by-reflex prompt whose only correct answer was "reject and retype the path"; a deny self-heals in one agent round trip. `WORKSPACE_GUARD_OVERRIDE=<reason>` is the documented, reasoned escape hatch for deliberate cross-checkout work.
+The deny (rather than `ask`) is the secure default here specifically because the failure mode is an approvable-by-reflex prompt whose only correct answer was "reject and retype the path"; a deny self-heals in one agent round trip.
+`WORKSPACE_GUARD_OVERRIDE=<reason>` is the documented, reasoned escape hatch for deliberate cross-checkout work.
 
-That reasoning is an assertion an operator has to take on trust — the reflex it predicts is not visible from outside. Q84 made it checkable without weakening it: `WORKSPACE_GUARD_POSTURE=supervise` turns the deny classes into prompts so the operator can watch them land, with a per-category knob above it for holding one class back. The default does not move, and the posture cannot turn a block into a run, since no permission mode auto-approves an `ask`. See "Supervising posture" in the README, and [`permission-modes.md`](permission-modes.md) for the mode measurement behind that last claim.
+That reasoning is an assertion an operator has to take on trust — the reflex it predicts is not visible from outside.
+Q84 made it checkable without weakening it: `WORKSPACE_GUARD_POSTURE=supervise` turns the deny classes into prompts so the operator can watch them land, with a per-category knob above it for holding one class back.
+The default does not move, and the posture cannot turn a block into a run, since no permission mode auto-approves an `ask`.
+See "Supervising posture" in the README, and [`permission-modes.md`](permission-modes.md) for the mode measurement behind that last claim.
 
 ### Why a write into another session's scratch denies while a read is allowed
 
-The scratch tree Claude Code hands each session sits under a project slug, one per checkout, so a dispatcher and its workers share a parent only when they share a checkout. Reads across that parent are allowed, and so are reads of a session whose transcript records a `cwd` in another checkout of the same repository (Q311) — tailing a worker's task output is the case they were opened for — and the write half stays blocked, because a session writing into a sibling's scratch clobbers work nobody asked it to touch.
+The scratch tree Claude Code hands each session sits under a project slug, one per checkout, so a dispatcher and its workers share a parent only when they share a checkout.
+Reads across that parent are allowed, and so are reads of a session whose transcript records a `cwd` in another checkout of the same repository (Q311) — tailing a worker's task output is the case they were opened for — and the write half stays blocked, because a session writing into a sibling's scratch clobbers work nobody asked it to touch.
 
-What makes it a `deny` with a rewrite rather than an `ask` is where those writes come from. A resume or a compaction mints a new session id and a new scratch dir under the same slug, while the path already in the agent's context still names the old one; the write is a stale reference rather than an intent. Measured over 30 days of one developer's transcripts: 41 such prompts, all writes, 40 of them naming a session other than the running one, and one session took nine in ninety minutes on a single path. An approved `ask` runs, so each of those writes landed and nothing told the agent its path was stale — the tenth was as likely as the first. A `deny` fails the write and carries the right path with it, which is the whole test for `deny` over `ask`: the hook knows the answer and can say it. Whether the reason attached to an `ask` reaches the agent at all is a separate question, unmeasured here and tracked against branch-guard; the argument does not rest on it, because an approval that succeeds teaches nothing either way.
+What makes it a `deny` with a rewrite rather than an `ask` is where those writes come from.
+A resume or a compaction mints a new session id and a new scratch dir under the same slug, while the path already in the agent's context still names the old one; the write is a stale reference rather than an intent.
+Measured over 30 days of one developer's transcripts: 41 such prompts, all writes, 40 of them naming a session other than the running one, and one session took nine in ninety minutes on a single path.
+An approved `ask` runs, so each of those writes landed and nothing told the agent its path was stale — the tenth was as likely as the first.
+A `deny` fails the write and carries the right path with it, which is the whole test for `deny` over `ask`: the hook knows the answer and can say it.
+Whether the reason attached to an `ask` reaches the agent at all is a separate question, unmeasured here and tracked against branch-guard; the argument does not rest on it, because an approval that succeeds teaches nothing either way.
 
 A deliberate cross-session write — seeding a worker's scratch with a brief — is the case `WORKSPACE_GUARD_OVERRIDE` covers, and it is rare enough to be worth naming when it happens.
 
 ### Why a process kill is in scope, though it touches no file
 
-`pkill -f` — and `Stop-Process` on the PowerShell side — reaches another session's work without naming a path. It signals by *pattern*, matched against the whole command line, so `pkill -f "make check"` hits every checkout on the host running one — the same wrong-branch mistake as a sibling-checkout write, addressed the one way a path check cannot see. It sits in this plugin rather than a new one for the same reason the write tools do: the workspace root, the tokenizer, and the override are already here.
+`pkill -f` — and `Stop-Process` on the PowerShell side — reaches another session's work without naming a path.
+It signals by *pattern*, matched against the whole command line, so `pkill -f "make check"` hits every checkout on the host running one — the same wrong-branch mistake as a sibling-checkout write, addressed the one way a path check cannot see.
+It sits in this plugin rather than a new one for the same reason the write tools do: the workspace root, the tokenizer, and the override are already here.
 
-The rule is an *anchor*, not a pattern allowlist: some operand must contain the project root's directory name as a whole path component with a separator on at least one side. That is a mechanical test with no judgment in it — a bare word is a substring match against a command line, and the hook has no basis for deciding whether `api` excludes a sibling. Both misparse directions of the flag table land on `deny`, so lagging an implementation's options costs friction, never a hole.
+The rule is an *anchor*, not a pattern allowlist: some operand must contain the project root's directory name as a whole path component with a separator on at least one side.
+That is a mechanical test with no judgment in it — a bare word is a substring match against a command line, and the hook has no basis for deciding whether `api` excludes a sibling.
+Both misparse directions of the flag table land on `deny`, so lagging an implementation's options costs friction, never a hole.
 
-`deny` rather than `ask` here is measured, not assumed: of 38 `pkill` targets observed across one developer's session transcripts, 36 carried nothing identifying the worktree that started them. An `ask` on 36 of 38 kills trains the reflexive approval it exists to prevent. Unlike the file tiers, an *anchored* kill defers rather than emitting `allow` — this hook has nothing more to say about it, and an `allow` would strip the user's own permission settings from a destructive command.
+`deny` rather than `ask` here is measured, not assumed: of 38 `pkill` targets observed across one developer's session transcripts, 36 carried nothing identifying the worktree that started them.
+An `ask` on 36 of 38 kills trains the reflexive approval it exists to prevent.
+Unlike the file tiers, an *anchored* kill defers rather than emitting `allow` — this hook has nothing more to say about it, and an `allow` would strip the user's own permission settings from a destructive command.
 
-PowerShell's `Stop-Process` is the same hazard behind a different grammar, and covering it changed one thing about the rule: the scope is the whole *statement*, not one command. The anchored rewrite there is `Get-Process | Where-Object { $_.Path -like '<root>\*' } | Stop-Process`, where the anchor sits two pipeline segments upstream of the kill, so a segment-local scan would deny the very rewrite the message recommends. Covering the pipeline form at all is not optional: guard only `-Name` and the deny teaches the agent to reach for `Get-Process node | Stop-Process` — the identical host-wide kill, one step further from the check.
+PowerShell's `Stop-Process` is the same hazard behind a different grammar, and covering it changed one thing about the rule: the scope is the whole *statement*, not one command.
+The anchored rewrite there is `Get-Process | Where-Object { $_.Path -like '<root>\*' } | Stop-Process`, where the anchor sits two pipeline segments upstream of the kill, so a segment-local scan would deny the very rewrite the message recommends.
+Covering the pipeline form at all is not optional: guard only `-Name` and the deny teaches the agent to reach for `Get-Process node | Stop-Process` — the identical host-wide kill, one step further from the check.
 
-Windows' `taskkill` then pushed the scope back the other way, which is the part worth recording. It reaches both frontends, so it is checked in both — but it is judged on its own arguments, not on its statement, because it reads no pipeline: its selection is entirely in its own flags. Inheriting `Stop-Process`' statement scope would have accepted `Get-Content <root>\list.txt | taskkill /IM node.exe` as anchored while it killed every checkout's `node.exe`. The scope of an anchor is therefore a property of *how the command selects its targets*, not of the shell it was typed into — one rule, two scopes, decided per command.
+Windows' `taskkill` then pushed the scope back the other way, which is the part worth recording.
+It reaches both frontends, so it is checked in both — but it is judged on its own arguments, not on its statement, because it reads no pipeline: its selection is entirely in its own flags.
+Inheriting `Stop-Process`' statement scope would have accepted `Get-Content <root>\list.txt | taskkill /IM node.exe` as anchored while it killed every checkout's `node.exe`.
+The scope of an anchor is therefore a property of *how the command selects its targets*, not of the shell it was typed into — one rule, two scopes, decided per command.
 
-Bash has that same shape, one layer down: a rule that keys on the kill *command* is dodged by keying on the pid instead: `pgrep -f ginkgo | xargs kill` and `ps … | grep ginkgo | awk '{print $1}' | xargs kill` kill exactly what `pkill -f ginkgo` kills. The second shape was worse than a miss — `grep` and `awk` are clean guarded commands, so the hook emitted its blanket `allow` for the whole string and green-lit the kill. That is the general lesson: **`allow` speaks for the entire command string**, so any tier that answers `allow` on the strength of one command has to be suppressed by anything destructive elsewhere in the string. Signalling now clears the flag in the bash frontend regardless of whether the kill itself offends, and the pattern that produced the pids is run through the same anchor test the kill's own pattern gets. Both frontends clear it now: a `Stop-Process` or a `taskkill` suppresses the PowerShell `allow` on the same terms, including the kills the anchor rule cleared. That last part is the point rather than an edge case — a kill by literal pid or behind a `Where-Object` filter earns no offender, which is precisely what left it there for a clean `Get-Content` to speak for.
+Bash has that same shape, one layer down: a rule that keys on the kill *command* is dodged by keying on the pid instead: `pgrep -f ginkgo | xargs kill` and `ps … | grep ginkgo | awk '{print $1}' | xargs kill` kill exactly what `pkill -f ginkgo` kills.
+The second shape was worse than a miss — `grep` and `awk` are clean guarded commands, so the hook emitted its blanket `allow` for the whole string and green-lit the kill.
+That is the general lesson: **`allow` speaks for the entire command string**, so any tier that answers `allow` on the strength of one command has to be suppressed by anything destructive elsewhere in the string.
+Signalling now clears the flag in the bash frontend regardless of whether the kill itself offends, and the pattern that produced the pids is run through the same anchor test the kill's own pattern gets.
+Both frontends clear it now: a `Stop-Process` or a `taskkill` suppresses the PowerShell `allow` on the same terms, including the kills the anchor rule cleared.
+That last part is the point rather than an edge case — a kill by literal pid or behind a `Where-Object` filter earns no offender, which is precisely what left it there for a clean `Get-Content` to speak for.
 
-The narrow part is deciding which kills that applies to. A `kill` whose operands are all literal pids or job specs is *proof* of no pattern provenance, which is what lets the recommended rewrite — inspect with `pgrep -fl`, then kill the pid you meant — stay clear of the rule. Everything else is co-occurrence within one command string rather than real dataflow; tracking pids through a pipeline for real would buy precision the literal-pid rule already delivers.
+The narrow part is deciding which kills that applies to.
+A `kill` whose operands are all literal pids or job specs is *proof* of no pattern provenance, which is what lets the recommended rewrite — inspect with `pgrep -fl`, then kill the pid you meant — stay clear of the rule.
+Everything else is co-occurrence within one command string rather than real dataflow; tracking pids through a pipeline for real would buy precision the literal-pid rule already delivers.
 
-Where that rule first put the pid source turned out to be wrong, and the correction generalizes. It read the *pattern* — `pgrep`'s operands, or a `grep`'s when a `ps` shared the pipeline — which made the grep load-bearing and every other filter a hole: swap in `awk '/ginkgo/ {print $1}'` and nothing was collected. The instinct is to widen the filter table, which loses, because the next filter is always `sed`, then `cut`, then `perl`, and a pipeline with *no* filter (`ps -eo pid= | xargs kill`) has nothing to widen to. The source was never the filter. It is `ps`, which produces the pids; the filter only decides which of its rows survive. Making `ps` the source and its selection *unreadable* catches every spelling at once, and reduces the grep's role to what it actually is — the one stage the hook can read well enough to let it **anchor** the pipeline. The lesson is that a rule keyed on the readable thing near the hazard will keep needing extensions; keying it on the thing that produces the hazard ends the sequence.
+Where that rule first put the pid source turned out to be wrong, and the correction generalizes.
+It read the *pattern* — `pgrep`'s operands, or a `grep`'s when a `ps` shared the pipeline — which made the grep load-bearing and every other filter a hole: swap in `awk '/ginkgo/ {print $1}'` and nothing was collected.
+The instinct is to widen the filter table, which loses, because the next filter is always `sed`, then `cut`, then `perl`, and a pipeline with *no* filter (`ps -eo pid= | xargs kill`) has nothing to widen to.
+The source was never the filter.
+It is `ps`, which produces the pids; the filter only decides which of its rows survive.
+Making `ps` the source and its selection *unreadable* catches every spelling at once, and reduces the grep's role to what it actually is — the one stage the hook can read well enough to let it **anchor** the pipeline.
+The lesson is that a rule keyed on the readable thing near the hazard will keep needing extensions; keying it on the thing that produces the hazard ends the sequence.
 
-Reading an `awk` program instead would have been unsafe rather than merely imprecise, which is why the fix is a stand-in that never anchors rather than a wider pattern reader: an inverting program (`awk '!/<root>/ {print $1}'`) scans as anchored while killing every *other* checkout — the trap the `grep -v` rule already exists to close. The cost is a false deny on an anchored `awk`, paid deliberately.
+Reading an `awk` program instead would have been unsafe rather than merely imprecise, which is why the fix is a stand-in that never anchors rather than a wider pattern reader: an inverting program (`awk '!/<root>/ {print $1}'`) scans as anchored while killing every *other* checkout — the trap the `grep -v` rule already exists to close.
+The cost is a false deny on an anchored `awk`, paid deliberately.
 
-The weaker signal needed the stronger provenance, though. A grep pattern is readable, so an unanchored one is evidence of intent wherever in the string it sits; a bare `ps` says nothing until it is wired to a kill, so it counts only where its pids can reach one — the same pipeline, or a substitution the kill consumes. Without that, the rule denies `run & p=$!; kill $p; ps -p $p`, where the `ps` *consumes* a pid the shell already knows. Two commands in the measured corpus have exactly that shape, and a guard that blocks the ordinary way to check whether your own child died is a guard people turn off.
+The weaker signal needed the stronger provenance, though.
+A grep pattern is readable, so an unanchored one is evidence of intent wherever in the string it sits; a bare `ps` says nothing until it is wired to a kill, so it counts only where its pids can reach one — the same pipeline, or a substitution the kill consumes.
+Without that, the rule denies `run & p=$!; kill $p; ps -p $p`, where the `ps` *consumes* a pid the shell already knows.
+Two commands in the measured corpus have exactly that shape, and a guard that blocks the ordinary way to check whether your own child died is a guard people turn off.
 
-`sh -c '<body>'` is the same `allow`-speaks-for-everything problem in its purest form: the body is one opaque token, so the hook knows nothing about it — and knowing nothing is precisely the case where vouching is indefensible. Measured, `cat in.txt; sh -c 'cat /outside'` returned `allow`. It now defers.
+`sh -c '<body>'` is the same `allow`-speaks-for-everything problem in its purest form: the body is one opaque token, so the hook knows nothing about it — and knowing nothing is precisely the case where vouching is indefensible.
+Measured, `cat in.txt; sh -c 'cat /outside'` returned `allow`.
+It now defers.
 
-Reading the body came next, and the thing standing in the way was never the parsing — a body is an ordinary command string, and feeding it back through the same rules is four lines. It was that a path only means something if you know whose filesystem it names. `docker exec c sh -c 'cat /var/lib/…'` and `ssh h sh -c '…'` name paths that are not this disk's, so judging them against this workspace produces a block on a file the command never touches. The exclusion could have been written either way round, and which way round is the whole decision: a denylist of container runtimes has to be right about every runtime that exists, and is wrong by default about the next one. So the hook names the **local** wrappers instead — `timeout`, `env`, `xargs`, `find`, and the handful of others that really do exec a shell here — and everything unrecognized reads as remote and is left alone. `sudo` was unlisted for the same reason, since `sudo docker exec …` is a shape the head of the group cannot distinguish; once wrappers were peeled by their grammar (Q219, Q236), the head is the command `sudo` runs, and `docker` behind it still reads as remote. Being wrong about a local wrapper costs a missed catch, which is where the hook already was; being wrong about a remote one costs a block on a path that does not exist.
+Reading the body came next, and the thing standing in the way was never the parsing — a body is an ordinary command string, and feeding it back through the same rules is four lines.
+It was that a path only means something if you know whose filesystem it names.
+`docker exec c sh -c 'cat /var/lib/…'` and `ssh h sh -c '…'` name paths that are not this disk's, so judging them against this workspace produces a block on a file the command never touches.
+The exclusion could have been written either way round, and which way round is the whole decision: a denylist of container runtimes has to be right about every runtime that exists, and is wrong by default about the next one.
+So the hook names the **local** wrappers instead — `timeout`, `env`, `xargs`, `find`, and the handful of others that really do exec a shell here — and everything unrecognized reads as remote and is left alone.
+`sudo` was unlisted for the same reason, since `sudo docker exec …` is a shape the head of the group cannot distinguish; once wrappers were peeled by their grammar (Q219, Q236), the head is the command `sudo` runs, and `docker` behind it still reads as remote.
+Being wrong about a local wrapper costs a missed catch, which is where the hook already was; being wrong about a remote one costs a block on a path that does not exist.
 
-Interpreters are the same problem in a spelling `SHELL_C_CMDS` does not cover, and separating the two questions it raises is the whole of it. *Guarding* `python3` was never in scope — it is not a command anyone pre-approves for file reading, its own IO happens inside its process where no `PreToolUse` hook can see it, and a bare `python3 x.py` deferring to normal permission rules is the documented non-goal working. *Vouching* for it is a different act, and the hook was doing it: `cat README.md && python3 -c '…'` returned `allow`, which speaks for the whole string and short-circuits the user's own permission settings. Measured, the guard was removing a prompt that existed without it — the one failure mode "defer on uncertainty" is meant to rule out.
+Interpreters are the same problem in a spelling `SHELL_C_CMDS` does not cover, and separating the two questions it raises is the whole of it.
+*Guarding* `python3` was never in scope — it is not a command anyone pre-approves for file reading, its own IO happens inside its process where no `PreToolUse` hook can see it, and a bare `python3 x.py` deferring to normal permission rules is the documented non-goal working.
+*Vouching* for it is a different act, and the hook was doing it: `cat README.md && python3 -c '…'` returned `allow`, which speaks for the whole string and short-circuits the user's own permission settings.
+Measured, the guard was removing a prompt that existed without it — the one failure mode "defer on uncertainty" is meant to rule out.
 
-Where to cut it was the real decision, because the obvious rule is unaffordable. Suppressing on any interpreter word costs 6.85% of all `allow` decisions across 52,251 corpus commands — 45x what the `sh -c` suppression cost (56 commands, 0.15%), and squarely in the "too noisy; erodes trust" territory that rejected a blanket outside-workspace deny. The cut that pays for itself is **code the hook cannot read**: inline `-c`/`-e`, a heredoc or stdin body, and a script resolving outside the root all suppress, while a script resolving *inside* it does not. Q143 later added Python's `-m`, whose operand is a module name resolved on `sys.path` — the same unreadable code in a spelling the `-c`/`-e` scan missed, which had been resolving as a path instead and so vouching. The corpus figures in this paragraph were measured for the Q72 cut and were not re-taken for it. That exemption is not a concession — repo-resident code is exactly what "sandboxing the workspace from itself is a non-goal" already trusts, and it is what brings the cost to 1,657 commands (4.49% of allow decisions, the same base as the 6.85% above — not of the 52,251), with nothing newly allowed in either direction.
+Where to cut it was the real decision, because the obvious rule is unaffordable.
+Suppressing on any interpreter word costs 6.85% of all `allow` decisions across 52,251 corpus commands — 45x what the `sh -c` suppression cost (56 commands, 0.15%), and squarely in the "too noisy; erodes trust" territory that rejected a blanket outside-workspace deny.
+The cut that pays for itself is **code the hook cannot read**: inline `-c`/`-e`, a heredoc or stdin body, and a script resolving outside the root all suppress, while a script resolving *inside* it does not.
+Q143 later added Python's `-m`, whose operand is a module name resolved on `sys.path` — the same unreadable code in a spelling the `-c`/`-e` scan missed, which had been resolving as a path instead and so vouching.
+The corpus figures in this paragraph were measured for the Q72 cut and were not re-taken for it.
+That exemption is not a concession — repo-resident code is exactly what "sandboxing the workspace from itself is a non-goal" already trusts, and it is what brings the cost to 1,657 commands (4.49% of allow decisions, the same base as the 6.85% above — not of the 52,251), with nothing newly allowed in either direction.
 
-Two details carry more weight than their size. The rule keys on the group's **command word**, not on any token, because a loose scan reads `grep -n 'kindest/node'` as a node invocation and defers a clean grep — the false-positive direction that gets a guard uninstalled. And locality is decided exactly as `shell_c_bodies` decides it: `kubectl exec p -- python3 -c …` runs on another filesystem, so this workspace's boundary has nothing to say about it. Both are the same lesson as the `ps` correction above — key the rule on the thing that produces the hazard, and be precise about whose disk a path names.
+Two details carry more weight than their size.
+The rule keys on the group's **command word**, not on any token, because a loose scan reads `grep -n 'kindest/node'` as a node invocation and defers a clean grep — the false-positive direction that gets a guard uninstalled.
+And locality is decided exactly as `shell_c_bodies` decides it: `kubectl exec p -- python3 -c …` runs on another filesystem, so this workspace's boundary has nothing to say about it.
+Both are the same lesson as the `ps` correction above — key the rule on the thing that produces the hazard, and be precise about whose disk a path names.
 
-A suppression is only as good as what it falls back to, and Q74 is where that
-was cashed. Withholding `allow` hands the string to the operator's own rules,
-which prompt in `manual`, `dontAsk` and `plan` and pre-approve in `auto`,
-`acceptEdits` and `bypassPermissions` — so in exactly the three modes a defer
-runs, the suppression above achieved nothing. The two suppressions naming a
-construct this guard already judges now escalate there instead (`ask` where a
-person is at the prompt, `deny` under `bypassPermissions`, which has none; Q310
-later made the wrapper and kill signals deny in all three, since their refusal
-carries the rewrite, and the `sh -c` signal followed once the split was seen to
-be its rewrite too). The
-interpreter suppression does not, by default, and the split is a cost reading
-rather than a taste: replaying 89,133 commands from local transcripts on
-2026-09-09, 4,243 carry a withheld `allow` and 4,160 of them are the interpreter
-signal — 4.67% of every command against 0.09% for the other two. Guarding an
-interpreter is a non-goal below, and a bare `python3 -c` runs unprompted in every
-mode, so escalating that signal would fire only where such code happens to share
-a string with a guarded command. The corpus figures earlier in this section were
-measured for the Q72 cut against a different corpus and were **not** re-taken for
-this one.
+A suppression is only as good as what it falls back to, and Q74 is where that was cashed.
+Withholding `allow` hands the string to the operator's own rules, which prompt in `manual`, `dontAsk` and `plan` and pre-approve in `auto`, `acceptEdits` and `bypassPermissions` — so in exactly the three modes a defer runs, the suppression above achieved nothing.
+The two suppressions naming a construct this guard already judges now escalate there instead (`ask` where a person is at the prompt, `deny` under `bypassPermissions`, which has none; Q310 later made the wrapper and kill signals deny in all three, since their refusal carries the rewrite, and the `sh -c` signal followed once the split was seen to be its rewrite too).
+The interpreter suppression does not, by default, and the split is a cost reading rather than a taste: replaying 89,133 commands from local transcripts on 2026-09-09, 4,243 carry a withheld `allow` and 4,160 of them are the interpreter signal — 4.67% of every command against 0.09% for the other two.
+Guarding an interpreter is a non-goal below, and a bare `python3 -c` runs unprompted in every mode, so escalating that signal would fire only where such code happens to share a string with a guarded command.
+The corpus figures earlier in this section were measured for the Q72 cut against a different corpus and were **not** re-taken for this one.
 
-What the recursion is *not* allowed to do is upgrade a decision. A body's offenders fold in and its `guarded` is discarded, exactly as a command substitution's is, so a body reading nothing but workspace files still leaves the string deferring. The suppression above and the analysis here answer different questions — "may the hook vouch for this string?" and "is there something in it to catch?" — and only the second one got a new answer. The measurement bears out that this is friction the guard was already charging elsewhere: across 37,474 corpus commands the change moved four decisions, and each of the four is precisely what the shipped hook already returns for that same body written unwrapped. `sh -c` was buying an exemption, and nothing else.
+What the recursion is *not* allowed to do is upgrade a decision.
+A body's offenders fold in and its `guarded` is discarded, exactly as a command substitution's is, so a body reading nothing but workspace files still leaves the string deferring.
+The suppression above and the analysis here answer different questions — "may the hook vouch for this string?" and "is there something in it to catch?" — and only the second one got a new answer.
+The measurement bears out that this is friction the guard was already charging elsewhere: across 37,474 corpus commands the change moved four decisions, and each of the four is precisely what the shipped hook already returns for that same body written unwrapped.
+`sh -c` was buying an exemption, and nothing else.
 
 ## Alternatives considered and rejected
 
-- **Sandboxing (seccomp, App Sandbox, bind mounts, chroot).** Too heavyweight; platform-specific; breaks legitimate cross-workspace reads. A user who wants this level of isolation should run the whole agent in a container, not bolt on a partial sandbox.
+- **Sandboxing (seccomp, App Sandbox, bind mounts, chroot).** Too heavyweight; platform-specific; breaks legitimate cross-workspace reads.
+  A user who wants this level of isolation should run the whole agent in a container, not bolt on a partial sandbox.
 - **Wrapping the agent's shell.** Invasive; introduces a forked environment that drifts from the real one; easily bypassed by invoking the binary at its real absolute path.
-- **Per-invocation permission rules upstream in Claude Code.** Probably the right long-term answer. This hook is the bridge while that doesn't exist.
+- **Per-invocation permission rules upstream in Claude Code.** Probably the right long-term answer.
+  This hook is the bridge while that doesn't exist.
 - **Denying outside-workspace reads outright.** Too noisy; erodes trust; the agent and user will route around it (file a workaround as a Queue item, set a wider PROJECT_DIR, uninstall the hook).
-- **A dynamic learning parser.** Inferring flag semantics from observed commands would let coverage grow without code changes, but the misclassification surface — and the bypass surface — grows with it. The static table is boring on purpose.
+- **A dynamic learning parser.** Inferring flag semantics from observed commands would let coverage grow without code changes, but the misclassification surface — and the bypass surface — grows with it.
+  The static table is boring on purpose.
 
 ## Non-goals
 
-- **Defending against an attacker with arbitrary shell execution.** The agent can write a script and `bash` it; the hook does not try to model every wrapper command. The "wrapper commands" section of [`security-notes.md`](security-notes.md) covers this.
-- **Sandboxing the workspace from itself.** Workspace-local reads are explicitly allowed, including reads of sensitive files (`.env`, `.git/config`) inside the project. Protecting those is the user's choice via other means.
-- **Replacing Claude Code's permission system.** The hook augments it for one specific gap. If the gap closes upstream, this plugin retires.
-- **Modeling every shell construct.** Variable expansion, command substitution, `cd` semantics, etc. are out of scope for the lexer but covered as backlog items where the gap has security impact. Constructs without security impact stay unmodeled.
+- **Defending against an attacker with arbitrary shell execution.** The agent can write a script and `bash` it; the hook does not try to model every wrapper command.
+  The "wrapper commands" section of [`security-notes.md`](security-notes.md) covers this.
+- **Sandboxing the workspace from itself.** Workspace-local reads are explicitly allowed, including reads of sensitive files (`.env`, `.git/config`) inside the project.
+  Protecting those is the user's choice via other means.
+- **Replacing Claude Code's permission system.** The hook augments it for one specific gap.
+  If the gap closes upstream, this plugin retires.
+- **Modeling every shell construct.** Variable expansion, command substitution, `cd` semantics, etc. are out of scope for the lexer but covered as backlog items where the gap has security impact.
+  Constructs without security impact stay unmodeled.
 
 ## Open questions
 
 These are intentionally unresolved; if you have a strong opinion, propose a Queue item:
 
-- **Should the spec be data, not code?** The `SPEC` dict could move to a JSON/TOML file shipped with the plugin, making contributions less Python-centric. Today it's code because it's tiny and stdlib-only matters more than ergonomics.
-- **Should denials be configurable per command?** Some users may want `ask` for `cat` but `deny` for `jq --rawfile`. Today it's a global one-line edit.
+- **Should the spec be data, not code?** The `SPEC` dict could move to a JSON/TOML file shipped with the plugin, making contributions less Python-centric.
+  Today it's code because it's tiny and stdlib-only matters more than ergonomics.
+- **Should denials be configurable per command?** Some users may want `ask` for `cat` but `deny` for `jq --rawfile`.
+  Today it's a global one-line edit.
 - **Should the hook log decisions?** A local audit log would help debug false positives and false negatives, but it's also a new surface (write target, PII).
