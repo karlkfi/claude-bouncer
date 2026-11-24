@@ -1,0 +1,12 @@
+# Commits that only moved line breaks, so blame looks past them.
+# GitHub reads this file automatically. For local git, once per clone:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# A squash hash exists only after the merge, so a later reflow is added here by
+# a follow-up pull request.
+
+# build(repo): hold Markdown to one sentence per line with mdreflow (#370).
+# The squash also added the gate, and git guesses an older commit for some of
+# those lines: in the Makefile, tests.yml and dependabot.yml, use
+# `git blame --ignore-revs-file=''` to see the real one.
+2d8d18d1b22fad3fd58dd4c348ce3c8a74ae9f94
