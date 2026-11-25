@@ -107,7 +107,7 @@ OVERRIDE_PLUGIN = 'foreground-guard'
 # become denies — the mode where the friction is worst.
 #
 # The trace a deny does leave is the error handed back to the agent, whose text
-# is verbatim the reason the hook printed, joined to the command by
+# carries verbatim the reason the hook printed, joined to the command by
 # `tool_use_id` like any other tool result. Every reason this guard denies with
 # opens `foreground-guard: `, so that opener is the key. A guard wording its
 # reason differently is not recoverable this way and still under-counts its
@@ -124,8 +124,12 @@ OVERRIDE_PLUGIN = 'foreground-guard'
 # a plugin that does not exist.
 NON_GUARD_PLUGINS = ('pr-sentinel',)
 
+# Claude Code now hands that text back as `PreToolUse:Bash hook error: ` plus the
+# reason, and older transcripts hold the reason bare, so both are read. Measured
+# 2026-11-24 over 8,004 denies: bare through 2.1.275, wrapped from 2.1.281 but
+# for two, and nothing recorded between.
 DENY_TEXT = re.compile(
-    r'^(?:Error:\s*)?('
+    r'^(?:Error:\s*)?(?:PreToolUse:\S+ hook error:\s*)?('
     + '|'.join([r'[a-z0-9-]+-guard']
                + [re.escape(p) for p in NON_GUARD_PLUGINS])
     + r'):\s')
@@ -238,10 +242,18 @@ def guard_name(command):
     return trimmed if trimmed in NON_GUARD_PLUGINS else name
 
 
+def named_guard(reason):
+    """The guard whose opener a reason carries, or None. It stands in for
+    guard_name where the hook command names no script: some attachments record
+    `command hook 7`, whose number does not identify a guard."""
+    m = DENY_TEXT.match(reason) if isinstance(reason, str) else None
+    return m.group(1) if m else None
+
+
 def deny_from_result(block):
     """(guard, reason) if this tool_result block is a hook deny, else None.
 
-    A blocked call comes back as an error whose text is the guard's reason;
+    A blocked call comes back as an error carrying the guard's reason;
     anything else (a failing command, a rejected prompt, another tool's error)
     does not open with a `<name>-guard: ` reason and is left alone."""
     if not block.get('is_error'):
@@ -253,7 +265,7 @@ def deny_from_result(block):
         return None
     text = text.strip()
     m = DENY_TEXT.match(text)
-    return (m.group(1), text) if m else None
+    return (m.group(1), text[m.start(1):]) if m else None
 
 
 def clip(line, cap=120):
@@ -284,6 +296,24 @@ def error_note(att):
     if lines:
         parts.append(clip(lines[0]))
     return ': '.join(parts)
+
+
+def is_repeat(rec, seen):
+    """Whether a transcript record restates one this file already holds, which
+    would count its decision again. `seen` collects the uuids read so far.
+
+    A record written twice keeps its `uuid`. An `api-request-blob` replays the
+    conversation sent to the API, tool results included, in a record with
+    neither `uuid` nor `timestamp`, so `--since` cannot place it either.
+    Measured 2026-11-24 over every local transcript: each of the 39,714 tool
+    calls and 568 denies in an untimestamped record was also in a timestamped
+    one in the same file."""
+    uid = rec.get('uuid')
+    if not rec.get('timestamp') or uid in seen:
+        return True
+    if uid:
+        seen.add(uid)
+    return False
 
 
 def scope(rec, cutoff, repo):
@@ -318,6 +348,7 @@ def iter_decisions(paths, plugin, cutoff, repo, tally=None):
     for path in paths:
         cmd_by_id = {}
         records = []
+        seen = set()
         calls = 0
         overrides = 0
         try:
@@ -329,6 +360,8 @@ def iter_decisions(paths, plugin, cutoff, repo, tally=None):
                     try:
                         rec = json.loads(line)
                     except ValueError:
+                        continue
+                    if is_repeat(rec, seen):
                         continue
                     # Index Bash tool_use commands for the join. Indexing spans
                     # the whole file (a decision may sit outside the window
@@ -355,17 +388,6 @@ def iter_decisions(paths, plugin, cutoff, repo, tally=None):
             att = rec.get('attachment')
             if not isinstance(att, dict) or att.get('hookName') != 'PreToolUse:Bash':
                 continue
-            name = guard_name(att.get('command'))
-            if name is None:
-                continue
-            decided.add((name, att.get('toolUseID')))
-            if plugin != 'all' and name != plugin:
-                continue
-            window = scope(rec, cutoff, repo)
-            if window is None:
-                continue
-            cwd, ts = window
-
             if att.get('type') != HOOK_OK:
                 # No verdict to read: the hook never ran to completion, so the
                 # call went through unguarded rather than deferred (see HOOK_OK).
@@ -379,8 +401,19 @@ def iter_decisions(paths, plugin, cutoff, repo, tally=None):
                         hso = out.get('hookSpecificOutput') or {}
                         decision = hso.get('permissionDecision', 'defer')
                         reason = hso.get('permissionDecisionReason', '')
-                    except ValueError:
+                    except (ValueError, AttributeError):   # not a verdict object
                         pass
+
+            name = guard_name(att.get('command')) or named_guard(reason)
+            if name is None:
+                continue
+            decided.add((name, att.get('toolUseID')))
+            if plugin != 'all' and name != plugin:
+                continue
+            window = scope(rec, cutoff, repo)
+            if window is None:
+                continue
+            cwd, ts = window
             prompted = prompted or decision in ('ask', 'deny')
             yield {
                 'plugin': name, 'decision': decision, 'reason': reason,

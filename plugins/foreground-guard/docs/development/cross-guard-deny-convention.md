@@ -31,7 +31,7 @@ The one guard in the family that can only deny is the one wholly invisible to th
 The corpus-wide zero is corroboration, not the finding: it is the figure that looks strongest while being weakest.
 
 The reason still reaches the transcript, by the other route.
-The blocked call hands the agent back an error whose text is verbatim what the hook printed, joined to the command by `tool_use_id` like any other tool result.
+The blocked call hands the agent back an error carrying verbatim what the hook printed, joined to the command by `tool_use_id` like any other tool result.
 Recovering denies means reading that error text — and telling it apart from every other failed call in the same stream: a non-zero exit, a rejected permission prompt, an MCP error, a Python traceback.
 The opener is what tells them apart.
 
@@ -91,7 +91,18 @@ A guard adopting it today starts its window today.
    Take the colon everywhere rather than only where the reader needs it.
    A guard with one exempt path has a second opener shape to keep right, the exemption is invisible from the string itself, and a reader cannot tell an unprefixed string of yours from a sibling's.
 
-A leading `Error: ` inserted by the harness is tolerated by the reader, so it does not have to be stripped.
+The harness puts its own text in front of the opener, and the reader reads through it, so a guard has nothing to strip or add:
+
+- `PreToolUse:Bash hook error: `, naming whichever tool was called.
+  Measured 2026-11-24 over 8,004 denies in one machine's transcripts, every deny recorded through Claude Code 2.1.275 is bare and all but two from 2.1.281 carry this; nothing was recorded between.
+- `Error: `, from older result shapes.
+
+A reader anchored on the opener alone matches neither, and reports zero denies.
+All four friction reports accept both and drop them from the reason they rank.
+
+The same deny can be in a transcript more than once.
+A record may be written twice under one `uuid`, and an `api-request-blob` record replays earlier tool results with no `uuid` and no `timestamp`.
+A reader that counts those overcounts, and lets denies from outside `--since` through, so count only records with a timestamp, each `uuid` once.
 
 foreground-guard used to carve out one exception to rule 4: its override downgrade opened `foreground-guard override acknowledged (…)` with no colon, on the argument that the path set `ask` by construction and `DENY_TEXT` would never be asked to read it.
 The reasoning held and the rule was still the wrong one — the carve-out is invisible from the string, so a reader meeting it has no way to know it was deliberate.
@@ -100,7 +111,7 @@ The path is gone (the override now makes the hook defer), and `tests/test_foregr
 ## The hook script name has to agree
 
 The two streams are counted together, so they have to resolve to the same word.
-The attachment stream has no reason text to read; it labels a decision by the `.py` file the hook command names, stripping a leading `bash-`.
+A silent decision has no reason text to read, so the attachment stream labels a decision by the `.py` file the hook command names, stripping a leading `bash-`.
 A command naming no `.py` falls back to its launcher, the command's first word, less its extension and a leading `run-`, and keeps that label only when it ends in `-guard` or is a listed non-guard name:
 
 | Hook command names | Label |
@@ -112,8 +123,11 @@ A command naming no `.py` falls back to its launcher, the command's first word, 
 | `run-python-hook.cmd` alone, `claude-go-throttle-hook.sh` | none — not a guard's name |
 | `pr-sentinel-guard.py` | `pr-sentinel-guard` — a word apart from its denies |
 
-A hook command that yields no label loses everything but its denies, because those are read from the opener instead.
-The guard then reads as 100% deny, which looks like a measurement rather than a gap. spill-guard read that way until the launcher fallback above.
+Some attachments record `command hook 7` in place of the command, with a number that does not identify a guard.
+Those are labelled from the reason's opener, so an `ask` is counted and an `allow` whose reason has no opener is not.
+
+Any other hook command that yields no label loses its silent and unopened decisions, because only a reason's opener can name the guard then.
+The guard then reads as nearly all deny, which looks like a measurement rather than a gap. spill-guard read as 100% deny until the launcher fallback above.
 Measured 2026-10-04 over 90 days of one machine's transcripts, that was 686 denies and nothing else, where 3,823 decisions were recorded.
 
 pr-sentinel is the case that breaks: its script is `pr-sentinel-guard.py` and its reasons open `pr-sentinel: `, so one plugin arrives under two labels, and neither `--plugin` value returns both halves of its record. foreground-guard's reader folds that specific name back (`NON_GUARD_PLUGINS` in `friction-report.py`), but the fold is a list someone has to edit.

@@ -305,7 +305,7 @@ The denominator is every Bash call in the window, so a guard installed part-way 
 
 Denies take a second route into the report, and since both classes deny by default that route now carries nearly all of it.
 Claude Code records a hook's stdout only for a call it goes on to run, so a `deny` leaves no decision record at all — counting that stream alone would report zero friction for this guard.
-The report recovers them from the error the blocked call handed back, whose text is the reason the hook printed.
+The report recovers them from the error the blocked call handed back, which carries the reason the hook printed.
 
 That recovery keys on the `foreground-guard: ` opener every reason here carries, which makes it complete for this guard and partial across guards.
 `python3 scripts/friction-report.py --plugin all` reports every sibling guard's decisions found in the transcripts, and says so in a note: a guard wording its reason differently still under-counts its denies, so a low deny count there is not evidence that guard rarely blocks.

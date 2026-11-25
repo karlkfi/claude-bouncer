@@ -2,8 +2,9 @@
 """Report where exit-status-guard friction accumulates, from session transcripts.
 
 Read-only analyzer. The hook itself writes nothing to disk (see PRIVACY.md); it
-only emits a decision on stdout. Claude Code records that stdout -- plus the
-triggering command, cwd, and timestamp -- in the session transcripts under
+only emits a decision on stdout. Claude Code records a deny's reason as the
+error the blocked call handed back (see ``DENY_TEXT``) -- plus the triggering
+command, cwd, and timestamp -- in the session transcripts under
 ``~/.claude/projects/**/*.jsonl``. This tool re-reads those records and ranks
 the guard's denials so you can see, in one command, which rule fires most and
 what Claude was doing when it tripped.
@@ -61,6 +62,19 @@ REASON_PATTERNS = {
 # prefix is optional because it is not in denials recorded before it shipped,
 # and dropping those would report gates that were hit as never hit.
 GATE_RE = re.compile(r'^(?:[a-z0-9-]+-guard:\s+)?`([^`]+)`')
+
+# A denying hook leaves no attachment of its own: Claude Code persists hook
+# stdout only for a call it goes on to run. The trace a deny does leave is the
+# error handed back to the agent, which carries verbatim the reason the hook
+# printed, joined to the command by `tool_use_id` like any other tool result.
+# The `<name>-guard: ` opener is what tells it from an ordinary failure.
+#
+# Claude Code now hands that text back as `PreToolUse:Bash hook error: ` plus the
+# reason, and older transcripts hold the reason bare, so both are read. Measured
+# 2026-11-24 over 8,004 denies: bare through 2.1.275, wrapped from 2.1.281 but
+# for two, and nothing recorded between.
+DENY_TEXT = re.compile(r'^(?:Error:\s*)?(?:PreToolUse:\S+ hook error:\s*)?'
+                       r'([a-z0-9-]+-guard):\s')
 
 # Volatile command fragments to collapse so near-identical commands group
 # together. --raw disables this.
@@ -208,15 +222,69 @@ def guard_name(command):
     return re.sub(r'^bash-', '', m.group(1))
 
 
+def named_guard(reason):
+    """The guard whose opener a reason carries, or None. It stands in for
+    guard_name where the hook command names no script: some attachments record
+    `command hook 7`, whose number does not identify a guard."""
+    m = DENY_TEXT.match(reason) if isinstance(reason, str) else None
+    return m.group(1) if m else None
+
+
+def deny_from_result(block):
+    """(guard, reason) if this tool_result block is a hook deny, else None.
+
+    A blocked call comes back as an error carrying the guard's reason; anything
+    else (a failing command, a rejected prompt, another tool's error) does not
+    open with a `<name>-guard: ` reason and is left alone.
+
+    A denial recorded before that opener shipped names no guard, so this guard's
+    own are recognized by opening with a gate and carrying a rule's wording."""
+    if not block.get('is_error'):
+        return None
+    text = block.get('content')
+    if isinstance(text, list):
+        text = ''.join(p.get('text', '') for p in text if isinstance(p, dict))
+    if not isinstance(text, str):
+        return None
+    text = text.strip()
+    m = DENY_TEXT.match(text)
+    if m:
+        return m.group(1), text[m.start(1):]
+    if GATE_RE.match(text) and categorize(text) != 'other':
+        return THIS_GUARD, text
+    return None
+
+
+def is_repeat(rec, seen):
+    """Whether a transcript record restates one this file already holds, which
+    would count its decision again. `seen` collects the uuids read so far.
+
+    A record written twice keeps its `uuid`. An `api-request-blob` replays the
+    conversation sent to the API, tool results included, in a record with
+    neither `uuid` nor `timestamp`, so `--since` cannot place it either.
+    Measured 2026-11-24 over every local transcript: each of the 39,714 tool
+    calls and 568 denies in an untimestamped record was also in a timestamped
+    one in the same file."""
+    uid = rec.get('uuid')
+    if not rec.get('timestamp') or uid in seen:
+        return True
+    if uid:
+        seen.add(uid)
+    return False
+
+
 def iter_decisions(paths):
     """Yield every guard decision found in the given transcript files.
 
     Builds a per-file toolUseID -> Bash command map (ids are session-scoped) so
-    each decision can name the command that triggered it.
+    each decision can name the command that triggered it. Two passes per file:
+    the attachment stream, then the tool results, which are where a deny
+    survives (see DENY_TEXT).
     """
     for path in paths:
         cmd_by_id = {}
         records = []
+        seen = set()
         try:
             with open(path, encoding='utf-8') as fh:
                 for line in fh:
@@ -226,6 +294,8 @@ def iter_decisions(paths):
                     try:
                         rec = json.loads(line)
                     except ValueError:
+                        continue
+                    if is_repeat(rec, seen):
                         continue
                     msg = rec.get('message') or {}
                     for b in (msg.get('content') or []):
@@ -237,12 +307,10 @@ def iter_decisions(paths):
         except OSError:
             continue
 
+        decided = set()   # (guard, toolUseID) that the attachment stream carries
         for rec in records:
             att = rec.get('attachment')
             if not isinstance(att, dict) or att.get('hookName') != 'PreToolUse:Bash':
-                continue
-            name = guard_name(att.get('command'))
-            if name is None:
                 continue
             stdout = att.get('stdout') or ''
             decision, reason = 'defer', ''   # empty stdout => hook stayed silent
@@ -251,11 +319,33 @@ def iter_decisions(paths):
                     hso = json.loads(stdout).get('hookSpecificOutput') or {}
                     decision = hso.get('permissionDecision', 'defer')
                     reason = hso.get('permissionDecisionReason', '')
-                except ValueError:
+                except (ValueError, AttributeError):   # not a verdict object
                     pass
+            name = guard_name(att.get('command')) or named_guard(reason)
+            if name is None:
+                continue
+            decided.add((name, att.get('toolUseID')))
             yield {'plugin': name, 'decision': decision, 'reason': reason,
                    'cwd': rec.get('cwd') or '', 'ts': parse_ts(rec),
                    'command': cmd_by_id.get(att.get('toolUseID'), '')}
+
+        # Second pass: the denies the first one cannot see (see DENY_TEXT). An
+        # `ask` the operator declines hands the same reason back as an error,
+        # and the attachment it left is what keeps it out of here.
+        for rec in records:
+            for block in ((rec.get('message') or {}).get('content') or []):
+                if not isinstance(block, dict) or block.get('type') != 'tool_result':
+                    continue
+                found = deny_from_result(block)
+                if found is None:
+                    continue
+                name, reason = found
+                tuid = block.get('tool_use_id')
+                if tuid not in cmd_by_id or (name, tuid) in decided:
+                    continue
+                yield {'plugin': name, 'decision': 'deny', 'reason': reason,
+                       'cwd': rec.get('cwd') or '', 'ts': parse_ts(rec),
+                       'command': cmd_by_id[tuid]}
 
 
 def scan(paths, plugin, cutoff, repo):
@@ -315,17 +405,18 @@ def explain_empty(survey, plugin, since, repo):
 def coverage_note(plugin):
     """What the scan structurally cannot see.
 
-    Claude Code records a hook attachment only when the hook writes to stdout,
-    and this guard writes only when it denies. Every silent run -- the
-    overwhelming majority -- leaves nothing to count, so these totals are the
-    denials, not the traffic.
+    This guard writes only when it denies, and a deny is read off the error the
+    blocked call handed back. Every silent run -- the overwhelming majority --
+    leaves nothing to count, so these totals are the denials, not the traffic.
     """
     note = ["Denials only. This guard emits nothing when it has no objection, "
             "and a hook run with no stdout leaves no transcript record, so "
             "there is no denominator here -- these counts are not a rate."]
     if plugin == 'all':
         note.append("Guards emit on different terms, so the plugins: counts "
-                    "are not a like-for-like ranking.")
+                    "are not a like-for-like ranking, and a sibling whose "
+                    "block text opens with something other than "
+                    "'<name>-guard: ' under-counts its denies here.")
     return note
 
 
