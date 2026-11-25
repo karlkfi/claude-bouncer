@@ -3586,6 +3586,21 @@ check "[sh -c][dontAsk] OVERRIDE sh -c 'git reset --hard' dirty on feature -> de
   "$(decision_for "$(bash_mode "BRANCH_GUARD_OVERRIDE=r sh -c 'git reset --hard'" dontAsk)" "$SHC.feat")"
 rm -rf "$SHC" "$SHC.feat"
 
+# The friction report's own suite, run here so every caller of this harness
+# covers it. It imports the hook rather than judging a command, so it needs an
+# interpreter of its own; the probe is the launcher's, and for its reason.
+TEST_PY=''
+for candidate in python3 python; do
+  if "$candidate" -c 'import sys; sys.exit(sys.version_info[0] != 3)' \
+      >/dev/null 2>&1; then
+    TEST_PY="$candidate"
+    break
+  fi
+done
+report_rc=0
+"$TEST_PY" "$SCRIPT_DIR/test_friction_report.py" || report_rc=$?
+check "friction report suite" 0 "$report_rc"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 
 # A FLOOR, not an exact count. The suite used to assert its own size against a

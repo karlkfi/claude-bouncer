@@ -28,6 +28,7 @@ Everything else defers to your normal permission settings.
 - [Upgrade](#upgrade)
 - [How it works](#how-it-works)
 - [Agent guidance: avoiding prompts](#agent-guidance-avoiding-prompts)
+- [Friction report](#friction-report)
 - [Configuration](#configuration)
 - [Limitations](#limitations)
 - [Companion plugins](#companion-plugins)
@@ -696,6 +697,62 @@ protected branch (main/master) or destructive git commands. To keep work flowing
   deny above is the single push it reaches.
 ```
 
+## Friction report
+
+`/branch-guard:friction-report` ranks the prompts and denials you have met, so you can see which one to stop causing.
+It re-reads the decisions Claude Code already recorded in your local session transcripts and adds no telemetry (see [PRIVACY.md](PRIVACY.md)).
+
+```
+/branch-guard:friction-report              # last 7 days
+/branch-guard:friction-report --since 24h --repo gateway
+/branch-guard:friction-report --json       # machine-readable
+```
+
+Keep the `branch-guard:` prefix: the [companion plugins](#companion-plugins) ship a command of the same name.
+
+Each prompt or denial falls in one category, and each category has one fix:
+
+| Category | What was stopped | What stops it recurring |
+| --- | --- | --- |
+| `protected-work` | A commit, merge, push or edit landing on a protected branch | Work on a feature branch or worktree and land it by pull request |
+| `protected-ref` | A protected branch deleted, renamed, reset or overwritten | Leave the shared branch alone and pick another name |
+| `cross-push` | A push to or from a branch other than the worktree's | Push the worktree branch to its own name, or name the destination in `--force-with-lease=<branch>:<sha>` |
+| `tag-push` | A tag publish | Push one tag by name, and expect one prompt per release |
+| `stale-base` | A push whose base moved into the branch's own lines | `git fetch && git rebase <base>` before pushing |
+| `unpinned-gh` | A `gh` write that names no repository | Add `--repo <owner>/<name>` |
+| `unpublished-tip` | A delete, move or reset that would strand commits | Push the branch first, or check with `gh pr view` that it already merged |
+| `unnamed-target` | A branch or directory the guard couldn't read or resolve | Name an existing branch, and a literal directory in `cd` or `git -C` |
+| `uncommitted-work` | Working-tree changes or untracked files that would be lost | Commit the work to a branch first |
+| `stash-drop` | A stash drop or clear | Apply the stash and commit it before dropping it |
+| `worktree-force` | `git worktree remove --force` | Clean or commit inside it, then remove it without `--force`; use the session scratchpad for throwaway checkouts |
+| `worktree-admin` | `git worktree prune` or `move` | Remove your own worktree by path with `git worktree remove` |
+| `worktree-grant` | A `git worktree add` with grants turned on | Approve once per checkout, or unset `BRANCH_GUARD_WORKTREE_GRANTS` |
+| `tag-delete` | A local tag delete | Leave the tag for the user to delete |
+| `git-config` | A git config write | Set it for one command with `git -c key=value` |
+| `history-rewrite` | A reflog rewrite, `gc` or `filter-branch` | Skip it; git expires and repacks on its own |
+| `remote-delete` | A `gh` delete or disable | Close or archive instead, or leave the deletion to the user |
+
+A reason the report does not recognize is counted as `other`.
+
+The friction rate divides by the calls the hook runs on (`Bash`, `Edit`, `Write`, `MultiEdit`, `NotebookEdit`) rather than by the guard's decisions.
+A defer leaves no record, so the decision counts are floors.
+A denial leaves none either, and is read back from the error the blocked call returned.
+Each call counts once, however often a resumed or forked session repeated it in the transcripts.
+
+The `BRANCH_GUARD_OVERRIDE` line counts the commands whose [break-glass](#break-glass-branch_guard_override) prefix the guard read, how many verdicts it lifted, and how many stood anyway.
+
+A hook that crashed or timed out is listed under "Hook failures", because the guard never ran on that call.
+The report also warns when the installed branch-guard is older than the version in your local marketplace clone.
+
+You can run the script directly:
+
+```
+python3 scripts/friction-report.py --since 30d --repo gateway --top 20
+```
+
+`--plugin all` counts every guard found in the transcripts.
+The categories are branch-guard's, so another guard's reasons show there as `other`.
+
 ## Configuration
 
 - **Push policy** — set `BRANCH_GUARD_PUSH_POLICY` to `strict` (default), `protected`, or `off` (see [Push guard](#push-guard)).
@@ -828,6 +885,7 @@ Run both for coverage across both dimensions.
 The hook runs entirely on your machine and has no network access, telemetry, or analytics.
 It reads the pending Bash/edit command and asks `git` a few read-only questions about the repository — the current branch (`symbolic-ref`), whether a branch exists and where its commits survive (`show-ref`, `for-each-ref`), and whether a path is ignored (`check-ignore`) — then decides in memory.
 It never opens the contents of the file being edited and never writes anything to disk.
+The [friction report](#friction-report) is a separate read-only script that runs only when you ask for it, and reads your local session transcripts.
 
 ## Contributing
 

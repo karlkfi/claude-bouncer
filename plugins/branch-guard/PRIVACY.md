@@ -1,6 +1,6 @@
 # Privacy Policy — branch-guard
 
-_Last updated: 2026-09-02_
+_Last updated: 2026-11-25_
 
 branch-guard is a Claude Code plugin that runs entirely on your local machine as a `PreToolUse` hook for `Bash`, `Edit`, `Write`, `MultiEdit` and `NotebookEdit` (plus a `PostToolUse` hook that records session-scoped worktree grants).
 Its only job is to auto-approve routine git operations and add a confirmation prompt before protected-branch or destructive ones.
@@ -9,7 +9,7 @@ Its only job is to auto-approve routine git operations and add a confirmation pr
 
 None.
 The plugin has no analytics, no telemetry, and no network access.
-It ships as a single Python script that uses only the standard library.
+It ships as Python scripts that use only the standard library.
 
 ## How your data is handled
 
@@ -21,6 +21,15 @@ It ships as a single Python script that uses only the standard library.
   It holds the path of the checkout you approved, a fixed reason string, and a timestamp; grants expire after 8 hours, stale files are cleaned up automatically, and you can delete the directory at any time. workspace-guard reads the same file, which is why it is not under a guard-specific directory.
   With the setting off — the default — the plugin writes nothing to disk at all.
 - Nothing leaves your machine.
+
+## The friction report
+
+`scripts/friction-report.py` and the `/branch-guard:friction-report` command are read-only analyzers over data Claude Code has **already** written to disk: your session transcripts under `~/.claude/projects/**/*.jsonl`.
+To flag a stale install the report also reads `~/.claude/plugins/installed_plugins.json`, `known_marketplaces.json` and the marketplace clone's `marketplace.json`, taking version strings and the clone path.
+It runs only when you run it, writes nothing to disk, and makes no network connections.
+
+Those transcripts contain your commands and working directories, and the report prints excerpts of the commands to your terminal.
+If you paste that output somewhere, you are pasting your own command history, so check it first and use `--repo` to narrow the scope.
 
 ## Third parties
 
