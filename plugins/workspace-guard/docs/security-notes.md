@@ -83,6 +83,21 @@ That is why the hook emits `deny` (not `ask`) for outside paths when `permission
 The hook input JSON also can't distinguish interactive `default` from headless `-p` `default` (both report `permission_mode: "default"`), so `bypassPermissions` is the only reliable "no human present" signal available to the hook.
 The behavior matrix is locked in by `tests/test_workspace_guard.py` (`test_outside_bypass_permissions_deny` and siblings).
 
+## Side-session notes are writable across runs
+
+A session may write inside any existing run folder of `~/Library/Application Support/Claude/side-session-notes/` without a prompt, not only the folder Claude Desktop gave it.
+The hook input does not name a session's added directories, so the hook cannot tell one run's folder from another's.
+One run can therefore overwrite or delete another run's files, and nothing there is under version control.
+Content is not judged at all: a session can leave another session text to act on, or copy a file out of its own project to where other projects' sessions read it.
+
+**Why not backlogged:** the person at the prompt sees a path and cannot judge the content, and sessions can pass the same data by message.
+Over 2026-11-18 to 2026-11-24 (UTC), one machine's transcripts held 44 asks, 33 of them writes to the notes, and every one of the 33 ran.
+Controlling what moves between sessions needs a guard that reads the content.
+Writes to the notes root, to a run folder as a whole, and to any path holding a glob or a brace keep the `ask`.
+
+A hard link in a run folder is a second name for a file elsewhere, and `realpath` cannot see that.
+Making one asks when its source is outside the session's project, so the file a session can expose that way is one of its own.
+
 ## When to promote a note to the Queue
 
 Move an item from this file to the [shared backlog](https://github.com/karlkfi/claude-bouncer/blob/main/docs/queue/README.md) when any of the following changes:

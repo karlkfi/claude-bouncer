@@ -4242,6 +4242,11 @@ def classify_outside(rp, ctx, is_read):
     if is_read and any(path_at_or_under(rp, p)
                        for p in installed_read_trees(ctx.session_tmp_root)):
         return None
+    # Writes inside a side-session notes run folder: the app has told this
+    # session to leave files there, and a person at the prompt cannot judge
+    # what the file says.
+    if not is_read and is_notes_run_path(rp):
+        return None
     # Read-only: a sibling session of the SAME project sharing the scratch parent
     # (dispatcher tails workers). (#61)
     if is_read and ctx.session_proj_dir \
@@ -7949,15 +7954,38 @@ def installed_read_trees(tmp_root):
       app's shared notes folder. The app adds it to the session as a working
       directory, but the hook input names no additional directories (checked
       against 2.1.308), so the guard cannot learn that from the payload.
+      Writes are exempt inside its run folders (:func:`is_notes_run_path`).
 
     Resolved lazily, once per process, only for a read that would otherwise ask.
     """
-    candidates = [os.path.join(tmp_root, 'bundled-skills')]
+    bundled = _real_dir(os.path.join(tmp_root, 'bundled-skills'))
+    return tuple(rp for rp in (bundled, side_session_notes_root()) if rp)
+
+
+@functools.lru_cache(maxsize=None)
+def side_session_notes_root():
+    """Realpath of the desktop app's shared notes folder, or None."""
     home = resolved_home()
-    if home:
-        candidates.append(os.path.join(home, 'Library', 'Application Support',
-                                       'Claude', 'side-session-notes'))
-    return tuple(rp for rp in map(_real_dir, candidates) if rp)
+    return home and _real_dir(os.path.join(
+        home, 'Library', 'Application Support', 'Claude',
+        'side-session-notes'))
+
+
+def is_notes_run_path(rp):
+    """True when resolved path ``rp`` is strictly inside an existing run folder,
+    ``side-session-notes/<run>/...``.
+
+    The root and a run folder itself are not, so deleting or replacing either
+    still asks. Nor is a path holding a pattern or a brace: ``realpath`` cannot
+    resolve one, and it can stand for a link leading out or, as in
+    ``<run>/{,x}``, for the run folder.
+    """
+    root = side_session_notes_root()
+    if not root or not rp.startswith(root + os.sep):
+        return False
+    run, _, rest = rp[len(root) + 1:].partition(os.sep)
+    return bool(rest) and not any(c in rest for c in '*?[{}') \
+        and _real_dir(os.path.join(root, run)) is not None
 
 
 def main():
