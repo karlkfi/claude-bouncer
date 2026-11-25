@@ -9,7 +9,7 @@ The backlog is another — one store for all five, below.
 
 ## Never edit a vendored library copy
 
-`lib/` holds the shared modules: `bouncer_parse.py`, the shell parser, `bouncer_grants.py`, the session-grant store, and `bouncer_wrappers.py`, each command wrapper's option grammar.
+`lib/` holds the shared modules: `bouncer_parse.py`, the shell parser, `bouncer_grants.py`, the session-grant store, `bouncer_wrappers.py`, each command wrapper's option grammar, `bouncer_session.py`, the session-scratch predicate, and `bouncer_friction.py`, the transcript reader behind a friction report.
 Every plugin carries a copy of each at `plugins/<name>/lib/`, written by `scripts/sync-lib.py`, which syncs every module named in its `MODULES` tuple.
 Adding a module there is what makes it shared — a file dropped in `lib/` and not named is vendored nowhere.
 

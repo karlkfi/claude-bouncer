@@ -21,6 +21,7 @@
     "push",
     "break-glass",
     "rebase",
-    "merge-queue"
+    "merge-queue",
+    "friction"
   ]
 }

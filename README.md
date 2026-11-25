@@ -133,6 +133,10 @@ Command wrappers split the same way.
 `lib/bouncer_wrappers.py` holds the option grammar of `sudo`, `env`, `timeout` and the rest, so a value-taking option is recorded once for all five guards.
 The loop that peels a wrapper stays in each guard, because what it does with the peeled words differs.
 
+Friction reports are split that way too.
+`lib/bouncer_friction.py` reads hook decisions back out of session transcripts, and branch-guard's report is the first built on it.
+What a reason means, and what fixes it, stays in each guard's own report.
+
 ### Why every plugin carries its own copy of the parser
 
 Claude Code copies a plugin into `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/` at install time, and a path that climbs out of the plugin root doesn't resolve there.
@@ -151,7 +155,8 @@ Never a vendored copy.
 
 ```
 .claude-plugin/marketplace.json   the five entries, sourced from ./plugins/<name>
-lib/                              the shared modules: parser, grant store, wrapper options
+lib/                              the shared modules: parser, grant store, wrapper options,
+                                  session scratch, transcript reader
 scripts/sync-lib.py               vendors it, and the CI drift gate
 scripts/render-images.py          rasterizes the brand images, here and per plugin
 scripts/queue.py                  reads, orders and checks the backlog
