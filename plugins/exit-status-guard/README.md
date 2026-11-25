@@ -416,6 +416,7 @@ To see which rule fires most, and on which commands, run the friction report:
 ```
 
 It is a **read-only** analyzer: it re-reads the decisions Claude Code already recorded in your local session transcripts and adds no telemetry (see [PRIVACY.md](PRIVACY.md)).
+A denial leaves no decision record, so the report reads it back from the error the blocked call returned.
 The report ranks denials by rule (`piped`, `pipestatus`, `background`, `sequenced`), by the gate whose status was being lost, and by triggering command.
 
 **Read the counts as false greens caught, not as a friction rate.** Unlike the sibling guards, exit-status-guard emits nothing when it has no objection, and a hook run with no stdout leaves no transcript record — so there is no denominator.

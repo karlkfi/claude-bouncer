@@ -362,6 +362,7 @@ To see which prod-guard prompts actually cost you time — and which unknown tar
 ```
 
 It is a **read-only** analyzer: it re-reads the decisions Claude Code already recorded in your local session transcripts and adds no telemetry (see [PRIVACY.md](PRIVACY.md)).
+A denial leaves no decision record, so the report reads it back from the error the blocked call returned.
 The report ranks prompts by category (`deny-prod`, `deny-ambient`, `deny-switch`, `ask-unknown`, `ask-switch`), by tool, and — most usefully — by **unclassified target**: the non-prod names that keep landing in `ask-unknown` are exactly the ones to add under `"nonprod"` in `.claude/prod-guard.json` (see [Configuration](#configuration)).
 Vet each before adding — never reclassify a real production target as non-prod just to silence a prompt.
 

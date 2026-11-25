@@ -78,7 +78,7 @@ REASON_PATTERNS = {
 # this guard's default, which is the friction worth seeing most.
 #
 # The trace a deny does leave is the error handed back to the agent, whose text
-# is verbatim the reason the hook printed, joined to the command by
+# carries verbatim the reason the hook printed, joined to the command by
 # `tool_use_id` like any other tool result. Two keys read it: this opener, a
 # cross-guard convention that recovers a sibling's denies under --plugin all
 # too, and this guard's own REASON_PATTERNS, the only key a deny recorded before
@@ -86,7 +86,13 @@ REASON_PATTERNS = {
 # vintage. A companion guard that words its opener differently is reachable by
 # neither key and still under-counts its denies; the coverage line says so
 # rather than showing a zero.
-DENY_TEXT = re.compile(r'^(?:Error:\s*)?([a-z0-9-]+-guard):\s')
+#
+# Claude Code now hands that text back as `PreToolUse:Bash hook error: ` plus the
+# reason, and older transcripts hold the reason bare, so both are read. Measured
+# 2026-11-24 over 8,004 denies: bare through 2.1.275, wrapped from 2.1.281 but
+# for two, and nothing recorded between.
+DENY_TEXT = re.compile(r'^(?:Error:\s*)?(?:PreToolUse:\S+ hook error:\s*)?'
+                       r'([a-z0-9-]+-guard):\s')
 
 # Volatile path segments to collapse so near-identical paths group together in
 # the "top paths" ranking (e.g. every per-session /tmp/claude-NNN/... folds to
@@ -258,13 +264,21 @@ def guard_name(command):
     return base
 
 
+def named_guard(reason):
+    """The guard whose opener a reason carries, or None. It stands in for
+    guard_name where the hook command names no script: some attachments record
+    `command hook 7`, whose number does not identify a guard."""
+    m = DENY_TEXT.match(reason) if isinstance(reason, str) else None
+    return m.group(1) if m else None
+
+
 def deny_from_result(block):
     """(guard, reason) if this tool_result block carries a guard's block text,
     else None. Whether that block was a deny is the caller's call — see
     iter_decisions, where the attachment stream settles it.
 
-    A blocked call comes back as an error whose text is verbatim the reason the
-    hook printed. Two keys read it (see DENY_TEXT): the `<name>-guard: ` opener,
+    A blocked call comes back as an error carrying verbatim the reason the hook
+    printed. Two keys read it (see DENY_TEXT): the `<name>-guard: ` opener,
     which names the guard itself, and this guard's own reason wording, for a
     block emitted before that opener existed. Anything else — a failing command,
     a rejected prompt on an unguarded call, another tool's error — matches
@@ -280,10 +294,28 @@ def deny_from_result(block):
     text = text.strip()
     m = DENY_TEXT.match(text)
     if m:
-        return m.group(1), text
+        return m.group(1), text[m.start(1):]
     if any(pat.search(text) for pat in REASON_PATTERNS.values()):
         return THIS_GUARD, text
     return None
+
+
+def is_repeat(rec, seen):
+    """Whether a transcript record restates one this file already holds, which
+    would count its decision again. `seen` collects the uuids read so far.
+
+    A record written twice keeps its `uuid`. An `api-request-blob` replays the
+    conversation sent to the API, tool results included, in a record with
+    neither `uuid` nor `timestamp`, so `--since` cannot place it either.
+    Measured 2026-11-24 over every local transcript: each of the 39,714 tool
+    calls and 568 denies in an untimestamped record was also in a timestamped
+    one in the same file."""
+    uid = rec.get('uuid')
+    if not rec.get('timestamp') or uid in seen:
+        return True
+    if uid:
+        seen.add(uid)
+    return False
 
 
 def iter_decisions(paths):
@@ -303,6 +335,7 @@ def iter_decisions(paths):
     for path in paths:
         call_by_id = {}
         records = []
+        seen = set()
         try:
             with open(path, encoding='utf-8') as fh:
                 for line in fh:
@@ -312,6 +345,8 @@ def iter_decisions(paths):
                     try:
                         rec = json.loads(line)
                     except ValueError:
+                        continue
+                    if is_repeat(rec, seen):
                         continue
                     # Index every tool_use for the join. Only a shell tool
                     # carries a command; a native one has a path instead.
@@ -332,13 +367,6 @@ def iter_decisions(paths):
             hook = att.get('hookName') if isinstance(att, dict) else None
             if not isinstance(hook, str) or not hook.startswith('PreToolUse:'):
                 continue
-            name = guard_name(att.get('command'))
-            if name is None:
-                continue
-            decided.add((name, att.get('toolUseID')))
-            cwd = rec.get('cwd') or ''
-            ts = parse_ts(rec)
-
             stdout = att.get('stdout') or ''
             decision, reason = 'defer', ''   # empty stdout => hook stayed silent
             if stdout.strip():
@@ -347,11 +375,16 @@ def iter_decisions(paths):
                     hso = out.get('hookSpecificOutput') or {}
                     decision = hso.get('permissionDecision', 'defer')
                     reason = hso.get('permissionDecisionReason', '')
-                except ValueError:
+                except (ValueError, AttributeError):   # not a verdict object
                     pass
+            name = guard_name(att.get('command')) or named_guard(reason)
+            if name is None:
+                continue
+            decided.add((name, att.get('toolUseID')))
             yield {
                 'plugin': name, 'decision': decision, 'reason': reason,
-                'cwd': cwd, 'ts': ts, 'tool': hook.split(':', 1)[1],
+                'cwd': rec.get('cwd') or '', 'ts': parse_ts(rec),
+                'tool': hook.split(':', 1)[1],
                 'command': call_by_id.get(att.get('toolUseID'), ('', ''))[1],
             }
 

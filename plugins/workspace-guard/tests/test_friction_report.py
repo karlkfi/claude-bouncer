@@ -142,6 +142,18 @@ class DenyFromResultTests(unittest.TestCase):
             "Error: foreground-guard: `sleep` parks the main thread for ~120 s."))
         self.assertEqual(got[0], 'foreground-guard')
 
+    def test_harness_prefix_is_read_through_and_dropped(self):
+        # How Claude Code has handed a block back since 2.1.281.
+        for tool in ("Bash", "Edit", "mcp__x-y__z"):
+            with self.subTest(tool=tool):
+                got = fr.deny_from_result(self._block(
+                    f"PreToolUse:{tool} hook error: prod-guard: blocked."))
+                self.assertEqual(got, ('prod-guard', 'prod-guard: blocked.'))
+
+    def test_the_prefix_alone_names_no_guard(self):
+        self.assertIsNone(fr.deny_from_result(self._block(
+            "PreToolUse:Bash hook error: error: pathspec 'x' did not match")))
+
     def test_pre_attribution_reason_is_still_recovered(self):
         # Every deny in the corpus this was measured on predates the
         # `workspace-guard: ` opener, so the reason wording is the only key
@@ -340,7 +352,7 @@ class PrintTextTests(unittest.TestCase):
 def write_transcript(tmp):
     """Synthetic transcript: one tool_use + one matching hook attachment."""
     path = Path(tmp) / "s.jsonl"
-    tool_use = {"message": {"content": [
+    tool_use = {"timestamp": "2026-06-14T12:00:00.000Z", "message": {"content": [
         {"type": "tool_use", "name": "Bash", "id": "toolu_X",
          "input": {"command": "cd /etc && grep root passwd"}}]}}
     attach = {
@@ -411,7 +423,7 @@ class EndToEndTests(unittest.TestCase):
 
 def native_attachment(hook="PreToolUse:Read", tuid="toolu_R"):
     """A native tool call and the ask workspace-guard recorded for it."""
-    use = {"message": {"content": [
+    use = {"timestamp": "2026-06-14T12:03:00.000Z", "message": {"content": [
         {"type": "tool_use", "name": hook.split(":")[1], "id": tuid,
          "input": {"file_path": "/etc/passwd"}}]}}
     attach = {
@@ -478,7 +490,7 @@ def deny_records(tuid="toolu_D", reason=None, tool="Bash"):
                         "every session and worktree. Use ./tmp/ instead.")
     args = ({"command": "echo hi > /tmp/q83-fake-target"} if tool == "Bash"
             else {"file_path": "/tmp/q83-fake-target"})
-    use = {"message": {"content": [
+    use = {"timestamp": "2026-06-14T12:02:00.000Z", "message": {"content": [
         {"type": "tool_use", "name": tool, "id": tuid, "input": args}]}}
     result = {"cwd": "/home/u/proj", "timestamp": "2026-06-14T12:02:00.000Z",
               "message": {"content": [
@@ -545,6 +557,104 @@ class DenyRecoveryTests(unittest.TestCase):
             decs, _ = self._scan(tmp, *records, plugin='all')
             self.assertEqual([(d['plugin'], d['decision']) for d in decs],
                              [('prod-guard', 'deny')])
+
+
+def replay(rec):
+    """`rec` as an `api-request-blob` restates it: the message, and neither
+    the `uuid` nor the `timestamp` (nor the cwd) of the record it came from."""
+    return {"type": "api-request-blob", "hash": "h", "sessionId": "s",
+            "message": rec["message"]}
+
+
+class RepeatTests(unittest.TestCase):
+    """A transcript restates its own records; each decision counts once."""
+
+    CUTOFF = dt.datetime(2026, 7, 1, tzinfo=dt.timezone.utc)
+
+    def _scan(self, tmp, *records, cutoff=None):
+        path = Path(tmp) / "s.jsonl"
+        path.write_text("".join(json.dumps(r) + "\n" for r in records))
+        return fr.scan([str(path)], 'workspace-guard', cutoff, '')[0]
+
+    def test_a_replayed_deny_counts_once(self):
+        use, result = deny_records()
+        for order in ((use, result, replay(use), replay(result)),
+                      (replay(use), replay(result), use, result)):
+            with self.subTest(first=order[0].get("type")), \
+                    tempfile.TemporaryDirectory() as tmp:
+                decs = self._scan(tmp, *order)
+                self.assertEqual([d['decision'] for d in decs], ['deny'])
+                self.assertEqual(decs[0]['cwd'], "/home/u/proj")
+
+    def test_a_replay_does_not_pass_the_window(self):
+        use, result = deny_records()
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(self._scan(tmp, use, result, replay(use),
+                                        replay(result), cutoff=self.CUTOFF), [])
+
+    def test_a_repeated_attachment_counts_once(self):
+        # Q242: the same attachment line, uuid and all, written again.
+        use, attach = native_attachment()
+        attach["uuid"] = "u-1"
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(len(self._scan(tmp, use, attach, attach)), 1)
+
+    def test_a_repeated_deny_record_counts_once(self):
+        use, result = deny_records()
+        result["uuid"] = "u-1"
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(len(self._scan(tmp, use, result, result)), 1)
+
+    def test_two_records_with_their_own_uuids_both_count(self):
+        use1, result1 = deny_records(tuid="toolu_1")
+        use2, result2 = deny_records(tuid="toolu_2")
+        for n, rec in enumerate((use1, result1, use2, result2)):
+            rec["uuid"] = f"u-{n}"
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(len(self._scan(tmp, use1, result1, use2, result2)),
+                             2)
+
+
+class UnnamedHookTests(unittest.TestCase):
+    """Some attachments record `command hook 7` where the script path was."""
+
+    def _scan(self, tmp, reason, *extra, stdout=None, plugin='workspace-guard'):
+        use, attach = native_attachment("PreToolUse:Bash", "toolu_U")
+        attach["attachment"]["command"] = "command hook 7"
+        attach["attachment"]["stdout"] = stdout or json.dumps(
+            {"hookSpecificOutput": {"permissionDecision": "ask",
+                                    "permissionDecisionReason": reason}})
+        path = Path(tmp) / "s.jsonl"
+        path.write_text("".join(json.dumps(r) + "\n"
+                                for r in (use, attach) + extra))
+        return fr.scan([str(path)], plugin, None, '')[0]
+
+    ASK = "workspace-guard: Outside-workspace path(s): /q5-fake. Fix: x."
+
+    def test_the_opener_names_the_guard(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            decs = self._scan(tmp, self.ASK)
+            self.assertEqual([(d['plugin'], d['decision']) for d in decs],
+                             [('workspace-guard', 'ask')])
+
+    def test_a_declined_ask_is_not_a_deny(self):
+        _, result = deny_records(
+            tuid="toolu_U",
+            reason="PreToolUse:Bash hook error: " + self.ASK)
+        with tempfile.TemporaryDirectory() as tmp:
+            decs = self._scan(tmp, self.ASK, result)
+            self.assertEqual([d['decision'] for d in decs], ['ask'])
+
+    def test_an_unattributable_hook_is_left_alone(self):
+        for stdout in (
+                '{"hookSpecificOutput": {"permissionDecision": "allow",'
+                ' "permissionDecisionReason": "error: not a guard"}}',
+                '{"hookSpecificOutput": {"permissionDecisionReason": null}}',
+                '{"systemMessage": "hi"}', '["not", "a", "verdict"]', 'plain'):
+            with self.subTest(stdout=stdout), \
+                    tempfile.TemporaryDirectory() as tmp:
+                self.assertEqual(
+                    self._scan(tmp, '', stdout=stdout, plugin='all'), [])
 
 
 class EmptyResultTests(unittest.TestCase):

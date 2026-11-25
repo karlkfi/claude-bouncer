@@ -10,7 +10,8 @@ Each `PreToolUse` invocation that writes a decision lands as an `attachment` rec
 
 **A deny is not in that stream.** Claude Code persists hook stdout only for a call it then runs, so a blocked call records no decision at all.
 Measured 2026-08-21 over 1,034 local transcripts: 60,858 workspace-guard decisions, every one of them `allow` or `ask`, while 80 denials sat in plain sight as tool results.
-The report reads those back instead — the error a blocked call hands the agent is verbatim the reason the hook printed, joined to the command by `tool_use_id` like any other tool result.
+The report reads those back instead — the error a blocked call hands the agent carries verbatim the reason the hook printed, joined to the command by `tool_use_id` like any other tool result.
+Claude Code 2.1.281 and later put a `PreToolUse:Bash hook error: ` prefix in front of the reason, and 2.1.275 and earlier hand it back bare; the report reads both.
 Two keys find it:
 
 - the `<name>-guard: ` opener every reason now carries, a cross-guard convention, so a companion guard's denies are recovered under `--plugin all` too;
@@ -20,6 +21,11 @@ Two keys find it:
 Neither key alone says *deny*, because an `ask` is worded identically and a prompt the operator declines comes back as an error carrying the same text (measured on one `~/.zshrc` ask that did exactly that).
 What separates them is the attachment: the ask left one, the deny left none.
 So a result whose `(guard, toolUseID)` already appears in the decision stream is dropped rather than counted twice.
+
+**A transcript repeats itself, and the report counts each decision once.** A record may be written twice under one `uuid`.
+An `api-request-blob` record replays earlier tool calls and results with no `uuid` and no `timestamp`, so `--since` cannot place it.
+Records with no timestamp are skipped, and so is a `uuid` already read from the same file.
+A call that appears in two transcript files is still counted in both: 49 of 7,918 denies on 2026-11-24.
 
 The report only **reads** that already-persisted local data.
 It adds no logging and no telemetry — keep it that way (hook-side logging would be a privacy regression for no added signal).
@@ -39,6 +45,8 @@ So the scan cannot see:
 - **Which release made a decision.** Nothing in a transcript records the guard version: the hook command is stored unexpanded, as `${CLAUDE_PLUGIN_ROOT}/...`. An installed copy has no git tags or dated release notes to bucket by either. So a ranking over a window that spans releases mixes them, and a shape a later release stopped prompting on keeps its rank. On 2026-08-22 a 30-day run ranked `$f` top among `expand` paths with 228 prompts, and every one of those shapes already allowed on the installed 1.10.0.
   To see only what the installed version does, narrow `--since` to when this machine installed it: the guard's `lastUpdated` in `~/.claude/plugins/installed_plugins.json`.
   `--since` takes a whole UTC day, so pass the day after that date; the install day itself still mixes.
+- **An unnamed `allow`.** Some attachments record `command hook 7` where the script path was.
+  The reason's opener names the guard for those, and this guard's `allow` reason has none, so they are dropped: 362 of them in the week to 2026-11-24.
 - **A deny neither key finds.** Under `--plugin all`, a companion guard whose block text opens with something other than `<name>-guard: ` under-counts its denies — pr-sentinel leads with `pr-sentinel: `, for instance.
   The coverage line says so rather than showing a zero.
 

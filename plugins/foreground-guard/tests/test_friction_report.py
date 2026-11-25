@@ -166,6 +166,13 @@ def _bash_call(tooluseid, command, cwd="/home/u/proj", ts=None):
     }
 
 
+def _replay(rec):
+    """`rec` as an `api-request-blob` restates it: the message, and neither the
+    `uuid` nor the `timestamp` (nor the cwd) of the record it came from."""
+    return {"type": "api-request-blob", "hash": "h", "sessionId": "s",
+            "message": rec["message"]}
+
+
 def _stdout(decision, reason):
     return json.dumps({"hookSpecificOutput": {
         "hookEventName": "PreToolUse",
@@ -407,6 +414,18 @@ class DenyFromResultTests(unittest.TestCase):
         # The same text appears with an `Error: ` lead in some result shapes.
         got = fr.deny_from_result(self._block(content="Error: " + REASON_DENY))
         self.assertEqual(got[0], "foreground-guard")
+
+    def test_harness_prefix_is_read_through_and_dropped(self):
+        # How Claude Code has handed a deny back since 2.1.281.
+        for tool in ("Bash", "Monitor", "mcp__x-y__z"):
+            with self.subTest(tool=tool):
+                got = fr.deny_from_result(self._block(
+                    content="PreToolUse:%s hook error: %s" % (tool, REASON_DENY)))
+                self.assertEqual(got, ("foreground-guard", REASON_DENY))
+
+    def test_the_prefix_alone_names_no_guard(self):
+        self.assertIsNone(fr.deny_from_result(self._block(
+            content="PreToolUse:Bash hook error: error: pathspec 'x'")))
 
     def test_content_as_text_blocks(self):
         got = fr.deny_from_result(
@@ -661,6 +680,83 @@ class IterDecisionsTests(unittest.TestCase):
         self.assertEqual(got[0]["command"],
                          "while :; do gh pr checks 1; sleep 5; done")
         self.assertEqual(got[0]["reason"], REASON_DENY)
+
+    def test_prefixed_deny_reads_like_a_bare_one(self):
+        bare = _deny_record("toolu_1", "sleep 300")
+        prefixed = _deny_record(
+            "toolu_2", "sleep 400",
+            reason="PreToolUse:Bash hook error: " + REASON_DENY)
+        root = write_transcript([*bare, *prefixed])
+        paths = [str(p) for p in Path(root).rglob("*.jsonl")]
+        got = list(fr.iter_decisions(paths, "foreground-guard", None, ""))
+        self.assertEqual([d["command"] for d in got], ["sleep 300", "sleep 400"])
+        self.assertEqual([d["reason"] for d in got], [REASON_DENY] * 2)
+
+    def test_replayed_records_count_once(self):
+        # An `api-request-blob` restates the message under a record with no
+        # timestamp, so it cleared any window and counted the call again.
+        use, result = _deny_record("toolu_1", CMD_OVERRIDE)
+        for order in ((use, result, _replay(use), _replay(result)),
+                      (_replay(use), _replay(result), use, result)):
+            with self.subTest(first=order[0].get("type")):
+                root = write_transcript(order)
+                paths = [str(p) for p in Path(root).rglob("*.jsonl")]
+                tally = fr.new_scope()
+                got = list(fr.iter_decisions(paths, "foreground-guard", None,
+                                             "", tally))
+                self.assertEqual([d["cwd"] for d in got], ["/home/u/proj"])
+                self.assertEqual((tally["bash_calls"], tally["overrides"]),
+                                 (1, 1))
+
+    def test_replayed_records_do_not_pass_the_window(self):
+        use, result = _deny_record("toolu_1", "sleep 300",
+                                   ts="2020-01-01T00:00:00Z")
+        root = write_transcript([use, result, _replay(use), _replay(result)])
+        paths = [str(p) for p in Path(root).rglob("*.jsonl")]
+        cutoff = dt.datetime(2025, 1, 1, tzinfo=dt.timezone.utc)
+        tally = fr.new_scope()
+        self.assertEqual(list(fr.iter_decisions(
+            paths, "foreground-guard", cutoff, "", tally)), [])
+        self.assertEqual(tally, fr.new_scope())
+
+    def test_a_record_written_twice_counts_once(self):
+        use, result = _deny_record("toolu_1", "sleep 300")
+        use["uuid"], result["uuid"] = "u-1", "u-2"
+        ask_use, ask = _decision_record(
+            "toolu_2", "gh run watch 456", _stdout("ask", REASON_WATCH))
+        ask_use["uuid"], ask["uuid"] = "u-3", "u-4"
+        root = write_transcript([use, result, ask_use, ask] * 2)
+        paths = [str(p) for p in Path(root).rglob("*.jsonl")]
+        tally = fr.new_scope()
+        got = list(fr.iter_decisions(paths, "foreground-guard", None, "", tally))
+        self.assertEqual(sorted(d["decision"] for d in got), ["ask", "deny"])
+        self.assertEqual(tally["bash_calls"], 2)
+
+    def test_an_unnamed_hook_is_named_by_its_reason(self):
+        # Some attachments record `command hook 7` where the script path was.
+        use, att = _decision_record(
+            "toolu_1", "gh run watch 456", _stdout("ask", REASON_WATCH),
+            hook_cmd="command hook 7")
+        # The declined ask comes back as an error worded like a deny.
+        _, result = _deny_record(
+            "toolu_1", "gh run watch 456",
+            reason="PreToolUse:Bash hook error: " + REASON_WATCH)
+        root = write_transcript([use, att, result])
+        paths = [str(p) for p in Path(root).rglob("*.jsonl")]
+        got = list(fr.iter_decisions(paths, "foreground-guard", None, ""))
+        self.assertEqual([(d["plugin"], d["decision"]) for d in got],
+                         [("foreground-guard", "ask")])
+
+    def test_an_unattributable_hook_is_left_alone(self):
+        records = []
+        for n, stdout in enumerate((
+                _stdout("allow", "error: not a guard"), _stdout("allow", None),
+                '{"systemMessage": "hi"}', '["not", "a", "verdict"]', "plain")):
+            records += _decision_record("toolu_%d" % n, "ls", stdout,
+                                        hook_cmd="command hook 3")
+        root = write_transcript(records)
+        paths = [str(p) for p in Path(root).rglob("*.jsonl")]
+        self.assertEqual(list(fr.iter_decisions(paths, "all", None, "")), [])
 
     def test_deny_honors_plugin_and_scope_filters(self):
         use1, res1 = _deny_record("toolu_1", "sleep 300",

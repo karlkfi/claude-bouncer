@@ -132,11 +132,33 @@ def _decision_record(tooluseid, command, stdout, cwd="/home/u/proj", ts=None,
         },
     }
     use = {
+        "timestamp": ts or "2026-07-01T12:00:00Z",
+        "cwd": cwd,
         "message": {"content": [
             {"type": "tool_use", "name": "Bash", "id": tooluseid,
              "input": {"command": command}}]},
     }
     return use, att
+
+
+def _deny_record(tooluseid, command, reason, cwd="/home/u/proj", ts=None):
+    """The two records a denied Bash call leaves: the tool_use and the error
+    tool_result carrying the reason. There is no attachment (see DENY_TEXT)."""
+    use, _ = _decision_record(tooluseid, command, "", cwd=cwd, ts=ts)
+    result = dict(use, message={"content": [
+        {"type": "tool_result", "tool_use_id": tooluseid, "is_error": True,
+         "content": reason}]})
+    return use, result
+
+
+def _replay(rec):
+    """`rec` as an `api-request-blob` restates it: the message, and neither the
+    `uuid` nor the `timestamp` (nor the cwd) of the record it came from."""
+    return {"type": "api-request-blob", "hash": "h", "sessionId": "s",
+            "message": rec["message"]}
+
+
+PREFIX = "PreToolUse:Bash hook error: "
 
 
 def _stdout(decision, reason):
@@ -508,6 +530,118 @@ class IterDecisionsTests(unittest.TestCase):
             f.write(json.dumps(att) + "\n")
         paths = [os.path.join(root, "s.jsonl")]
         self.assertEqual(len(list(fr.iter_decisions(paths, "prod-guard", None, ""))), 1)
+
+
+class DenyRecoveryTests(unittest.TestCase):
+    """A deny reaches the report only through the tool result it produced."""
+
+    CMD = "kubectl delete ns x"
+
+    def _decisions(self, records, plugin="prod-guard", cutoff=None, repo=""):
+        root = write_transcript(records)
+        paths = [str(p) for p in Path(root).rglob("*.jsonl")]
+        return list(fr.iter_decisions(paths, plugin, cutoff, repo))
+
+    def test_both_forms_are_recovered(self):
+        bare = _deny_record("toolu_1", self.CMD, REASON_DENY_PROD)
+        prefixed = _deny_record("toolu_2", self.CMD, PREFIX + REASON_DENY_PROD)
+        errored = _deny_record("toolu_3", self.CMD, "Error: " + REASON_DENY_PROD)
+        got = self._decisions([*bare, *prefixed, *errored])
+        self.assertEqual([d["decision"] for d in got], ["deny"] * 3)
+        self.assertEqual([d["reason"] for d in got], [REASON_DENY_PROD] * 3)
+        self.assertEqual([d["command"] for d in got], [self.CMD] * 3)
+        report = fr.build_report(got)
+        self.assertEqual(report["categories"], {"deny-prod": 3})
+        self.assertEqual(report["tools"], {"kubectl": 3})
+
+    def test_ordinary_failures_are_not_denies(self):
+        for text in ("Exit code 1", "error: pathspec 'x' did not match",
+                     PREFIX + "error: pathspec 'x' did not match",
+                     "quoting " + REASON_DENY_PROD):
+            with self.subTest(text=text):
+                self.assertEqual(
+                    self._decisions(_deny_record("toolu_1", "ls", text),
+                                    plugin="all"), [])
+        use, result = _deny_record("toolu_1", self.CMD, REASON_DENY_PROD)
+        result["message"]["content"][0]["is_error"] = False
+        self.assertEqual(self._decisions([use, result]), [])
+
+    def test_filters_apply(self):
+        sibling = _deny_record("toolu_1", "ls",
+                               PREFIX + "workspace-guard: outside")
+        old = _deny_record("toolu_2", self.CMD, PREFIX + REASON_DENY_PROD,
+                           ts="2020-01-01T00:00:00Z")
+        other = _deny_record("toolu_3", self.CMD, PREFIX + REASON_DENY_PROD,
+                             cwd="/home/u/gateway")
+        records = [*sibling, *old, *other]
+        cutoff = dt.datetime(2025, 1, 1, tzinfo=dt.timezone.utc)
+        self.assertEqual(len(self._decisions(records)), 2)
+        self.assertEqual(len(self._decisions(records, plugin="all")), 3)
+        self.assertEqual(len(self._decisions(records, cutoff=cutoff)), 1)
+        self.assertEqual(len(self._decisions(records, repo="gateway")), 1)
+
+    def test_a_deny_on_a_non_bash_call_is_ignored(self):
+        _, result = _deny_record("toolu_1", self.CMD, PREFIX + REASON_DENY_PROD)
+        self.assertEqual(self._decisions([result]), [])
+
+    def test_a_declined_ask_is_not_a_deny(self):
+        use, att = _decision_record(
+            "toolu_1", "aws s3 rm s3://b", _stdout("ask", REASON_ASK_UNKNOWN))
+        for hook_cmd in (att["attachment"]["command"], "command hook 8"):
+            with self.subTest(hook_cmd=hook_cmd):
+                att["attachment"]["command"] = hook_cmd
+                _, result = _deny_record("toolu_1", "aws s3 rm s3://b",
+                                         PREFIX + REASON_ASK_UNKNOWN)
+                got = self._decisions([use, att, result])
+                self.assertEqual([(d["plugin"], d["decision"]) for d in got],
+                                 [("prod-guard", "ask")])
+
+    def test_an_unattributable_hook_is_left_alone(self):
+        records = []
+        for n, stdout in enumerate((
+                _stdout("allow", "error: not a guard"), _stdout("allow", None),
+                '{"systemMessage": "hi"}', '["not", "a", "verdict"]', "plain")):
+            records += _decision_record("toolu_%d" % n, "ls", stdout,
+                                        hook_cmd="command hook 3")
+        self.assertEqual(self._decisions(records, plugin="all"), [])
+
+
+class RepeatTests(unittest.TestCase):
+    """A transcript restates its own records; each decision counts once."""
+
+    def _decisions(self, records, cutoff=None):
+        root = write_transcript(records)
+        paths = [str(p) for p in Path(root).rglob("*.jsonl")]
+        return list(fr.iter_decisions(paths, "prod-guard", cutoff, ""))
+
+    def test_a_replayed_deny_counts_once(self):
+        use, result = _deny_record("toolu_1", "kubectl delete ns x",
+                                   PREFIX + REASON_DENY_PROD)
+        for order in ((use, result, _replay(use), _replay(result)),
+                      (_replay(use), _replay(result), use, result)):
+            with self.subTest(first=order[0].get("type")):
+                self.assertEqual([d["cwd"] for d in self._decisions(order)],
+                                 ["/home/u/proj"])
+
+    def test_a_replay_does_not_pass_the_window(self):
+        use, result = _deny_record("toolu_1", "kubectl delete ns x",
+                                   PREFIX + REASON_DENY_PROD,
+                                   ts="2020-01-01T00:00:00Z")
+        cutoff = dt.datetime(2025, 1, 1, tzinfo=dt.timezone.utc)
+        self.assertEqual(
+            self._decisions([use, result, _replay(use), _replay(result)],
+                            cutoff), [])
+
+    def test_a_record_written_twice_counts_once(self):
+        use, result = _deny_record("toolu_1", "kubectl delete ns x",
+                                   PREFIX + REASON_DENY_PROD)
+        ask_use, ask = _decision_record(
+            "toolu_2", "aws s3 rm s3://b", _stdout("ask", REASON_ASK_UNKNOWN))
+        records = [use, result, ask_use, ask]
+        for n, rec in enumerate(records):
+            rec["uuid"] = "u-%d" % n
+        got = self._decisions(records * 2)
+        self.assertEqual(sorted(d["decision"] for d in got), ["ask", "deny"])
 
 
 class VersionTupleTests(unittest.TestCase):
