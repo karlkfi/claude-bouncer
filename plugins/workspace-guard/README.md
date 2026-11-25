@@ -72,6 +72,7 @@ Sessions that spawn and manage background work therefore aren't spammed with pro
 Read-only commands may also poll a **sibling** session's output under the same project's scratch dir — the dispatcher-tails-workers pattern of parallel dispatch.
 Writing into another session's scratch is **denied**, with this session's own scratchpad named in the refusal, because the usual cause is a path the agent carried across a resume or a compaction — each mints a new session id and a new scratch dir, leaving the remembered path pointing at the old one.
 Reads reach a session in any other checkout of the same repository too, since Claude Code files each worktree under its own scratch dir; a different repository's scratch still asks entirely.
+The desktop app's shared notes are exempt for reads, and for writes inside a run folder (see [Side-session notes](#side-session-notes)).
 
 | Command                              | Decision |
 | ------------------------------------ | -------- |
@@ -109,6 +110,8 @@ Reads reach a session in any other checkout of the same repository too, since Cl
 | `echo x > /tmp/claude-501/…/<this-session>/scratchpad/f` (own scratch write) | allow |
 | `tail /tmp/claude-501/<this-project>/<sibling-session>/…` (sibling read) | allow |
 | `echo x > /tmp/claude-501/<this-project>/<sibling-session>/scratchpad/f` (sibling write) | **deny** |
+| `cp in.txt ~/Library/Application\ Support/Claude/side-session-notes/<run>/n.md` | allow |
+| `rm -rf ~/Library/Application\ Support/Claude/side-session-notes/<run>` (or `…/*`, or `…/<run>/*`) | **ask** |
 | `f=notes.md; cat $f`                 | allow    |
 | `for f in docs/*.md; do cat $f; done` | allow   |
 | `for f in docs/*.md; do echo "$(wc -l < "$f")"; done` (loop var inside a substitution) | defer |
@@ -846,7 +849,10 @@ flowing, avoid triggering it:
   are exempt and never prompt. Only *read-only* access extends to a sibling
   session's output under the same project's scratch dir; writing there still
   asks.) Reading files under `~/.claude/projects/` (Claude Code's own session
-  and sub-agent data) is also exempt for read-only commands.
+  and sub-agent data) is also exempt for read-only commands. A file inside an
+  existing `~/Library/Application Support/Claude/side-session-notes/<run>/` is
+  exempt for reads and writes; name it literally, since a glob or a brace in
+  the path still asks on a write.
 - **Read dependency source from in-workspace vendored/pinned copies, not the
   global cache.** Out-of-tree caches (Go's `~/go/pkg/mod`, npm's `~/.npm`, pip's
   `~/.cache/pip`, cargo's `~/.cargo/registry`) are outside the project root, so
@@ -999,7 +1005,7 @@ Three limits:
 ### Allowed read prefixes
 
 A set of path prefixes are always allowed for **read-only** guarded commands (`cat`, `head`, `tail`, `grep`, `rg`, `sed`, `awk`, `jq`, `yq`, `diff`, `sort`, `wc`, `file`, `hexdump`, `cut`, `base64`, and their aliases).
-Write commands (`cp`, `mv`, `tee`, `rm`, `unlink`), every operand of `ln` (bar a symbolic link's source where the link is blocked anyway), redirect targets, read commands carrying a write-mode flag (`sed -i`, gawk `-i inplace`, `yq -i`, `sort -o`, BSD `base64 -o`), and the positional output file of `uniq IN OUT` / `xxd IN OUT` are never exempt.
+Write commands (`cp`, `mv`, `tee`, `rm`, `unlink`), every operand of `ln` (bar a symbolic link's source where the link is blocked anyway), redirect targets, read commands carrying a write-mode flag (`sed -i`, gawk `-i inplace`, `yq -i`, `sort -o`, BSD `base64 -o`), and the positional output file of `uniq IN OUT` / `xxd IN OUT` are never exempt by these prefixes.
 
 The built-in defaults are `~/.claude/projects/` (Claude Code's own session and sub-agent data) and `~/.claude/plugins/` + `~/.claude/skills/` (installed extension code).
 The extension dirs rest on the same trust boundary as the plugin itself — that code is installed by the user, deliberately — and they are load-bearing rather than a convenience: a hook or skill routinely launches its own scripts by absolute path, so without the exemption every such launch would prompt.
@@ -1012,6 +1018,7 @@ So the exempt set is exactly the skills installed right now: uninstalling one dr
 
 Claude Code's `/tmp/claude-<uid>/bundled-skills/` and the desktop app's `~/Library/Application Support/Claude/side-session-notes/` (the hook input does not name a session's added directories) are exempt too.
 A root that is a symlink is not.
+[Side-session notes](#side-session-notes) covers writes there.
 
 You can extend the defaults with additional prefixes:
 
@@ -1029,6 +1036,22 @@ Scope entries tightly: anything under a configured prefix is silently allowed fo
 A relative entry is resolved against the tool's working directory, the same base the command's own file arguments resolve against.
 On Windows an entry with a leading slash is first read the way Git Bash reads it, so `/c/Users/me/shared` means `C:\Users\me\shared` — as it does in a command — rather than a `c` folder on whichever drive is current.
 Both rules apply to every configured path: the host-temp roots and allowlist above, and these prefixes.
+
+### Side-session notes
+
+Claude Desktop gives linked sessions a shared folder, `~/Library/Application Support/Claude/side-session-notes/<run>/`, adds it to each session as a working directory, and tells sessions to leave findings there.
+A write strictly inside a run folder is exempt, from Bash, PowerShell, and the native file tools alike.
+The run folder has to exist already and be a real directory.
+
+These still ask:
+
+- a write to `side-session-notes/` itself, to a file directly in it, or to a run folder as a whole, so `rm -rf side-session-notes` and `rm -rf side-session-notes/*` prompt;
+- a path holding `*`, `?`, `[`, `{` or `}`, because the hook cannot resolve what it expands to: `<run>/{,x}` names the run folder, and `<run>/*` can match a link leading out;
+- a path that resolves out of the run folder, through a symlink or `..`.
+
+The hook input does not say which run folder is this session's, so the exemption covers all of them: [one run can overwrite another's files](docs/security-notes.md#side-session-notes-are-writable-across-runs), which have no version control.
+
+A script in the notes is never vouched for, so `bash <run>/s.sh` beside a guarded command withholds the `allow`.
 
 ### Cross-workspace denies
 

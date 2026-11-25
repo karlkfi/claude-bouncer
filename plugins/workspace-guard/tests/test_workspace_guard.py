@@ -10413,7 +10413,7 @@ class SameRepoSessionScratchE2ETests(unittest.TestCase):
 
 class InstalledReadTreesE2ETests(unittest.TestCase):
     """Q311: bundled skills and the desktop app's side-session notes are exempt
-    for reads only. Builds a fake home under the real one, so a path that is NOT
+    for reads, and a notes run folder for writes too. Builds a fake home under the real one, so a path that is NOT
     exempt reads as an outside ``ask`` rather than a host-temp deny."""
 
     def setUp(self):
@@ -10428,14 +10428,19 @@ class InstalledReadTreesE2ETests(unittest.TestCase):
         self.home = os.path.join(base, "home")
         self.notes = os.path.join(self.home, "Library", "Application Support",
                                   "Claude", "side-session-notes")
-        os.makedirs(os.path.join(self.notes, "family"))
+        self.run_dir = os.path.join(self.notes, "family")
+        os.makedirs(os.path.join(self.run_dir, "sub"))
         self.env = {"HOME": self.home, "USERPROFILE": self.home}
 
     def tearDown(self):
         self._tmp.cleanup()
 
-    def _expect(self, cmd, expected, **env):
-        out = run_hook(cmd, self.workspace, env_extra=dict(self.env, **env))
+    def _expect(self, cmd, expected, tool_name=None, **env):
+        out = run_hook(cmd, self.workspace, env_extra=dict(self.env, **env),
+                       tool_name=tool_name)
+        if expected is None:
+            self.assertIsNone(out, f"expected a defer for: {cmd!r}")
+            return
         self.assertIsNotNone(out, f"expected a decision, got defer for: {cmd!r}")
         got = out["hookSpecificOutput"]["permissionDecision"]
         self.assertEqual(
@@ -10447,10 +10452,139 @@ class InstalledReadTreesE2ETests(unittest.TestCase):
         self._expect(f"cat {sh(os.path.join(self.notes, 'family', 'n.md'))}",
                      "allow")
 
-    def test_side_session_notes_write_still_asks(self):
-        self._expect(
-            f"cp ./in.txt {sh(os.path.join(self.notes, 'family', 'n.md'))}",
-            "ask")
+    def _run_path(self, *parts):
+        return sh(os.path.join(self.run_dir, *parts))
+
+    def _file_tool(self, tool, path):
+        """The decision for a native file tool on ``path``, None on a defer."""
+        env = dict(os.environ, CLAUDE_PROJECT_DIR=self.workspace, **self.env)
+        key = "notebook_path" if tool == "NotebookEdit" else "file_path"
+        r = subprocess.run(
+            [sys.executable, str(SCRIPT)], capture_output=True, text=True,
+            input=json.dumps({"tool_name": tool, "cwd": self.workspace,
+                              "tool_input": {key: path}}), env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        if not r.stdout.strip():
+            return None
+        return json.loads(r.stdout)["hookSpecificOutput"]["permissionDecision"]
+
+    def test_notes_run_folder_write_allowed(self):
+        n = self._run_path("n.md")
+        for cmd in (f"cp ./in.txt {n}", f"echo x > {n}; cat in.txt",
+                    f"cat in.txt >> {n}", f"cat in.txt | tee {n}",
+                    f"rm {n}", f"rm -rf {n}", f"sed -i.bak s/a/b/ {n}",
+                    f"mv ./in.txt {n}",
+                    f"rm -rf {self._run_path('sub')}",
+                    f"cp ./in.txt {self._run_path('sub', '..', 'n.md')}",
+                    f"cd {sh(self.run_dir)} && echo x > n.md && cat n.md"):
+            with self.subTest(cmd=cmd):
+                self._expect(cmd, "allow")
+
+    def test_notes_run_folder_file_tools_defer(self):
+        for tool in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
+            with self.subTest(tool=tool):
+                self.assertIsNone(
+                    self._file_tool(tool, os.path.join(self.run_dir, "n.md")))
+
+    def test_notes_run_folder_powershell_write_allowed(self):
+        n = ps(os.path.join(self.run_dir, "n.md"))
+        for cmd in (f"Set-Content -Path {n} -Value x",
+                    f"Copy-Item ./in.txt {n}", f"Remove-Item {n}"):
+            with self.subTest(cmd=cmd):
+                self._expect(cmd, "allow", tool_name="PowerShell")
+
+    def test_notes_root_and_run_folder_writes_ask(self):
+        for path in (self.notes, self.run_dir, self.run_dir + os.sep,
+                     os.path.join(self.run_dir, "sub", ".."),
+                     os.path.join(self.run_dir, "..", "family"),
+                     os.path.join(self.run_dir, ".."),
+                     os.path.join(self.run_dir, "..", "..", "n.md"),
+                     os.path.join(self.notes, "loose.md"),
+                     os.path.join(self.notes, "no-such-run", "n.md")):
+            with self.subTest(path=path):
+                self._expect(f"rm -rf {sh(path)}", "ask")
+                self._expect(f"Remove-Item -Recurse {ps(path)}", "ask",
+                             tool_name="PowerShell")
+                self.assertEqual(self._file_tool("Write", path), "ask")
+        self._expect(f"mv {sh(self.run_dir)} ./here", "ask")
+        self._expect(f"find {sh(self.run_dir)} -delete", "ask")
+
+    def test_notes_pattern_write_asks(self):
+        # bash expands each of these into a run folder, or into something in
+        # one that realpath never saw.
+        for tail in ("/*", "/*/", "/fam*", "/*/n.md", "/family/*",
+                     "/family/**", "/family/[n].md", "/family/?.md",
+                     "/{family,other}", "/family{,/sub}", "/family/{,sub}",
+                     "/family/{sub,../other}", "/family/{,../}../other"):
+            with self.subTest(tail=tail):
+                self._expect(f"rm -rf {sh(self.notes)}{tail}", "ask")
+        for tail in ("/*", "/family/*"):
+            with self.subTest(tail=tail, tool="PowerShell"):
+                self._expect(f"Remove-Item -Recurse {ps(self.notes + tail)}",
+                             "ask", tool_name="PowerShell")
+
+    def test_notes_sibling_sharing_the_prefix_asks(self):
+        for name in ("side-session-notes-old", "side-session-notes2"):
+            path = os.path.join(os.path.dirname(self.notes), name, "family")
+            os.makedirs(path)
+            with self.subTest(name=name):
+                n = os.path.join(path, "n.md")
+                self._expect(f"cp ./in.txt {sh(n)}", "ask")
+                self.assertEqual(self._file_tool("Write", n), "ask")
+
+    def test_notes_symlink_out_asks(self):
+        away = os.path.join(self.home, "elsewhere")
+        os.mkdir(away)
+        os.symlink(away, os.path.join(self.run_dir, "dir"))
+        os.symlink(os.path.join(away, "f"), os.path.join(self.run_dir, "file"))
+        os.symlink(self.notes, os.path.join(self.run_dir, "up"))
+        os.symlink(away, os.path.join(self.notes, "linked-run"))
+        for path in (os.path.join(self.run_dir, "dir", "n.md"),
+                     os.path.join(self.run_dir, "file"),
+                     os.path.join(self.run_dir, "up", "family"),
+                     os.path.join(self.notes, "linked-run", "n.md")):
+            with self.subTest(path=path):
+                self._expect(f"cp ./in.txt {sh(path)}", "ask")
+                self._expect(f"Copy-Item ./in.txt {ps(path)}", "ask",
+                             tool_name="PowerShell")
+                self.assertEqual(self._file_tool("Write", path), "ask")
+        # Deleting the link touches only the entry, which is in the run folder.
+        self._expect(f"rm {self._run_path('file')}", "allow")
+
+    def test_notes_link_planted_in_the_same_call_asks(self):
+        away = sh(os.path.join(self.home, "elsewhere"))
+        link = self._run_path("l")
+        self._expect(f"ln -s {away} {link} && echo x > {link}", "ask")
+        self._expect(f"ln -s {away} {link}", "ask")
+        self._expect(f"ln {away} {link}", "ask")
+
+    def test_notes_script_is_never_vouched_for(self):
+        # Forward slashes: a path run as a command is recognised by its `/`.
+        s = sh(Path(self.run_dir, "s.sh").as_posix())
+        self._expect(f"cp ./in.txt {s} && bash {s}", None)
+        self._expect(f"cp ./in.txt {s} && {s}", None)
+
+    def test_notes_write_beside_an_outside_write_asks(self):
+        other = sh(os.path.join(self.home, "other"))
+        self._expect(f"cp ./in.txt {self._run_path('n.md')} && cp ./in.txt {other}",
+                     "ask")
+
+    def test_linked_notes_root_write_asks(self):
+        real = os.path.join(self.home, "elsewhere")
+        os.makedirs(os.path.join(real, "family"))
+        shutil.rmtree(self.notes)
+        os.symlink(real, self.notes)
+        self._expect(f"cp ./in.txt {self._run_path('n.md')}", "ask")
+
+    def test_no_home_directory_exempts_nothing(self):
+        with mock.patch.object(guard, "resolved_home", return_value=None):
+            guard.side_session_notes_root.cache_clear()
+            try:
+                self.assertIsNone(guard.side_session_notes_root())
+                self.assertFalse(guard.is_notes_run_path(
+                    os.path.join(self.run_dir, "n.md")))
+            finally:
+                guard.side_session_notes_root.cache_clear()
 
     def test_linked_notes_root_is_not_exempt(self):
         real = os.path.join(self.home, "elsewhere")
