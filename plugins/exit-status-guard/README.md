@@ -184,6 +184,7 @@ make check > >(tee <scratchpad>/c.log)  # the gate runs outside it
 
 The last two matter most.
 Gate patterns are matched against the **head of a shell segment** — its command word and arguments, after leading `VAR=val` assignments and `bash`/`sudo`/`time`-style wrappers are peeled, along with the options of a command wrapper (`sudo -u root`, `stdbuf -oL`, `/usr/bin/time -p`), the operand `timeout`, `chrt` and `taskset` take before the command (`timeout 600`), and the options of the `time` keyword (`time -p`), and `env -S 'make check'` is read as the command its string splits into — never against the raw command string.
+Git's global options are dropped the same way, so `git -C sub push` and `git --no-pager pull` are matched as `git push` and `git pull`.
 A pattern matched against the raw string also fires on every `git show`, `grep`, and commit message that merely *names* the command.
 A heredoc body is data, so a piped gate quoted in one is text; no rule handles that case, the parser does.
 A shell's `-c` string is a command, so `bash -c 'make check | tail'` is denied as the pipe it runs, and `bash -c 'make check' | tail` as `(make check) | tail` would be.

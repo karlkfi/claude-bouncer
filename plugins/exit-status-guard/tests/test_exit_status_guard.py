@@ -886,6 +886,38 @@ CASES = [
     ('make check piped beside a completion helper still denies',
      'git checkout --git-completion-helper-all; make check | tail', False, True, 'piped'),
 
+    # --- git's global options ahead of the subcommand (Q368) -----------------
+    # git 2.55.0 takes `--git-dir`, `--work-tree`, `--namespace` and
+    # `--config-env` with the value as the next word or after `=`.
+    ('git -C before a commit', 'git -C . commit -m x | tail', False, True,
+     "exit status is the filter's"),
+    ('git -c before a commit', 'git -c user.name=x commit -m y | tail',
+     False, True, ''),
+    ('git --no-pager before a pull', 'git --no-pager pull | tail', False, True, ''),
+    ('git -C before a push', 'git -C sub push | tail', False, True, ''),
+    ('git -P before a commit', 'git -P commit -m x | tail', False, True, ''),
+    ('git --git-dir= before a commit', 'git --git-dir=.git commit -m x | tail',
+     False, True, ''),
+    ('git --git-dir and --work-tree as separate words',
+     'git --git-dir .git --work-tree . commit -m x | tail', False, True, ''),
+    ('git -C before a sequenced push', 'make check; git -C . push',
+     False, True, 'is sequenced before'),
+    ('git -C before a read', 'git -C . log | tail', False, False, ''),
+    ('git -C before a stash list', 'git -C . stash list | tail',
+     False, False, ''),
+    ('a -C value named for a gate', 'git -C commit log | tail', False, False, ''),
+    ('a -c value naming a gate', 'git -c commit.gpgsign=false log | tail',
+     False, False, ''),
+    ('a global option that runs no subcommand', 'git --html-path | cat',
+     False, False, ''),
+    # git 2.55.0 prints the option list and exits 0 for this one too.
+    ('git -C before a completion helper',
+     'git -C . checkout --git-completion-helper-all | tr " " "\\n"',
+     False, False, ''),
+    ('git -C before a restore',
+     'make check > log 2>&1; rc=$?; git -C . reset --hard; '
+     '[ "$rc" -ne 0 ] || exit 1', False, False, ''),
+
     # --- A backgrounded gate whose status the last statement drops -----------
     ('the canonical lost background status',
      'make check > tmp/check.log 2>&1; echo "EXIT=$?"', True, True,
