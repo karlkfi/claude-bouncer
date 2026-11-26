@@ -133,6 +133,11 @@ Each rule asks one question: *whose exit status does the caller actually see?*
 **Parens are transparent.** Closing a subshell hands its last statement's status outward unchanged, so in `(cd sub && go test ./...) | tail` the operator that consumes `go test`'s status is the `|`, two tokens later.
 Segments therefore carry the whole operator run on each side, and `next_op()` skips `(` and `)` to find the one that decides.
 
+**A shell's `-c` call is a subshell.** It exits with its body's last status, so `splice_shell_bodies()` replaces the call with the body's segments inside a group, and every rule reads `bash -c 'make check'; git push` as it reads `(make check); git push`.
+The one difference is pipefail: a child shell starts from its own options rather than the caller's, so the group opens with the `set` those options amount to.
+The body is also judged as a command of its own, the way a substitution body is, for what only its text shows — a `$PIPESTATUS`, a substitution, a sequence inside it.
+Both recursions stop at `MAX_SUBST_DEPTH`, the bound the shared parser sets.
+
 **A process substitution carries nothing.** `<(…)` and `>(…)` run beside the command that names them, and bash reports their status to no operator at all, so a gate there is lost whatever surrounds it.
 That makes it the one place a gate is denied without reading an operator: `procsub_gate()` only asks whether the body holds one.
 
@@ -163,6 +168,3 @@ The reasoning behind the parts that were hard -- line ranges rather than path in
 
 **Gate-then-gate with `;`.** `make lint; make test` really does lose `make lint`'s status.
 Rule 3 is scoped to state-changing commands because that is where the consequence is a publish rather than a misreported check, and because gate-then-gate is common enough that denying it would train the override reflex — which costs more than the rule is worth.
-
-**`bash -c '…'` bodies.** The quoted string is one word to the tokenizer.
-Adding recursion into it is tractable (workspace-guard does it) but has not been needed; if it is, port that too rather than reimplementing.
