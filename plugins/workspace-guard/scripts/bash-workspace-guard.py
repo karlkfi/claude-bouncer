@@ -1999,6 +1999,8 @@ INTERP_CMDS = frozenset({
 #   query   prints and exits, running nothing
 # A letter or long option the row does not name is unknown. The walk then
 # cannot say which word is the script, so every later word is a checked read.
+# An unknown `--name=value` consumes no word, so the walk reads its value and
+# goes on.
 #
 # Letters Q72 read as code stay code where the man page says otherwise --
 # perl's and ruby's `-c` check syntax, php's `-c` names an ini file and its
@@ -2687,38 +2689,39 @@ def interp_walk(row, args):
     operand (``len(args)`` when there is none), and otherwise the kind that
     ended the walk: 'query', 'code' or 'script'. ``reads`` are option
     arguments naming a file the interpreter loads, the script itself last for
-    'script'. ``unknown`` says an option outside the row came first, and then
-    the walk runs to the end, every later operand going into ``reads`` and
-    ``at`` staying ``len(args)``. ``body`` is set by a shell's `-c`, and
-    ``moved`` by an option that moves where a relative script resolves.
+    'script'. ``unknown`` says the walk stopped at an option outside the row:
+    every later word not starting with `-` is then in ``reads``, since any of
+    them may be the script, and ``at`` is ``len(args)``. ``body`` is set by a
+    shell's `-c`, and ``moved`` by an option that moves where a relative
+    script resolves.
     """
-    reads, unknown, body, moved, i, n = [], False, False, False, 0, len(args)
+    reads, body, moved, i, n = [], False, False, 0, len(args)
     while i < n:
         u = args[i]
         i += 1
         if u in ('--', '-'):
             if (row.dashdash if u == '--' else row.dash) == 'stdin':
-                return InterpWalk('code', i, reads, unknown, body, moved)
-            if not unknown:
-                return InterpWalk(None, i, reads, unknown, body, moved)
-            reads.extend(t for t in args[i:] if not t.startswith('-'))
-            break
+                return InterpWalk('code', i, reads, False, body, moved)
+            return InterpWalk(None, i, reads, False, body, moved)
         if u.startswith('--'):
             name, eq, val = u[2:].partition('=')
             kinds = [row.long.get(name, row.long_default)]
+            if kinds == [None] and eq:
+                # Consumes no word, so the walk stays aligned past it.
+                if val:
+                    reads.append(val)
+                continue
             args_for = [val] if eq else []
         elif u[:1] == '-' or (row.plus and u[:1] == '+'):
             kinds, args_for = _short_cluster(row, u)
-        elif unknown:
-            reads.append(u)
-            continue
         else:
-            return InterpWalk(None, i - 1, reads, unknown, body, moved)
+            return InterpWalk(None, i - 1, reads, False, body, moved)
+        if None in kinds:
+            reads.extend(t for t in args[i:] if not t.startswith('-'))
+            return InterpWalk(None, n, reads, True, body, moved)
         for kind in kinds:
-            if kind is None:
-                unknown = True
-            elif kind in ('query', 'code'):
-                return InterpWalk(kind, i, reads, unknown, body, moved)
+            if kind in ('query', 'code'):
+                return InterpWalk(kind, i, reads, False, body, moved)
             elif kind == 'body':
                 body = True
             elif kind not in ('flag', 'digits', 'tail'):
@@ -2734,11 +2737,8 @@ def interp_walk(row, args):
                     reads.append(arg)
                 moved = moved or kind in ('cd', 'cdtail')
                 if kind == 'script':
-                    if unknown:
-                        reads.extend(t for t in args[i:]
-                                     if not t.startswith('-'))
-                    return InterpWalk('script', i, reads, unknown, body, moved)
-    return InterpWalk(None, n, reads, unknown, body, moved)
+                    return InterpWalk('script', i, reads, False, body, moved)
+    return InterpWalk(None, n, reads, False, body, moved)
 
 
 def interp_code_source(tokens, name=None):

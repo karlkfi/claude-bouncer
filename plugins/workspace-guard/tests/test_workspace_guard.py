@@ -9445,6 +9445,24 @@ class InterpreterSuppressesAllowTests(unittest.TestCase):
                        "/q72-fake-target/t.js", "ask")
         self._decision("cat in.txt; node --zz-unlisted ./in.txt", "defer")
 
+    def test_a_script_argument_past_an_unlisted_option_is_not_an_option(self):
+        # Review of PR 378 at 5afd0bc: the walk read the script's own `-h`
+        # past an unlisted option as a query and dropped every read, so each
+        # of these allowed. The `=` forms consume no word, so the walk stays
+        # aligned past them and reads the value as well. (Q402)
+        t = "/q72-fake-target/t"
+        for cmd in (f"cat in.txt; node --max-old-space-size=4096 {t}.js --help",
+                    f"cat in.txt; node --stack-size=1000 {t}.js -v",
+                    f"cat in.txt; ruby --parser=prism {t}.rb -h",
+                    f"cat in.txt; ruby --jit-wait {t}.rb -h",
+                    f"cat in.txt; Rscript --default-packages=stats {t}.R --help",
+                    f"cat in.txt; node --zz -C {t}.js",
+                    f"cat in.txt; node --zz-loader={t}.js ./in.txt"):
+            self._decision(cmd, "ask")
+        self._decision("cat in.txt; ruby --jit-wait ./in.txt -h", "defer")
+        self._decision("cat in.txt; node --max-old-space-size=4096 ./in.txt",
+                       "allow")
+
     def test_a_c_body_after_an_option_argument_is_read(self):
         # bash takes a `-c` body from the first operand after its options, so
         # an option argument ahead of it or between them is not the body.
