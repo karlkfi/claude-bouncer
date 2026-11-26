@@ -4857,6 +4857,11 @@ class QuotedSubstBodyEndToEndTests(unittest.TestCase):
                 self.assertIsNotNone(out)
                 self.assertIn(out["hookSpecificOutput"]["permissionDecision"],
                               ("ask", "deny"))
+    def test_a_substitution_in_arithmetic_is_judged(self):
+        # bash runs it, and a quote in arithmetic is text (Q362).
+        for shape in ('echo "$(( $(rm %s) ))"', "echo $(( '$(rm %s)' ))"):
+            with self.subTest(shape=shape):
+                self._decision(shape % "/etc/q362-fake-target", "ask")
 
 
 class SubstitutionResumesCommandEndToEndTests(unittest.TestCase):

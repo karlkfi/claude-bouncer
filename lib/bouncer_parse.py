@@ -1196,7 +1196,7 @@ def _brace_end_steps(text, i):
         i = end
     return -1
 
-def _arith_end(text, i, quoted=False):
+def _arith_end(text, i, quoted=False, ends=None):
     """The index just past the ``))`` closing the ``((`` at ``text[i]``, -1
     when bash reads the ``((`` as two parens instead, or ``len(text)`` when
     nothing closes it.
@@ -1219,8 +1219,12 @@ def _arith_end(text, i, quoted=False):
     and so is one in a quote or a ``${…}``. In the comment a backslash takes
     the next character, so ``\\⏎`` continues it. A first scan that never closes is
     a parse error that runs nothing, so it is not scanned again.
+
+    Pass a dict as ``ends`` to collect this close and every nested
+    ``$((`` close found on the way, keyed by the ``((`` index, as
+    ``(quoted, end)``.
     """
-    return _trampoline(_arith_end_steps(text, i, quoted))
+    return _trampoline(_arith_end_steps(text, i, quoted, ends))
 
 def _memo_steps(memo, key, steps):
     """Run ``steps`` once per ``key``, so a second scan of the same span reuses
@@ -1229,15 +1233,17 @@ def _memo_steps(memo, key, steps):
         memo[key] = yield steps
     return memo[key]
 
-def _arith_end_steps(text, i, quoted=False):
+def _arith_end_steps(text, i, quoted=False, ends=None):
     memo = {}
-    end = yield _arith_span_steps(text, i, quoted, memo)
+    end = yield _arith_span_steps(text, i, quoted, memo, ends)
     if quoted and 0 < end < len(text) and text.find('#', i, end) >= 0 and (
-            yield _arith_span_steps(text, i, quoted, memo, True)) != end:
-        return -1
+            yield _arith_span_steps(text, i, quoted, memo, ends, True)) != end:
+        end = -1
+    if ends is not None:
+        ends[i] = (quoted, end)
     return end
 
-def _arith_span_steps(text, i, quoted, memo, comments=False, close=False):
+def _arith_span_steps(text, i, quoted, memo, ends, comments=False, close=False):
     i, n = i + 2, len(text)
     depth, in_double = 0, False
     blank = False         # the last character was a blank, so `#` comments
@@ -1266,7 +1272,7 @@ def _arith_span_steps(text, i, quoted, memo, comments=False, close=False):
             if text.startswith('$((', i):
                 q = quoted or in_double
                 end = yield _memo_steps(memo, ('a', i, q),
-                                        _arith_end_steps(text, i + 1, q))
+                                        _arith_end_steps(text, i + 1, q, ends))
             if end < 0:
                 end = (yield _memo_steps(memo, ('p', i),
                                          _scan_dollar_paren_steps(text, i + 2)))[1]
@@ -1311,7 +1317,7 @@ def _comment_comsub(text, i, braced=False):
     The ``\⏎`` goes in single quotes too, unless the ``$((`` is ``braced``:
     written in a ``${…}`` word rather than in double quotes inside one.
     """
-    end = _trampoline(_arith_span_steps(text, i, True, {}, True, True))
+    end = _trampoline(_arith_span_steps(text, i, True, {}, None, True, True))
     if end < 0:
         return (None, i)
     out, j, quote = [], i + 2, ''
@@ -1368,8 +1374,12 @@ def command_substitutions(text, quotes=True, spans=None, funsubs=None):
     Returns the inner command string of each ``$(…)`` and backtick ``` `…` ```
     substitution appearing in an UNQUOTED or DOUBLE-QUOTED context — the two
     contexts where bash performs command substitution. A substitution inside
-    single quotes is a literal and is skipped, matching bash; ``$((…))``
-    arithmetic (no command inside) is skipped too.
+    single quotes is a literal and is skipped, matching bash.
+
+    A ``$((…))`` body expands the way an unquoted heredoc body does (Q362):
+    driven on bash 5.3.15, ``echo $(( '$(cmd)' ))`` and
+    ``echo "$(( 1 # $(cmd)⏎ ))"`` both run ``cmd``, and ``\\$(cmd)`` does not.
+    So its substitutions are returned, with quotes and comments read as text.
 
     Scans the RAW command string, never the post-shlex tokens: shlex strips the
     quotes, losing the single-vs-double distinction that decides whether a
@@ -1421,7 +1431,17 @@ def command_substitutions(text, quotes=True, spans=None, funsubs=None):
     closes = set()        # indices of the `)` that end a word
     braced = 0            # inside a `${…}` before this index
     words = []            # a `${…}` opened in "…": [its `}`, a "…" open in it]
+    arith = []            # per open `$((`: where its `))` is, quoted, outer aq
+    aq = ''               # a quote opened in arithmetic, where it is text
+    arith_ends = {}       # `_arith_end`'s closes, so nesting is scanned once
     while i < n:
+        if arith and i >= arith[-1][0]:
+            i, _, aq = arith.pop()
+            i += 2
+            brk = False                            # `$((1))#x` is one word
+            continue
+        q = quotes and not arith
+        close = arith[-1][0] if arith else n + 1
         c = text[i]
         if words and i >= words[-1][0]:
             i = max(i, words.pop()[0] + 1)
@@ -1431,23 +1451,27 @@ def command_substitutions(text, quotes=True, spans=None, funsubs=None):
                 in_single = False
             i += 1
             continue
-        if regex is not None and quotes and not in_double and i >= quiet:
+        if regex is not None and q and not in_double and i >= quiet:
             regex = _regex_step(regex, text, i)
         if c == '\\':                              # escapes next char (not in '')
             brk = brk and text[i+1:i+2] == '\n'    # a continuation joins words
             i += 2
             continue
-        end = _ansi_c_end(text, i) if quotes and not in_double else -1
+        end = _ansi_c_end(text, i) if q and not in_double else -1
         if end > 0:
             brk = False
             i = end
             continue
-        if quotes and c == "'" and not in_double:
+        if arith and c in '"\'':
+            aq = '' if aq == c else aq or c
+            i += 1
+            continue
+        if q and c == "'" and not in_double:
             in_single = True
             brk = False
             i += 1
             continue
-        if quotes and c == '"':
+        if q and c == '"':
             if words:
                 words[-1][1] = not words[-1][1]
             else:
@@ -1457,7 +1481,10 @@ def command_substitutions(text, quotes=True, spans=None, funsubs=None):
             continue
         if c == '$' and _funsub_at(text, i):
             end = _brace_end(text, i)
-            if end < 0:
+            if end < 0 or end > close:
+                if arith:                          # bash finds it unclosed too
+                    i = close
+                    continue
                 break                              # unterminated -> stop
             bodies.append(text[_funsub_body_start(text, i):end - 1])
             if spans is not None:
@@ -1467,7 +1494,7 @@ def command_substitutions(text, quotes=True, spans=None, funsubs=None):
             brk = False
             i = end
             continue
-        if in_double and text.startswith('${', i):
+        if q and in_double and text.startswith('${', i):
             end = _brace_end(text, i)
             if end > 0:
                 words.append([end - 1, False])
@@ -1475,20 +1502,32 @@ def command_substitutions(text, quotes=True, spans=None, funsubs=None):
                 continue
         if c == '$' and i + 1 < n and text[i + 1] == '(':
             brk = False                            # `$(a)#b` is one word
-            quoted = in_double or not quotes or i < braced
-            end = _arith_end(text, i + 1, quoted) \
-                if text[i+2:i+3] == '(' else -1
+            quoted = arith[-1][1] or bool(aq) if arith else (
+                in_double or not quotes or i < braced)
+            end = -1
+            if text[i+2:i+3] == '(':
+                if arith_ends.get(i + 1, (None,))[0] != quoted:
+                    _arith_end(text, i + 1, quoted, arith_ends)
+                end = arith_ends[i + 1][1]
+            if end > close:
+                i = close
+                continue
             if end > 0:
                 closes.add(end - 1)
-                i = end                            # $((…)) arithmetic
+                arith.append((end - 2, quoted, aq))
+                aq = ''
+                i += 3                             # its body expands (Q362)
                 continue
             body = None
             if quoted and text[i+2:i+3] == '(' and _arith_end(text, i + 1) > 0:
-                body, end = _comment_comsub(text, i, quotes and (
+                body, end = _comment_comsub(text, i, q and (
                     words and not words[-1][1] if in_double else i < braced))
             if body is None:
                 body, end = _scan_dollar_paren(text, i + 2)
-            if body is None:
+            if body is None or end > close:
+                if arith:
+                    i = close
+                    continue
                 break                              # unterminated -> stop
             closes.add(end - 1)
             bodies.append(body)
@@ -1500,7 +1539,10 @@ def command_substitutions(text, quotes=True, spans=None, funsubs=None):
             continue
         if c == '`':
             body, end = _scan_backticks(text, i + 1)
-            if body is None:
+            if body is None or end > close:
+                if arith:
+                    i = close
+                    continue
                 break                              # unterminated -> stop
             bodies.append(_unescape_backticks(body, in_double))
             if spans is not None:
@@ -1510,7 +1552,7 @@ def command_substitutions(text, quotes=True, spans=None, funsubs=None):
             brk = False
             i = end
             continue
-        if quotes and not in_double:
+        if q and not in_double:
             if i >= quiet:                         # strip_comments' `[[` rule
                 if brk and text[i+2:i+3] in ('', ' ', '\t', '\n'):
                     if text.startswith('[[', i):

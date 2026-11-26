@@ -434,8 +434,9 @@ class ArithmeticCloseTests(unittest.TestCase):
             body = 'echo %s ; cat /etc/passwd' % arith
             wrapped = '${x:-%s}' % arith
             with self.subTest(arith=arith):
-                self.assertEqual(['echo ID'], bp.command_substitutions(
-                    'echo %s ; echo $(echo ID)' % arith))
+                self.assertEqual(bp.command_substitutions(arith) + ['echo ID'],
+                                 bp.command_substitutions(
+                                     'echo %s ; echo $(echo ID)' % arith))
                 self.assertEqual([body], bp.command_substitutions('x=$(%s)' % body))
                 self.assertEqual([body], bp.command_substitutions(
                     'echo "$(%s)"' % body))
@@ -557,6 +558,31 @@ class ArithmeticCloseTests(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertEqual([body], bp.command_substitutions(
                     cmd, quotes=quotes))
+    def test_a_substitution_in_arithmetic_is_returned(self):
+        # bash expands a `$((` body like an unquoted heredoc body (Q362).
+        for cmd, bodies in (
+                ('echo $(( $(make check | tail -1 | wc -c) ))',   # 2
+                 ['make check | tail -1 | wc -c']),
+                ('echo "$(( $(echo RAN) ))"', ['echo RAN']),
+                ("echo $(( '$(echo RAN)' ))", ['echo RAN']),      # RAN, error
+                ('echo $(( "$(echo RAN)" ))', ['echo RAN']),
+                ('echo $(( `echo RAN` ))', ['echo RAN']),
+                ('echo "$(( 1 # $(echo RAN)\n ))"', ['echo RAN']),  # RAN, error
+                ('echo $(( ${x:-$(echo RAN)} ))', ['echo RAN']),
+                ('echo $(( ${ echo RAN; } ))', [' echo RAN; ']),
+                ('echo $(( a[$(echo RAN)] ))', ['echo RAN']),
+                ('echo $(( $(( $(echo RAN) )) + 1 ))', ['echo RAN']),
+                ('x=$(( $(echo A) + $(echo B) )); $(echo C)',
+                 ['echo A', 'echo B', 'echo C']),
+                ("echo $(( '$(( 1 # ))\n) ; echo RAN)' ))",       # 1: not found
+                 ['( 1 # ))\n) ; echo RAN']),
+                ('echo $(( 1 ))#x $(echo ID)', ['echo ID']),
+                ('echo $(( \\$(echo RAN) ))', [])):                # error only
+            with self.subTest(cmd=cmd):
+                self.assertEqual(bodies, bp.command_substitutions(cmd))
+        spans = []
+        bp.command_substitutions('echo $(( $(a) + 1 ))', spans=spans)
+        self.assertEqual([(9, 13)], spans)
 
 
 class ProcessSubstitutionTests(unittest.TestCase):
