@@ -502,7 +502,13 @@ class ArithmeticCloseTests(unittest.TestCase):
                 ('echo ${x:-$(( 1 # ))\n) ; echo RAN)}',      # 1: not found, RAN
                  ['( 1 # ))\n) ; echo RAN']),
                 ('echo "$(echo "$(( 1 # ))\n) ; echo RAN)")"',
-                 ['echo "$(( 1 # ))\n) ; echo RAN)"'])):
+                 ['echo "$(( 1 # ))\n) ; echo RAN)"']),
+                # In the comment `\⏎` continues it, and bash drops it from
+                # the body it runs.
+                ('echo "$(( 1 # \\\n))\n) ; echo RAN)"',        # 1: not found, RAN
+                 ['( 1 # ))\n) ; echo RAN']),
+                ('echo "$(( 1 # \\\n echo A ))\n) ; echo RAN)"',  # 1, RAN; no A
+                 ['( 1 #  echo A ))\n) ; echo RAN'])):
             with self.subTest(cmd=cmd):
                 self.assertEqual(bodies, bp.command_substitutions(cmd))
         self.assertEqual(['( 1 # ))\n) ; echo RAN'], bp.command_substitutions(
@@ -516,6 +522,7 @@ class ArithmeticCloseTests(unittest.TestCase):
                     'echo "$(( 1 # c\n ))"',              # invalid operator
                     'echo "$(( "a # b" ))"',
                     'echo "$(( ${x:- # } ))"',            # syntax error, nothing
+                    'echo "$(( 1 # \\\\\n))\n) ; echo RAN)"',  # error on `# \⏎`
                     'echo $(( 1 # ))\n) ; echo RAN)'):    # syntax error, nothing
             with self.subTest(cmd=cmd):
                 self.assertEqual([], bp.command_substitutions(cmd))

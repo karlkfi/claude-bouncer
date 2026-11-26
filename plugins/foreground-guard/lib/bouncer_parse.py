@@ -1220,7 +1220,8 @@ def _arith_end(text, i, quoted=False):
     arithmetic only when both scans close on the same ``))``. Driven on bash
     5.3.15, ``"$(( 1 # ))⏎) ; cmd)"`` and ``"$(( 1 # (⏎) ; cmd ))"`` both run
     ``cmd`` as ``$( (``. A ``#`` glued to a word, a ``(`` or a ``;`` is text,
-    and so is one in a quote or a ``${…}``. A first scan that never closes is
+    and so is one in a quote or a ``${…}``. In the comment a backslash takes
+    the next character, so ``\\⏎`` continues it. A first scan that never closes is
     a parse error that runs nothing, so it is not scanned again.
     """
     return _trampoline(_arith_end_steps(text, i, quoted))
@@ -1240,7 +1241,7 @@ def _arith_end_steps(text, i, quoted=False):
         return -1
     return end
 
-def _arith_span_steps(text, i, quoted, memo, comments=False):
+def _arith_span_steps(text, i, quoted, memo, comments=False, close=False):
     i, n = i + 2, len(text)
     depth, in_double = 0, False
     blank = False         # the last character was a blank, so `#` comments
@@ -1248,8 +1249,8 @@ def _arith_span_steps(text, i, quoted, memo, comments=False):
     while i < n:
         c = text[i]
         if comments and c == '#' and blank and i >= quiet:
-            end = text.find('\n', i)
-            i = n if end < 0 else end
+            while i < n and text[i] != '\n':      # `\` takes the next one,
+                i += 2 if text[i] == '\\' else 1  # a newline too
             continue
         blank = c in ' \t\n' and not in_double
         if c == '\\':
@@ -1295,10 +1296,39 @@ def _arith_span_steps(text, i, quoted, memo, comments=False):
             depth -= 1
             i += 1
             continue
+        elif close:
+            return i + 1
         else:
             return i + 2 if text.startswith('))', i) else -1
         i = end
-    return n
+    return -1 if close else n
+
+def _comment_comsub(text, i):
+    r"""The body bash runs, and the index past it, for a quoted ``$((`` at
+    ``text[i]`` that a comment made a ``$( (``, or ``(None, i)``.
+
+    bash reads that body with the comment rule of the scan that decided it,
+    where a ``\`` takes the next character and a ``\⏎`` is dropped before
+    the body is parsed. Driven on bash 5.3.15,
+    ``"$(( 1 # \⏎ echo A ))⏎) ; echo RAN)"`` runs ``RAN`` and not ``echo A``,
+    where ``"$( ( 1 # \⏎ echo A ))⏎) ; echo RAN)"`` runs ``echo A``.
+    """
+    end = _trampoline(_arith_span_steps(text, i, True, {}, True, True))
+    if end < 0:
+        return (None, i)
+    out, j, quote = [], i + 2, ''
+    while j < end - 1:
+        c = text[j]
+        if c == '\\' and quote != "'":
+            if text[j+1:j+2] != '\n':
+                out.append(text[j:j+2])
+            j += 2
+            continue
+        if c in '"\'' and quote in ('', c):
+            quote = '' if quote else c
+        out.append(c)
+        j += 1
+    return (''.join(out), end)
 
 def _dq_expansion_end(text, i):
     """The index just past the ``$(…)``, backtick span or ``${…}`` opening at
@@ -1434,13 +1464,18 @@ def command_substitutions(text, quotes=True, spans=None, funsubs=None):
             continue
         if c == '$' and i + 1 < n and text[i + 1] == '(':
             brk = False                            # `$(a)#b` is one word
-            end = _arith_end(text, i + 1, in_double or not quotes
-                             or i < braced) if text[i+2:i+3] == '(' else -1
+            quoted = in_double or not quotes or i < braced
+            end = _arith_end(text, i + 1, quoted) \
+                if text[i+2:i+3] == '(' else -1
             if end > 0:
                 closes.add(end - 1)
                 i = end                            # $((…)) arithmetic
                 continue
-            body, end = _scan_dollar_paren(text, i + 2)
+            body = None
+            if quoted and text[i+2:i+3] == '(' and _arith_end(text, i + 1) > 0:
+                body, end = _comment_comsub(text, i)
+            if body is None:
+                body, end = _scan_dollar_paren(text, i + 2)
             if body is None:
                 break                              # unterminated -> stop
             closes.add(end - 1)

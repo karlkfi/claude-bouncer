@@ -4838,7 +4838,8 @@ class QuotedSubstBodyEndToEndTests(unittest.TestCase):
         # not close there and runs as `$( (` (Q375). The heredoc was `allow`.
         for shape in ('echo "$(( 1 # ))\n) ; rm %s)"',
                       'echo "$(( 1 # (\n) ; rm %s ))"',
-                      'cat <<EOF\n$(( 1 # ))\n) ; rm %s)\nEOF'):
+                      'cat <<EOF\n$(( 1 # ))\n) ; rm %s)\nEOF',
+                      'echo "$(( 1 # \\\n))\n) ; rm %s)"'):
             with self.subTest(shape=shape):
                 self._decision(shape % "/etc/q375-fake-target", "ask")
 

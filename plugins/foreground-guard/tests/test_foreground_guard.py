@@ -445,6 +445,7 @@ class SubstitutionTests(unittest.TestCase):
         'echo "$(( 1 # ))\n) ; tail -f log.txt)"',
         'echo "$(( 1 # (\n) ; tail -f log.txt ))"',
         'cat <<EOF\n$(( 1 # ))\n) ; tail -f log.txt)\nEOF',
+        'echo "$(( 1 # \\\n))\n) ; tail -f log.txt)"',
         # bash 5.3's funsub substitutes a list too (Q357), and a heredoc in a
         # body ends before the commands after it.
         'echo ${ sleep 600; }',
