@@ -1862,6 +1862,45 @@ class ShellBodyAndFindExecTests(unittest.TestCase):
         self.assertIsNone(run_hook(r"find . -name x -print")[0])
 
 
+class VariableHeldCommandTests(unittest.TestCase):
+    """A command held in a variable and run through `eval` or a bare `$X`
+    (Q382). Each deferred before the fix; bash 5.3.15, with `/bin/echo` in
+    place of kubectl, ran every one."""
+
+    D = "kubectl --context gke_acme_prod-us delete ns x"
+
+    def test_eval_and_bare_expansion_are_judged(self):
+        for shape in ('X="%s"; eval "$X"', 'X="%s"; eval $X',
+                      'export X="%s"; eval "$X"', 'X="%s"; $X',
+                      'X="sudo %s"; $X', 'X="echo hi; %s"; eval "$X"',
+                      'A="%s"; $A'):
+            with self.subTest(shape=shape):
+                self.assertEqual(run_hook(shape % self.D)[0], "deny")
+
+    def test_unquoted_expansion_splits_in_argument_position(self):
+        for cmd in ('A="--context gke_acme_prod-us delete ns x"; kubectl $A',
+                    'X="kubectl --context gke_acme_prod-us"; $X delete ns x'):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(run_hook(cmd)[0], "deny")
+
+    def test_eval_rereads_a_name_the_value_holds(self):
+        self.assertEqual(run_hook(
+            "X='kubectl --context $C delete ns x'; C=gke_acme_prod-us; "
+            'eval "$X"')[0], "deny")
+
+    def test_what_bash_does_not_split_or_reparse_stays_one_word(self):
+        # `"$X"` is one command name, and a bare `$X` runs no `;` it holds.
+        self.assertIsNone(run_hook('X="%s"; "$X"' % self.D)[0])
+        self.assertIsNone(run_hook('X="echo hi; %s"; $X' % self.D)[0])
+        self.assertIsNone(run_hook(
+            'X="kubectl --context gke_acme_prod-us get pods"; $X')[0])
+
+    def test_eval_body_assignment_still_reaches_its_command(self):
+        self.assertEqual(run_hook(
+            "C=kind-ci; eval 'C=gke_acme_prod-us; kubectl --context $C "
+            "delete ns x'")[0], "deny")
+
+
 class OverrideTests(unittest.TestCase):
     def test_override_downgrades_deny_to_ask(self):
         decision, reason = run_hook(

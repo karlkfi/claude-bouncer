@@ -1193,6 +1193,7 @@ class MayVanish(str):
 
 
 _VAR_REFS_RE = re.compile('(?:%s)*' % VAR_REF_RE.pattern)
+_IFS_RE = re.compile('[ \t\n]+')
 # What `env -S` expands in its string: the braced form only. Both env
 # implementations refuse a bare `$NAME` there and run nothing.
 _BRACED_REFS_RE = re.compile(r'(?:\$\{[A-Za-z_][A-Za-z0-9_]*\})+')
@@ -1200,13 +1201,22 @@ _BRACED_REFS_RE = re.compile(r'(?:\$\{[A-Za-z_][A-Za-z0-9_]*\})+')
 
 def expand_argv(argv, env):
     """Expand simple variable references in every token of `argv`, marking
-    each word that may expand to nothing as a `MayVanish`."""
+    each word that may expand to nothing as a `MayVanish`. A word written with
+    no quoting splits on whitespace where its expansion holds some, as bash
+    splits an unquoted expansion (Q382); an assignment-shaped word does not."""
     out = []
     for tok in argv:
         # Only an assignment's value persists for a later word to re-expand;
         # an `env -S` string relies on the parent having expanded it.
-        word = expand_word(tok, env) if ASSIGNMENT_RE.match(tok) \
-            else expand_vars(tok, env)
+        if ASSIGNMENT_RE.match(tok):
+            word = expand_word(tok, env)
+        else:
+            word = expand_vars(tok, env)
+            if getattr(tok, 'quoted_from', None) is None and word != tok:
+                fields = _IFS_RE.split(word.strip(' \t\n'))
+                if len(fields) > 1:
+                    out += fields
+                    continue
         if (tok and getattr(tok, 'quoted_from', None) is None
                 and _VAR_REFS_RE.fullmatch(tok)
                 and _VAR_REFS_RE.fullmatch(word)):
@@ -3756,10 +3766,21 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
             # single quotes stop only the PARENT, and `eval` expands the same
             # text itself. `child_env` rides on for a real child inside (Q151).
             left = {}
+            text = ' '.join(argv_raw[1:])
             sub_f, sub_o, sub_s = evaluate_command_string(
-                ' '.join(argv_raw[1:]), ctx, depth + 1, child_env, words_env,
+                text, ctx, depth + 1, child_env, words_env,
                 left, known=(functions, bodies))
             findings += sub_f
+            # The parent expands a word outside single quotes before `eval`
+            # re-reads it, so a `$X` holding `a; b` runs two commands (Q382).
+            # That reading is judged too.
+            parent = ' '.join(t if "'" in getattr(t, 'quotes', ())
+                              else expand_vars(t, words_env)
+                              for t in argv_raw[1:])
+            if parent != text:
+                findings += evaluate_command_string(
+                    parent, ctx, depth + 1, child_env, words_env,
+                    known=(functions, bodies))[0]
             override = override or sub_o
             session_reason = session_reason if session_reason is not None else sub_s
             # And what the body assigns stays assigned (Q165), where it
