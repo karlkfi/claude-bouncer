@@ -9452,6 +9452,8 @@ class InterpreterSuppressesAllowTests(unittest.TestCase):
         # aligned past them and reads the value as well. (Q402)
         t = "/q72-fake-target/t"
         for cmd in (f"cat in.txt; node --max-old-space-size=4096 {t}.js --help",
+                    f"cat in.txt; node --max-old-space-size=4096 {t}.js -v",
+                    f"cat in.txt; node --stack-size=1000 {t}.js -h",
                     f"cat in.txt; node --stack-size=1000 {t}.js -v",
                     f"cat in.txt; ruby --parser=prism {t}.rb -h",
                     f"cat in.txt; ruby --jit-wait {t}.rb -h",
