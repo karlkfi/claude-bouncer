@@ -900,6 +900,11 @@ CASES = [
      False, True, ''),
     ('git --git-dir and --work-tree as separate words',
      'git --git-dir .git --work-tree . commit -m x | tail', False, True, ''),
+    # In git(1) since 2.42 and missing from the usage line.
+    ('git --attr-source= before a commit',
+     'git --attr-source=HEAD commit -m x | tail', False, True, ''),
+    ('git --attr-source as a separate word',
+     'git --attr-source HEAD commit -m x | tail', False, True, ''),
     ('git -C before a sequenced push', 'make check; git -C . push',
      False, True, 'is sequenced before'),
     ('git -C before a read', 'git -C . log | tail', False, False, ''),

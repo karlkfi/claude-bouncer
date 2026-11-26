@@ -397,7 +397,7 @@ def head_words(seg):
 # set takes the next word; the long ones also take `=value`. Anything else
 # there -- `--version`, `--html-path`, `--list-cmds=` -- runs no subcommand.
 GIT_VALUE_OPTS = frozenset({'-C', '-c', '--git-dir', '--work-tree',
-                            '--namespace', '--config-env'})
+                            '--namespace', '--config-env', '--attr-source'})
 GIT_FLAG_OPTS = frozenset({
     '-p', '--paginate', '-P', '--no-pager', '--bare', '--no-replace-objects',
     '--no-lazy-fetch', '--no-optional-locks', '--no-advice',
