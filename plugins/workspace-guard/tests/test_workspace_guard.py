@@ -4833,6 +4833,31 @@ class QuotedSubstBodyEndToEndTests(unittest.TestCase):
             with self.subTest(shape=shape):
                 self._decision(shape % "/etc/q338-fake-target", "ask")
 
+    def test_a_comment_in_quoted_arithmetic_is_judged(self):
+        # In double quotes bash reads ` # ))` as a comment, so the `$((` does
+        # not close there and runs as `$( (` (Q375). The heredoc was `allow`.
+        for shape in ('echo "$(( 1 # ))\n) ; rm %s)"',
+                      'echo "$(( 1 # (\n) ; rm %s ))"',
+                      'cat <<EOF\n$(( 1 # ))\n) ; rm %s)\nEOF',
+                      'echo "$(( 1 # \\\n))\n) ; rm %s)"'):
+            with self.subTest(shape=shape):
+                self._decision(shape % "/etc/q375-fake-target", "ask")
+
+    def test_a_quoted_backslash_newline_in_the_comment_body_is_judged(self):
+        # In double quotes bash drops it, so rm leaves the root; in a `${…}`
+        # word it keeps it, so `<root>\⏎/x` is a sibling and not `<root>/x`.
+        # Where `\` separates paths that one is inside the root.
+        root = self.workspace
+        cmds = ["echo \"$(( 1 # ))\n) ; rm '%s/.\\\n./../q375-x')\"" % root]
+        if os.sep == "/":
+            cmds.append("echo ${x:-$(( 1 # ))\n) ; rm '%s\\\n/q375-x')}" % root)
+        for cmd in cmds:
+            with self.subTest(cmd=cmd):
+                out = run_hook(cmd, root, project_dir=root)
+                self.assertIsNotNone(out)
+                self.assertIn(out["hookSpecificOutput"]["permissionDecision"],
+                              ("ask", "deny"))
+
 
 class SubstitutionResumesCommandEndToEndTests(unittest.TestCase):
     """The words after a substitution's close belong to the command it sits in

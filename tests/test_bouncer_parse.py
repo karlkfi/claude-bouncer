@@ -488,6 +488,76 @@ class ArithmeticCloseTests(unittest.TestCase):
         cmd = 'echo $((cat <<EOF) ; echo ID)\nhi\nEOF\n'
         self.assertEqual(cmd, bp.strip_heredoc_bodies(cmd))
 
+    def test_a_comment_in_quoted_arithmetic_can_make_it_a_substitution(self):
+        # Quoted, bash reads the span with and without comments, and it is
+        # arithmetic only when both close on the same `))` (Q375).
+        for cmd, bodies in (
+                ('echo "$(( 1 # ))\n) ; echo RAN)"',          # 1: not found, RAN
+                 ['( 1 # ))\n) ; echo RAN']),
+                ('echo "$(( 1 # (\n) ; echo RAN ))"',         # 1: not found, RAN)
+                 ['( 1 # (\n) ; echo RAN ']),
+                ('echo "$(( 1 # ))\n))"', ['( 1 # ))\n)']),   # 1: not found
+                ('echo "$(( 1 # )\n echo RAN ))"',            # 1: not found, RAN
+                 ['( 1 # )\n echo RAN )']),
+                ('echo ${x:-$(( 1 # ))\n) ; echo RAN)}',      # 1: not found, RAN
+                 ['( 1 # ))\n) ; echo RAN']),
+                ('echo "$(echo "$(( 1 # ))\n) ; echo RAN)")"',
+                 ['echo "$(( 1 # ))\n) ; echo RAN)"']),
+                # In the comment `\⏎` continues it, and bash drops it from
+                # the body it runs.
+                ('echo "$(( 1 # \\\n))\n) ; echo RAN)"',        # 1: not found, RAN
+                 ['( 1 # ))\n) ; echo RAN']),
+                ('echo "$(( 1 # \\\n echo A ))\n) ; echo RAN)"',  # 1, RAN; no A
+                 ['( 1 #  echo A ))\n) ; echo RAN'])):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(bodies, bp.command_substitutions(cmd))
+        self.assertEqual(['( 1 # ))\n) ; echo RAN'], bp.command_substitutions(
+            '$(( 1 # ))\n) ; echo RAN)\n', quotes=False))   # an unquoted heredoc
+
+    def test_a_hash_that_starts_no_comment_keeps_arithmetic(self):
+        for cmd in ('echo "$(( 1# ))\n) ; echo RAN)"',    # invalid arithmetic base
+                    'echo "$(( x# ))\n) ; echo RAN)"',    # invalid operator
+                    'echo "$(( 1;# ))\n) ; echo RAN)"',   # invalid operator
+                    'echo "$(( 2#11 ))"',                 # 3
+                    'echo "$(( 1 # c\n ))"',              # invalid operator
+                    'echo "$(( "a # b" ))"',
+                    'echo "$(( ${x:- # } ))"',            # syntax error, nothing
+                    'echo "$(( 1 # \\\\\n))\n) ; echo RAN)"',  # error on `# \⏎`
+                    'echo $(( 1 # ))\n) ; echo RAN)'):    # syntax error, nothing
+            with self.subTest(cmd=cmd):
+                self.assertEqual([], bp.command_substitutions(cmd))
+        # A bare `((` in a quoted body keeps the unquoted rule: ` ; echo RAN)`
+        # is printed, not run.
+        self.assertEqual([' (( 1 # ))\n'], bp.command_substitutions(
+            'echo "$( (( 1 # ))\n) ; echo RAN)"'))
+
+    def test_the_comment_body_drops_a_quoted_backslash_newline(self):
+        # bash drops `\⏎` in single quotes too, a pair at a time, unless the
+        # `$((` is written in a `${…}` word. The comments are what printf printed.
+        keep = "( 1 # ))\n) ; printf %s 'a\\\nb'"
+        for cmd, quotes, body in (
+                ('echo "$(( 1 # ))\n) ; printf %s \'a\\\nb\')"', True,   # ab
+                 "( 1 # ))\n) ; printf %s 'ab'"),
+                ('echo "$(( 1 # ))\n) ; printf %s \'a\\\\\nb\')"', True,  # a\\⏎b
+                 "( 1 # ))\n) ; printf %s 'a\\\\\nb'"),
+                ('echo "$(( 1 # ))\n) ; printf %s \'a\\\\\\\nb\')"', True,  # a\\b
+                 "( 1 # ))\n) ; printf %s 'a\\\\b'"),
+                ('$(( 1 # ))\n) ; printf %s \'a\\\nb\')\n', False,       # ab
+                 "( 1 # ))\n) ; printf %s 'ab'"),
+                ('${x:-$(( 1 # ))\n) ; printf %s \'a\\\nb\')}\n', False,  # ab
+                 "( 1 # ))\n) ; printf %s 'ab'"),
+                ('echo "${x:-y}$(( 1 # ))\n) ; printf %s \'a\\\nb\')"', True,
+                 "( 1 # ))\n) ; printf %s 'ab'"),                         # yab
+                ('echo "${x:-"$(( 1 # ))\n) ; printf %s \'a\\\nb\')"}"', True,
+                 "( 1 # ))\n) ; printf %s 'ab'"),                         # ab
+                ('echo ${x:-$(( 1 # ))\n) ; printf %s \'a\\\nb\')}', True,
+                 keep),                                                    # a\⏎b
+                ('echo "${x:-$(( 1 # ))\n) ; printf %s \'a\\\nb\')}"', True,
+                 keep)):                                                   # a\⏎b
+            with self.subTest(cmd=cmd):
+                self.assertEqual([body], bp.command_substitutions(
+                    cmd, quotes=quotes))
+
 
 class ProcessSubstitutionTests(unittest.TestCase):
     """`<(…)` and `>(…)` bodies, which command_substitutions never returns (Q277).

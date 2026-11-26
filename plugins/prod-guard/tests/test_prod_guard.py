@@ -818,6 +818,14 @@ class CommandSubstitutionDecisionTests(unittest.TestCase):
             with self.subTest(shape=shape):
                 self.assertEqual(self.decide(shape % self.K), "deny")
 
+    def test_a_comment_in_quoted_arithmetic_is_judged(self):
+        # In double quotes bash reads ` # ))` as a comment, so the `$((` does
+        # not close there and runs as `$( (` (Q375).
+        for shape in ('echo "$(( 1 # ))\n) ; %s)"',
+                      'echo "$(( 1 # (\n) ; %s ))"'):
+            with self.subTest(shape=shape):
+                self.assertEqual(self.decide(shape % self.K), "deny")
+
     def test_single_quoted_substitution_stays_literal(self):
         for shape in ("echo '`%s`'", "echo '$(%s)'", "echo '\"$(%s)\"'",
                       'echo "\\$(%s)"', 'echo hi # "$(%s)"'):

@@ -1025,6 +1025,25 @@ CASES = [
     ('the same, in nested double quotes',
      'echo "$(echo "$((echo x) ; make check | tail)")"', False, True,
      "exit status is the filter's"),
+    # Q375: in double quotes bash reads ` # ))` as a comment, so the `$((` does
+    # not close there and runs as `$( (`. A `#` glued to a word is text.
+    ('a comment in quoted arithmetic makes it a substitution',
+     'echo "$(( 1 # ))\n) ; make check | tail)"', False, True,
+     "exit status is the filter's"),
+    ('the same, with the paren the comment hides',
+     'echo "$(( 1 # (\n) ; make check | tail ))"', False, True,
+     "exit status is the filter's"),
+    ('the same, in a ${…}',
+     'echo ${x:-$(( 1 # ))\n) ; make check | tail)}', False, True,
+     "exit status is the filter's"),
+    ('the same, in a heredoc body',
+     'cat <<EOF\n$(( 1 # ))\n) ; make check | tail)\nEOF', False, True,
+     "exit status is the filter's"),
+    ('the same, in double quotes inside a "${…}"',
+     'echo "${x:-"$(( 1 # ))\n) ; make check | tail)"}"', False, True,
+     "exit status is the filter's"),
+    ('a hash glued to a word keeps it arithmetic',
+     'echo "$(( 1# ))\n) ; make check | tail)"', False, False, ''),
 
     # --- A gate sequenced before a state change with `;` ---------------------
     ('check then push', 'make check; git push', False, True,
