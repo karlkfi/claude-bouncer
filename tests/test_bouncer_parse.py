@@ -586,6 +586,25 @@ class ArithmeticCloseTests(unittest.TestCase):
         bp.command_substitutions('echo $(( $(a) + 1 ))', spans=spans)
         self.assertEqual([(9, 13)], spans)
 
+    def test_a_brace_word_in_arithmetic_keeps_a_quoted_backslash_newline(self):
+        # As outside arithmetic, a comment-made `$( (` written in a `${…}` word
+        # keeps `\⏎` in single quotes; printf printed the comment's column.
+        keep = "( 1 # ))\n) ; printf %s 'a\\\nb'"
+        drop = "( 1 # ))\n) ; printf %s 'ab'"
+        for cmd, body in (
+                ('echo "$(( ${x:-$(( 1 # ))\n) ; printf %s \'a\\\nb\')} ))"',
+                 keep),                                                    # a\⏎b
+                ('echo "$(( ${x:-"y"$(( 1 # ))\n) ; printf %s \'a\\\nb\')} ))"',
+                 keep),                                                    # a\⏎b
+                ('echo "$(( ${x:-"$(( 1 # ))\n) ; printf %s \'a\\\nb\')"} ))"',
+                 drop),                                                    # ab
+                ('echo $(( "$(( 1 # ))\n) ; printf %s \'a\\\nb\')" ))',
+                 drop),                                                    # ab
+                ('echo $(( ${x:-"$(( 1 # ))\n) ; printf %s \'a\\\nb\')"} ))',
+                 drop)):                                                   # ab
+            with self.subTest(cmd=cmd):
+                self.assertEqual([body], bp.command_substitutions(cmd))
+
 
 class ProcessSubstitutionTests(unittest.TestCase):
     """`<(…)` and `>(…)` bodies, which command_substitutions never returns (Q277).
