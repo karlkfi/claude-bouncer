@@ -2632,6 +2632,22 @@ def shell_c_group(tokens):
     return False
 
 
+def eval_body(tokens):
+    """The command string an `eval` runs, or None when ``tokens`` is no
+    `eval` or an operand is rewritten before `eval` sees it.
+
+    `eval` joins its operands with spaces and runs the result in this shell,
+    so a literal body is read the way a `-c` body is (Q399). `eval "$X"` and
+    `eval "$(…)"` run text the hook cannot read, and are left alone.
+    """
+    if not tokens or tokens[0] != 'eval':
+        return None
+    args = tokens[2:] if tokens[1:2] == ['--'] else tokens[1:]
+    if not args or any(_unreadable_word(t) for t in args):
+        return None
+    return ' '.join(args)
+
+
 def shell_c_bodies(tokens):
     """Bodies of the shell `-c` commands this group runs on this host.
 
@@ -4614,11 +4630,11 @@ def escalate_suppression(signal, mode, override=None, prefixable=True):
     if signal == INTERPRETER_SIGNAL and scope != 'all':
         return None
     if signal == 'sh -c':
-        what = ("a shell `-c` body it could not reach (a container or remote "
-                "wrapper, or an untracked cwd)")
-        fix = ("Fix: run the command holding the `-c` body (the `docker exec`, "
-               "`kubectl run`, `ssh`) as its own call, so the rest of the "
-               "string can be vouched for")
+        what = ("a shell `-c` or `eval` body it could not reach (a container "
+                "or remote wrapper, or an untracked cwd)")
+        fix = ("Fix: run the command holding the body (the `docker exec`, "
+               "`kubectl run`, `ssh`, `eval`) as its own call, so the rest of "
+               "the string can be vouched for")
     elif signal == INTERPRETER_SIGNAL:
         what = "interpreter code it cannot read (an inline body, a heredoc, -m)"
         fix = ("Fix: move the code into a file inside the project root and run "
@@ -6248,6 +6264,12 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
         # as in-workspace, and a wrong clean answer is worse than no answer.
         if not cmd_cwd_unknown:
             shell_bodies.extend((b, cmd_cwd) for b in shell_c_bodies(g))
+        body = None if wrap.external else eval_body(g)
+        if body is not None:
+            if cmd_cwd_unknown:
+                signal = merge_nested_signal(signal, 'sh -c')
+            else:
+                shell_bodies.append((body, cmd_cwd))
         if not g: continue                        # the wrappers run nothing
         if os.path.basename(g[0]) == 'ps':
             ps_pipes.add(pipe)

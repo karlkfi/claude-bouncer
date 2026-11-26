@@ -45,7 +45,7 @@ The consequence worth internalizing: **`defer` is a protective decision only in 
 In `auto`, `acceptEdits`, and `bypassPermissions` they are worth nothing: the fallback is the pre-approval the suppression was trying to withhold.
 
 Q74 closed that for the two suppressions naming a construct this guard already judges.
-A `sh -c` body it could not reach, and a kill it could not scope, now **escalate** in those three modes rather than deferring.
+A `sh -c` or literal `eval` body it could not reach, and a kill it could not scope, now **escalate** in those three modes rather than deferring.
 Q74 had them `ask` in `auto` and `acceptEdits`, where a prompt reaches somebody, and `deny` under `bypassPermissions`, where it would not; both now deny in all three, below.
 The interpreter suppression stays inert by default and is the one this paragraph still describes unchanged: escalating it costs 4.67% of all commands against 0.09% for the other two (measured 2026-09-09 over 89,133 corpus commands), and an interpreter's own file access is a documented non-goal.
 The wrapper suppression (Q219) — an `xargs`, whose operands arrive on stdin, or a wrapper flag the hook cannot read — escalates with the first two when the command it hides is one this guard judges, because those hidden operands are file access the guard exists to check.

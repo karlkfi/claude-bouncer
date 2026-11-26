@@ -232,6 +232,7 @@ The desktop app's shared notes are exempt for reads, and for writes inside a run
 | `find . -name '*.py' -exec grep foo {} +` (a `find` command, read at one remove) | defer |
 | `find /etc/x -delete` · `find . -fprint /etc/x` | **ask** |
 | `cat in.txt; sh -c 'cat in.txt'` (clean body, still no vouch) | defer |
+| `eval 'cat /etc/hosts'` · `cat in.txt; eval 'cat /etc/hosts'` (a literal `eval` body) | **ask** |
 | `ps aux \| grep ginkgo` (no kill in the string) | allow |
 | `cat in.txt; bash --version` (shell, no `-c` body) | allow |
 | `cat in.txt; bash -o errexit /etc/x.sh` · `perl -I lib /etc/x.pl` (an option's argument is not the script) | **ask** |
@@ -478,6 +479,7 @@ cd /etc && sh -c 'cat hosts'            # -> ask   (the `cd` ran first)
 ```
 
 This covers `sh`, `bash`, `zsh`, `dash` and `ksh`, under the wrappers that actually appear — `timeout 5 bash -c …`, `xargs -I{} sh -c …`, `find … -exec sh -c … \;`, `env FOO=1 sh -c …`, `nohup`, `nice`, `stdbuf`.
+A literal `eval` body is read the same way, since `eval 'cat /etc/hosts'` runs its operands, joined by spaces, in this shell; `eval "$X"` and `eval "$(…)"` run text the hook cannot read and are not.
 
 **It never earns the string an `allow`.** That holds whether or not the body was checked, because plenty of bodies don't run here at all — a path inside a container is not a path on this disk — and a body the hook declines to read is exactly the case where vouching is indefensible.
 
