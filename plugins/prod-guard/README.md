@@ -212,7 +212,7 @@ Verbs the tables have never heard of are treated as **mutating** — when unsure
 Ambient resolution is **pure local string work** — the guard parses the flag or reads the tool's local config file.
 It never runs the tool, never makes a network call, never touches a cluster.
 
-Compound commands are split and each segment evaluated: `&&`, `||`, `|`, `;`, `&`, newlines, subshells, `$(...)`, backticks, plus `bash|sh|zsh -c '...'` bodies, `eval`, and wrappers (`sudo`, `env`, `timeout`, `xargs`, `nohup`, `time`, `nice`, `ionice`, `setsid`, `chrt`, `taskset`).
+Compound commands are split and each segment evaluated: `&&`, `||`, `|`, `;`, `&`, newlines, subshells, `$(...)`, backticks, plus `bash|sh|zsh -c '...'` bodies (in a cluster such as `-lc`, or behind `--`, too), `eval`, the command a `find -exec`, `-execdir`, `-ok` or `-okdir` runs, and wrappers (`sudo`, `env`, `timeout`, `xargs`, `nohup`, `time`, `nice`, `ionice`, `setsid`, `chrt`, `taskset`).
 So are the bodies of `{ …; }`, `if`/`then`/`else`, `while`/`until`/`for`/`select` loops, `case` arms, a command behind `!`, and a function body, which is judged where it is written and again at each call, against the values in scope there.
 A `sh -c` body, a call or an `eval` nested deeper than the guard reads asks, and so does a command substitution nested more than 25 levels deep, though a production target inside one still denies down to 545 levels.
 An assignment in a body bash may not run (a conditional, a loop, a function until it is called) leaves the name's value unknown, so a target that reads it prompts.
