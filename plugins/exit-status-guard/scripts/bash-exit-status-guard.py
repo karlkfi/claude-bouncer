@@ -389,7 +389,36 @@ def peel_wrappers(tokens, assigned=None):
 
 def head_words(seg):
     """The words a registry pattern is matched against, real command word first."""
-    return peel_wrappers(seg.tokens)
+    words = peel_wrappers(seg.tokens)
+    return git_subcommand(words) if words[:1] == ['git'] else words
+
+
+# git's global options, which go between `git` and the subcommand. The first
+# set takes the next word; the long ones also take `=value`. Anything else
+# there -- `--version`, `--html-path`, `--list-cmds=` -- runs no subcommand.
+GIT_VALUE_OPTS = frozenset({'-C', '-c', '--git-dir', '--work-tree',
+                            '--namespace', '--config-env', '--attr-source'})
+GIT_FLAG_OPTS = frozenset({
+    '-p', '--paginate', '-P', '--no-pager', '--bare', '--no-replace-objects',
+    '--no-lazy-fetch', '--no-optional-locks', '--no-advice',
+    '--literal-pathspecs', '--glob-pathspecs', '--noglob-pathspecs',
+    '--icase-pathspecs'})
+
+
+def git_subcommand(words):
+    """``words`` with git's global options dropped, so the subcommand is second."""
+    i = 1
+    while i < len(words):
+        name, eq, _ = words[i].partition('=')
+        if words[i] in GIT_VALUE_OPTS:
+            i += 2
+        elif words[i] in GIT_FLAG_OPTS or (
+                eq and name.startswith('--')
+                and name in GIT_VALUE_OPTS | {'--exec-path'}):
+            i += 1
+        else:
+            break
+    return words[:1] + words[i:]
 
 
 # Shell long options that take the next word as their argument.

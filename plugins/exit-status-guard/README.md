@@ -184,6 +184,7 @@ make check > >(tee <scratchpad>/c.log)  # the gate runs outside it
 
 The last two matter most.
 Gate patterns are matched against the **head of a shell segment** — its command word and arguments, after leading `VAR=val` assignments and `bash`/`sudo`/`time`-style wrappers are peeled, along with the options of a command wrapper (`sudo -u root`, `stdbuf -oL`, `/usr/bin/time -p`), the operand `timeout`, `chrt` and `taskset` take before the command (`timeout 600`), and the options of the `time` keyword (`time -p`), and `env -S 'make check'` is read as the command its string splits into — never against the raw command string.
+Git's global options are dropped the same way, so `git -C sub push` and `git --no-pager pull` are matched as `git push` and `git pull`.
 A pattern matched against the raw string also fires on every `git show`, `grep`, and commit message that merely *names* the command.
 A heredoc body is data, so a piped gate quoted in one is text; no rule handles that case, the parser does.
 A shell's `-c` string is a command, so `bash -c 'make check | tail'` is denied as the pipe it runs, and `bash -c 'make check' | tail` as `(make check) | tail` would be.
@@ -437,6 +438,7 @@ python3 scripts/friction-report.py --since 30d --repo gateway --top 20
 
 - **The registry is the detector.** Nothing is denied on shape alone, so an unregistered command piped into `tail` is invisible to this guard.
   Treat it as a net, not a wall — and extend `gates` for the tools your repo actually depends on.
+- **A `-c` body is read only where it is written out.** `bash -c "$CMD"` is one word whose value the guard never sees, and a body behind `env -S`, `xargs` or `find -exec` is not read at all. A double-quoted body is also read as written, before the calling shell expands its `$` words, so a status re-raise inside one can be credited when the caller has already emptied it.
 - **Gate-then-gate with `;` is not denied.** `make lint; make test` really does lose `make lint`'s status, but rule 3 is scoped to state-changing commands, where the consequence is a publish rather than a misreported check.
   Widening it would deny a very common and mostly harmless shape, which trains the override reflex.
 - **A command the tokenizer cannot parse gets silence, not a guess.** Unbalanced quotes, `| |`, and similar defer to normal permissions.
