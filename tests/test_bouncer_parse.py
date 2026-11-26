@@ -13,6 +13,7 @@ import os
 import sys
 import unittest
 from importlib import util
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB = os.path.join(ROOT, 'lib', 'bouncer_parse.py')
@@ -977,6 +978,22 @@ class CommentInSubstitutionTests(unittest.TestCase):
                         'x=$(%s) T' % body))
                     wrapped = '${y:-%s}' % body
                     self.assertEqual(len(wrapped), bp._brace_end(wrapped, 0))
+
+    def test_unclosed_brace_levels_are_scanned_once(self):
+        # Rescanning each failed `${` doubled the scans per level (Q370):
+        # about 2^24 at d=24, and 553 once a scan is remembered.
+        calls, real = [0], bp._brace_end_steps
+        def counted(*args):
+            calls[0] += 1
+            if calls[0] > 10000:
+                raise AssertionError('over 10,000 brace scans')
+            return real(*args)
+        for q in ('"', ''):
+            calls[0] = 0
+            with self.subTest(quoted=bool(q)), mock.patch.object(
+                    bp, '_brace_end_steps', counted):
+                self.assertEqual([], bp.command_substitutions(
+                    'echo ' + q + '${x:-$(' * 24 + 'echo ; rm /etc/q370-x'))
 
 
 class CommentOutsideSubstitutionTests(unittest.TestCase):

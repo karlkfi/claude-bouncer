@@ -851,18 +851,31 @@ def _trampoline(steps):
     a Python frame. Recursing, a thousand nested ``${y:-`` raised
     ``RecursionError`` and the hook exited 1, which Claude Code reads as no
     decision (Q337).
+
+    A step may yield ``(key, steps)`` instead, and a key already run is
+    answered from memory: every scan is a function of the text and its start,
+    and rescanning each ``${`` that failed made every unclosed ``${x:-$(``
+    level double the cost (Q370).
     """
-    stack, result = [steps], None
+    stack, result, memo = [(steps, None)], None, {}
     while True:
         try:
-            nested = stack[-1].send(result)
+            nested = stack[-1][0].send(result)
         except StopIteration as done:
-            stack.pop()
+            key = stack.pop()[1]
+            if key is not None:
+                memo[key] = done.value
             if not stack:
                 return done.value
             result = done.value
             continue
-        stack.append(nested)
+        key = None
+        if isinstance(nested, tuple):
+            key, nested = nested
+            if key in memo:
+                result = memo[key]
+                continue
+        stack.append((nested, key))
         result = None
 
 
@@ -962,7 +975,7 @@ def _scan_dollar_paren_steps(text, start, brace=False):
             if c == '"':
                 in_double = False
             elif text.startswith('$((', i):
-                end = yield _arith_end_steps(text, i + 1, True)
+                end = yield ('a', i + 1, True), _arith_end_steps(text, i + 1, True)
             if end < 0 and text.startswith('$(', i):
                 frames.append((cmd_pos, clauses, pending, parens, brk, dollar,
                                braces))
@@ -973,7 +986,7 @@ def _scan_dollar_paren_steps(text, start, brace=False):
                 i += 2
                 continue
             if text.startswith('${', i):
-                end = yield _brace_end_steps(text, i)
+                end = yield ('b', i), _brace_end_steps(text, i)
             if end < 0 and c == '`':
                 end = _scan_backticks(text, i + 1)[1]
             i = max(end, i + 1)
@@ -1018,7 +1031,7 @@ def _scan_dollar_paren_steps(text, start, brace=False):
             continue
         end = _ansi_c_end(text, i)
         if end < 0 and text.startswith('${', i):
-            end = yield _brace_end_steps(text, i)
+            end = yield ('b', i), _brace_end_steps(text, i)
         elif end < 0 and c == '`':
             end = _scan_backticks(text, i + 1)[1]
         if end > 0:
@@ -1065,7 +1078,7 @@ def _scan_dollar_paren_steps(text, start, brace=False):
             i = m.end()
             continue
         if c == '(' and i + 1 < n and text[i+1] == '(':
-            end = yield _arith_end_steps(text, i)
+            end = yield ('a', i, False), _arith_end_steps(text, i)
             if end > 0:                           # `((…))` / `$((…))` arithmetic
                 brk = dollar != i - 1             # `$((1))#x` is one word
                 i = end
@@ -1160,7 +1173,8 @@ def _funsub_body_start(text, i):
 def _brace_end_steps(text, i):
     if _funsub_at(text, i):
         start = _funsub_body_start(text, i)
-        body, end = yield _scan_dollar_paren_steps(text, start, brace=True)
+        body, end = yield ('f', start), _scan_dollar_paren_steps(
+            text, start, brace=True)
         return -1 if body is None else end
     i, n = i + 2, len(text)
     in_double = False
@@ -1181,12 +1195,12 @@ def _brace_end_steps(text, i):
         elif text.startswith('$(', i):
             end = -1
             if text.startswith('$((', i):
-                end = yield _arith_end_steps(text, i + 1, True)
+                end = yield ('a', i + 1, True), _arith_end_steps(text, i + 1, True)
             if end < 0:
-                end = (yield _scan_dollar_paren_steps(text, i + 2))[1]
+                end = (yield ('p', i + 2), _scan_dollar_paren_steps(text, i + 2))[1]
                 end = -1 if end == i + 2 else end
         elif text.startswith('${', i):
-            end = yield _brace_end_steps(text, i)
+            end = yield ('b', i), _brace_end_steps(text, i)
         elif c == '`':
             end = _scan_backticks(text, i + 1)[1]
             end = -1 if end == i + 1 else end
@@ -1230,24 +1244,16 @@ def _arith_end(text, i, quoted=False, ends=None):
     """
     return _trampoline(_arith_end_steps(text, i, quoted, ends))
 
-def _memo_steps(memo, key, steps):
-    """Run ``steps`` once per ``key``, so a second scan of the same span reuses
-    the nested results of the first instead of repeating them."""
-    if key not in memo:
-        memo[key] = yield steps
-    return memo[key]
-
 def _arith_end_steps(text, i, quoted=False, ends=None):
-    memo = {}
-    end = yield _arith_span_steps(text, i, quoted, memo, ends)
+    end = yield _arith_span_steps(text, i, quoted, ends)
     if quoted and 0 < end < len(text) and text.find('#', i, end) >= 0 and (
-            yield _arith_span_steps(text, i, quoted, memo, ends, True)) != end:
+            yield _arith_span_steps(text, i, quoted, ends, True)) != end:
         end = -1
     if ends is not None:
         ends[i] = (quoted, end)
     return end
 
-def _arith_span_steps(text, i, quoted, memo, ends, comments=False, close=False):
+def _arith_span_steps(text, i, quoted, ends, comments=False, close=False):
     i, n = i + 2, len(text)
     depth, in_double = 0, False
     blank = False         # the last character was a blank, so `#` comments
@@ -1275,22 +1281,21 @@ def _arith_span_steps(text, i, quoted, memo, ends, comments=False, close=False):
             end = -1
             if text.startswith('$((', i):
                 q = quoted or in_double
-                end = yield _memo_steps(memo, ('a', i, q),
-                                        _arith_end_steps(text, i + 1, q, ends))
+                end = yield ('a', i + 1, q), _arith_end_steps(
+                    text, i + 1, q, ends)
             if end < 0:
-                end = (yield _memo_steps(memo, ('p', i),
-                                         _scan_dollar_paren_steps(text, i + 2)))[1]
+                end = (yield ('p', i + 2), _scan_dollar_paren_steps(
+                    text, i + 2))[1]
                 end = n if end == i + 2 else end
         elif text.startswith('${', i) and in_double:
-            end = yield _memo_steps(memo, ('b', i), _brace_end_steps(text, i))
+            end = yield ('b', i), _brace_end_steps(text, i)
             end = n if end < 0 else end
         elif c == '`':
             end = _scan_backticks(text, i + 1)[1]
             end = n if end == i + 1 else end
         elif in_double or c not in '()':
             if comments and text.startswith('${', i) and i >= quiet:
-                quiet = yield _memo_steps(memo, ('b', i),
-                                          _brace_end_steps(text, i))
+                quiet = yield ('b', i), _brace_end_steps(text, i)
                 quiet = n if quiet < 0 else quiet
             i += 1
             continue
@@ -1321,7 +1326,7 @@ def _comment_comsub(text, i, braced=False):
     The ``\⏎`` goes in single quotes too, unless the ``$((`` is ``braced``:
     written in a ``${…}`` word rather than in double quotes inside one.
     """
-    end = _trampoline(_arith_span_steps(text, i, True, {}, None, True, True))
+    end = _trampoline(_arith_span_steps(text, i, True, None, True, True))
     if end < 0:
         return (None, i)
     out, j, quote = [], i + 2, ''
