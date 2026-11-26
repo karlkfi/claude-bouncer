@@ -9765,6 +9765,59 @@ class ShellCBodyAnalysisTests(unittest.TestCase):
         self._decision("cd - && sh -c 'cat passwd'", "defer")
 
 
+class EvalBodyAnalysisTests(unittest.TestCase):
+    """An `eval` body is checked the way a `-c` body is (Q399).
+
+    `eval` joins its operands with spaces and runs them in this shell. Measured
+    at 920e2fe4, `eval 'cat <outside>'` deferred where `bash -c` asked, and
+    beside a guarded command it allowed. Targets are synthetic (repo rule);
+    nothing is executed.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = os.path.realpath(self._tmp.name)
+        with open(os.path.join(self.workspace, "in.txt"), "w") as f:
+            f.write("hello\n")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _decision(self, cmd, expected, mode=None):
+        out = run_hook(cmd, self.workspace, project_dir=self.workspace,
+                       permission_mode=mode)
+        got = out["hookSpecificOutput"]["permissionDecision"] if out else "defer"
+        self.assertEqual(got, expected, f"for {cmd!r}")
+
+    def test_an_outside_read_inside_the_body(self):
+        t = "/q399-fake-target/f"
+        for cmd in (f"eval 'cat {t}'",
+                    f"bash -c 'eval \"cat {t}\"'",
+                    f"cat in.txt; eval 'cat {t}'",
+                    f"eval cat {t}",
+                    f"eval -- 'cat {t}'",
+                    f"command eval 'cat {t}'",
+                    f"eval 'cat {t}' | head -1",
+                    "cat in.txt; eval 'D=/q399-fake-target; cat $D/f'",
+                    f"cat in.txt; eval 'echo `cat {t}`'",
+                    f"cat in.txt; eval 'echo $(cat {t})'"):
+            self._decision(cmd, "ask")
+
+    def test_a_body_under_an_untracked_cwd_reads_as_inline_text(self):
+        # The body runs where the next command would, so a relative path gets
+        # the same deny `cd $X; cat f` does, and a body with none stays clean.
+        for mode in (None, "auto"):
+            self._decision("cat in.txt; cd $X; eval 'cat f'", "deny", mode)
+            for cmd in ("cat in.txt; eval 'echo a' && eval 'echo b'",
+                        "cat in.txt; cd $X; eval 'echo hi'"):
+                self._decision(cmd, "allow", mode)
+
+    def test_a_body_past_the_depth_cap_withholds_the_allow(self):
+        cmd = "cat in.txt; " + "eval " * 26 + "cat /q399-fake-target/f"
+        self._decision(cmd, "defer")
+        self._decision(cmd, "deny", mode="auto")
+
+
 class PeelWrappersTests(unittest.TestCase):
     """`peel_wrappers` finds the command behind a wrapper by its grammar (Q219).
 

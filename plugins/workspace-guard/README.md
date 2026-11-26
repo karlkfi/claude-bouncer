@@ -232,6 +232,7 @@ The desktop app's shared notes are exempt for reads, and for writes inside a run
 | `find . -name '*.py' -exec grep foo {} +` (a `find` command, read at one remove) | defer |
 | `find /etc/x -delete` · `find . -fprint /etc/x` | **ask** |
 | `cat in.txt; sh -c 'cat in.txt'` (clean body, still no vouch) | defer |
+| `eval 'cat /etc/hosts'` · `cat in.txt; eval 'D=/etc; cat $D/hosts'` (an `eval` body) | **ask** |
 | `ps aux \| grep ginkgo` (no kill in the string) | allow |
 | `cat in.txt; bash --version` (shell, no `-c` body) | allow |
 | `cat in.txt; bash -o errexit /etc/x.sh` · `perl -I lib /etc/x.pl` (an option's argument is not the script) | **ask** |
@@ -492,6 +493,10 @@ The unchecked list is everything that isn't a local wrapper: container runtimes 
 `sudo` is read through like the other wrappers below, so `sudo sh -c '…'` is checked, and `sudo docker exec c sh -c '…'` is not.
 Naming the local wrappers rather than the remote ones is deliberate — a runtime nobody has heard of yet reads as remote, and its body is left alone rather than judged against paths it never touches.
 See [Limitations](#limitations).
+
+An `eval` body is read the way a local `-c` body is, since `eval` runs its operands, joined by spaces, in this shell.
+It runs where the next command would, so it gets the cwd that command would get, and a clean body is no reason to withhold the `allow`: `cat in.txt; eval 'cat in.txt'` allows.
+What `eval "$X"` or `eval "$(…)"` runs is whatever the variable or the substitution prints, which the hook never sees.
 
 #### PowerShell: `Stop-Process`
 
