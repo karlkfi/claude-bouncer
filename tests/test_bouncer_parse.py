@@ -601,7 +601,9 @@ class ArithmeticCloseTests(unittest.TestCase):
                 ('echo $(( "$(( 1 # ))\n) ; printf %s \'a\\\nb\')" ))',
                  drop),                                                    # ab
                 ('echo $(( ${x:-"$(( 1 # ))\n) ; printf %s \'a\\\nb\')"} ))',
-                 drop)):                                                   # ab
+                 drop),                                                    # ab
+                ('echo "$(( ${x:-\'$(( 1 # ))\n) ; printf %s \'a\\\nb\')\'} ))"',
+                 drop)):                                                   # 'ab'
             with self.subTest(cmd=cmd):
                 self.assertEqual([body], bp.command_substitutions(cmd))
 
