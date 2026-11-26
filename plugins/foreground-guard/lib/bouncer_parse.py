@@ -1303,7 +1303,7 @@ def _arith_span_steps(text, i, quoted, memo, comments=False, close=False):
         i = end
     return -1 if close else n
 
-def _comment_comsub(text, i):
+def _comment_comsub(text, i, braced=False):
     r"""The body bash runs, and the index past it, for a quoted ``$((`` at
     ``text[i]`` that a comment made a ``$( (``, or ``(None, i)``.
 
@@ -1312,6 +1312,8 @@ def _comment_comsub(text, i):
     the body is parsed. Driven on bash 5.3.15,
     ``"$(( 1 # \⏎ echo A ))⏎) ; echo RAN)"`` runs ``RAN`` and not ``echo A``,
     where ``"$( ( 1 # \⏎ echo A ))⏎) ; echo RAN)"`` runs ``echo A``.
+    The ``\⏎`` goes in single quotes too, unless the ``$((`` is ``braced``:
+    written in a ``${…}`` word rather than in double quotes inside one.
     """
     end = _trampoline(_arith_span_steps(text, i, True, {}, True, True))
     if end < 0:
@@ -1319,7 +1321,7 @@ def _comment_comsub(text, i):
     out, j, quote = [], i + 2, ''
     while j < end - 1:
         c = text[j]
-        if c == '\\' and quote != "'":
+        if c == '\\' and (quote != "'" or not braced):
             if text[j+1:j+2] != '\n':
                 out.append(text[j:j+2])
             j += 2
@@ -1422,8 +1424,12 @@ def command_substitutions(text, quotes=True, spans=None, funsubs=None):
     regex = None          # a `=~` operand: None, 'op', 'next', paren depth
     closes = set()        # indices of the `)` that end a word
     braced = 0            # inside a `${…}` before this index
+    words = []            # a `${…}` opened in "…": [its `}`, a "…" open in it]
     while i < n:
         c = text[i]
+        if words and i >= words[-1][0]:
+            i = max(i, words.pop()[0] + 1)
+            continue
         if in_single:
             if c == "'":
                 in_single = False
@@ -1446,7 +1452,10 @@ def command_substitutions(text, quotes=True, spans=None, funsubs=None):
             i += 1
             continue
         if quotes and c == '"':
-            in_double = not in_double
+            if words:
+                words[-1][1] = not words[-1][1]
+            else:
+                in_double = not in_double
             brk = False
             i += 1
             continue
@@ -1462,6 +1471,12 @@ def command_substitutions(text, quotes=True, spans=None, funsubs=None):
             brk = False
             i = end
             continue
+        if in_double and text.startswith('${', i):
+            end = _brace_end(text, i)
+            if end > 0:
+                words.append([end - 1, False])
+                i += 2
+                continue
         if c == '$' and i + 1 < n and text[i + 1] == '(':
             brk = False                            # `$(a)#b` is one word
             quoted = in_double or not quotes or i < braced
@@ -1473,7 +1488,8 @@ def command_substitutions(text, quotes=True, spans=None, funsubs=None):
                 continue
             body = None
             if quoted and text[i+2:i+3] == '(' and _arith_end(text, i + 1) > 0:
-                body, end = _comment_comsub(text, i)
+                body, end = _comment_comsub(text, i, quotes and (
+                    words and not words[-1][1] if in_double else i < braced))
             if body is None:
                 body, end = _scan_dollar_paren(text, i + 2)
             if body is None:

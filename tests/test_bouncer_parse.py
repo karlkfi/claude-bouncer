@@ -531,6 +531,31 @@ class ArithmeticCloseTests(unittest.TestCase):
         self.assertEqual([' (( 1 # ))\n'], bp.command_substitutions(
             'echo "$( (( 1 # ))\n) ; echo RAN)"'))
 
+    def test_the_comment_body_drops_a_quoted_backslash_newline(self):
+        # bash drops `\⏎` in single quotes too, a pair at a time, unless the
+        # `$((` is written in a `${…}` word. The comments are what printf printed.
+        keep = "( 1 # ))\n) ; printf %s 'a\\\nb'"
+        for cmd, quotes, body in (
+                ('echo "$(( 1 # ))\n) ; printf %s \'a\\\nb\')"', True,   # ab
+                 "( 1 # ))\n) ; printf %s 'ab'"),
+                ('echo "$(( 1 # ))\n) ; printf %s \'a\\\\\nb\')"', True,  # a\\⏎b
+                 "( 1 # ))\n) ; printf %s 'a\\\\\nb'"),
+                ('echo "$(( 1 # ))\n) ; printf %s \'a\\\\\\\nb\')"', True,  # a\\b
+                 "( 1 # ))\n) ; printf %s 'a\\\\b'"),
+                ('$(( 1 # ))\n) ; printf %s \'a\\\nb\')\n', False,       # ab
+                 "( 1 # ))\n) ; printf %s 'ab'"),
+                ('${x:-$(( 1 # ))\n) ; printf %s \'a\\\nb\')}\n', False,  # ab
+                 "( 1 # ))\n) ; printf %s 'ab'"),
+                ('echo "${x:-"$(( 1 # ))\n) ; printf %s \'a\\\nb\')"}"', True,
+                 "( 1 # ))\n) ; printf %s 'ab'"),                         # ab
+                ('echo ${x:-$(( 1 # ))\n) ; printf %s \'a\\\nb\')}', True,
+                 keep),                                                    # a\⏎b
+                ('echo "${x:-$(( 1 # ))\n) ; printf %s \'a\\\nb\')}"', True,
+                 keep)):                                                   # a\⏎b
+            with self.subTest(cmd=cmd):
+                self.assertEqual([body], bp.command_substitutions(
+                    cmd, quotes=quotes))
+
 
 class ProcessSubstitutionTests(unittest.TestCase):
     """`<(…)` and `>(…)` bodies, which command_substitutions never returns (Q277).
