@@ -1039,6 +1039,9 @@ CASES = [
     ('the same, in a heredoc body',
      'cat <<EOF\n$(( 1 # ))\n) ; make check | tail)\nEOF', False, True,
      "exit status is the filter's"),
+    ('the same, in double quotes inside a "${…}"',
+     'echo "${x:-"$(( 1 # ))\n) ; make check | tail)"}"', False, True,
+     "exit status is the filter's"),
     ('a hash glued to a word keeps it arithmetic',
      'echo "$(( 1# ))\n) ; make check | tail)"', False, False, ''),
 

@@ -546,6 +546,8 @@ class ArithmeticCloseTests(unittest.TestCase):
                  "( 1 # ))\n) ; printf %s 'ab'"),
                 ('${x:-$(( 1 # ))\n) ; printf %s \'a\\\nb\')}\n', False,  # ab
                  "( 1 # ))\n) ; printf %s 'ab'"),
+                ('echo "${x:-y}$(( 1 # ))\n) ; printf %s \'a\\\nb\')"', True,
+                 "( 1 # ))\n) ; printf %s 'ab'"),                         # yab
                 ('echo "${x:-"$(( 1 # ))\n) ; printf %s \'a\\\nb\')"}"', True,
                  "( 1 # ))\n) ; printf %s 'ab'"),                         # ab
                 ('echo ${x:-$(( 1 # ))\n) ; printf %s \'a\\\nb\')}', True,
