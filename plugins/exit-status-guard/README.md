@@ -438,6 +438,7 @@ python3 scripts/friction-report.py --since 30d --repo gateway --top 20
 
 - **The registry is the detector.** Nothing is denied on shape alone, so an unregistered command piped into `tail` is invisible to this guard.
   Treat it as a net, not a wall — and extend `gates` for the tools your repo actually depends on.
+- **A `-c` body is read only where it is written out.** `bash -c "$CMD"` is one word whose value the guard never sees, and a body behind `env -S`, `xargs` or `find -exec` is not read at all. A double-quoted body is also read as written, before the calling shell expands its `$` words, so a status re-raise inside one can be credited when the caller has already emptied it.
 - **Gate-then-gate with `;` is not denied.** `make lint; make test` really does lose `make lint`'s status, but rule 3 is scoped to state-changing commands, where the consequence is a publish rather than a misreported check.
   Widening it would deny a very common and mostly harmless shape, which trains the override reflex.
 - **A command the tokenizer cannot parse gets silence, not a guess.** Unbalanced quotes, `| |`, and similar defer to normal permissions.
