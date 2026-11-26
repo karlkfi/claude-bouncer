@@ -226,6 +226,8 @@ The cut that pays for itself is **code the hook cannot read**: inline `-c`/`-e`,
 Q143 later added Python's `-m`, whose operand is a module name resolved on `sys.path` — the same unreadable code in a spelling the `-c`/`-e` scan missed, which had been resolving as a path instead and so vouching.
 The corpus figures in this paragraph were measured for the Q72 cut and were not re-taken for it.
 That exemption is not a concession — repo-resident code is exactly what "sandboxing the workspace from itself is a non-goal" already trusts, and it is what brings the cost to 1,657 commands (4.49% of allow decisions, the same base as the 6.85% above — not of the 52,251), with nothing newly allowed in either direction.
+Q402 replaced the scan that found the script — the first word not starting with `-` — with a walk over each interpreter's option grammar, because an option taking an argument (`bash -o errexit`, `perl -I lib`) handed the read check its argument while the real script went unread.
+An option outside that grammar is not guessed at: every later word becomes a checked read and the `allow` is withheld, since the walk can no longer say which word is code.
 
 Two details carry more weight than their size.
 The rule keys on the group's **command word**, not on any token, because a loose scan reads `grep -n 'kindest/node'` as a node invocation and defers a clean grep — the false-positive direction that gets a guard uninstalled.

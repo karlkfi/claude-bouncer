@@ -234,6 +234,7 @@ The desktop app's shared notes are exempt for reads, and for writes inside a run
 | `cat in.txt; sh -c 'cat in.txt'` (clean body, still no vouch) | defer |
 | `ps aux \| grep ginkgo` (no kill in the string) | allow |
 | `cat in.txt; bash --version` (shell, no `-c` body) | allow |
+| `cat in.txt; bash -o errexit /etc/x.sh` · `perl -I lib /etc/x.pl` (an option's argument is not the script) | **ask** |
 | `ls /etc` (unguarded, no redirect)   | defer    |
 | `mktemp --version` (creates nothing) | defer    |
 | `echo '$(mktemp -d)'` (single-quoted, no subst) | defer |
@@ -1173,6 +1174,7 @@ To hard-block in *every* mode, drop the `permission_mode` check and return `"den
   So `python3 -c 'open("/etc/passwd")'` is not checked against the boundary, and neither is any file a script it runs touches.
   This is the [documented threat model](docs/design.md) rather than an oversight — the plugin closes a granularity gap in *pre-approved file readers*, and it does not try to model every program that can open a file.
   What the hook *does* check is the **script path** an interpreter is told to run — `python3 <path>` reads that file, so it is checked like any other read and an outside-workspace script gets the usual `ask`.
+  The script is found by reading each interpreter's own options, so `bash -o errexit <path>` and `python3 -W ignore <path>` check `<path>` rather than the option's argument, and an option the hook does not know makes every later word a checked read and withholds the `allow`.
   Installed extension code is read-exempt (see [Allowed read prefixes](#allowed-read-prefixes)), which is what keeps a hook launching its own script quiet.
   Separately, interpreter code suppresses the blanket `allow` a clean guarded command in the same string would otherwise earn, so the hook never vouches for code it cannot read.
   Note the asymmetry: the path check produces a real decision that blocks in every permission mode, while the suppression only withholds `allow` and so protects nothing under `auto`, `acceptEdits`, or `bypassPermissions` — see [`docs/permission-modes.md`](docs/permission-modes.md).
