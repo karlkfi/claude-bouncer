@@ -576,6 +576,8 @@ class ArithmeticCloseTests(unittest.TestCase):
                  ['echo A', 'echo B', 'echo C']),
                 ("echo $(( '$(( 1 # ))\n) ; echo RAN)' ))",       # 1: not found
                  ['( 1 # ))\n) ; echo RAN']),
+                ('echo "$(( "$(( 1 # ))\n) ; echo RAN)" ))"',      # 1: not found
+                 ['( 1 # ))\n) ; echo RAN']),
                 ('echo $(( 1 ))#x $(echo ID)', ['echo ID']),
                 ('echo $(( \\$(echo RAN) ))', [])):                # error only
             with self.subTest(cmd=cmd):
