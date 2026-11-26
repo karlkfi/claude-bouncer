@@ -1388,6 +1388,30 @@ def peel_sudo(operands):
     return operands[i:], assigned
 
 
+FIND_EXEC_PRIMARIES = frozenset({'-exec', '-execdir', '-ok', '-okdir'})
+
+
+def find_actions(argv):
+    """The commands a `find` argv runs, one per `-exec`-family primary, each
+    up to its `;` or a `+` straight after a `{}` (Q389). find refuses a
+    primary with no terminator; its words still count, to the end. A word
+    spelled like a primary can be another primary's operand (`-path -exec`),
+    so each one starts a command of its own."""
+    out, i = [], 1
+    while i < len(argv):
+        if argv[i] not in FIND_EXEC_PRIMARIES:
+            i += 1
+            continue
+        j = i + 1
+        while j < len(argv) and argv[j] != ';' and not (
+                argv[j] == '+' and j > i + 1 and argv[j - 1] == '{}'):
+            j += 1
+        if j > i + 1:
+            out.append(argv[i + 1:j])
+        i += 1
+    return out
+
+
 def strip_wrappers(argv, env, alternates=None, child=None):
     """Remove leading launcher commands (sudo, env, timeout, xargs, ...) so
     the covered tool underneath is classified, not the wrapper. `env`
@@ -1398,7 +1422,8 @@ def strip_wrappers(argv, env, alternates=None, child=None):
     their assignments added, and what `env -i`/`-u` removes gone (Q269).
 
     A list passed as `alternates` gets each second reading the walk could not
-    rule out, as `(argv, child env)`: the caller judges those too."""
+    rule out, and each later command a `find` runs, as `(argv, child env)`:
+    the caller judges those too."""
     if child is None:
         child = {}
     while argv:
@@ -1479,6 +1504,14 @@ def strip_wrappers(argv, env, alternates=None, child=None):
                 if os.path.basename(t) in COVERED_TOOLS or os.path.basename(t) in SHELL_NAMES:
                     return rest[i:]
             return []
+        elif head == 'find':
+            # The first command is walked on; each later one is judged too.
+            actions = find_actions(argv)
+            if not actions:
+                break
+            if alternates is not None:
+                alternates.extend((a, dict(child)) for a in actions[1:])
+            argv = actions[0]
         elif head in PLAIN_WRAPPERS:
             # `command -v`/`-V` reports where a name resolves and runs
             # nothing, so its operands are names rather than a command to
@@ -1541,6 +1574,38 @@ def first_flag_value(argv, names):
         if n in vals:
             return vals[n]
     return None
+
+
+def shell_bodies(argv):
+    """The words a shell's `argv` may run as its `-c` string (Q389).
+
+    The `c` can sit in any short cluster, `+c` included, and options can follow
+    it: the body is the first operand after it, and a `--` or `-` ends the
+    options, so the word after one is the body even when it is `--`. Each `o`
+    or `O` in a cluster takes the next word as its argument in bash, while ksh
+    and zsh run that word instead in some clusters, so both readings are
+    returned."""
+    start = next((i for i, w in enumerate(argv[1:], 1) if w[:1] in '-+'
+                  and w[1:2] not in ('', '-') and 'c' in w[1:]), None)
+    if start is None:
+        return []
+    found = []
+    for takes in (True, False):
+        owed = 0
+        for j in range(start, len(argv)):
+            w = argv[j]
+            if owed:
+                owed -= 1
+            elif w in ('-', '--'):
+                found.append(j + 1)
+                break
+            elif w[:1] in '-+' and len(w) > 1:
+                if takes and not w.startswith('--'):
+                    owed = sum(ch in 'oO' for ch in w[1:])
+            else:
+                found.append(j)
+                break
+    return [argv[j] for j in dict.fromkeys(found) if j < len(argv)]
 
 
 def all_flag_values(argv, names):
@@ -3530,17 +3595,20 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
         argv_raw = strip_wrappers(list(argv_raw), {})
         for alt, alt_env in alternates:
             # Already expanded, so the child's env is all it needs (Q287). An
-            # override among its operands is in effect only in that reading:
-            # in the other one env passes it to the command as an argument.
-            # So it downgrades this reading's denies and reaches nothing else.
+            # override among its operands is in effect only for that command:
+            # in an `env -S` string's other reading env passes it to the
+            # command as an argument, and a later `find` command is another
+            # command. So it downgrades this one's denies and reaches nothing
+            # else.
             sub_f, sub_o, sub_s = evaluate_command_string(
                 shlex.join(alt), ctx, depth + 1, alt_env,
                 words_env)
             if sub_o or sub_s is not None:
                 sub_f = [(ASK if sev == DENY else sev,
-                          'prod-guard: override acknowledged in one reading '
-                          'of an `env -S` string -- downgraded from deny to '
-                          'a confirmation prompt. ' + r if sev == DENY else r,
+                          'prod-guard: override acknowledged for one of the '
+                          'commands this segment may run -- downgraded from '
+                          'deny to a confirmation prompt. ' + r
+                          if sev == DENY else r,
                           gts) for sev, r, gts in sub_f]
             findings += sub_f
         # Read after the walk, which merges `env NAME=v` operands into
@@ -3612,17 +3680,17 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
             # Mixed quoting keeps the child's env:
             # only some runs were parent-expanded, and under-expanding is the
             # safe direction (unresolved target -> prompt).
-            body = first_flag_value(argv_raw, ('-c',))
-            if body and depth >= 3:
+            c_bodies = [b for b in shell_bodies(argv_raw) if b]
+            if c_bodies and depth >= 3:
                 # A body this deep is not read, so what it runs is unknown (Q340).
                 findings.append((ASK, 'prod-guard: `%s -c` runs a body nested '
                                  'deeper than the guard reads, so what it runs '
                                  'is unknown. Confirm it is safe.' % tool, None))
-            if body:
+            for body in c_bodies:
                 # The default stands in for a body that reached here as a
-                # plain str rather than a token (`-c=…`, which flag_values
-                # splits): unknown quoting reads as single, so it expands in
-                # the child and nothing new resolves.
+                # plain str rather than a token (an `env -S` string splits
+                # into those): unknown quoting reads as single, so it
+                # expands in the child and nothing new resolves.
                 quotes = getattr(body, 'quotes', frozenset("'"))
                 # What `env`/`sudo` add reaches the body only where the child
                 # does the expanding: a body written wholly in single quotes.

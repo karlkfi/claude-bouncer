@@ -331,6 +331,27 @@ class ParsingTests(unittest.TestCase):
             guard.strip_wrappers(["env", "AWS_PROFILE=dev", "aws", "s3", "ls"], env),
             ["aws", "s3", "ls"])
         self.assertEqual(env, {"AWS_PROFILE": "dev"})
+        alternates = []
+        self.assertEqual(
+            guard.strip_wrappers(["find", ".", "-exec", "echo", "{}", ";",
+                                  "-ok", "kubectl", "delete", "{}", "+"], {},
+                                 alternates),
+            ["echo", "{}"])
+        self.assertEqual([a for a, _ in alternates],
+                         [["kubectl", "delete", "{}"]])
+
+    def test_shell_bodies(self):
+        # Each pair read from bash 5.3.15 (Q389).
+        for argv, bodies in (
+                (["bash", "-c", "B"], ["B"]),
+                (["bash", "-lc", "B"], ["B"]),
+                (["bash", "-c", "-x", "-o", "pipefail", "B"], ["B", "pipefail"]),
+                (["bash", "-co", "pipefail", "B"], ["B", "pipefail"]),
+                (["bash", "-c", "--", "--", "B"], ["--"]),
+                (["bash", "--rcfile", "f", "-c", "B"], ["B"]),
+                (["bash", "-c"], []), (["bash", "x.sh"], [])):
+            with self.subTest(argv=argv):
+                self.assertEqual(guard.shell_bodies(argv), bodies)
 
     def test_value_taking_wrapper_flag_skips_its_value(self):
         # A flag taking a SEPARATE value leaves that value behind when flags
@@ -1771,6 +1792,60 @@ class CompoundBypassTests(unittest.TestCase):
     def test_kustomize_alone_defers(self):
         decision, _ = run_hook("kustomize build overlays/prod")
         self.assertIsNone(decision)
+
+
+class ShellBodyAndFindExecTests(unittest.TestCase):
+    """A `-c` body behind a flag cluster or `--`, and a command `find` runs
+    (Q389). Each deferred before the fix; bash 5.3.15 and BSD find, with
+    `/bin/echo` in place of kubectl, ran every one of them."""
+
+    D = "kubectl --context gke_acme_prod-us delete pod x"
+
+    def test_body_behind_a_cluster_or_end_of_options_is_judged(self):
+        for shape in ("bash -lc '%s'", "bash -ec '%s'", "sh -xc '%s'",
+                      "bash +c '%s'", "bash -c -- '%s'", "bash -c - '%s'",
+                      "bash -c -x '%s'", "bash -c -o pipefail '%s'",
+                      "bash -co pipefail '%s'", "bash -oc pipefail '%s'",
+                      "zsh -c +x '%s'", "ksh -oc '%s' pipefail",
+                      "bash -c '%s' -c echo"):
+            with self.subTest(shape=shape):
+                self.assertEqual(run_hook(shape % self.D)[0], "deny")
+
+    def test_word_bash_runs_instead_of_the_delete_defers(self):
+        # A second `--` is the body, and `$0` gets the delete.
+        self.assertIsNone(run_hook("bash -c -- -- '%s'" % self.D)[0])
+        self.assertIsNone(run_hook("bash -c")[0])
+
+    def test_command_find_runs_is_judged(self):
+        for shape in (r"find . -exec %s \;", "find . -exec %s {} +",
+                      r"find . -execdir %s \;", r"find . -ok %s \;",
+                      r"find . -okdir %s \;", r"find . -exec sudo %s \;",
+                      r"find . -exec bash -c '%s {}' \;",
+                      r"find . -exec bash -lc '%s' \;",
+                      r"find . -name a -exec echo {} \; -exec %s \;",
+                      r"find . -path -exec -o -exec %s \;",
+                      r"find . -name -ok -o -exec %s \;",
+                      "find . -exec %s"):
+            with self.subTest(shape=shape):
+                self.assertEqual(run_hook(shape % self.D)[0], "deny")
+
+    def test_shell_segment_leaves_later_functions_and_eval_judged(self):
+        for shape in ("bash -c true; eval '%s'", "bash -c true; f() { %s; }; f",
+                      "f() { %s; }; bash -c true; f"):
+            with self.subTest(shape=shape):
+                self.assertEqual(run_hook(shape % self.D)[0], "deny")
+
+    def test_override_in_a_later_find_command_asks(self):
+        decision, reason = run_hook(
+            r"find . -exec echo \; -exec env PROD_GUARD_OVERRIDE=why %s \;"
+            % self.D)
+        self.assertEqual(decision, "ask")
+        self.assertIn("for one of the commands this segment may run", reason)
+
+    def test_plus_ends_the_command_only_after_braces(self):
+        # `echo + kubectl …` is one echo: find prints the words.
+        self.assertIsNone(run_hook(r"find . -exec echo + %s \;" % self.D)[0])
+        self.assertIsNone(run_hook(r"find . -name x -print")[0])
 
 
 class OverrideTests(unittest.TestCase):
