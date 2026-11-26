@@ -1823,11 +1823,19 @@ class ShellBodyAndFindExecTests(unittest.TestCase):
                       r"find . -exec bash -c '%s {}' \;",
                       r"find . -exec bash -lc '%s' \;",
                       r"find . -name a -exec echo {} \; -exec %s \;",
+                      r"find . -path -exec -o -exec %s \;",
+                      r"find . -name -ok -o -exec %s \;",
                       "find . -exec %s"):
             with self.subTest(shape=shape):
                 self.assertEqual(run_hook(shape % self.D)[0], "deny")
 
-    def test_override_reaches_only_the_find_command_it_prefixes(self):
+    def test_shell_segment_leaves_later_functions_and_eval_judged(self):
+        for shape in ("bash -c true; eval '%s'", "bash -c true; f() { %s; }; f",
+                      "f() { %s; }; bash -c true; f"):
+            with self.subTest(shape=shape):
+                self.assertEqual(run_hook(shape % self.D)[0], "deny")
+
+    def test_override_in_a_later_find_command_asks(self):
         decision, reason = run_hook(
             r"find . -exec echo \; -exec env PROD_GUARD_OVERRIDE=why %s \;"
             % self.D)

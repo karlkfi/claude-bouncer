@@ -1394,7 +1394,9 @@ FIND_EXEC_PRIMARIES = frozenset({'-exec', '-execdir', '-ok', '-okdir'})
 def find_actions(argv):
     """The commands a `find` argv runs, one per `-exec`-family primary, each
     up to its `;` or a `+` straight after a `{}` (Q389). find refuses a
-    primary with no terminator; its words still count, to the end."""
+    primary with no terminator; its words still count, to the end. A word
+    spelled like a primary can be another primary's operand (`-path -exec`),
+    so each one starts a command of its own."""
     out, i = [], 1
     while i < len(argv):
         if argv[i] not in FIND_EXEC_PRIMARIES:
@@ -1406,7 +1408,7 @@ def find_actions(argv):
             j += 1
         if j > i + 1:
             out.append(argv[i + 1:j])
-        i = j + 1
+        i += 1
     return out
 
 
@@ -3678,13 +3680,13 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
             # Mixed quoting keeps the child's env:
             # only some runs were parent-expanded, and under-expanding is the
             # safe direction (unresolved target -> prompt).
-            bodies = [b for b in shell_bodies(argv_raw) if b]
-            if bodies and depth >= 3:
+            c_bodies = [b for b in shell_bodies(argv_raw) if b]
+            if c_bodies and depth >= 3:
                 # A body this deep is not read, so what it runs is unknown (Q340).
                 findings.append((ASK, 'prod-guard: `%s -c` runs a body nested '
                                  'deeper than the guard reads, so what it runs '
                                  'is unknown. Confirm it is safe.' % tool, None))
-            for body in bodies:
+            for body in c_bodies:
                 # The default stands in for a body that reached here as a
                 # plain str rather than a token (an `env -S` string splits
                 # into those): unknown quoting reads as single, so it
