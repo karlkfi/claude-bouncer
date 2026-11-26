@@ -4833,6 +4833,15 @@ class QuotedSubstBodyEndToEndTests(unittest.TestCase):
             with self.subTest(shape=shape):
                 self._decision(shape % "/etc/q338-fake-target", "ask")
 
+    def test_a_comment_in_quoted_arithmetic_is_judged(self):
+        # In double quotes bash reads ` # ))` as a comment, so the `$((` does
+        # not close there and runs as `$( (` (Q375). The heredoc was `allow`.
+        for shape in ('echo "$(( 1 # ))\n) ; rm %s)"',
+                      'echo "$(( 1 # (\n) ; rm %s ))"',
+                      'cat <<EOF\n$(( 1 # ))\n) ; rm %s)\nEOF'):
+            with self.subTest(shape=shape):
+                self._decision(shape % "/etc/q375-fake-target", "ask")
+
 
 class SubstitutionResumesCommandEndToEndTests(unittest.TestCase):
     """The words after a substitution's close belong to the command it sits in

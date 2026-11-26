@@ -713,7 +713,7 @@ def strip_heredoc_bodies(cmd, expanded=None, unterminated=None,
         # A substitution body is parsed in its own quote context, so these two
         # openers are recognised whether or not a `"` is still open.
         if c == '$' and i + 2 < n and cmd[i+1] == '(' and (
-                cmd[i+2] != '(' or _arith_end(cmd, i + 1) < 0):
+                cmd[i+2] != '(' or _arith_end(cmd, i + 1, in_double) < 0):
             stack.append((')', in_double, pending, depth))
             in_double = False; pending = []; depth = 0
             out.append('$('); last = SUBST_OPEN; i += 2
@@ -962,7 +962,7 @@ def _scan_dollar_paren_steps(text, start, brace=False):
             if c == '"':
                 in_double = False
             elif text.startswith('$((', i):
-                end = yield _arith_end_steps(text, i + 1)
+                end = yield _arith_end_steps(text, i + 1, True)
             if end < 0 and text.startswith('$(', i):
                 frames.append((cmd_pos, clauses, pending, parens, brk, dollar,
                                braces))
@@ -1181,7 +1181,7 @@ def _brace_end_steps(text, i):
         elif text.startswith('$(', i):
             end = -1
             if text.startswith('$((', i):
-                end = yield _arith_end_steps(text, i + 1)
+                end = yield _arith_end_steps(text, i + 1, True)
             if end < 0:
                 end = (yield _scan_dollar_paren_steps(text, i + 2))[1]
                 end = -1 if end == i + 2 else end
@@ -1200,7 +1200,7 @@ def _brace_end_steps(text, i):
         i = end
     return -1
 
-def _arith_end(text, i):
+def _arith_end(text, i, quoted=False):
     """The index just past the ``))`` closing the ``((`` at ``text[i]``, -1
     when bash reads the ``((`` as two parens instead, or ``len(text)`` when
     nothing closes it.
@@ -1212,17 +1212,46 @@ def _arith_end(text, i):
     on one. Driven on bash 5.3.15, ``echo $((echo x))`` is an arithmetic error
     and ``echo $((1)+(2))`` runs ``(1)+(2)`` as a command. A paren in a quote,
     a backtick span or a nested ``$(…)`` is not counted (Q361), and one in a
-    ``${…}`` is. Unquoted, a ``#`` starts no comment. In double quotes bash
-    does start one, so ``"$(( 1 # ))⏎) ; cmd)"`` runs ``cmd``, and this scan
-    does not model that.
-    """
-    return _trampoline(_arith_end_steps(text, i))
+    ``${…}`` is. Unquoted, a ``#`` starts no comment.
 
-def _arith_end_steps(text, i):
+    Pass ``quoted`` for a ``$((`` in double quotes, an unquoted heredoc body
+    or a ``${…}`` (Q375). bash scans one there twice, once as above and once
+    reading a ``#`` after a blank as a comment to the newline, and it is
+    arithmetic only when both scans close on the same ``))``. Driven on bash
+    5.3.15, ``"$(( 1 # ))⏎) ; cmd)"`` and ``"$(( 1 # (⏎) ; cmd ))"`` both run
+    ``cmd`` as ``$( (``. A ``#`` glued to a word, a ``(`` or a ``;`` is text,
+    and so is one in a quote or a ``${…}``. A first scan that never closes is
+    a parse error that runs nothing, so it is not scanned again.
+    """
+    return _trampoline(_arith_end_steps(text, i, quoted))
+
+def _memo_steps(memo, key, steps):
+    """Run ``steps`` once per ``key``, so a second scan of the same span reuses
+    the nested results of the first instead of repeating them."""
+    if key not in memo:
+        memo[key] = yield steps
+    return memo[key]
+
+def _arith_end_steps(text, i, quoted=False):
+    memo = {}
+    end = yield _arith_span_steps(text, i, quoted, memo)
+    if quoted and 0 < end < len(text) and text.find('#', i, end) >= 0 and (
+            yield _arith_span_steps(text, i, quoted, memo, True)) != end:
+        return -1
+    return end
+
+def _arith_span_steps(text, i, quoted, memo, comments=False):
     i, n = i + 2, len(text)
     depth, in_double = 0, False
+    blank = False         # the last character was a blank, so `#` comments
+    quiet = 0             # no comment starts before this index: a `${…}`
     while i < n:
         c = text[i]
+        if comments and c == '#' and blank and i >= quiet:
+            end = text.find('\n', i)
+            i = n if end < 0 else end
+            continue
+        blank = c in ' \t\n' and not in_double
         if c == '\\':
             i += 2
             continue
@@ -1238,17 +1267,24 @@ def _arith_end_steps(text, i):
         elif text.startswith('$(', i):
             end = -1
             if text.startswith('$((', i):
-                end = yield _arith_end_steps(text, i + 1)
+                q = quoted or in_double
+                end = yield _memo_steps(memo, ('a', i, q),
+                                        _arith_end_steps(text, i + 1, q))
             if end < 0:
-                end = (yield _scan_dollar_paren_steps(text, i + 2))[1]
+                end = (yield _memo_steps(memo, ('p', i),
+                                         _scan_dollar_paren_steps(text, i + 2)))[1]
                 end = n if end == i + 2 else end
         elif text.startswith('${', i) and in_double:
-            end = yield _brace_end_steps(text, i)
+            end = yield _memo_steps(memo, ('b', i), _brace_end_steps(text, i))
             end = n if end < 0 else end
         elif c == '`':
             end = _scan_backticks(text, i + 1)[1]
             end = n if end == i + 1 else end
         elif in_double or c not in '()':
+            if comments and text.startswith('${', i) and i >= quiet:
+                quiet = yield _memo_steps(memo, ('b', i),
+                                          _brace_end_steps(text, i))
+                quiet = n if quiet < 0 else quiet
             i += 1
             continue
         elif c == '(':
@@ -1355,6 +1391,7 @@ def command_substitutions(text, quotes=True, spans=None, funsubs=None):
     dbracket = False      # inside `[[ … ]]`
     regex = None          # a `=~` operand: None, 'op', 'next', paren depth
     closes = set()        # indices of the `)` that end a word
+    braced = 0            # inside a `${…}` before this index
     while i < n:
         c = text[i]
         if in_single:
@@ -1397,7 +1434,8 @@ def command_substitutions(text, quotes=True, spans=None, funsubs=None):
             continue
         if c == '$' and i + 1 < n and text[i + 1] == '(':
             brk = False                            # `$(a)#b` is one word
-            end = _arith_end(text, i + 1) if text[i+2:i+3] == '(' else -1
+            end = _arith_end(text, i + 1, in_double or not quotes
+                             or i < braced) if text[i+2:i+3] == '(' else -1
             if end > 0:
                 closes.add(end - 1)
                 i = end                            # $((…)) arithmetic
@@ -1442,7 +1480,10 @@ def command_substitutions(text, quotes=True, spans=None, funsubs=None):
                 while i < n and text[i] != '\n':   # keep the newline itself
                     i += 1
                 continue
-            quiet = max(quiet, _comment_free_end(text, i, brk))
+            end = _comment_free_end(text, i, brk)
+            if text.startswith('${', i):
+                braced = max(braced, end)
+            quiet = max(quiet, end)
             if c == '(':
                 parens.append(i > 0 and text[i-1] in '<>?*+@!')
             elif c == ')':
@@ -1854,7 +1895,7 @@ def _subscript_end(token, open_at):
     return -1
 
 
-def _skip_quoted(text, i):
+def _skip_quoted(text, i, quoted=False):
     """Step over the escape, quoted run or expansion starting at ``text[i]``.
 
     Returns the index just past it, or -1 when it never closes. A `$` that
@@ -1878,13 +1919,14 @@ def _skip_quoted(text, i):
             if text[i] == '"':
                 return i + 1
             if text[i] in '\\`$' and not text.startswith("$'", i):
-                i = _skip_quoted(text, i)
+                i = _skip_quoted(text, i, True)
                 if i < 0:
                     return -1
                 continue
             i += 1
         return -1
-    end = _arith_end(text, i + 1) if text.startswith('$((', i) else -1
+    end = _arith_end(text, i + 1, quoted) if text.startswith('$((', i) \
+        else -1
     if end > 0:
         return end
     if text.startswith('$(', i):
@@ -1894,7 +1936,7 @@ def _skip_quoted(text, i):
         depth, i = 0, i + 1
         while i < n:
             if text[i] in '\\\'"`$':
-                i = _skip_quoted(text, i)
+                i = _skip_quoted(text, i, True)
                 if i < 0:
                     return -1
                 continue

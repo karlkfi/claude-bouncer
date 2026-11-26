@@ -488,6 +488,42 @@ class ArithmeticCloseTests(unittest.TestCase):
         cmd = 'echo $((cat <<EOF) ; echo ID)\nhi\nEOF\n'
         self.assertEqual(cmd, bp.strip_heredoc_bodies(cmd))
 
+    def test_a_comment_in_quoted_arithmetic_can_make_it_a_substitution(self):
+        # Quoted, bash reads the span with and without comments, and it is
+        # arithmetic only when both close on the same `))` (Q375).
+        for cmd, bodies in (
+                ('echo "$(( 1 # ))\n) ; echo RAN)"',          # 1: not found, RAN
+                 ['( 1 # ))\n) ; echo RAN']),
+                ('echo "$(( 1 # (\n) ; echo RAN ))"',         # 1: not found, RAN)
+                 ['( 1 # (\n) ; echo RAN ']),
+                ('echo "$(( 1 # ))\n))"', ['( 1 # ))\n)']),   # 1: not found
+                ('echo "$(( 1 # )\n echo RAN ))"',            # 1: not found, RAN
+                 ['( 1 # )\n echo RAN )']),
+                ('echo ${x:-$(( 1 # ))\n) ; echo RAN)}',      # 1: not found, RAN
+                 ['( 1 # ))\n) ; echo RAN']),
+                ('echo "$(echo "$(( 1 # ))\n) ; echo RAN)")"',
+                 ['echo "$(( 1 # ))\n) ; echo RAN)"'])):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(bodies, bp.command_substitutions(cmd))
+        self.assertEqual(['( 1 # ))\n) ; echo RAN'], bp.command_substitutions(
+            '$(( 1 # ))\n) ; echo RAN)\n', quotes=False))   # an unquoted heredoc
+
+    def test_a_hash_that_starts_no_comment_keeps_arithmetic(self):
+        for cmd in ('echo "$(( 1# ))\n) ; echo RAN)"',    # invalid arithmetic base
+                    'echo "$(( x# ))\n) ; echo RAN)"',    # invalid operator
+                    'echo "$(( 1;# ))\n) ; echo RAN)"',   # invalid operator
+                    'echo "$(( 2#11 ))"',                 # 3
+                    'echo "$(( 1 # c\n ))"',              # invalid operator
+                    'echo "$(( "a # b" ))"',
+                    'echo "$(( ${x:- # } ))"',            # syntax error, nothing
+                    'echo $(( 1 # ))\n) ; echo RAN)'):    # syntax error, nothing
+            with self.subTest(cmd=cmd):
+                self.assertEqual([], bp.command_substitutions(cmd))
+        # A bare `((` in a quoted body keeps the unquoted rule: ` ; echo RAN)`
+        # is printed, not run.
+        self.assertEqual([' (( 1 # ))\n'], bp.command_substitutions(
+            'echo "$( (( 1 # ))\n) ; echo RAN)"'))
+
 
 class ProcessSubstitutionTests(unittest.TestCase):
     """`<(…)` and `>(…)` bodies, which command_substitutions never returns (Q277).
