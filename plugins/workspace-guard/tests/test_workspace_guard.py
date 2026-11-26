@@ -9381,9 +9381,79 @@ class InterpreterSuppressesAllowTests(unittest.TestCase):
                     "cat > T.SH <<'EOF'\ncat /q72-fake-target/f\nEOF\n"
                     "bash t.sh",
                     "cat in.txt > t.sh; bash -o errexit t.sh",
-                    "cat in.txt > t.sh; bash -o errexit $PWD/t.sh",
                     "cat in.txt > t.py; python3 -W ignore t.py"):
             self._decision(cmd, "defer")
+        # Once `errexit` stops being read as the script, `$PWD/t.sh` is, and
+        # gets the deny `bash $PWD/t.sh` always had. (Q402)
+        self._decision("cat in.txt > t.sh; bash -o errexit $PWD/t.sh", "deny")
+
+    def test_an_option_argument_is_not_read_as_the_script(self):
+        # Measured at c0bc0235: each of these returned `allow`, the option's
+        # argument read as the script and vouching while the real one went
+        # unread. Clusters, attached values, `+o` and long options are the
+        # ways an argument hides. (Q402)
+        t = "/q72-fake-target/t"
+        for cmd in (f"cat in.txt; bash -o errexit {t}.sh",
+                    f"cat in.txt; bash -O extglob {t}.sh",
+                    f"cat in.txt; bash -eo pipefail {t}.sh",
+                    f"cat in.txt; bash -oo errexit nounset {t}.sh",
+                    f"cat in.txt; bash +o errexit {t}.sh",
+                    f"cat in.txt; bash --rcfile in.txt {t}.sh",
+                    f"cat in.txt; ksh -o errexit {t}.sh",
+                    f"cat in.txt; python3 -W ignore {t}.py",
+                    f"cat in.txt; python3 -X dev {t}.py",
+                    f"cat in.txt; perl -I lib {t}.pl",
+                    f"cat in.txt; perl -wlI lib {t}.pl",
+                    f"cat in.txt; ruby -E utf-8 {t}.rb",
+                    f"cat in.txt; node -r ./in.txt {t}.js",
+                    f"cat in.txt; node --title x {t}.js",
+                    f"cat in.txt; php -d x=1 {t}.php",
+                    f"cat in.txt; dash -V {t}.sh",
+                    f"cat in.txt; zsh -V {t}.sh"):
+            self._decision(cmd, "ask")
+
+    def test_an_attached_value_is_not_read_as_a_code_flag(self):
+        # `-Wignore` holds an `e`, which the old cluster scan read as `-e`
+        # and deferred on, so the outside script was never checked. (Q402)
+        self._decision("cat in.txt; python3 -Wignore /q72-fake-target/t.py",
+                       "ask")
+
+    def test_a_shell_dash_ends_the_options(self):
+        # A shell runs the word after `-` as its script, where Python reads
+        # stdin. Measured: `bash - t.sh x` runs `t.sh`. (Q402)
+        self._decision("cat in.txt; bash - /q72-fake-target/t.sh", "ask")
+
+    def test_an_option_that_reads_code_withholds_the_allow(self):
+        # `bash -s` runs stdin with the operands as `$1`…, and `php -r` runs
+        # its argument. Both read the code's first word as a script. (Q402)
+        for cmd in ("cat in.txt; bash -s in.txt",
+                    "cat in.txt; php -r 'echo 1;'"):
+            self._decision(cmd, "defer")
+
+    def test_a_loaded_file_is_read_wherever_it_sits(self):
+        # `node -r` loads its argument as code, and `ruby -C` moves where the
+        # script resolves, so both are reads beside the script. (Q402)
+        for cmd in ("cat in.txt; node -r ./in.txt -r /q72-fake-target/t.js "
+                    "./in.txt",
+                    "cat in.txt; ruby -C ./sub /q72-fake-target/t.rb"):
+            self._decision(cmd, "ask")
+
+    def test_an_option_outside_the_row_reads_every_operand(self):
+        # The walk cannot say which word an unlisted option consumed, so every
+        # later word is a checked read and none of them vouches. (Q402)
+        self._decision("cat in.txt; node --zz-unlisted ./in.txt "
+                       "/q72-fake-target/t.js", "ask")
+        self._decision("cat in.txt; node --zz-unlisted ./in.txt", "defer")
+
+    def test_a_c_body_after_an_option_argument_is_read(self):
+        # bash takes a `-c` body from the first operand after its options, so
+        # an option argument ahead of it or between them is not the body.
+        # Measured at c0bc0235: the first two deferred, the third read `-o` as
+        # the body. (Q402)
+        for cmd in ("cat in.txt; bash -o pipefail -c 'cat /q72-fake-target/f'",
+                    "cat in.txt; bash -eo pipefail -c 'cat /q72-fake-target/f'",
+                    "cat in.txt; bash -c -o errexit 'cat /q72-fake-target/f'"):
+            self._decision(cmd, "ask")
 
     def test_an_unresolvable_run_with_no_write_still_allows(self):
         self._decision("cat in.txt; \"$PWD\"/t.sh", "allow")
@@ -13584,6 +13654,12 @@ class PowerShellInterpreterSuppressesAllowTests(unittest.TestCase):
         # meet it. (Q143)
         self._agree("Get-Content .\\README.md; python3 -m unittest",
                     "cat ./README.md; python3 -m unittest", "defer")
+
+    def test_an_unlisted_option_withholds_the_allow_on_both(self):
+        # Past an option outside `INTERP_OPTIONS` the walk cannot say which
+        # word is the script, so the resident one no longer vouches. (Q402)
+        self._agree("Get-Content .\\README.md; python3 -Z .\\scripts\\run.py",
+                    "cat ./README.md; python3 -Z ./scripts/run.py", "defer")
 
     def test_a_workspace_resident_script_still_vouches(self):
         # Repo-resident code is what the boundary already trusts. Without this

@@ -1976,20 +1976,150 @@ INTERP_CMDS = frozenset({
     'deno', 'bun', 'Rscript', 'osascript',
 })
 
-# Flags that make an interpreter print and exit rather than run anything. Only
-# unambiguous spellings are listed: `-h` is bash's `hashall` and `-v` is
-# Python's verbose, and both still run code.
-INTERP_QUERY_FLAGS = frozenset({'--version', '--help', '-V'})
+# How each interpreter reads its own options, so the operand walk in
+# `interp_code_source` can tell an option's argument from the script (Q402).
+# Each row is read off the interpreter's man page or `--help`, and checked
+# against the binary where one was on hand: bash's and dash's `-o` takes the
+# next word even from inside a cluster (`-eo pipefail`, `-oo a b`), zsh's and
+# ksh's an attached one (`-oerrexit`), and perl's `-C` and ruby's `-W` only an
+# attached one, so `perl -C 7 t.pl` runs `7`.
+#
+# A short letter maps to how it takes its argument:
+#   flag    none
+#   next    the next word, while the rest of the cluster stays letters
+#   value   the rest of the cluster, else the next word
+#   tail    the rest of the cluster only, which may be empty
+#   digits  the digits that follow (`perl -0777pi`)
+#   path    a `value` naming a file the interpreter loads, checked as a read
+#   script  a `value` that IS the script (`php -f`)
+#   cd      a `value` naming the directory the script resolves under
+#   cdtail  a `tail` doing the same when it is not empty (`perl -x[dir]`)
+#   code    code the hook cannot read: a `-c` body, a module, stdin
+#   body    a shell's `-c`: the body is the first operand after the options
+#   query   prints and exits, running nothing
+# A letter or long option the row does not name is unknown. The walk then
+# cannot say which word is the script, so every later word is a checked read.
+#
+# Letters Q72 read as code stay code where the man page says otherwise --
+# perl's and ruby's `-c` check syntax, php's `-c` names an ini file and its
+# `-e` is profiling -- because un-reading one withdraws a defer.
+InterpOptions = collections.namedtuple(
+    'InterpOptions', 'short long short_default long_default plus dash dashdash')
 
-# Interpreters whose `-m` takes a module name resolved on the import path. Only
-# Python spells it that way: perl's `-m` takes its module attached (`-Mstrict`),
-# php's lists modules and exits, and node has none — so widening this set would
-# consume a real operand for a flag that never had one. `-m` is deliberately the
-# only option here. Several others take a non-path operand too, and each is its
-# own question: a set grown by guesswork is where a read that SHOULD prompt
-# quietly stops prompting, which is the one failure a scope review cannot see.
-# (Q143)
-INTERP_MODULE_CMDS = frozenset({'python', 'python2', 'python3'})
+
+def _interp_row(flags='', short=None, long=None, short_default=None,
+                long_default=None, plus=False, dash='stdin', dashdash='end'):
+    s = dict.fromkeys(flags, 'flag')
+    s.update(short or {})
+    lo = {'help': 'query', 'version': 'query'}
+    lo.update(long or {})
+    return InterpOptions(s, lo, short_default, long_default, plus, dash,
+                         dashdash)
+
+
+_BASH_LONG = dict.fromkeys(
+    ('debug', 'debugger', 'dump-po-strings', 'dump-strings', 'login',
+     'noediting', 'noprofile', 'norc', 'posix', 'pretty-print', 'restricted',
+     'verbose'), 'flag')
+_BASH_LONG.update({'init-file': 'value', 'rcfile': 'value'})
+_SHELL = {'c': 'body', 's': 'code'}
+_PYTHON = _interp_row('bBdEiIOPqsSuvxR3t', {
+    'W': 'value', 'X': 'value', 'Q': 'value', 'c': 'code', 'e': 'code',
+    'm': 'code', 'V': 'query', 'h': 'query', '?': 'query'}, {
+    'check-hash-based-pycs': 'value', 'help-env': 'query',
+    'help-xoptions': 'query', 'help-all': 'query'})
+_NODE_VALUE = ('conditions', 'input-type', 'title', 'inspect-port',
+               'icu-data-dir', 'openssl-config', 'redirect-warnings',
+               'report-dir', 'report-directory', 'report-filename',
+               'diagnostic-dir', 'disable-warning', 'dns-result-order',
+               'unhandled-rejections', 'max-http-header-size',
+               'test-reporter', 'test-reporter-destination',
+               'test-name-pattern', 'test-skip-pattern', 'test-concurrency',
+               'test-timeout', 'watch-path')
+_NODE_FLAG = ('no-warnings', 'enable-source-maps', 'trace-warnings',
+              'trace-deprecation', 'trace-uncaught', 'throw-deprecation',
+              'no-deprecation', 'pending-deprecation', 'experimental-vm-modules',
+              'experimental-strip-types', 'experimental-transform-types',
+              'experimental-require-module', 'test', 'watch', 'inspect',
+              'inspect-brk', 'inspect-wait', 'expose-gc', 'preserve-symlinks',
+              'preserve-symlinks-main', 'abort-on-uncaught-exception',
+              'frozen-intrinsics', 'interactive')
+_NODE_LONG = dict.fromkeys(_NODE_VALUE, 'value')
+_NODE_LONG.update(dict.fromkeys(_NODE_FLAG, 'flag'))
+_NODE_LONG.update(dict.fromkeys(
+    ('require', 'import', 'loader', 'experimental-loader', 'env-file',
+     'env-file-if-exists'), 'path'))
+_NODE_LONG.update(dict.fromkeys(('eval', 'print', 'check'), 'code'))
+_PHP_LONG = dict.fromkeys(
+    ('interactive', 'no-chdir', 'no-header', 'no-php-ini', 'usage', 'info',
+     'syntax-check', 'modules', 'syntax-highlight', 'syntax-highlighting',
+     'strip', 'ini'), 'flag')
+_PHP_LONG.update(dict.fromkeys(
+    ('bindpath', 'timing', 'define', 'server', 'rf', 'rfunction', 'rc',
+     'rclass', 're', 'rextension', 'rz', 'rzendextension', 'ri', 'rextinfo'),
+    'value'))
+_PHP_LONG.update({'docroot': 'path', 'file': 'script', 'process-file': 'script'})
+_PHP_LONG.update(dict.fromkeys(
+    ('php-ini', 'profile-info', 'run', 'process-begin', 'process-code',
+     'process-end'), 'code'))
+_SH_BASH = _interp_row('abefhkmnptuvxBCEHPTilrD', dict(
+    _SHELL, o='next', O='next'), _BASH_LONG, plus=True, dash='end')
+INTERP_OPTIONS = {
+    'bash': _SH_BASH,
+    # Whichever shell `sh` is on the host -- bash, dash -- the flags of
+    # either are safe, since the other rejects them and runs nothing. `-O` is
+    # bash's shopt argument and zsh's plain letter, so it is left unknown.
+    'sh': _interp_row('abefhkmnptuvxBCEHPTilrDIqV', dict(_SHELL, o='next'),
+                      _BASH_LONG, plus=True, dash='end'),
+    'dash': _interp_row('aCefnuvxIimqVEbl', dict(_SHELL, o='next'),
+                        plus=True, dash='end'),
+    # Every zsh letter is a no-argument option or an error, and every long
+    # option an option name, but for `-o` and `--emulate`.
+    'zsh': _interp_row('', dict(_SHELL, o='value'), {'emulate': 'next'},
+                       short_default='flag', long_default='flag', plus=True,
+                       dash='end'),
+    'ksh': _interp_row('ilrDEabefhkmnprtuvxBCGH', dict(
+        _SHELL, o='value', R='value'), plus=True, dash='end'),
+    'python': _PYTHON, 'python2': _PYTHON, 'python3': _PYTHON,
+    'perl': _interp_row('afhnpsStTuUwWXg', {
+        '0': 'digits', 'l': 'digits', 'C': 'tail', 'd': 'tail', 'D': 'tail',
+        'F': 'tail', 'i': 'tail', 'm': 'tail', 'M': 'tail', 'x': 'cdtail',
+        'I': 'path', 'c': 'code', 'e': 'code', 'E': 'code', 'v': 'query',
+        'V': 'query'}),
+    'ruby': _interp_row('adlnpsSUvwy', {
+        '0': 'digits', 'F': 'tail', 'i': 'tail', 'K': 'tail', 'W': 'tail',
+        'x': 'cdtail', 'C': 'cd', 'E': 'value', 'I': 'path', 'r': 'path',
+        'c': 'code', 'e': 'code', 'h': 'query'}, dict(
+            dict.fromkeys(('jit', 'yjit', 'verbose', 'copyright',
+                           'disable-gems'), 'flag'),
+            **dict.fromkeys(('enable', 'disable', 'encoding', 'dump',
+                             'external-encoding', 'internal-encoding'),
+                            'value'))),
+    'node': _interp_row('i', {
+        'C': 'value', 'r': 'path', 'c': 'code', 'e': 'code', 'p': 'code',
+        'h': 'query', 'v': 'query'}, _NODE_LONG),
+    'php': _interp_row('aCqnlsHw', {
+        'b': 'value', 'T': 'value', 'd': 'value', 'S': 'value', 't': 'path',
+        'f': 'script', 'F': 'script', 'c': 'code', 'e': 'code', 'r': 'code',
+        'B': 'code', 'R': 'code', 'E': 'code', 'h': 'query', '?': 'query',
+        'i': 'query', 'm': 'query', 'v': 'query'}, _PHP_LONG,
+        dashdash='stdin'),
+    'osascript': _interp_row('i', {'l': 'value', 's': 'value', 'c': 'code',
+                                   'e': 'code'}),
+    'Rscript': _interp_row('', {'c': 'code', 'e': 'code'}, dict.fromkeys(
+        ('verbose', 'vanilla', 'no-environ', 'no-site-file', 'no-init-file',
+         'no-restore', 'no-save', 'save', 'restore', 'no-echo', 'slave',
+         'quiet', 'silent'), 'flag')),
+    # Both take a subcommand first, which no options row describes.
+    'deno': _interp_row('', {'c': 'code', 'e': 'code'}),
+    'bun': _interp_row('', {'c': 'code', 'e': 'code'}),
+}
+
+# An octal run, or `x` and hex: what perl's `-0` and `-l` and ruby's `-0` take.
+_OPTION_DIGITS_RE = re.compile(r'x[0-9A-Fa-f]*|[0-7]*')
+
+InterpWalk = collections.namedtuple('InterpWalk',
+                                    'stop at reads unknown body moved')
 
 # Command words that run a shell `-c` body in THIS filesystem. The body is only
 # re-analyzed under one of these, because a path in it means nothing unless the
@@ -2508,9 +2638,9 @@ def shell_c_bodies(tokens):
     and over-reporting costs it a defer, whereas a wrongly picked body is fed to
     the tokenizer and can invent offenders out of text that is not a command at
     all (`bash x.sh | grep -c FAIL` has both a shell and a `-c` in it). So the
-    `-c` must be an option of the shell ITSELF — found in the unbroken option run
-    that follows the shell word, ending at the first operand — and the body is
-    the token after it.
+    `-c` must be an option of the shell ITSELF, read by `interp_walk` over the
+    shell's row, and the body is the first operand after the options, which is
+    where bash takes it from: `bash -c -o errexit 'cmd'` runs `cmd` (Q402).
 
     The group must also run the shell locally: its command word is a shell or one
     of LOCAL_SHELL_WRAPPERS. Anything else (a container runtime, `ssh`, `sudo`)
@@ -2523,28 +2653,106 @@ def shell_c_bodies(tokens):
         return []
     out, n = [], len(tokens)
     for i, t in enumerate(tokens):
-        if os.path.basename(t) not in SHELL_C_CMDS:
+        base = os.path.basename(t)
+        if base not in SHELL_C_CMDS:
             continue
-        j = i + 1
-        while j < n and tokens[j].startswith('-') and tokens[j] != '-':
-            if not tokens[j].startswith('--') and 'c' in tokens[j][1:]:
-                if j + 1 < n:
-                    out.append(tokens[j+1])
-                break
-            j += 1
+        w = interp_walk(INTERP_OPTIONS[base], tokens[i+1:])
+        k = i + 1 + w.at
+        if w.body and w.stop is None and not w.unknown and k < n:
+            out.append(tokens[k])
     return out
+
+
+def _short_cluster(row, u):
+    """The kinds of the letters in cluster ``u``, and the attached argument
+    the last one takes, if any. An unknown letter ends the cluster."""
+    kinds, attached, j = [], [], 1
+    while j < len(u):
+        kind = row.short.get(u[j], row.short_default)
+        j += 1
+        kinds.append(kind)
+        if kind == 'digits':
+            j = _OPTION_DIGITS_RE.match(u, j).end()
+        elif kind not in ('flag', 'next', 'body'):
+            if kind is not None and (j < len(u) or kind in ('tail', 'cdtail')):
+                attached.append(u[j:])
+            break
+    return kinds, attached
+
+
+def interp_walk(row, args):
+    """Walk ``args``, the words after an interpreter, over its options row.
+
+    ``stop`` is None when the options ran out at ``args[at]``, the first
+    operand (``len(args)`` when there is none), and otherwise the kind that
+    ended the walk: 'query', 'code' or 'script'. ``reads`` are option
+    arguments naming a file the interpreter loads, the script itself last for
+    'script'. ``unknown`` says an option outside the row came first, and then
+    the walk runs to the end, every later operand going into ``reads`` and
+    ``at`` staying ``len(args)``. ``body`` is set by a shell's `-c`, and
+    ``moved`` by an option that moves where a relative script resolves.
+    """
+    reads, unknown, body, moved, i, n = [], False, False, False, 0, len(args)
+    while i < n:
+        u = args[i]
+        i += 1
+        if u in ('--', '-'):
+            if (row.dashdash if u == '--' else row.dash) == 'stdin':
+                return InterpWalk('code', i, reads, unknown, body, moved)
+            if not unknown:
+                return InterpWalk(None, i, reads, unknown, body, moved)
+            reads.extend(t for t in args[i:] if not t.startswith('-'))
+            break
+        if u.startswith('--'):
+            name, eq, val = u[2:].partition('=')
+            kinds = [row.long.get(name, row.long_default)]
+            args_for = [val] if eq else []
+        elif u[:1] == '-' or (row.plus and u[:1] == '+'):
+            kinds, args_for = _short_cluster(row, u)
+        elif unknown:
+            reads.append(u)
+            continue
+        else:
+            return InterpWalk(None, i - 1, reads, unknown, body, moved)
+        for kind in kinds:
+            if kind is None:
+                unknown = True
+            elif kind in ('query', 'code'):
+                return InterpWalk(kind, i, reads, unknown, body, moved)
+            elif kind == 'body':
+                body = True
+            elif kind not in ('flag', 'digits', 'tail'):
+                if args_for:
+                    arg = args_for.pop(0)
+                elif kind != 'cdtail' and i < n:
+                    arg, i = args[i], i + 1
+                else:
+                    continue
+                if not arg:
+                    continue
+                if kind in ('path', 'script', 'cd', 'cdtail'):
+                    reads.append(arg)
+                moved = moved or kind in ('cd', 'cdtail')
+                if kind == 'script':
+                    if unknown:
+                        reads.extend(t for t in args[i:]
+                                     if not t.startswith('-'))
+                    return InterpWalk('script', i, reads, unknown, body, moved)
+    return InterpWalk(None, n, reads, unknown, body, moved)
 
 
 def interp_code_source(tokens, name=None):
     """What an interpreter group runs, when `allow` must not speak for it.
 
     Returns None when the group runs no interpreter, or is not running one on
-    this host. Otherwise ``('inline', None)`` for code the hook can never read —
-    a `-c`/`-e` operand, a Python `-m` module, a heredoc, a bare stdin `-`, or
-    a REPL — or ``('script', tok)`` for a script path the caller resolves, since
-    a script *inside* the workspace is repo-resident code the boundary already
-    trusts (`docs/design.md`, "Sandboxing the workspace from itself" is a
-    non-goal).
+    this host. Otherwise ``('inline', reads)`` for code the hook can never read —
+    a `-c`/`-e` operand, a Python `-m` module, a heredoc, a bare stdin `-`, a
+    REPL, or a script it cannot pick out past an option outside
+    `INTERP_OPTIONS` — or ``('script', reads)`` ending in a script path the
+    caller resolves, since a script *inside* the workspace is repo-resident
+    code the boundary already trusts (`docs/design.md`, "Sandboxing the
+    workspace from itself" is a non-goal). Either way ``reads`` are paths the
+    interpreter reads, which the caller checks.
 
     This is `shell_c_group`'s rule one layer out. A shell's `-c` body is not the
     only opaque token a clean guarded command can end up vouching for:
@@ -2576,37 +2784,23 @@ def interp_code_source(tokens, name=None):
         base = namer(t)
         if base not in INTERP_CMDS and base not in SHELL_C_CMDS:
             continue
-        # An interpreter takes its code from `-e`/`-c`; a shell only from `-c`
-        # (`bash -e` is errexit). Python additionally takes it from `-m`, whose
-        # operand is a module name the interpreter resolves on `sys.path` and
-        # never a file beside the cwd. All are read off short-option clusters,
-        # so `perl -pe`, `perl -0pi -e`, `sh -lc` and `python3 -Bm` all fire.
-        # Over-reporting here costs a defer rather than a silent allow, which is
-        # the safe direction.
-        inline = 'c'
-        if base in INTERP_CMDS:
-            inline = 'cem' if base in INTERP_MODULE_CMDS else 'ce'
-        operand = None
-        for u in tokens[i+1:]:
-            if u == '-' or not u.startswith('-'):
-                operand = u
-                break
-            if u == '--':
-                continue
-            # A query flag runs no code at all, so there is nothing to vouch
-            # for. It has to be named: after heredoc stripping `bash --version`
-            # and `python3 <<'PY'` both reduce to a bare command word, and the
-            # operand-less case below has to keep reading the second as stdin.
-            if u in INTERP_QUERY_FLAGS:
-                return None
-            if not u.startswith('--') and any(ch in u[1:] for ch in inline):
-                return ('inline', None)
+        # A query flag runs no code at all, so there is nothing to vouch for.
+        # It has to be named: after heredoc stripping `bash --version` and
+        # `python3 <<'PY'` both reduce to a bare command word, and the
+        # operand-less case below has to keep reading the second as stdin.
+        w = interp_walk(INTERP_OPTIONS[base], tokens[i+1:])
+        if w.stop == 'query':
+            return None
+        rest = tokens[i + 1 + w.at:]
+        script = rest[:1] if w.stop is None and not (w.unknown or w.body) \
+            else []
         # No operand is a REPL or a `python3 <<'PY'` heredoc, whose body was
-        # stripped from the string before shlex ever saw it; `-` is an explicit
-        # read-from-stdin. Neither leaves the hook anything to read.
-        if operand is None or operand == '-':
-            return ('inline', None)
-        return ('script', operand)
+        # stripped from the string before shlex ever saw it. A moved directory
+        # leaves a relative script unresolvable here, so it cannot vouch.
+        if w.stop == 'code' or w.unknown or w.body or w.moved \
+                or not (script or w.stop == 'script'):
+            return ('inline', w.reads + script)
+        return ('script', w.reads + script)
     return None
 
 
@@ -6009,10 +6203,10 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
         # the string has been seen.
         src = interp_code_source(g)
         if src is not None:
-            kind, tok = src
+            kind, toks = src
             if kind == 'inline':
                 signal = signal or 'interpreter'
-            else:
+            for tok in toks:
                 # A script operand is a file the interpreter reads, so it is
                 # checked like any other read. That matters far more than the
                 # suppression beside it: an offender emits `ask`/`deny`, which
@@ -6025,26 +6219,15 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
                 if o is not None:
                     outside.append(o)
                     signal = signal or 'interpreter'
+                    continue
+                # Exempt or in-workspace. Vouch only for the workspace case:
+                # an exempt prefix earns silence, not the hook's word for
+                # everything else in the string.
+                k, rp = resolve_token(tok, cmd_cwd, cmd_cwd_unknown)
+                if k != 'path' or path_is_outside(rp, ctx.proj):
+                    signal = signal or 'interpreter'
                 else:
-                    # Exempt or in-workspace. Vouch only for the workspace case:
-                    # an exempt prefix earns silence, not the hook's word for
-                    # everything else in the string.
-                    k, rp = resolve_token(tok, cmd_cwd, cmd_cwd_unknown)
-                    if k != 'path' or path_is_outside(rp, ctx.proj):
-                        signal = signal or 'interpreter'
-                    else:
-                        scripts.runs.append(rp)
-                    # An option taking an argument (`bash -o errexit t.sh`)
-                    # makes `tok` that argument, so after one every later
-                    # operand may be the script.
-                    at = g.index(tok)
-                    if any(t.startswith('-') for t in g[1:at]):
-                        for t in g[at + 1:]:
-                            k, rp = resolve_token(t, cmd_cwd, cmd_cwd_unknown)
-                            if k == 'path':
-                                scripts.runs.append(rp)
-                            elif k != 'skip':
-                                scripts.unknown = True
+                    scripts.runs.append(rp)
         elif g and (('/' in g[0] and not g[0].endswith('/'))
                     or os.path.basename(g[0]) in ('source', '.')):
             # A script run by path or sourced never needed the exemption, but
@@ -7604,10 +7787,10 @@ def ps_analyze_segment(tokens, ctx, cwd, cwd_unknown, alone=False):
         # deferring in every mode, exactly as it did before Q74.
         src = interp_code_source([w[1] for w in words], name=ps_command_name)
         if src is not None:
-            kind, tok = src
+            kind, toks = src
             if kind == 'inline':
                 signal = INTERPRETER_SIGNAL
-            else:
+            for tok in toks:
                 # A script operand is a file the interpreter reads, so it is
                 # checked like any other read, and repo-resident code still
                 # vouches -- exempting it is what keeps this from costing far
