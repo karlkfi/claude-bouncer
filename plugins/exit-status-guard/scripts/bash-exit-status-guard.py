@@ -392,6 +392,83 @@ def head_words(seg):
     return peel_wrappers(seg.tokens)
 
 
+# Shell long options that take the next word as their argument.
+SHELL_ARG_OPTS = frozenset({'--rcfile', '--init-file'})
+
+
+def shell_c_body(tokens):
+    """(prefix, body, pipefail) for a shell's `-c` call, else None.
+
+    ``prefix`` is everything before the shell word -- reserved words, the
+    assignments, the wrappers. The string is the shell's first operand
+    whichever side of `-c` its other options sit: bash 5.3.15 runs `bash -c -o
+    pipefail 'false | true'` with pipefail on and exits 1. ``pipefail`` is
+    whether those options set it, since a child shell does not inherit the
+    caller's.
+    """
+    words = peel_wrappers(tokens)
+    at = len(tokens) - len(words)
+    if (not words or at < 1 or list(tokens[at:]) != list(words)
+            or os.path.basename(tokens[at - 1]) not in SHELL_WRAPPERS):
+        return None
+    runs = pipefail = False
+    i = 0
+    while i < len(words) and words[i].startswith(('-', '+')):
+        w = words[i]
+        i += 1
+        if w in ('-', '--'):
+            break
+        if w in SHELL_ARG_OPTS:
+            i += 1
+        elif not w.startswith('--'):
+            runs = runs or (w[0] == '-' and 'c' in w[1:])
+            if 'o' in w[1:] or 'O' in w[1:]:
+                if 'o' in w[1:] and words[i:i + 1] == ['pipefail']:
+                    pipefail = w[0] == '-'
+                i += 1
+    if not runs or i >= len(words):
+        return None
+    return list(tokens[:at - 1]), words[i], pipefail
+
+
+def splice_shell_bodies(segs, depth=0):
+    """``segs`` with each shell `-c` call replaced by its body, as a subshell.
+
+    A `-c` call exits with its body's status, so every rule here reads
+    `bash -c 'make check' | tail` as `(make check) | tail`. The body starts
+    from the pipefail the shell's own options give it, which a leading `set`
+    stands in for; it is joined by `&&` because a `;` would start the
+    statement `last_statement` reads.
+    """
+    out = []
+    for seg in segs:
+        found = shell_c_body(seg.tokens) if depth < MAX_SUBST_DEPTH else None
+        inner = shell_segments(found[1], depth + 1) if found else None
+        if not inner:
+            out.append(seg)
+            continue
+        prefix, _, pipefail = found
+        if prefix:
+            out.append(Seg(prefix, ('(',), seg.depth))
+        elif out:
+            out[-1] = out[-1]._replace(post_ops=out[-1].post_ops + ('(',))
+        level = seg.depth + 1
+        out.append(Seg(['set', '-o' if pipefail else '+o', 'pipefail'],
+                       ('&&',), level))
+        body = [s._replace(depth=s.depth + level) for s in inner]
+        body[-1] = body[-1]._replace(
+            post_ops=body[-1].post_ops + (')',) + seg.post_ops)
+        out.extend(body)
+    return out
+
+
+def shell_segments(text, depth=0):
+    """The Segs of ``text`` with its shell `-c` bodies spliced in, or None."""
+    tokens = tokenize(text)[0]
+    segs = split_segments(tokens) if tokens is not None else None
+    return splice_shell_bodies(segs, depth) if segs else segs
+
+
 # --- Registry ---------------------------------------------------------------
 
 # Flags that make an invocation a capability probe rather than a run: the tool
@@ -661,8 +738,9 @@ def pipefail_setting(words):
 
 
 def pipefail_walk(segs, initial=False):
-    """(per segment, at the end): whether pipefail is on when each segment runs,
-    and whether it is on after the last one.
+    """(per segment, at the end): whether pipefail is on when each segment runs
+    -- where its pipe runs, for one a pipe follows -- and whether it is on
+    after the last one.
 
     Read in order, so a `set` after a pipeline does nothing for it (Q148), and
     scoped to the subshell that ran it: `(set -o pipefail); make | tail` runs
@@ -706,7 +784,11 @@ def pipefail_walk(segs, initial=False):
                 if fname and touched:
                     funcs[fname] = value
         for op in seg.post_ops:
-            if op == '(':
+            if op in PIPE_OPS:
+                # A pipe after a `)` is the enclosing shell's, so what the
+                # group set inside does not reach it.
+                out[-1] = stack[-1]
+            elif op == '(':
                 parens.append(len(stack))
                 stack.append(stack[-1])
             elif op == ')' and len(stack) > 1:
@@ -1307,8 +1389,7 @@ def procsub_gate(bodies, segs, reg):
     for body in bodies:
         if '$?' in body:
             continue
-        tokens = tokenize(body)[0]
-        inner = split_segments(tokens) if tokens is not None else None
+        inner = shell_segments(body)
         if inner:
             gate = first_gate(inner, reg)
             if gate:
@@ -1365,8 +1446,7 @@ def operand_gate(cleaned, spans, bodies, states, reg):
         for k in held:
             if '$?' in bodies[k]:
                 continue
-            inner_tokens = tokenize(bodies[k])[0]
-            inner = split_segments(inner_tokens) if inner_tokens is not None else None
+            inner = shell_segments(bodies[k])
             if not inner:
                 continue
             chain = last_statement(inner)[0]
@@ -1569,6 +1649,9 @@ def decide(cmd, background, reg, scratch='', depth=0, pipefail=False):
     segs = split_segments(tokens)
     if segs is None:
         return ''
+    shells = [found for found in map(shell_c_body, (s.tokens for s in segs))
+              if found]
+    segs = splice_shell_bodies(segs, depth)
     if has_override(segs):
         return ''
 
@@ -1638,6 +1721,11 @@ def decide(cmd, background, reg, scratch='', depth=0, pipefail=False):
         if gate:
             return with_log_path(
                 '`' + truncate(gate) + '`' + SUBST_REASON, scratch)
+        # The splice above judges how a `-c` body's status leaves it; the body
+        # is also read as a command of its own, for what only its text shows:
+        # a `$PIPESTATUS`, a substitution, a sequence inside it.
+        bodies += [body for _, body, _ in shells]
+        states += [pipefail for _, _, pipefail in shells]
         for body, state in zip(bodies, states):
             reason = decide(body, False, reg, scratch, depth + 1, state)
             if reason:
