@@ -614,6 +614,7 @@ If the `version` or `gitCommitSha` still shows the old release, the update didn'
    A `cd` behind `&&` or `||` may not run either.
    Behind `&&` it holds for the commands joined to it by `&&`, since none of them runs unless the `cd` did, so `make && cd ../wt && git commit` is judged in `../wt`.
    Past that run, or behind `||`, bash may be in either tree, so the directory is unknown and no checkout stands in for it: `false && cd ../other; git commit` asks on any branch.
+   A `cd` that stays in the worktree it left is followed as before, since either way the command runs on the same branch.
 3. **Parse** each segment with `parse_invocation`: strip leading `NAME=VALUE` env prefixes (`GIT_AUTHOR_NAME=x git …`), command wrappers (`env`, `sudo`, `timeout`, `nice`, `nohup`, `command`, `stdbuf`, `setsid`, `time`, `exec`, with their own options), and program global options (`git -C path`, `-c k=v`) to find the `git`/`gh` subcommand and its arguments.
    Combined short flags (`git clean -fd`) are decomposed, and an abbreviated long option is written out the way git expands it (`git branch --forc` is `--force`; `git switch --forc` is ambiguous between `--force` and `--force-create`, so git refuses it and it is left as typed). cherry-pick and revert expand no abbreviation, so none is read there.
    A wrapped command gets every `ask` and `deny` the bare one would, but is never auto-approved: the wrapper can change the user or the environment, neither of which the classifier reads.

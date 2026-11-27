@@ -3555,6 +3555,18 @@ for c in "true && cd $GRP_MAIN; git commit -m x" \
   check "[and-or] from feat, $c -> ask" ask \
     "$(decision_for "$(bash_payload "$c")" "$GRP.feat")"
 done
+#     A `cd` that stays in the worktree it left lands on the same branch either
+#     way, so the commit is judged as if the `cd` ran, and allows.
+mkdir -p "$GRP.feat/sub"
+for c in 'true && cd sub && git status; git commit -m x' \
+         'false && cd .; git commit -m x' 'true || cd sub; git commit -m x'; do
+  check "[and-or] from feat, $c -> allow" allow \
+    "$(decision_for "$(bash_payload "$c")" "$GRP.feat")"
+done
+check "[and-or] from feat/sub, true && cd ..; git commit -> allow" allow \
+  "$(decision_for "$(bash_payload 'true && cd ..; git commit -m x')" "$GRP.feat/sub")"
+check "[and-or][dontAsk] from feat, true && cd sub; git commit -> allow" allow \
+  "$(decision_for "$(bash_mode 'true && cd sub; git commit -m x' dontAsk)" "$GRP.feat")"
 #     A `cd` the hook could not follow anyway keeps the `cd \$VAR` reading.
 check "[and-or] from feat, true && cd \"\$X\"; git commit -> none" none \
   "$(decision_for "$(bash_payload 'true && cd "$X"; git commit -m x')" "$GRP.feat")"

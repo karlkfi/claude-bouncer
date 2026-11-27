@@ -1760,14 +1760,17 @@ def segment_cwds(segments, tail, invs, seg_cwd, runs_funsub=holds_funsub):
     cwd, behind `&&` or `||` may not run (Q303). Behind `&&` it holds along
     the run of `&&` after it, since nothing there runs unless it did; past
     that run, or behind `||`, the cwd is blind: unknown, and bash may be in
-    either tree, so no directory is a fair place to read HEAD instead."""
-    frames, sure, joins, blind = [], [False], [], False
+    either tree, so no directory is a fair place to read HEAD instead. A `cd`
+    that stays in the worktree it left is followed as before: both trees are
+    one."""
+    frames, sure, joins, blind, roots = [], [False], [], False, {}
     flat, apart = compound_layout(segments, tail)
 
-    def behind(op, dest):
+    def behind(op, prior, dest):
         nonlocal blind
-        if dest is None:
-            return None
+        if dest is None or op is None or prior is not None \
+                and same_worktree(prior, dest, roots):
+            return dest
         if op == '&&':
             sure[-1] = True
         elif op == '||':
@@ -1787,7 +1790,7 @@ def segment_cwds(segments, tail, invs, seg_cwd, runs_funsub=holds_funsub):
             sure.pop()
             op = joins.pop()
             if cwd != top[1] and top[0] != '(' and not top[3]:
-                cwd = behind(op, cwd)
+                cwd = behind(op, top[1], cwd)
         return cwd
 
     for pos, at in enumerate(flat):
@@ -1810,7 +1813,7 @@ def segment_cwds(segments, tail, invs, seg_cwd, runs_funsub=holds_funsub):
             # arm would inherit a `cd` bash never ran there.
             if is_cd:
                 seg_cwd = (None if any(f[0] == 'case' for f in frames)
-                           else behind(joined_by(flat, pos), dest))
+                           else behind(joined_by(flat, pos), seg_cwd, dest))
 
 
 def ref_to_branch(ref, current):
