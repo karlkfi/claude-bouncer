@@ -3763,6 +3763,25 @@ check "[subst] feature: echo \"\$(cd <main> && commit)\" -> ask" ask \
 check "[subst] main: echo \"\$(cd <feature>)\"; echo \"\$(commit)\" -> ask" ask \
   "$(decision_for "$(bash_payload "echo \"\$(cd $SUB_FEAT)\"; echo \"\$(git commit -m x)\"")" "$SUB")"
 
+#     A process substitution's body runs as surely (Q420), in a subshell, so
+#     it is judged the same way. Quoted, bash leaves it literal text.
+for c in 'cat <(git commit -m x)' 'diff <(git push --force origin main) x' \
+         'tee >(git commit -m x) < f' 'echo x<(git commit -m x)' \
+         'cat <(echo "$(git commit -m x)")'; do
+  check "[procsub] on main: $c -> ask" ask \
+    "$(decision_for "$(bash_payload "$c")" "$SUB")"
+done
+for c in 'cat "<(git commit -m x)"' "cat '<(git commit -m x)'" 'cat <(git log -1)'; do
+  check "[procsub] on main: $c -> none" none \
+    "$(decision_for "$(bash_payload "$c")" "$SUB")"
+done
+check "[procsub] on the feature branch: cat <(git commit -m x) -> none" none \
+  "$(decision_for "$(bash_payload 'cat <(git commit -m x)')" "$SUB.feat")"
+check "[procsub] feature: cat <(cd <main> && commit) -> ask" ask \
+  "$(decision_for "$(bash_payload "cat <(cd $SUB_MAIN && git commit -m x)")" "$SUB.feat")"
+check "[procsub] main: cat <(cd <feature>); echo \"\$(commit)\" -> ask" ask \
+  "$(decision_for "$(bash_payload "cat <(cd $SUB_FEAT); echo \"\$(git commit -m x)\"")" "$SUB")"
+
 #     The break-glass does not reach into a body, as it does not into `-c`.
 printf 'dirty\n' > "$SUB.feat/file.txt"
 check "[subst][dontAsk] OVERRIDE echo \"\$(git reset --hard)\" dirty on feature -> deny" deny \
