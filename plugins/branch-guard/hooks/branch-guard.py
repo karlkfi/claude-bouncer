@@ -647,6 +647,8 @@ CD_SUBSTITUTIONS = frozenset({('git', 'rev-parse', '--show-toplevel'), ('pwd',)}
 # It runs its list in the current shell, so it is a command substitution that
 # can also move the cwd of everything after it (Q383).
 FUNSUB_RE = re.compile(r'\$\{(?:[ \t\n|]|$)')
+# The word `mask_funsubs` puts in a funsub's place, numbering its body.
+FUNSUB_MARK_RE = re.compile('\\$\\{\x1e(\\d+)\x1e\\}')
 
 # `git push` options that consume a separate following value token.
 PUSH_VALUE_OPTS = {'--repo', '-o', '--push-option', '--receive-pack', '--exec'}
@@ -1784,7 +1786,60 @@ def group_cwd(frames, flat, apart, pos, cwd):
 
 
 def holds_funsub(seg):
-    return any(FUNSUB_RE.search(t) for t in seg)
+    return any(FUNSUB_RE.search(t) or FUNSUB_MARK_RE.search(t) for t in seg)
+
+
+def mask_funsubs(text):
+    """`text` with each outermost funsub replaced by a `${…}` word numbering
+    its body, and the bodies. The lexer splits an unquoted funsub apart, so
+    this is what lets the cwd walk read one whole (Q427). A text already
+    holding the sentinel is left as it is, with no bodies."""
+    if '\x1e' in text:
+        return text, []
+    spans, flags = [], []
+    found = command_substitutions(text, spans=spans, funsubs=flags)
+    out, bodies, last = [], [], 0
+    for body, (start, end), funsub in zip(found, spans, flags):
+        if funsub:
+            out += [text[last:start], '${\x1e%d\x1e}' % len(bodies)]
+            bodies.append(body)
+            last = end
+    return ''.join(out) + text[last:], bodies
+
+
+def list_exit(text, cwd, depth):
+    """The cwd a funsub's list leaves the shell in, walked as the command
+    around it is, or None where that walk ends unknown."""
+    if cwd is None or depth >= MAX_BODY_DEPTH:
+        return None
+    masked, bodies = mask_funsubs(text)
+    try:
+        tokens = tokenize(masked + '\n:')
+    except ValueError:
+        return None
+    tail = []
+    segments = command_segments(tokens, tail)
+    invs = [parse_invocation(s) for s, _, _ in segments]
+    here = None
+    for _, here, _ in segment_cwds(segments, tail, invs, cwd,
+                                   funsub_exit=funsub_exits(bodies, depth + 1)):
+        pass
+    return here
+
+
+def funsub_exits(bodies, depth):
+    """For `segment_cwds`: the cwd a segment's numbered funsubs leave the
+    shell in, each walked from where the last one left it. A funsub
+    `mask_funsubs` did not number, such as one inside a `$( )`, leaves it
+    unknown."""
+    def exit_cwd(seg, cwd):
+        for t in seg:
+            if FUNSUB_RE.search(t):
+                return None
+            for k in FUNSUB_MARK_RE.findall(t):
+                cwd = list_exit(bodies[int(k)], cwd, depth)
+        return cwd
+    return exit_cwd
 
 
 def joined_by(flat, pos):
@@ -1811,20 +1866,23 @@ def ends_and_run(flat, pos):
     return True
 
 
-def segment_cwds(segments, tail, invs, seg_cwd, runs_funsub=holds_funsub):
+def segment_cwds(segments, tail, invs, seg_cwd, runs_funsub=holds_funsub,
+                 funsub_exit=lambda seg, cwd: None):
     """Each segment's index with the cwd it runs in, in source order, and
     whether that cwd is blind.
 
     A literal `cd` moves the cwd for everything after it, scoped the way bash
-    scopes it (Q302). A funsub runs in the current shell, so a `cd` in one
-    moves its caller too: after a segment `runs_funsub` names, the cwd is
-    unknown, as after a `cd $VAR` (Q383). A `cd`, or a `{ }` that moved the
-    cwd, behind `&&` or `||` may not run (Q303). Behind `&&` it holds along
-    the run of `&&` after it, since nothing there runs unless it did; past
-    that run, or behind `||`, the cwd is blind: unknown, and bash may be in
-    either tree, so no directory is a fair place to read HEAD instead. A `cd`
-    that stays in the worktree it left is followed as before: both trees are
-    one."""
+    scopes it (Q302). A funsub runs in the current shell, as its word is
+    expanded, so a `cd` in one moves its own segment and its caller too:
+    from a segment `runs_funsub` names, the cwd is where `funsub_exit` says
+    its funsubs left it, scoped as a `cd` there would be, and unknown where
+    that is None, as after a `cd $VAR` (Q383, Q427). A `cd`, or a `{ }` that
+    moved the cwd, behind `&&` or `||` may not run (Q303). Behind `&&` it
+    holds along the run of `&&` after it, since nothing there runs unless it
+    did; past that run, or behind `||`, the cwd is blind: unknown, and bash
+    may be in either tree, so no directory is a fair place to read HEAD
+    instead. A `cd` that stays in the worktree it left is followed as before:
+    both trees are one."""
     frames, sure, joins, blind, roots = [], [False], [], False, {}
     flat, apart = compound_layout(segments, tail)
 
@@ -1864,15 +1922,18 @@ def segment_cwds(segments, tail, invs, seg_cwd, runs_funsub=holds_funsub):
         seg = segments[at][0]
         if loop_head(seg):
             seg_cwd = step(pos, seg_cwd)
-        yield at, seg_cwd, blind and seg_cwd is None
+        moved = runs_funsub(seg)
+        own = funsub_exit(seg, seg_cwd) if moved else seg_cwd
+        yield at, own, blind and own is None
         if pos in apart:
             continue
-        if runs_funsub(seg):
-            seg_cwd = None
-        elif invs[at] is None:
+        # A `case` arm ends at a `;;` no mark records, so the next arm would
+        # inherit a `cd` bash never ran there.
+        if moved:
+            seg_cwd = (None if own is None or any(f[0] == 'case' for f in frames)
+                       else behind(joined_by(flat, pos), seg_cwd, own))
+        if invs[at] is None:
             is_cd, dest = cd_destination(seg, seg_cwd)
-            # A `case` arm ends at a `;;` no mark records, so the next
-            # arm would inherit a `cd` bash never ran there.
             if is_cd:
                 seg_cwd = (None if any(f[0] == 'case' for f in frames)
                            else behind(joined_by(flat, pos), seg_cwd, dest))
@@ -3685,8 +3746,9 @@ def judged_body(body, env, seg_cwd, cwd, head_base, ctx, depth):
     if seg_cwd is not None:
         head_base = seg_cwd
     text = strip_heredocs(body)
+    masked, funsubs = mask_funsubs(text)
     try:
-        tokens = tokenize(text)
+        tokens = tokenize(masked)
     except ValueError:
         return []
     tail = []
@@ -3696,7 +3758,7 @@ def judged_body(body, env, seg_cwd, cwd, head_base, ctx, depth):
         if inv:
             inv['env'] = {**env, **inv['env']}
     inner = judge_segments(segments, tail, invs, seg_cwd, cwd, head_base, ctx,
-                           depth)
+                           depth, funsubs=funsubs)
     inner += substitution_verdicts(text, seg_cwd, cwd, head_base, ctx, depth)
     return [(v, r, False) for v, r, _ in inner
             if v in ('ask', 'ask-shared') or v in DENY_ROUTES]
@@ -3762,16 +3824,28 @@ def substitution_cwds(text, spans, funsubs, seg_cwd):
     def held(seg):
         return [int(k) for t in seg for k in MARK_RE.findall(t)]
 
+    # A segment's substitutions expand left to right, so each starts where
+    # the funsubs before it in the segment left the shell (Q427).
+    starts = {}
+
+    def exit_cwd(seg, cwd):
+        for k in held(seg):
+            starts[k] = cwd
+            if funsubs[k]:
+                start, end = spans[k]
+                cwd = list_exit(command_substitutions(text[start:end])[0], cwd, 0)
+        return cwd
+
     for at, here, blind in segment_cwds(
             segments, tail, invs, seg_cwd,
-            lambda seg: any(funsubs[k] for k in held(seg))):
+            lambda seg: any(funsubs[k] for k in held(seg)), exit_cwd):
         for k in held(segments[at][0]):
-            places[k] = (here, blind)
+            places[k] = (starts.get(k, here), blind)
     return places
 
 
 def judge_segments(segments, tail, invs, seg_cwd, cwd, head_base, ctx, depth=0,
-                   bound=frozenset()):
+                   bound=frozenset(), funsubs=()):
     """[(verdict, reason, overridable)] for each segment, in source order.
 
     The working directory is a per-segment fact, not a per-command one: a
@@ -3783,9 +3857,12 @@ def judge_segments(segments, tail, invs, seg_cwd, cwd, head_base, ctx, depth=0,
     resolve, `probe` goes false and the probes stand down. `cwd` is the tree
     the command is judged against, and `head_base` where HEAD is read after a
     `cd` the hook couldn't follow — None where no directory is a fair guess.
-    `bound` holds the assignments `bind_literal_vars` already substituted."""
+    `bound` holds the assignments `bind_literal_vars` already substituted,
+    and `funsubs` the bodies `mask_funsubs` numbered in `segments`."""
     verdicts = []
-    for at, seg_cwd, blind in segment_cwds(segments, tail, invs, seg_cwd):
+    for at, seg_cwd, blind in segment_cwds(
+            segments, tail, invs, seg_cwd,
+            funsub_exit=funsub_exits(funsubs, depth)):
         (seg, writes, _), inv = segments[at], invs[at]
         if at in bound:
             verdicts.append(('benign', None, False))
@@ -3874,12 +3951,16 @@ def main():
         # parsed as command segments — a large heredoc would otherwise split
         # into foreign segments and defer an all-git chain (see strip_heredocs).
         cmd = strip_heredocs(cmd)
+        # The segments read each funsub as one word, so the cwd walk can
+        # follow it; the raw tokens still show it to `has_shell_substitution`.
+        masked, funsubs = mask_funsubs(cmd)
         try:
             tokens = tokenize(cmd)
+            masked_tokens = tokenize(masked)
         except ValueError:
             return                                 # unbalanced quotes -> defer
         tail = []
-        segments, bound = bind_literal_vars(cmd, command_segments(tokens, tail), tail)
+        segments, bound = bind_literal_vars(cmd, command_segments(masked_tokens, tail), tail)
         invs = [parse_invocation(seg) for seg, _, _ in segments]
         cwd = data.get('cwd') or os.getcwd()
         seen = set()
@@ -3892,7 +3973,7 @@ def main():
             return                                 # no git/gh command -> defer
         note_branch_creations(data)
         verdicts = judge_segments(segments, tail, invs, cwd, cwd, cwd, ctx,
-                                  bound=bound) + inner
+                                  bound=bound, funsubs=funsubs) + inner
 
         # A protective ask wins over everything (and becomes deny when no human
         # is present). A shared one — the cause is a protected branch — is

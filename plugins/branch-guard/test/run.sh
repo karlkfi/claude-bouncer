@@ -3863,6 +3863,33 @@ check "[procsub] main: cat <(cd <feature>); echo \"\$(commit)\" -> ask" ask \
 printf 'dirty\n' > "$SUB.feat/file.txt"
 check "[subst][dontAsk] OVERRIDE echo \"\$(git reset --hard)\" dirty on feature -> deny" deny \
   "$(decision_for "$(bash_mode 'BRANCH_GUARD_OVERRIDE=r echo "$(git reset --hard)"' dontAsk)" "$SUB.feat")"
+
+#     A funsub runs in the current shell as its word expands (Q427), so a
+#     literal `cd` in one moves its own segment and everything after it, the
+#     way the same `cd` inside `{ }` does. Forked, in a pipeline stage or a
+#     `$( )`, it moves nothing; one the body's own walk cannot follow leaves
+#     the session's branch as the fallback, as before.
+check "[funsub] control: feature: { cd <main>; }; git commit -> ask" ask \
+  "$(decision_for "$(bash_payload "{ cd $SUB_MAIN; }; git commit -m x")" "$SUB.feat")"
+for c in "echo \${ cd $SUB_MAIN; }; git commit -m x" "echo \"\${ cd $SUB_MAIN; }\"; git commit -m x" \
+         "echo \${| cd $SUB_MAIN; REPLY=1; }; git commit -m x" "x=\${ cd $SUB_MAIN; pwd; }; git commit -m x" \
+         "git commit -m \"\${ cd $SUB_MAIN; }\"" "true && echo \${ cd $SUB_MAIN; }; git commit -m x" \
+         "echo \${ cd $SUB_MAIN; }; echo \"\$(git commit -m x)\"" \
+         "echo \"\${ cd $SUB_MAIN; } \$(git commit -m x)\""; do
+  check "[funsub] feature: $c -> ask" ask \
+    "$(decision_for "$(bash_payload "$c")" "$SUB.feat")"
+done
+for c in "echo \${ cd $SUB_MAIN; } | cat; git commit -m x" \
+         "echo \"\$(echo \${ cd $SUB_MAIN; })\"; git commit -m x" \
+         "echo \"\$(git commit -m x) \${ cd $SUB_MAIN; }\"" 'echo ${ cd "$X"; }; git commit -m x' \
+         'echo ${ cd .; }; git commit -m x'; do
+  check "[funsub] feature: $c -> none" none \
+    "$(decision_for "$(bash_payload "$c")" "$SUB.feat")"
+done
+check "[funsub] main: echo \${ cd <feature>; }; git commit -> none" none \
+  "$(decision_for "$(bash_payload "echo \${ cd $SUB_FEAT; }; git commit -m x")" "$SUB")"
+check "[funsub] main: echo \${ cd \"\$X\"; }; git commit -> ask" ask \
+  "$(decision_for "$(bash_payload 'echo ${ cd "$X"; }; git commit -m x')" "$SUB")"
 rm -rf "$SUB" "$SUB.feat"
 
 # The friction report's own suite, run here so every caller of this harness
