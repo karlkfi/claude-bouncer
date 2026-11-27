@@ -826,6 +826,12 @@ class CommandSubstitutionDecisionTests(unittest.TestCase):
             with self.subTest(shape=shape):
                 self.assertEqual(self.decide(shape % self.K), "deny")
 
+    def test_a_substitution_in_arithmetic_is_judged(self):
+        # bash runs it, and a quote in arithmetic is text (Q362).
+        for shape in ('echo "$(( $(%s) ))"', "echo $(( '$(%s)' ))"):
+            with self.subTest(shape=shape):
+                self.assertEqual(self.decide(shape % self.K), "deny")
+
     def test_single_quoted_substitution_stays_literal(self):
         for shape in ("echo '`%s`'", "echo '$(%s)'", "echo '\"$(%s)\"'",
                       'echo "\\$(%s)"', 'echo hi # "$(%s)"'):

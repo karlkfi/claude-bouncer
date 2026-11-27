@@ -1044,6 +1044,22 @@ CASES = [
      "exit status is the filter's"),
     ('a hash glued to a word keeps it arithmetic',
      'echo "$(( 1# ))\n) ; make check | tail)"', False, False, ''),
+    # Q362: a `$((` body expands, so a substitution in one runs, and a quote
+    # there is text.
+    ('a gate piped in a substitution in arithmetic',
+     'echo $(( $(make check | tail -1 | wc -c) ))', False, True,
+     "exit status is the filter's"),
+    ('the same, in double quotes',
+     'echo "$(( $(make check | tail -1 | wc -c) ))"', False, True,
+     "exit status is the filter's"),
+    ('the same, in single quotes inside the arithmetic',
+     "echo $(( '$(make check | tail -1 | wc -c)' ))", False, True,
+     "exit status is the filter's"),
+    ('the same, assigned',
+     'x=$(( $(make check | tail -1 | wc -c) + 1 ))', False, True,
+     "exit status is the filter's"),
+    ('an escaped substitution in arithmetic runs nothing',
+     'echo $(( \\$(make check | tail -1 | wc -c) ))', False, False, ''),
 
     # --- A gate sequenced before a state change with `;` ---------------------
     ('check then push', 'make check; git push', False, True,

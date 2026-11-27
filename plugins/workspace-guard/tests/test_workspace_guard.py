@@ -4857,6 +4857,23 @@ class QuotedSubstBodyEndToEndTests(unittest.TestCase):
                 self.assertIsNotNone(out)
                 self.assertIn(out["hookSpecificOutput"]["permissionDecision"],
                               ("ask", "deny"))
+    def test_a_substitution_in_arithmetic_is_judged(self):
+        # bash runs it, and a quote in arithmetic is text (Q362).
+        for shape in ('echo "$(( $(rm %s) ))"', "echo $(( '$(rm %s)' ))"):
+            with self.subTest(shape=shape):
+                self._decision(shape % "/etc/q362-fake-target", "ask")
+
+    def test_a_quoted_backslash_newline_in_arithmetic_braces_is_judged(self):
+        # bash keeps it in a `${…}` word, so `<root>\⏎/x` is a sibling of the
+        # root; where `\` separates paths it is inside, and allowed.
+        if os.sep != "/":
+            return
+        root = self.workspace
+        out = run_hook("echo \"$(( ${x:-$(( 1 # ))\n) ; rm '%s\\\n/q384-x'; "
+                       "echo 1)} ))\"" % root, root, project_dir=root)
+        self.assertIsNotNone(out)
+        self.assertIn(out["hookSpecificOutput"]["permissionDecision"],
+                      ("ask", "deny"))
 
 
 class SubstitutionResumesCommandEndToEndTests(unittest.TestCase):

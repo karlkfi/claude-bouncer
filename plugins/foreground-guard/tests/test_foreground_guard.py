@@ -447,6 +447,9 @@ class SubstitutionTests(unittest.TestCase):
         'cat <<EOF\n$(( 1 # ))\n) ; tail -f log.txt)\nEOF',
         'echo "$(( 1 # \\\n))\n) ; tail -f log.txt)"',
         'echo "$(( 1 # ))\n) ; tail \'-\\\nf\' log.txt)"',   # bash drops the `\⏎`
+        # A `$((` body expands, and a quote in it is text (Q362).
+        'echo "$(( $(tail -f log.txt) ))"',
+        "echo $(( '$(tail -f log.txt)' ))",
         # bash 5.3's funsub substitutes a list too (Q357), and a heredoc in a
         # body ends before the commands after it.
         'echo ${ sleep 600; }',
