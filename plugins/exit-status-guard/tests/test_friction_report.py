@@ -73,16 +73,20 @@ class TestGateExtraction(unittest.TestCase):
         self.assertEqual('make check', m.group(1))
 
     def test_the_gate_resolves_for_every_rule(self):
-        """One rule builds its reason without `with_log_path`, so all four are
+        """One rule builds its reason without `with_log_path`, so every rule is
         exercised rather than the piped one standing in for the set."""
-        for name, cmd, bg in (
-                ('piped', 'make check | tail -5', False),
-                ('background', 'make check > c.log 2>&1; echo "EXIT=$?"', True),
-                ('sequenced', 'make check; git push', False)):
+        for name, cmd, bg, gate in (
+                ('piped', 'make check | tail -5', False, 'make check'),
+                ('gh api', 'gh api -X POST repos/o/r/issues | jq .', False,
+                 'gh api -X POST repos/o/r/issues'),
+                ('background', 'make check > c.log 2>&1; echo "EXIT=$?"', True,
+                 'make check'),
+                ('sequenced', 'make check; git push', False, 'make check'),
+                ('procsub', 'tail <(make check)', False, 'make check')):
             with self.subTest(name):
                 m = fr.GATE_RE.match(hook_reason(cmd, bg))
                 self.assertIsNotNone(m, 'no gate in the %s reason' % name)
-                self.assertEqual('make check', m.group(1))
+                self.assertEqual(gate, m.group(1))
 
     def test_a_reason_recorded_before_the_prefix_still_resolves(self):
         """Transcripts are historical: 1.x and 2.0 denials open with the gate."""
