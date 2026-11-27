@@ -4176,9 +4176,8 @@ def build_reason(offenders, scratch_hint='', override=None, prefixable=False):
             "Runtime-expanded arg(s) bash resolves but the hook can't: "
             + ", ".join(sorted(set(buckets['expand'])))
             + ". Fix: if this lands inside the project root, write the literal "
-            "path (drop the $VAR / $(...) / `...` / leading ~), or assign the variable "
-            "a plain literal earlier in the same command (VAR=./path; ...) so "
-            "the hook can resolve it; otherwise use the Read/Grep tools.")
+            "path, one command per call (drop the $VAR / $(...) / `...` / "
+            "leading ~); otherwise use the Read/Grep tools.")
     if buckets['untracked']:
         hints.append(
             "Relative path(s) after an untracked cd: "
@@ -4205,9 +4204,7 @@ def build_reason(offenders, scratch_hint='', override=None, prefixable=False):
             + ", ".join(sorted(set(buckets['sedexpand'])))
             + ". Fix: a $(...), a `...`, a ${...} operator, $1 or $_ in a sed "
             "script can add a w or r command that names a file. Write the "
-            "script literally, or use a plain $VAR set to a literal earlier in "
-            "the same command (VAR=value; ...) so the hook can read the script "
-            "bash builds.")
+            "script literally, one command per call.")
     if buckets['awktarget']:
         hints.append(
             "awk program opens a file the hook cannot name: "
