@@ -1150,6 +1150,69 @@ class VariableExpansionDecisionTests(unittest.TestCase):
         self.assertEqual(run_hook(
             "C=gke_acme_prod-us; B=\"$C\"; " + k % '$B')[0], "deny")
 
+    # --- Q387: bash exports a name, not a value ------------------------------
+    # bash 5.3.15 under `env -i`, with `echo` for kubectl, prints `p` in the
+    # child for `export C=k; C=p`, `C=p; export C`, `export C; C=p`,
+    # `declare -x C; C=p`, `set -a; C=p`, `set -o allexport; C=p` and
+    # `set -a; eval C=p`, and `[]` for `declare C=p`, `readonly C=p`,
+    # `export -n C=p`, `export C=k; declare +x C=p`, `set -a; set +a; C=p`,
+    # `( set -a ); C=p` and `set -- -a; C=p`.
+
+    K387 = "bash -c 'kubectl --context=$C delete pod x'"
+
+    def test_a_name_exported_earlier_reaches_the_child_with_its_new_value(self):
+        p = "C=gke_acme_prod-us; "
+        for cmd in ("export C=kind-ci; " + p + self.K387,
+                    "export C=kind-ci; B='$C'; " + p +
+                    'bash -c "kubectl --context=$B delete pod x"',
+                    "export C=kind-ci; true && " + p + self.K387,
+                    p + "export C; " + self.K387,
+                    "export C; " + p + self.K387,
+                    "declare -x C; " + p + self.K387,
+                    "set -a; " + p + self.K387,
+                    "set -o allexport; " + p + self.K387,
+                    "set -eo allexport; " + p + self.K387,
+                    "set -a; eval " + p + self.K387,
+                    # The attribute may be set, so the value may reach it.
+                    "true || set -a; " + p + self.K387,
+                    "set $X; " + p + self.K387,
+                    # `+x` comes off before the value goes in, and `set -a`
+                    # puts it back on.
+                    "set -a; declare +x " + p + self.K387,
+                    "set -a; typeset +x " + p + self.K387,
+                    "true || set -a; declare +x " + p + self.K387,
+                    "set -a; export C=kind-ci; declare +x C; " + p + self.K387,
+                    "export C=kind-ci; f(){ local " + p + self.K387 + "; }; f"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(run_hook(cmd)[0], "deny")
+
+    def test_an_exported_name_reassigned_to_nonprod_defers(self):
+        for cmd in ("export C=gke_acme_prod-us; C=kind-ci; " + self.K387,
+                    "export C; C=kind-ci; " + self.K387,
+                    "declare -x C=kind-ci; " + self.K387,
+                    "set -a; C=kind-ci; " + self.K387):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(run_hook(cmd)[0])
+
+    def test_a_name_without_the_attribute_does_not_reach_the_child(self):
+        # The child reads an empty `--context=`, which is the current context.
+        k = "C=kind-ci; " + self.K387
+        for cmd in ("declare " + k, "typeset " + k, "readonly " + k,
+                    "f(){ local " + k + "; }; f",
+                    "export -n " + k,
+                    "set -a; export -n " + k,
+                    "export C=kind-ci; export -n C; " + self.K387,
+                    "export C=gke_acme_prod-us; declare +x " + k,
+                    "export C=gke_acme_prod-us; unset C; " + k,
+                    "set -a; set +a; " + k,
+                    "set -a; set +o allexport; " + k,
+                    "( set -a ); " + k,
+                    "set -- -a; " + k,
+                    "true || set -a; " + k,
+                    "if x; then set -a; fi; " + k):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(run_hook(cmd)[0], "ask")
+
     # --- Q321: a prefix is applied after its command's words expand ---------
     # bash 5.3.15: `CTX=p /bin/echo "[$CTX]"` prints `[]`, and `[q]` after
     # `CTX=q`. A double-quoted `bash -c`, `eval` or `env -S` string expands
