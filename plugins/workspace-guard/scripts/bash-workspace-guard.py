@@ -2359,6 +2359,21 @@ def _scan_for_command(tokens):
     return []
 
 
+def strip_keywords(tokens):
+    """`strip_sh_keywords`, except that a `time` the strip stops behind on a
+    word starting with `-` goes back to the wrapper peel (Q319). bash reads
+    `time -p -p cat f` as the keyword running `-p`, but under `--posix` and in
+    dash `time` before an option is `/usr/bin/time`, which runs `cat`."""
+    body = strip_sh_keywords(tokens)
+    if body and body[0].startswith('-'):
+        j = len(tokens) - len(body)
+        while j and tokens[j - 1] in ('-p', '--'):
+            j -= 1
+        if j and tokens[j - 1] == 'time' and is_reserved_word(tokens[j - 1]):
+            return tokens[j - 1:]
+    return body
+
+
 def peel_wrappers(tokens):
     """The command a group runs once its wrappers are peeled, as a
     :data:`WrapperPeel`.
@@ -6130,7 +6145,7 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
         # letting the `cd` behind it apply. Deciding on `g`, which still
         # carries the record, is also closer to bash: it settles what a word IS
         # before expansion, keywords included.
-        head = len(g) - len(strip_env_prefix(strip_sh_keywords(g)))
+        head = len(g) - len(strip_env_prefix(strip_keywords(g)))
         g = sub_g[head:]
         if not g: continue                        # keyword/env-only or redirect-only group
         # Judge the command a wrapper runs rather than the wrapper (Q219).
