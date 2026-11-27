@@ -1576,20 +1576,31 @@ OVERRIDE_HINT = (
     " If the status genuinely does not matter here, re-run prefixed with "
     + OVERRIDE_VAR + "=<reason>." + OVERRIDE_TAIL)
 
+# The rewrite the pipe, $PIPESTATUS and process-substitution reasons hand back
+# is one statement whose status is the command's. Claude Code reports that
+# status with the result, so an `echo "EXIT=$?"` after it adds nothing but a
+# second statement, which the permission matcher cannot analyse and so prompts
+# for outside auto mode.
+SINGLE_STATEMENT_NOTE = (
+    " Claude Code reports that call's exit status with its result, so it "
+    "needs no `echo $?` after it.")
+
 PIPESTATUS_REASON = (
     "This reads $PIPESTATUS to recover a stage's status from a pipeline, "
     "which is not portable -- the array is a bash feature, and under a shell "
     "without it the read expands to empty, so the test against it reads as "
-    "success whatever the pipeline did. Redirect and read the status "
-    'directly: <MKDIR>cmd > <LOG> 2>&1; echo "EXIT=$?".' + OVERRIDE_HINT)
+    "success whatever the pipeline did. Redirect instead, so the call's own "
+    "status is the command's: `<MKDIR>cmd > <LOG> 2>&1`, then read <LOG> in a "
+    "separate call." + SINGLE_STATEMENT_NOTE + OVERRIDE_HINT)
 
 PIPED_REASON = (
     " is piped into a filter, so this call's exit status is the filter's, not "
     "the gate's -- a failure reads exactly like a pass, and a pipeline's "
-    "per-stage status is not portably recoverable. Redirect instead, then "
-    "reconcile status against output: "
-    "<MKDIR>cmd > <LOG> 2>&1; echo \"EXIT=$?\"; "
-    "grep -E 'FAILED|Error [0-9]|^make:' <LOG>." + OVERRIDE_HINT)
+    "per-stage status is not portably recoverable. Redirect instead, so the "
+    "call's status is the gate's: `<MKDIR>cmd > <LOG> 2>&1`, then reconcile "
+    "status against output in a separate call: "
+    "`grep -E 'FAILED|Error [0-9]|^make:' <LOG>`." + SINGLE_STATEMENT_NOTE
+    + OVERRIDE_HINT)
 
 # `gh api` filters its own response, and of the `gh` gates it is the only one
 # with `--jq`, so the rewrite that keeps the status and needs no pipe comes
@@ -1600,8 +1611,8 @@ GH_API_PIPED_REASON = (
     "`--jq` (`-q`) instead, which keeps gh's exit status: "
     "gh api <endpoint> ... --jq '<filter>'. Where the filter is not jq, or "
     "the call passes `--slurp`, which gh refuses beside `--jq`, redirect and "
-    "read the log in a separate call: "
-    "<MKDIR>cmd > <LOG> 2>&1; echo \"EXIT=$?\"." + OVERRIDE_HINT)
+    "read <LOG> in a separate call: `<MKDIR>cmd > <LOG> 2>&1`."
+    + SINGLE_STATEMENT_NOTE + OVERRIDE_HINT)
 
 LOST_STATUS_REASON = (
     " runs in the background, but this call's exit status is its LAST "
@@ -1614,8 +1625,8 @@ PROCSUB_REASON = (
     " runs inside a process substitution, `<(…)` or `>(…)`, whose exit status "
     "the shell never reports -- the command around it reads a stream that "
     "ended, so a failure reads exactly like a pass. Run it on its own, then "
-    'read <LOG> in a separate call: <MKDIR>cmd > <LOG> 2>&1; echo "EXIT=$?".'
-    + OVERRIDE_HINT)
+    "read <LOG> in a separate call: `<MKDIR>cmd > <LOG> 2>&1`."
+    + SINGLE_STATEMENT_NOTE + OVERRIDE_HINT)
 
 SUBST_REASON = (
     " runs in a command substitution that is an argument of another command, "

@@ -2006,7 +2006,8 @@ class TestSuggestedLogPath(unittest.TestCase):
                ('make check > c.log 2>&1; echo "EXIT=$?"', True),
                ('echo $PIPESTATUS', False),
                ('make check; git push', False),
-               ('gh api -X POST repos/o/r/issues | jq .', False))
+               ('gh api -X POST repos/o/r/issues | jq .', False),
+               ('tail <(make check)', False))
 
     @classmethod
     def setUpClass(cls):
@@ -2015,7 +2016,7 @@ class TestSuggestedLogPath(unittest.TestCase):
     def test_every_template_carries_both_placeholders(self):
         """A template that loses one names no path, or names one uncreated."""
         for name in ('PIPESTATUS_REASON', 'PIPED_REASON', 'GH_API_PIPED_REASON',
-                     'LOST_STATUS_REASON', 'SEQUENCED_REASON',
+                     'LOST_STATUS_REASON', 'PROCSUB_REASON', 'SEQUENCED_REASON',
                      'SEQUENCED_NEWLINE_REASON'):
             with self.subTest(name):
                 template = getattr(pg, name)
@@ -2067,6 +2068,50 @@ class TestGhApiRewrite(unittest.TestCase):
         reason = pg.decide('gh pr create --fill | tail -1', False, self.reg)
         self.assertIn('FAILED', reason)
         self.assertNotIn('--jq', reason)
+
+
+class TestSingleStatementRewrite(unittest.TestCase):
+    """The pipe, $PIPESTATUS and process-substitution reasons hand back one
+    statement. Claude Code reports its status already, and an `echo "EXIT=$?"`
+    after it is a second statement the permission matcher prompts for outside
+    auto mode (Q431)."""
+
+    DENIALS = (('PIPED_REASON', 'make check | tail -5'),
+               ('PIPESTATUS_REASON', 'echo $PIPESTATUS'),
+               ('GH_API_PIPED_REASON', 'gh api -X POST repos/o/r/issues | jq .'),
+               ('PROCSUB_REASON', 'tail <(make check)'))
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = shipped_registry()
+
+    def test_the_rewrite_is_the_redirect_alone(self):
+        for name, cmd in self.DENIALS:
+            with self.subTest(name):
+                reason = pg.decide(cmd, False, self.reg, '/scratch')
+                self.assertIn('`cmd > /scratch/out.log 2>&1`', reason)
+                self.assertIn('in a separate call', reason)
+                self.assertNotIn('EXIT=', reason)
+
+    def test_the_piped_log_read_is_a_call_of_its_own(self):
+        reason = pg.decide('make check | tail -5', False, self.reg, '/scratch')
+        self.assertIn("in a separate call: `grep -E 'FAILED|Error [0-9]|^make:' "
+                      "/scratch/out.log`", reason)
+
+    def test_the_rewrite_is_not_denied_in_either_mode(self):
+        """A pipe is denied foreground or background, so its rewrite has to
+        survive both; the old one ended in an echo the background rule denies."""
+        for background in (False, True):
+            with self.subTest(background=background):
+                self.assertEqual('', pg.decide(
+                    'make check > /scratch/out.log 2>&1', background, self.reg,
+                    '/scratch'))
+
+    def test_the_captures_that_carry_a_status_stay(self):
+        """A backgrounded call's notification reports its last statement, and
+        a substitution's status is gone unless read on the next one."""
+        self.assertIn('rc=$?; echo "EXIT=$rc"; exit $rc', pg.LOST_STATUS_REASON)
+        self.assertIn('out=$(cmd); rc=$?;', pg.SUBST_REASON)
 
 
 class TestScratchDir(unittest.TestCase):

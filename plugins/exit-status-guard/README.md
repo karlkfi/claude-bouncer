@@ -54,11 +54,18 @@ go test ./... | grep FAIL       # denied
 (cd sub && cargo test) | head   # denied — the subshell's status is cargo's
 ```
 
-The fix is to redirect, then reconcile status against output separately:
+The fix is to redirect, so the call's exit status is the gate's, then reconcile status against output in a separate call:
 
 ```bash
-make check > <scratchpad>/check.log 2>&1; echo "EXIT=$?"; grep -E 'FAILED|Error' <scratchpad>/check.log
+make check > <scratchpad>/check.log 2>&1
 ```
+
+```bash
+grep -E 'FAILED|Error' <scratchpad>/check.log
+```
+
+Claude Code already reports the first call's exit status with its result, so nothing needs to `echo $?` after it.
+A second statement there is one Claude Code's permission matcher cannot analyse, so outside auto mode it can turn a command the permission rules allow into a prompt.
 
 `<scratchpad>` is the per-session scratchpad directory Claude Code creates under `/tmp/claude-<uid>/`.
 The deny message resolves it to a literal path, so the rewrite is copy-pasteable and the redirect cannot fail before the gate runs — a build-output directory like `tmp/` is commonly gitignored, and so absent from a fresh checkout.
@@ -232,7 +239,7 @@ After installing with either method:
 - **Won't fire where plugin `PreToolUse` hooks don't run.** Claude Cowork and Claude Desktop's *native* assistant don't run them yet, so the guard never fires in those ([anthropics/claude-code#45514](https://github.com/anthropics/claude-code/issues/45514)).
 
 To verify, ask Claude to run `make check | tail -5` — the call should be denied with a reason naming the filter.
-Then ask it to run `make check > <scratchpad>/c.log 2>&1; echo "EXIT=$?"` in the foreground; that is the documented correct form and should run without comment.
+Then ask it to run `make check > <scratchpad>/c.log 2>&1` in the foreground; that is the documented correct form and should run without comment.
 
 ## Upgrade
 
