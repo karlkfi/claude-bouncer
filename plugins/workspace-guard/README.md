@@ -821,7 +821,9 @@ flowing, avoid triggering it:
   even when they'd resolve in-root. (A bare `~`/`~/…` *is* expanded to your home
   directory, so home-relative paths inside the root are fine. A variable assigned
   a plain literal path *earlier in the same command string* — `f=./config/app.json; cat $f`
-  — is also resolved and doesn't prompt, as is a `for f in a b c` loop over a
+  — is also resolved, though Claude Code's permission matcher sends that
+  multi-statement shape to a prompt more often than any other, so prefer the
+  literal path. So is a `for f in a b c` loop over a
   literal list, a `for f in docs/*.md` loop over an in-root glob, and a nested
   loop whose inner list is built from the outer variable
   (`for d in docs/*; do for f in "$d"/*.md`). A file operand or
@@ -1151,7 +1153,9 @@ When a file argument **resolves** to a path outside the project root, the hook k
 
 When the hook **cannot read the argument at all** — `cat $TMPDIR/out.log`, `grep foo $f`, `cat ~someuser/notes.md`, or a relative path after a `cd` it couldn't follow — it has no idea where the command lands.
 Nor does the operator staring at the prompt, who is shown the same unexpanded `$f` the agent wrote.
-Prompting there spends a person's attention and returns no information, so the hook denies and puts the fix in the reason: write the literal path, bind the variable to a literal earlier in the same command, or use the Read/Grep tools.
+Prompting there spends a person's attention and returns no information, so the hook denies and puts the fix in the reason: write the literal path, one command per call, or use the Read/Grep tools.
+It does not suggest binding the variable to a literal earlier in the same command, although the hook resolves that shape.
+Claude Code's own permission matcher often gives up on a command that opens with an assignment and chains `;`, and in default and acceptEdits modes a command it cannot match goes to a permission prompt, so that advice traded a deny the model fixes in seconds for a prompt a person has to answer.
 The agent applies that in its own loop and nobody is interrupted.
 
 This does not move the boundary — it moves the question to where it can be answered.

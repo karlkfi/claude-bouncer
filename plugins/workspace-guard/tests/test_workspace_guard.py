@@ -2021,6 +2021,14 @@ class HookEndToEndTests(unittest.TestCase):
         self.assertTrue(reason.startswith("workspace-guard: "), reason)
         self.assertIn("$TMPDIR/out.log", reason)
         self.assertIn("write the literal path", reason)
+        # `VAR=./path; cmd $VAR` resolves here, but auto and acceptEdits send
+        # a leading assignment chained with `;` to a permission prompt.
+        self.assertNotIn("VAR=", reason)
+
+    def test_sed_script_from_expansion_does_not_suggest_an_assignment(self):
+        out = self._decision("sed \"$(cat in.txt)\" in.txt", "deny")
+        self.assertNotIn("VAR=",
+                         out["hookSpecificOutput"]["permissionDecisionReason"])
 
     def test_untracked_relative_denies_with_the_rewrite(self):
         out = self._decision("cd $HOME && cat notes.md", "deny")
