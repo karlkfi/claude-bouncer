@@ -1069,12 +1069,16 @@ def _expanded_by_parent(names, words, texts):
     """The `names` a word not quoted singly references live, as `$NAME` rather
     than `\\$NAME`. The shell expands those before a prefix assignment applies,
     so they take its value and not the prefix's (Q321)."""
-    def live(n, s):
-        return re.search(r'(?<!\\)\$(?:\{%s\}|%s(?![A-Za-z0-9_]))' % (n, n), s)
+    def ref(n, s, before=''):
+        return re.search(before + r'\$(?:\{%s\}|%s(?![A-Za-z0-9_]))' % (n, n),
+                         s)
+    # In the text an odd run of backslashes escapes the `$`. The lexer has
+    # already spent those, so a backslash left in a word is literal.
+    even = r'(?<!\\)(?:\\\\)*'
     return {n for n in names
-            if any(live(n, str(w)) for w in words
+            if any(ref(n, str(w)) for w in words
                    if "'" not in getattr(w, 'quotes', frozenset("'")))
-            and any(live(n, s) for s in texts)}
+            and any(ref(n, s, even) for s in texts)}
 
 
 def _single_quoted_in_bodies(value):
@@ -3889,17 +3893,23 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
                 quotes = getattr(body, 'quotes', frozenset("'"))
                 # What `env`/`sudo` add reaches the body only where the child
                 # does the expanding: a body written wholly in single quotes.
-                # Anywhere else a `$C` left over is the parent's, unknown here,
-                # and reading the operand's value for it would defer on a
-                # guess, so those names stay out and it prompts (Q269).
+                # Anywhere else the parent expands a live `$C` itself, so that
+                # name stays out and it prompts (Q269). One it leaves as text
+                # reaches the child, but mixed quoting hides which, so the name
+                # takes the operand's value beside unknown.
+                texts = (ctx.get('command') or '', raw)
                 body_env = child
                 if not (quotes == {"'"} and getattr(body, 'quoted_chars', 0)
                         == len(body)):
-                    body_env = {k: v for k, v in child.items()
-                                if child_env.get(k) == v}
+                    read = {n for s in _choices(expand_vars(body, words_env))
+                            | {str(body)} for n in _REFERENCED_RE.findall(s)}
+                    read -= _expanded_by_parent(read, (body,), texts)
+                    body_env = {k: v if child_env.get(k) == v
+                                else Readings.of(v, {None})
+                                for k, v in child.items()
+                                if k in read or child_env.get(k) == v}
                 others = ()
                 if "'" not in quotes:
-                    texts = (ctx.get('command') or '', raw)
                     # `"\$X"` and `"$"X` reach the child as `$X`, which the
                     # lexer cannot tell from a live `"$X"`. Where the command
                     # holds either, a name also takes the value the child
