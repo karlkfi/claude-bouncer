@@ -1109,6 +1109,46 @@ check "[scratchpad] a path the hook cannot expand -> ask" ask \
 check "[scratchpad] own session id outside the temp root -> ask" ask \
   "$(decision_for "$(sess_payload "git worktree remove --force '$(nat "$WORK/$SESS/pr1")'")" \
      "$WORK" "${TEMP_ENV[@]}")"
+#     The same operand written through a variable a leading literal assignment
+#     fixes is the same command, and is judged as one: the value is substituted
+#     before any arm reads it. Each allow is paired with the cell where the
+#     value would not hold, or holds somewhere else.
+check "[scratchpad] W=<own>; remove --force \"\$W\" && echo -> allow" allow \
+  "$(decision_for "$(sess_payload "W='$(nat "$OWN/pr1")'; git worktree remove --force \"\$W\" && echo removed")" \
+     "$WORK" "${TEMP_ENV[@]}")"
+check "[scratchpad] S=<own>; remove --force \"\$S/pr1\" -> allow" allow \
+  "$(decision_for "$(sess_payload "S='$(nat "$OWN")'; git worktree remove --force \"\$S/pr1\"")" \
+     "$WORK" "${TEMP_ENV[@]}")"
+check "[scratchpad] W=<peer>; remove --force \"\$W\" -> ask" ask \
+  "$(decision_for "$(sess_payload "W='$(nat "$PEER/pr1")'; git worktree remove --force \"\$W\"")" \
+     "$WORK" "${TEMP_ENV[@]}")"
+check "[scratchpad] W=<a real checkout>; remove --force \"\$W\" -> ask" ask \
+  "$(decision_for "$(sess_payload "W='$(nat "$WORK/wt")'; git worktree remove --force \"\$W\"")" \
+     "$WORK" "${TEMP_ENV[@]}")"
+check "[scratchpad] W=<own>; remove --force '\$W' (a literal) -> ask" ask \
+  "$(decision_for "$(sess_payload "W='$(nat "$OWN/pr1")'; git worktree remove --force '\$W'")" \
+     "$WORK" "${TEMP_ENV[@]}")"
+check "[scratchpad] W=<own>; remove --force \\\$W (escaped) -> ask" ask \
+  "$(decision_for "$(sess_payload "W='$(nat "$OWN/pr1")'; git worktree remove --force \\\$W")" \
+     "$WORK" "${TEMP_ENV[@]}")"
+check "[scratchpad] git status && W=<own>; remove (may not run) -> ask" ask \
+  "$(decision_for "$(sess_payload "git status && W='$(nat "$OWN/pr1")'; git worktree remove --force \"\$W\"")" \
+     "$WORK" "${TEMP_ENV[@]}")"
+check "[scratchpad] W=<own> & remove (assigned apart) -> ask" ask \
+  "$(decision_for "$(sess_payload "W='$(nat "$OWN/pr1")' & git worktree remove --force \"\$W\"")" \
+     "$WORK" "${TEMP_ENV[@]}")"
+# A name already exported hands git the new value too, and the hook cannot
+# tell what that does; a variable bash acts on is not a plain word either.
+check "[scratchpad] W=<own> with W exported -> ask" ask \
+  "$(decision_for "$(sess_payload "W='$(nat "$OWN/pr1")'; git worktree remove --force \"\$W\"")" \
+     "$WORK" "${TEMP_ENV[@]}" W=x)"
+check "[scratchpad] PWD=<own>; remove --force \"\$PWD\" -> ask" ask \
+  "$(decision_for "$(sess_payload "PWD='$(nat "$OWN/pr1")'; git worktree remove --force \"\$PWD\"")" \
+     "$WORK" "${TEMP_ENV[@]}")"
+# The value reaches every arm, not only this one, which is what lets the
+# assignment ride along: a protected name through a variable is still one.
+check "B=main; git branch -f \"\$B\" HEAD -> ask" ask \
+  "$(decision_for "$(sess_payload 'B=main; git branch -f "$B" HEAD')" "$WORK")"
 rm -rf "$SCRATCH_PROJ"
 check "git worktree prune -> ask" ask \
   "$(decision_for "$(bash_cmd 'git worktree prune')" "$WORK")"
