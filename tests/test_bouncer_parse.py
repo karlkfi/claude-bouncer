@@ -1037,22 +1037,29 @@ class CommentInSubstitutionTests(unittest.TestCase):
                     result = yield steps.send(result)
                 except StopIteration as done:
                     return done.value
-        for q in ('"', ''):
+        for head, level in (('echo ', '${x:-$('), ('echo "', '${x:-$('),
+                            ('echo $(', '"${x:-$(')):
             resumes[0] = 0
-            with self.subTest(quoted=bool(q)), mock.patch.object(
+            with self.subTest(head=head, level=level), mock.patch.object(
                     bp, '_scan_dollar_paren_steps', counted):
                 self.assertEqual([], bp.command_substitutions(
-                    'echo ' + q + '${x:-$(' * 2000 + 'echo ; rm /etc/q421-x'))
+                    head + level * 2000 + 'echo ; rm /etc/q421-x'))
 
     def test_an_unclosed_brace_ends_the_substitution_holding_it(self):
-        # bash reads on to the end for the `}`, so nothing in the line runs.
+        # bash reads on to the end for the `}`, so nothing in the line runs,
+        # and zsh too unless only its reading of a `'` lets the `}` close.
         for cmd, bodies in (
                 ('echo $(echo ${x) ; echo RAN', []),        # EOF looking for `}'
                 ('echo "$(echo "${x")" ; echo RAN', []),    # EOF looking for `}'
                 ('echo $(echo ${x:-$(echo y)) ; echo RAN', []),
                 ('echo $(echo ${x:-a}b ${y) $(echo RAN)', []),
                 ('echo $(echo ${x}) ; echo $(echo RAN)',     # RAN
-                 ['echo ${x}', 'echo RAN'])):
+                 ['echo ${x}', 'echo RAN']),
+                # zsh 5.9 reads a `'` in "${…}" as text and runs these.
+                ('echo "$(echo RAN; echo "${x-it\'s}")"',
+                 ['echo RAN; echo "${x-it\'s}"']),
+                ('echo $(echo RAN; echo "${x/a/it\'s}")',
+                 ['echo RAN; echo "${x/a/it\'s}"'])):
             with self.subTest(cmd=cmd):
                 self.assertEqual(bodies, bp.command_substitutions(cmd))
         self.assertEqual([], bp.process_substitutions('cat <(echo ${x) ; echo RAN'))

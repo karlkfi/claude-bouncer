@@ -937,7 +937,9 @@ def _scan_dollar_paren(text, start):
     ``)`` in one closes nothing: ``"$(echo ${y:- #}; cmd)"`` and
     ``"$(echo `echo )`; cmd)"`` both run ``cmd``. A ``${`` that never closes
     leaves the substitution unterminated, since bash reads on to the end for
-    its ``}``: ``echo $(echo ${x) ; cmd`` runs nothing (Q421). A nested
+    its ``}``: ``echo $(echo ${x) ; cmd`` runs nothing (Q421). In double
+    quotes it is read again with a ``'`` as text, as zsh 5.9 reads one there,
+    since ``"$(cmd; echo "${x-it's}")"`` runs ``cmd`` in zsh. A nested
     ``$(…)`` in double quotes is scanned as a body of its own (Q325), so the
     ``"`` in ``"$(echo "$(echo ")")" ; cmd)"`` closes nothing. Its state is pushed on
     ``frames`` rather than recursed into, because any depth cap leaves a
@@ -985,6 +987,8 @@ def _scan_dollar_paren_steps(text, start, brace=False):
                 continue
             if text.startswith('${', i):
                 end = yield ('b', i), _brace_end_steps(text, i)
+                if end < 0:
+                    end = yield ('z', i), _brace_end_steps(text, i, False)
                 if end < 0:
                     return (None, start)
             if end < 0 and c == '`':
@@ -1172,7 +1176,7 @@ def _funsub_body_start(text, i):
     ``${|``, which substitutes ``$REPLY`` rather than the output."""
     return i + 3 if text[i+2:i+3] == '|' else i + 2
 
-def _brace_end_steps(text, i):
+def _brace_end_steps(text, i, squote=True):
     if _funsub_at(text, i):
         start = _funsub_body_start(text, i)
         body, end = yield ('f', start), _scan_dollar_paren_steps(
@@ -1189,10 +1193,10 @@ def _brace_end_steps(text, i):
             in_double = not in_double
             i += 1
             continue
-        end = -1 if in_double else _ansi_c_end(text, i)
+        end = -1 if in_double or not squote else _ansi_c_end(text, i)
         if end > 0:
             pass
-        elif c == "'" and not in_double:
+        elif c == "'" and not in_double and squote:
             end = text.find("'", i + 1) + 1 or -1
         elif text.startswith('$(', i):
             end = -1
@@ -1202,7 +1206,8 @@ def _brace_end_steps(text, i):
                 end = (yield ('p', i + 2), _scan_dollar_paren_steps(text, i + 2))[1]
                 end = -1 if end == i + 2 else end
         elif text.startswith('${', i):
-            end = yield ('b', i), _brace_end_steps(text, i)
+            end = yield ('b' if squote else 'z', i), _brace_end_steps(
+                text, i, squote)
         elif c == '`':
             end = _scan_backticks(text, i + 1)[1]
             end = -1 if end == i + 1 else end
