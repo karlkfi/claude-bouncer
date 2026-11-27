@@ -1892,6 +1892,9 @@ class VariableHeldCommandTests(unittest.TestCase):
                       'K="sudo bash -c"; $K "kubectl %s"',
                       "X='bash -c'; sudo $X 'kubectl %s'",
                       "OPTS='-l -c'; bash $OPTS 'kubectl %s'",
+                      "OPTS=-c; bash $OPTS 'kubectl %s'",
+                      "OPTS=-c; bash \"$OPTS\" 'kubectl %s'",
+                      "C=-lc; sudo bash $C 'kubectl %s'",
                       'X="eval kubectl"; $X %s', 'X="kubectl "; $X %s',
                       'X=" "; $X kubectl %s'):
             with self.subTest(shape=shape):

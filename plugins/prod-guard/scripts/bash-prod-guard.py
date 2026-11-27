@@ -3607,7 +3607,12 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
         split_raw = []
         for t in argv_raw:
             fields = expand_argv([t], words_env)
-            split_raw += fields if len(fields) != 1 else [t]
+            # One field takes its value where it may be the `-c` itself.
+            if len(fields) == 1 and (fields[0] == t or (
+                    getattr(t, 'quoted_from', None) is not None
+                    and fields[0][:1] not in ('-', '+'))):
+                fields = [t]
+            split_raw += fields
         # IFS is not tracked, so the word as written is judged too.
         unsplit_raw = strip_wrappers(list(argv_raw), {})
         argv_raw = strip_wrappers(split_raw, {})
