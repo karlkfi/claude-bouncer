@@ -1193,6 +1193,7 @@ class MayVanish(str):
 
 
 _VAR_REFS_RE = re.compile('(?:%s)*' % VAR_REF_RE.pattern)
+_IFS_RE = re.compile('[ \t\n]+')
 # What `env -S` expands in its string: the braced form only. Both env
 # implementations refuse a bare `$NAME` there and run nothing.
 _BRACED_REFS_RE = re.compile(r'(?:\$\{[A-Za-z_][A-Za-z0-9_]*\})+')
@@ -1200,13 +1201,22 @@ _BRACED_REFS_RE = re.compile(r'(?:\$\{[A-Za-z_][A-Za-z0-9_]*\})+')
 
 def expand_argv(argv, env):
     """Expand simple variable references in every token of `argv`, marking
-    each word that may expand to nothing as a `MayVanish`."""
+    each word that may expand to nothing as a `MayVanish`. A word written with
+    no quoting splits on whitespace where its expansion holds some, as bash
+    splits an unquoted expansion (Q382); an assignment-shaped word does not."""
     out = []
     for tok in argv:
         # Only an assignment's value persists for a later word to re-expand;
         # an `env -S` string relies on the parent having expanded it.
-        word = expand_word(tok, env) if ASSIGNMENT_RE.match(tok) \
-            else expand_vars(tok, env)
+        if ASSIGNMENT_RE.match(tok):
+            word = expand_word(tok, env)
+        else:
+            word = expand_vars(tok, env)
+            if getattr(tok, 'quoted_from', None) is None and word != tok:
+                fields = _IFS_RE.split(word.strip(' \t\n'))
+                if fields != [word]:
+                    out += [f for f in fields if f]
+                    continue
         if (tok and getattr(tok, 'quoted_from', None) is None
                 and _VAR_REFS_RE.fullmatch(tok)
                 and _VAR_REFS_RE.fullmatch(word)):
@@ -3592,7 +3602,20 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
         alternates = []
         argv = strip_wrappers(expand_argv(argv_raw, words_env), seg_inline,
                               alternates, child)
-        argv_raw = strip_wrappers(list(argv_raw), {})
+        # A word bash splits is several in the raw view too, so a `-c` or
+        # `eval` body is read from the word that holds it (Q382).
+        split_raw = []
+        for t in argv_raw:
+            fields = expand_argv([t], words_env)
+            # One field takes its value where it may be the `-c` itself.
+            if len(fields) == 1 and (fields[0] == t or (
+                    getattr(t, 'quoted_from', None) is not None
+                    and fields[0][:1] not in ('-', '+'))):
+                fields = [t]
+            split_raw += fields
+        # IFS is not tracked, so the word as written is judged too.
+        unsplit_raw = strip_wrappers(list(argv_raw), {})
+        argv_raw = strip_wrappers(split_raw, {})
         for alt, alt_env in alternates:
             # Already expanded, so the child's env is all it needs (Q287). An
             # override among its operands is in effect only for that command:
@@ -3680,7 +3703,10 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
             # Mixed quoting keeps the child's env:
             # only some runs were parent-expanded, and under-expanding is the
             # safe direction (unresolved target -> prompt).
-            c_bodies = [b for b in shell_bodies(argv_raw) if b]
+            c_bodies = []
+            for b in shell_bodies(argv_raw) + shell_bodies(unsplit_raw):
+                if b and b not in c_bodies:
+                    c_bodies.append(b)
             if c_bodies and depth >= 3:
                 # A body this deep is not read, so what it runs is unknown (Q340).
                 findings.append((ASK, 'prod-guard: `%s -c` runs a body nested '
@@ -3756,10 +3782,21 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
             # single quotes stop only the PARENT, and `eval` expands the same
             # text itself. `child_env` rides on for a real child inside (Q151).
             left = {}
+            text = ' '.join(argv_raw[1:])
             sub_f, sub_o, sub_s = evaluate_command_string(
-                ' '.join(argv_raw[1:]), ctx, depth + 1, child_env, words_env,
+                text, ctx, depth + 1, child_env, words_env,
                 left, known=(functions, bodies))
             findings += sub_f
+            # The parent expands a word outside single quotes before `eval`
+            # re-reads it, so a `$X` holding `a; b` runs two commands (Q382).
+            # That reading is judged too.
+            parent = ' '.join(t if "'" in getattr(t, 'quotes', ())
+                              else expand_vars(t, words_env)
+                              for t in argv_raw[1:])
+            if parent != text:
+                findings += evaluate_command_string(
+                    parent, ctx, depth + 1, child_env, words_env,
+                    known=(functions, bodies))[0]
             override = override or sub_o
             session_reason = session_reason if session_reason is not None else sub_s
             # And what the body assigns stays assigned (Q165), where it
