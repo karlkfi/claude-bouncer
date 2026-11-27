@@ -1176,6 +1176,12 @@ class VariableExpansionDecisionTests(unittest.TestCase):
                     # The attribute may be set, so the value may reach it.
                     "true || set -a; " + p + self.K387,
                     "set $X; " + p + self.K387,
+                    # `+x` comes off before the value goes in, and `set -a`
+                    # puts it back on.
+                    "set -a; declare +x " + p + self.K387,
+                    "set -a; typeset +x " + p + self.K387,
+                    "true || set -a; declare +x " + p + self.K387,
+                    "set -a; export C=kind-ci; declare +x C; " + p + self.K387,
                     "export C=kind-ci; f(){ local " + p + self.K387 + "; }; f"):
             with self.subTest(cmd=cmd):
                 self.assertEqual(run_hook(cmd)[0], "deny")
@@ -1194,6 +1200,7 @@ class VariableExpansionDecisionTests(unittest.TestCase):
         for cmd in ("declare " + k, "typeset " + k, "readonly " + k,
                     "f(){ local " + k + "; }; f",
                     "export -n " + k,
+                    "set -a; export -n " + k,
                     "export C=kind-ci; export -n C; " + self.K387,
                     "export C=gke_acme_prod-us; declare +x " + k,
                     "export C=gke_acme_prod-us; unset C; " + k,

@@ -195,6 +195,7 @@ It is bounded to the two directions that are unambiguous:
 The one subtlety is scope.
 A bare `P=x` (or same-shell) assignment is a shell variable, not exported; a child process — the body of `bash -c '…'` — sees only *exported* variables.
 The guard tracks the export attribute, since bash exports a name rather than a value (Q387): once `export P`, `declare -x P` or `set -a` has given `P` the attribute, every later `P=x` reaches a child too, until `export -n`, `declare +x` or `unset` takes it away; `set +a` only stops later assignments gaining it.
+Under `set -a` a `declare +x P=x` exports anyway, since the assignment comes after the `+x`, while `export -n P=x` does not.
 `declare`, `typeset`, `readonly` and `local` without `-x` export nothing on their own.
 `eval` starts no child: its body expands against the same shell (Q151), and what the body assigns or exports persists for the segments after it (Q165).
 The guard carries that back only when nothing in the command could have run the `eval` outside the invoking shell — no parenthesis, backtick, `<`, or lone `|` or `&` anywhere in it.

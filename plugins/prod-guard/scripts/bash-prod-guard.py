@@ -3788,7 +3788,14 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
                         others = {None if o is None else prior + o
                                   for o in others}
                     value = Readings.of(value, others)
-                    _assign_var({name: value}, export, defining, maybe,
+                    flag = export
+                    if export is False and tool != 'export':
+                        # `declare +x` clears the attribute and then assigns,
+                        # so `set -a` gives it back; `export -n` does not.
+                        _assign_var({name: value}, False, defining, maybe,
+                                    functions, shell_env, exported)
+                        flag = None
+                    _assign_var({name: value}, flag, defining, maybe,
                                 functions, shell_env, exported)
             continue
         if tool in SHELL_NAMES:
