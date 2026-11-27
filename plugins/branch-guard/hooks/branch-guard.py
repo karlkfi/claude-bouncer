@@ -121,8 +121,8 @@ import sys, os, json, re, shlex, subprocess, fnmatch
 # copy under this plugin's `lib/` is vendored; see scripts/sync-lib.py.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 from bouncer_parse import (                                   # noqa: E402
-    ASSIGN_PLAIN, ASSIGN_SUBSCRIPT, PUNCT_CHARS, command_substitutions, is_assignment, lex,
-    note_discarded_writes, split_assignment, split_operator_runs, strip_sh_keywords,
+    ASSIGN_PLAIN, ASSIGN_SUBSCRIPT, PUNCT_CHARS, QuotedStr, command_substitutions,
+    is_assignment, lex, note_discarded_writes, split_assignment, split_operator_runs, strip_sh_keywords,
 )
 from bouncer_grants import load_grants, record_grants         # noqa: E402
 from bouncer_session import claude_tmp_root, is_session_tmp_path  # noqa: E402
@@ -588,6 +588,34 @@ BENIGN_COMMANDS = frozenset({'echo', 'printf', 'true', 'false', ':', 'pwd'})
 # consulted: `'$HOME'` is a literal path to bash and reads as non-literal here,
 # which costs a stood-down probe rather than a wrongly-aimed one.
 NON_LITERAL_PATH_CHARS = frozenset('$`*?[]{}')
+
+# The variables bash reads or sets itself (the Bourne and Bash variables of
+# the bash 5.2 manual). Assigning one changes what the shell does or leaves
+# `$NAME` holding something other than what was written, so a literal
+# assignment to one is never followed (`bind_literal_vars`).
+BASH_VARIABLES = frozenset({
+    '_', 'CDPATH', 'HOME', 'IFS', 'MAIL', 'MAILPATH', 'OPTARG', 'OPTIND',
+    'PATH', 'PS0', 'PS1', 'PS2', 'PS3', 'PS4', 'CHILD_MAX', 'COLUMNS',
+    'COPROC', 'DIRSTACK', 'EMACS', 'ENV', 'EPOCHREALTIME', 'EPOCHSECONDS',
+    'EUID', 'EXECIGNORE', 'FCEDIT', 'FIGNORE', 'FUNCNAME', 'FUNCNEST',
+    'GLOBIGNORE', 'GLOBSORT', 'GROUPS', 'HOSTFILE', 'HOSTNAME', 'HOSTTYPE',
+    'IGNOREEOF', 'INPUTRC', 'INSIDE_EMACS', 'LANG', 'LINENO', 'LINES',
+    'MACHTYPE', 'MAILCHECK', 'MAPFILE', 'OLDPWD', 'OPTERR', 'OSTYPE',
+    'PIPESTATUS', 'POSIXLY_CORRECT', 'PPID', 'PROMPT_COMMAND',
+    'PROMPT_DIRTRIM', 'PWD', 'RANDOM', 'REPLY', 'SECONDS', 'SHELL',
+    'SHELLOPTS', 'SHLVL', 'SRANDOM', 'TIMEFORMAT', 'TMOUT', 'TMPDIR', 'UID',
+    'auto_resume', 'histchars',
+})
+# The same for whole families, plus the prefixes git, gh, ssh and the dynamic
+# loader read from the environment, should the name already be exported.
+UNBINDABLE_PREFIXES = ('BASH', 'COMP', 'HIST', 'LC_', 'READLINE_', 'GIT_',
+                       'GH_', 'GITHUB_', 'SSH_', 'XDG_', 'LD_', 'DYLD_')
+# The separators a followed assignment may sit among. Any other mark opens or
+# closes a compound command, whose scoping the binding walk does not model.
+BINDING_MARKS = frozenset({';', '\n', '&&', '||', '|', '|&', '&'})
+# `$NAME` or `${NAME}`. `$$` is matched so that `$$W` reads as the PID then
+# `W`, as bash reads it, rather than as `$` before `$W`.
+VAR_REF_RE = re.compile(r'\$(?:\$|([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})')
 
 # Command substitutions treated as PURE for chain classification. A `$(…)` /
 # backtick substitution (even inside a quoted argument) normally downgrades a
@@ -1814,6 +1842,84 @@ def segment_cwds(segments, tail, invs, seg_cwd, runs_funsub=holds_funsub):
             if is_cd:
                 seg_cwd = (None if any(f[0] == 'case' for f in frames)
                            else behind(joined_by(flat, pos), seg_cwd, dest))
+
+
+def expand_bound(tok, values):
+    """`tok` with each `$NAME`/`${NAME}` that `values` holds replaced by its
+    value. A word with any single-quoted part is left alone: inside one `$` is
+    a literal, and posix shlex has already stripped the quotes that said so."""
+    if not values or '$' not in tok or "'" in getattr(tok, 'quotes', ()):
+        return tok
+    out = VAR_REF_RE.sub(lambda m: values.get(m.group(1) or m.group(2),
+                                              m.group(0)), tok)
+    if out == tok:
+        return tok
+    word = QuotedStr(out)
+    for attr in ('quotes', 'quoted_from', 'quoted_chars', 'glued'):
+        setattr(word, attr, getattr(tok, attr, getattr(QuotedStr, attr)))
+    return word
+
+
+def bind_assignments(seg, values):
+    """Fold a segment made only of `NAME=<literal path word>` assignments into
+    `values` and return True; return False, possibly having folded some, for
+    anything else.
+
+    A name in the hook's own environment is refused because it is probably
+    exported, and its new value would reach git as well; the Bash tool's
+    shell inherits Claude Code's environment, though its profile may export
+    more, which UNBINDABLE_PREFIXES covers for the names git reads."""
+    if not seg or not all(is_assignment(t) for t in seg):
+        return False
+    for t in seg:
+        name, form, raw = split_assignment(t)
+        if form != ASSIGN_PLAIN or name in BASH_VARIABLES or name in os.environ \
+                or name.startswith(UNBINDABLE_PREFIXES):
+            return False
+        value = raw if "'" in getattr(t, 'quotes', ()) else expand_bound(raw, values)
+        if not is_literal_path(value) or any(c.isspace() for c in value):
+            return False
+        values[name] = str(value)
+    return True
+
+
+def bind_literal_vars(cmd, segments, tail):
+    """`segments` with each variable a leading literal assignment sets
+    substituted into the git/gh segments after it, and the indices of those
+    assignments, which `judge_segments` reads as `benign`.
+
+    Only the opening run of assignments and git/gh invocations is walked: a
+    git or gh process cannot change the shell's variables, and anything else
+    might. An assignment binds only where it certainly ran and lasted: at the
+    start of its and-or list, not followed by `||`, not in a pipeline stage
+    or a background job.
+
+    The value goes into every later git/gh word, not only the operand that
+    needed it, because the `benign` would otherwise let an arm read `$B` as an
+    opaque name: `B=main; git branch -f "$B"` must be judged on `main`. A `\\$`
+    anywhere stops the walk, since the lexer cannot say which `$` it
+    escaped."""
+    if '\\$' in cmd:
+        return segments, frozenset()
+    flat, apart = compound_layout(segments, tail)
+    out, values, bound = list(segments), {}, set()
+    for pos, at in enumerate(flat):
+        if not isinstance(at, int):
+            if at in BINDING_MARKS:
+                continue
+            break
+        seg, writes, marks = segments[at]
+        if parse_invocation(seg) is not None:
+            out[at] = ([expand_bound(t, values) for t in seg], writes, marks)
+            continue
+        nxt = pos + 1
+        while nxt < len(flat) and flat[nxt] == '\n':
+            nxt += 1
+        if writes or pos in apart or joined_by(flat, pos) is not None \
+                or flat[nxt:nxt + 1] == ['||'] or not bind_assignments(seg, values):
+            break
+        bound.add(at)
+    return out, frozenset(bound)
 
 
 def ref_to_branch(ref, current):
@@ -3589,7 +3695,8 @@ def substitution_cwds(text, spans, funsubs, seg_cwd):
     return places
 
 
-def judge_segments(segments, tail, invs, seg_cwd, cwd, head_base, ctx, depth=0):
+def judge_segments(segments, tail, invs, seg_cwd, cwd, head_base, ctx, depth=0,
+                   bound=frozenset()):
     """[(verdict, reason, overridable)] for each segment, in source order.
 
     The working directory is a per-segment fact, not a per-command one: a
@@ -3600,10 +3707,14 @@ def judge_segments(segments, tail, invs, seg_cwd, cwd, head_base, ctx, depth=0):
     push that really did overlap. Where the target is one the hook can't
     resolve, `probe` goes false and the probes stand down. `cwd` is the tree
     the command is judged against, and `head_base` where HEAD is read after a
-    `cd` the hook couldn't follow — None where no directory is a fair guess."""
+    `cd` the hook couldn't follow — None where no directory is a fair guess.
+    `bound` holds the assignments `bind_literal_vars` already substituted."""
     verdicts = []
     for at, seg_cwd, blind in segment_cwds(segments, tail, invs, seg_cwd):
         (seg, writes, _), inv = segments[at], invs[at]
+        if at in bound:
+            verdicts.append(('benign', None, False))
+            continue
         base = None if blind else head_base
         shell = shell_c_body(seg) if inv is None else None
         if shell:
@@ -3693,7 +3804,7 @@ def main():
         except ValueError:
             return                                 # unbalanced quotes -> defer
         tail = []
-        segments = command_segments(tokens, tail)
+        segments, bound = bind_literal_vars(cmd, command_segments(tokens, tail), tail)
         invs = [parse_invocation(seg) for seg, _, _ in segments]
         cwd = data.get('cwd') or os.getcwd()
         seen = set()
@@ -3705,7 +3816,8 @@ def main():
                 and not any(shell_c_body(seg) for seg, _, _ in segments):
             return                                 # no git/gh command -> defer
         note_branch_creations(data)
-        verdicts = judge_segments(segments, tail, invs, cwd, cwd, cwd, ctx) + inner
+        verdicts = judge_segments(segments, tail, invs, cwd, cwd, cwd, ctx,
+                                  bound=bound) + inner
 
         # A protective ask wins over everything (and becomes deny when no human
         # is present). A shared one — the cause is a protected branch — is

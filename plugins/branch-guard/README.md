@@ -68,6 +68,7 @@ The table below assumes the worktree is on a feature branch (`claude/x`) under t
 | `git worktree add ../wt feature` | allow *(**ask** with [`BRANCH_GUARD_WORKTREE_GRANTS=1`](#configuration))* |
 | `git worktree remove ../wt` *(git refuses one holding modified or untracked files)* | allow |
 | `git worktree remove --force <scratchpad>/pr1` *(an absolute path into this session's own Claude Code scratchpad; another session's, or a relative path, still asks)* | allow |
+| `W=<scratchpad>/pr1; git worktree remove --force "$W"` *(the same path through a variable a literal assignment at the head of the command sets; see [Limitations](#limitations) for which assignments are followed)* | allow |
 | `git commit -m "fix"` *(feature branch)* | allow |
 | `git add -A && git commit -m x && git push` *(feature branch)* | allow |
 | `git push` / `git push -u origin HEAD` *(worktree branch)* | allow |
@@ -845,6 +846,9 @@ The categories are branch-guard's, so another guard's reasons show there as `oth
 - Command wrappers are read from a fixed list.
   One outside it (`xargs`, whose arguments arrive on stdin, or a site-specific launcher) hides the `git` behind it, and the command defers to the normal permission flow.
   A shell is read only through its `-c` string: a script file, a script on stdin, and a body that runs its own arguments (`sh -c '"$@"' _ git commit`) defer the same way.
+- A `$VAR` in a git or gh argument is read as its value only when a literal assignment at the head of the command sets it (`W=/abs/path; git … "$W"`), with nothing but assignments and git/gh commands before the use.
+  An assignment behind `&&` or `||`, in a pipeline or backgrounded, inside a group or after any other command is not followed, and neither is a name bash itself acts on (`PWD`, `CDPATH`, `PATH`, …), one in a family git, gh, ssh or the loader read (`GIT_*`, `LD_*`, …), or one already exported to the hook's own environment, since a new value for it reaches git as well.
+  Everywhere else the argument is judged as the literal text `$VAR`.
 - The push guard parses the command string, so unusual refspecs may not be classified (it asks/defers rather than allowing).
   Auto-approval is a convenience layer, not a security boundary — for hard guarantees use a git `pre-push` hook and/or server-side branch protection.
 - A `--force-with-lease` rewrite of another branch is auto-approved on git's guarantee that the remote hasn't moved, which says nothing about who else uses that branch.
