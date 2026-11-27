@@ -2842,6 +2842,15 @@ check "[overlap] a push in a body after a cd into the overlapping worktree -> de
 check "[overlap] a push in a body after a cd out of it -> none" none \
   "$(decision_for "$(bash_payload "cd $OVL_CLEAN_Q && echo \"\$(git push)\"")" \
      "$OVL_WT_DIRTY")"
+#      A `cd` behind `&&` (Q303) is followed along the `&&` run after it, and
+#      past it the push may come from either tree, so it asks rather than
+#      being measured in the clean one.
+check "[overlap] true && cd into the overlapping worktree && git push -> deny" deny \
+  "$(decision_for "$(bash_payload "true && cd $OVL_DIRTY_Q && git push")" \
+     "$OVL_WT_CLEAN")"
+check "[overlap] false && cd out of it; git push -> ask" ask \
+  "$(decision_for "$(bash_payload "false && cd $OVL_CLEAN_Q; git push")" \
+     "$OVL_WT_DIRTY")"
 
 #      Aimed by `git -C`. This direction is the false ALLOW, which is the worse
 #      of the two: a wrong deny is visible to the session and a wrong allow is
@@ -3515,6 +3524,40 @@ check "[group] from main, if …; then cd <feat>; else git commit; fi -> ask" as
   "$(decision_for "$(bash_payload "if false; then cd $GRP_FEAT; else git commit -m x; fi")" "$GRP")"
 check "[group] from main, case arm cd, next arm git commit -> ask" ask \
   "$(decision_for "$(bash_payload "case a in b) cd $GRP_FEAT;; *) git commit -m x;; esac")" "$GRP")"
+
+#     30b. A `cd` behind `&&` or `||` (Q303). bash may skip it, so past the run
+#     of `&&` after it the commit may land in either tree. The session's own
+#     checkout is no answer there, so HEAD goes unread and the commit asks.
+#     From `main` each of these commits on `main`.
+for w in 'false && cd %s; ' 'true || cd %s; ' 'true || cd %s && ' \
+         'false && cd %s || ' 'false && { cd %s; }; ' '{ false && cd %s; }; ' \
+         'false && cd %s\n'; do
+  # shellcheck disable=SC2059
+  cmd="$(printf "${w}git commit -m x" "$GRP_FEAT")"
+  check "[and-or] from main, $cmd -> ask" ask \
+    "$(decision_for "$(bash_payload "$cmd")" "$GRP")"
+done
+#     Along the run of `&&` the commit runs only if the `cd` did, so it is
+#     judged where the `cd` lands, including across a line continued after
+#     `&&`; a `cd` that starts its list always runs.
+for w in 'true && cd %s && ' 'true && cd %s &&\n' 'cd %s || exit; '; do
+  # shellcheck disable=SC2059
+  cmd="$(printf "${w}git commit -m x" "$GRP_FEAT")"
+  check "[and-or] from main, $cmd -> none" none \
+    "$(decision_for "$(bash_payload "$cmd")" "$GRP")"
+done
+#     From the feature worktree the same reading must not fall back to the
+#     session's branch, or a commit bash runs on `main` would lose its ask.
+for c in "true && cd $GRP_MAIN; git commit -m x" \
+         "true && { cd $GRP_MAIN; }; git commit -m x" \
+         "true && cd $GRP_MAIN; echo \"\$(git commit -m x)\"" \
+         "true && cd $GRP_MAIN; sh -c 'git commit -m x'"; do
+  check "[and-or] from feat, $c -> ask" ask \
+    "$(decision_for "$(bash_payload "$c")" "$GRP.feat")"
+done
+#     A `cd` the hook could not follow anyway keeps the `cd \$VAR` reading.
+check "[and-or] from feat, true && cd \"\$X\"; git commit -> none" none \
+  "$(decision_for "$(bash_payload 'true && cd "$X"; git commit -m x')" "$GRP.feat")"
 rm -rf "$GRP" "$GRP.feat"
 
 # 31. A shell's `-c` body (Q297). `sh -c 'git commit -m x'` was never lexed, so
