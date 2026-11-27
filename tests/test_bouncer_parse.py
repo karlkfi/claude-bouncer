@@ -1023,6 +1023,40 @@ class CommentInSubstitutionTests(unittest.TestCase):
                 self.assertEqual([], bp.command_substitutions(
                     'echo ' + q + '${x:-$(' * 24 + 'echo ; rm /etc/q370-x'))
 
+    def test_unclosed_brace_levels_cost_linear_resumes(self):
+        # A `$(` scan that read on past a failed `${` walked to the end of the
+        # text once per level (Q421): d*(d+1) resumes, 4,002,000 at d=2000.
+        resumes, real = [0], bp._scan_dollar_paren_steps
+        def counted(*args, **kwargs):
+            steps, result = real(*args, **kwargs), None
+            while True:
+                resumes[0] += 1
+                if resumes[0] > 20000:
+                    raise AssertionError('over 20,000 $( scan resumes')
+                try:
+                    result = yield steps.send(result)
+                except StopIteration as done:
+                    return done.value
+        for q in ('"', ''):
+            resumes[0] = 0
+            with self.subTest(quoted=bool(q)), mock.patch.object(
+                    bp, '_scan_dollar_paren_steps', counted):
+                self.assertEqual([], bp.command_substitutions(
+                    'echo ' + q + '${x:-$(' * 2000 + 'echo ; rm /etc/q421-x'))
+
+    def test_an_unclosed_brace_ends_the_substitution_holding_it(self):
+        # bash reads on to the end for the `}`, so nothing in the line runs.
+        for cmd, bodies in (
+                ('echo $(echo ${x) ; echo RAN', []),        # EOF looking for `}'
+                ('echo "$(echo "${x")" ; echo RAN', []),    # EOF looking for `}'
+                ('echo $(echo ${x:-$(echo y)) ; echo RAN', []),
+                ('echo $(echo ${x:-a}b ${y) $(echo RAN)', []),
+                ('echo $(echo ${x}) ; echo $(echo RAN)',     # RAN
+                 ['echo ${x}', 'echo RAN'])):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(bodies, bp.command_substitutions(cmd))
+        self.assertEqual([], bp.process_substitutions('cat <(echo ${x) ; echo RAN'))
+
 
 class CommentOutsideSubstitutionTests(unittest.TestCase):
     """A top-level comment opens no substitution and no quote (Q258).

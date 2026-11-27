@@ -935,9 +935,11 @@ def _scan_dollar_paren(text, start):
     quotes too, where a quote inside one nests. bash reads a
     ``#`` in one as text, or ends its comment at the closing backtick, and a
     ``)`` in one closes nothing: ``"$(echo ${y:- #}; cmd)"`` and
-    ``"$(echo `echo )`; cmd)"`` both run ``cmd``. A nested ``$(…)`` in double
-    quotes is scanned as a body of its own (Q325), so the ``"`` in
-    ``"$(echo "$(echo ")")" ; cmd)"`` closes nothing. Its state is pushed on
+    ``"$(echo `echo )`; cmd)"`` both run ``cmd``. A ``${`` that never closes
+    leaves the substitution unterminated, since bash reads on to the end for
+    its ``}``: ``echo $(echo ${x) ; cmd`` runs nothing (Q421). A nested
+    ``$(…)`` in double quotes is scanned as a body of its own (Q325), so the
+    ``"`` in ``"$(echo "$(echo ")")" ; cmd)"`` closes nothing. Its state is pushed on
     ``frames`` rather than recursed into, because any depth cap leaves a
     reading past it that misplaces the close. A ``$((…))`` there is stepped
     over to the close ``_arith_end`` finds, and one it reads as ``$( (`` is
@@ -983,6 +985,8 @@ def _scan_dollar_paren_steps(text, start, brace=False):
                 continue
             if text.startswith('${', i):
                 end = yield ('b', i), _brace_end_steps(text, i)
+                if end < 0:
+                    return (None, start)
             if end < 0 and c == '`':
                 end = _scan_backticks(text, i + 1)[1]
             i = max(end, i + 1)
@@ -1028,6 +1032,8 @@ def _scan_dollar_paren_steps(text, start, brace=False):
         end = _ansi_c_end(text, i)
         if end < 0 and text.startswith('${', i):
             end = yield ('b', i), _brace_end_steps(text, i)
+            if end < 0:
+                return (None, start)
         elif end < 0 and c == '`':
             end = _scan_backticks(text, i + 1)[1]
         if end > 0:
