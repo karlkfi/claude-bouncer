@@ -1883,6 +1883,29 @@ class VariableHeldCommandTests(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertEqual(run_hook(cmd)[0], "deny")
 
+    def test_a_split_word_can_be_the_shell_or_eval_that_runs_the_body(self):
+        for shape in ("X='bash -c'; $X 'kubectl %s'",
+                      "X='bash -lc'; $X 'kubectl %s'",
+                      'X="sh -c"; $X "kubectl %s"',
+                      "X='env bash -c'; $X 'kubectl %s'",
+                      "X='nohup bash -c'; $X 'kubectl %s'",
+                      'K="sudo bash -c"; $K "kubectl %s"',
+                      "X='bash -c'; sudo $X 'kubectl %s'",
+                      "OPTS='-l -c'; bash $OPTS 'kubectl %s'",
+                      'X="eval kubectl"; $X %s', 'X="kubectl "; $X %s',
+                      'X=" "; $X kubectl %s'):
+            with self.subTest(shape=shape):
+                self.assertEqual(run_hook(
+                    shape % "--context gke_acme_prod-us delete ns x")[0], "deny")
+
+    def test_a_shell_body_is_also_read_unsplit(self):
+        # bash runs only the first field as the body, but under `IFS=` or
+        # `IFS=,` the field is the whole value, and IFS is not tracked.
+        for prefix in ('', 'IFS=; ', 'IFS=,; '):
+            with self.subTest(prefix=prefix):
+                self.assertEqual(run_hook(
+                    prefix + 'B="%s"; bash -c $B' % self.D)[0], "deny")
+
     def test_eval_rereads_a_name_the_value_holds(self):
         self.assertEqual(run_hook(
             "X='kubectl --context $C delete ns x'; C=gke_acme_prod-us; "

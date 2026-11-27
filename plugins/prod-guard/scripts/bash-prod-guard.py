@@ -1214,8 +1214,8 @@ def expand_argv(argv, env):
             word = expand_vars(tok, env)
             if getattr(tok, 'quoted_from', None) is None and word != tok:
                 fields = _IFS_RE.split(word.strip(' \t\n'))
-                if len(fields) > 1:
-                    out += fields
+                if fields != [word]:
+                    out += [f for f in fields if f]
                     continue
         if (tok and getattr(tok, 'quoted_from', None) is None
                 and _VAR_REFS_RE.fullmatch(tok)
@@ -3602,7 +3602,15 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
         alternates = []
         argv = strip_wrappers(expand_argv(argv_raw, words_env), seg_inline,
                               alternates, child)
-        argv_raw = strip_wrappers(list(argv_raw), {})
+        # A word bash splits is several in the raw view too, so a `-c` or
+        # `eval` body is read from the word that holds it (Q382).
+        split_raw = []
+        for t in argv_raw:
+            fields = expand_argv([t], words_env)
+            split_raw += fields if len(fields) != 1 else [t]
+        # IFS is not tracked, so the word as written is judged too.
+        unsplit_raw = strip_wrappers(list(argv_raw), {})
+        argv_raw = strip_wrappers(split_raw, {})
         for alt, alt_env in alternates:
             # Already expanded, so the child's env is all it needs (Q287). An
             # override among its operands is in effect only for that command:
@@ -3690,7 +3698,10 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
             # Mixed quoting keeps the child's env:
             # only some runs were parent-expanded, and under-expanding is the
             # safe direction (unresolved target -> prompt).
-            c_bodies = [b for b in shell_bodies(argv_raw) if b]
+            c_bodies = []
+            for b in shell_bodies(argv_raw) + shell_bodies(unsplit_raw):
+                if b and b not in c_bodies:
+                    c_bodies.append(b)
             if c_bodies and depth >= 3:
                 # A body this deep is not read, so what it runs is unknown (Q340).
                 findings.append((ASK, 'prod-guard: `%s -c` runs a body nested '
