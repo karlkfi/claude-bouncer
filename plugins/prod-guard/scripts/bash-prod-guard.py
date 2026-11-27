@@ -847,6 +847,88 @@ def _assign(values, defining, maybe, functions, *scopes, unknown=()):
             scope.update(values)
 
 
+def _assign_var(values, export, defining, maybe, functions, shell_env,
+                exported):
+    """`_assign` for variables. bash exports a name, not a value, so the
+    exported scope takes the value too wherever the name carries the export
+    attribute (Q387). `export` is True where the command sets the attribute,
+    False where it clears it, and None where it leaves it as it was."""
+    _assign(values, defining, maybe, functions, shell_env, unknown=(exported,))
+    if defining is not None or maybe:
+        return
+    for name, value in values.items():
+        if export is False:
+            exported.pop(name, None)
+            shell_env.pop(_mark(name), None)
+            continue
+        sure = export or _exported(name, shell_env, exported)
+        if sure:
+            exported[name] = value if sure is True \
+                else Readings.of(value, {None})
+
+
+# Shell state that is not a variable rides in the shell scope under a key no
+# name can be, so every copy, frame and merge the scopes get carries it: `set
+# -a`, and the attribute on a name exported before it had a value. A child is
+# seeded from the exported scope, so it inherits neither.
+ALLEXPORT = '-a'
+
+
+def _mark(name):
+    return '-x' + name
+
+
+def _exported(name, shell_env, exported):
+    """True where an assignment to `name` reaches a child, False where it
+    does not, and 'maybe' where whatever set the attribute may not have run."""
+    held = [v for v in (shell_env.get(ALLEXPORT), shell_env.get(_mark(name)),
+                        exported.get(name)) if v is not None]
+    if any(None not in _choices(v) for v in held):
+        return True
+    return 'maybe' if held else False
+
+
+def _export_flag(tool, args):
+    """What `tool`'s options do to its operands' export attribute: True sets
+    it, False clears it, None leaves it alone. Options end at the first
+    operand, as the builtin reads them."""
+    flag = True if tool == 'export' else None
+    for a in args:
+        if a == '--' or len(a) < 2 or a[0] not in '-+':
+            break
+        if tool == 'export':
+            if 'n' in a[1:]:
+                flag = False
+            elif 'f' in a[1:]:
+                return None   # the operands are functions
+        elif 'x' in a[1:]:
+            flag = a[0] == '-'
+    return flag
+
+
+def _allexport(args):
+    """What `set` does to allexport: True, False, None where it leaves it
+    alone, or 'maybe' for an option word the guard cannot read."""
+    state, i = None, 0
+    while i < len(args):
+        a = args[i]
+        i += 1
+        if '$' in a:
+            return 'maybe'
+        if a in ('-', '--') or len(a) < 2 or a[0] not in '-+':
+            break
+        for letter in a[1:]:
+            if letter == 'a':
+                state = a[0] == '-'
+            elif letter == 'o' and i < len(args):
+                name, i = args[i], i + 1
+                if '$' in name:
+                    return 'maybe'
+                if name == 'allexport':
+                    state = a[0] == '-'
+    return state
+
+
 def _forget(names, *scopes):
     """Drop `names` from every scope: assigned where bash may not have run the
     assignment, the value is unknown, so the target prompts rather than
@@ -864,6 +946,7 @@ def _forget(names, *scopes):
                     scope[name] = Readings.of(value, {None})
         for name in names:
             scope.pop(name, None)
+            scope.pop(_mark(name), None)
 
 
 def _unset(names, defining, maybe, functions, *scopes):
@@ -3642,10 +3725,11 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
         if 'PROD_GUARD_SESSION_OVERRIDE' in seg_inline and session_reason is None:
             session_reason = seg_inline['PROD_GUARD_SESSION_OVERRIDE']
         if not argv:
-            # Assignment-only segment (`P=x`): a shell var, not exported. In
-            # a body that may not run, the name's value is no longer known.
-            _assign(seg_inline, defining, maybe, functions, shell_env,
-                    unknown=(exported,))
+            # Assignment-only segment (`P=x`): a shell var, exported only
+            # where the name already is. In a body that may not run, the
+            # name's value is no longer known.
+            _assign_var(seg_inline, None, defining, maybe, functions,
+                        shell_env, exported)
             continue
         tool = os.path.basename(argv[0])
         if tool in REASSIGN_BUILTINS or tool in SOURCE_BUILTINS:
@@ -3666,12 +3750,27 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
                    shell_env, exported)
             continue
         if tool in ASSIGN_BUILTINS:
-            # `export NAME=val …`: operands persist and are exported. argv is
-            # already expanded, so the values are resolved.
+            # `export NAME=val …`: operands persist, and are exported where
+            # the options say so. argv is already expanded, so the values are
+            # resolved.
             # A builtin parses its own operands after quote removal, so
             # `export 'A=1'` assigns where a bare `'A=1'` would not (Q170).
+            export = _export_flag(tool, argv[1:])
             for tok in argv[1:]:
-                if not tok.startswith('-') and ASSIGNMENT_RE.match(tok):
+                if export is not None and _NAME_RE.fullmatch(tok):
+                    # `export C` sets the attribute alone: the value it has
+                    # now reaches a child, and so does every later one.
+                    if export:
+                        _assign({_mark(tok): '1'}, defining, maybe, functions,
+                                shell_env)
+                        if tok in shell_env:
+                            _assign({tok: shell_env[tok]}, defining, maybe,
+                                    functions, exported)
+                    else:
+                        _unset({tok}, defining, maybe, functions, exported)
+                        _unset({_mark(tok)}, defining, maybe, functions,
+                               shell_env)
+                elif not tok.startswith('-') and ASSIGNMENT_RE.match(tok):
                     name, form, value = split_assignment(tok)
                     # An operand expanded from a name with several readings
                     # assigns each of them (Q377). One that splits to another
@@ -3689,8 +3788,8 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
                         others = {None if o is None else prior + o
                                   for o in others}
                     value = Readings.of(value, others)
-                    _assign({name: value}, defining, maybe, functions,
-                            shell_env, exported)
+                    _assign_var({name: value}, export, defining, maybe,
+                                functions, shell_env, exported)
             continue
         if tool in SHELL_NAMES:
             # bash -c 'kubectl ...': evaluate the -c body as its own command,
@@ -3838,6 +3937,14 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
             # A sourced file may have defined it, so it may set any name.
             _unset({EVERY_NAME}, defining, maybe, functions, shell_env,
                    exported)
+        elif tool == 'set':
+            on = _allexport(argv[1:])
+            if on is False:
+                _unset({ALLEXPORT}, defining, maybe, functions, shell_env)
+            elif on:
+                _assign({ALLEXPORT: '1' if on is True
+                         else Readings.of('1', {None})},
+                        defining, maybe, functions, shell_env)
         evaluator = EVALUATORS.get(tool)
         if evaluator is None:
             continue  # uncovered tool: defer
