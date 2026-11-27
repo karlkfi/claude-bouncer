@@ -1389,6 +1389,8 @@ def command_substitutions(text, quotes=True, spans=None, funsubs=None):
     driven on bash 5.3.15, ``echo $(( '$(cmd)' ))`` and
     ``echo "$(( 1 # $(cmd)⏎ ))"`` both run ``cmd``, and ``\\$(cmd)`` does not.
     So its substitutions are returned, with quotes and comments read as text.
+    A ``$[…]`` body and an arithmetic command's ``((…))`` expand the same way
+    (Q415): ``(( '$(cmd)' ))`` and ``echo $[ '$(cmd)' ]`` run ``cmd`` too.
 
     Scans the RAW command string, never the post-shlex tokens: shlex strips the
     quotes, losing the single-vs-double distinction that decides whether a
@@ -1441,14 +1443,13 @@ def command_substitutions(text, quotes=True, spans=None, funsubs=None):
     braced = 0            # inside a `${…}` before this index
     words = []            # a `${…}` in "…" or arithmetic: [its `}`, a "…" open
                           # in it, the arithmetic depth it opened at, outer aq]
-    arith = []            # per open `$((`: where its `))` is, quoted, outer aq
+    arith = []            # per open `$((`, `((` or `$[`: where its close is,
+                          # quoted, outer aq, the index past it, brk after it
     aq = ''               # a quote opened in arithmetic, where it is text
     arith_ends = {}       # `_arith_end`'s closes, so nesting is scanned once
     while i < n:
         if arith and i >= arith[-1][0]:
-            i, _, aq = arith.pop()
-            i += 2
-            brk = False                            # `$((1))#x` is one word
+            _, _, aq, i, brk = arith.pop()         # `$((1))#x` is one word
             continue
         q = quotes and not arith
         close = arith[-1][0] if arith else n + 1
@@ -1534,7 +1535,7 @@ def command_substitutions(text, quotes=True, spans=None, funsubs=None):
                 continue
             if end > 0:
                 closes.add(end - 1)
-                arith.append((end - 2, quoted, aq))
+                arith.append((end - 2, quoted, aq, end, False))
                 aq = ''
                 i += 3                             # its body expands (Q362)
                 continue
@@ -1590,6 +1591,17 @@ def command_substitutions(text, quotes=True, spans=None, funsubs=None):
                 while i < n and text[i] != '\n':   # keep the newline itself
                     i += 1
                 continue
+            end = _arith_command_end(text, i, closes) \
+                if i >= quiet and not dbracket else -1
+            if text.startswith('$[', i):
+                end = _subscript_end(text, i + 1)
+            if end > 0:                            # expands as `$((` does (Q415)
+                arith.append((end - 1 - (c == '('), i < braced, aq, end,
+                              c == '('))
+                aq = ''
+                brk = False
+                i += 2
+                continue
             end = _comment_free_end(text, i, brk)
             if text.startswith('${', i):
                 braced = max(braced, end)
@@ -1624,6 +1636,28 @@ def command_substitutions(text, quotes=True, spans=None, funsubs=None):
         brk = c in COMMENT_PRECEDERS
         i += 1
     return bodies
+
+
+def _arith_command_end(text, i, closes):
+    """The index just past the ``))`` of an arithmetic command or a ``for ((``
+    opening at ``text[i]``, or -1.
+
+    Only a ``((`` in command position is one. Driven on bash 5.3.15,
+    ``(( '$(cmd)' ))`` and ``for (( i='$(cmd)'; ; ))`` run ``cmd``, where
+    ``cat <(( '$(cmd)' ))`` is a subshell in a process substitution and prints
+    nothing of it, and so is ``[[ a == @(('$(cmd)')) ]]``.
+    """
+    if not text.startswith('((', i):
+        return -1
+    word = j = i
+    while j and text[j-1] in ' \t':
+        j -= 1
+    if text[j-3:j] == 'for' and (j == 3 or text[j-4] in ' \t\n;&|('):
+        word = j - 3
+    if not _command_position(text, word, closes):
+        return -1
+    end = _arith_end(text, i)
+    return end if end > 0 and text[end-2:end] == '))' else -1
 
 
 def _comment_free_end(text, i, brk):

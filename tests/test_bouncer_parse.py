@@ -587,6 +587,34 @@ class ArithmeticCloseTests(unittest.TestCase):
         bp.command_substitutions('echo $(( $(a) + 1 ))', spans=spans)
         self.assertEqual([(9, 13)], spans)
 
+    def test_a_quote_in_an_arithmetic_command_or_dollar_bracket_is_text(self):
+        # bash expands those bodies the way it does a `$((` one (Q415).
+        for cmd, bodies in (
+                ("(( '$(echo RAN)' ))", ['echo RAN']),           # RAN, error
+                ("echo $[ '$(echo RAN)' ]", ['echo RAN']),       # RAN, error
+                ("for (( i='$(echo RAN)'; i<0; )); do :; done", ['echo RAN']),
+                ("for((i='$(echo RAN)'; i<0; )); do :; done", ['echo RAN']),
+                ("x=1; ((x)) && (( '$(echo RAN)' ))", ['echo RAN']),
+                ("if ! (( '$(echo RAN)' )); then :; fi", ['echo RAN']),
+                ("case a in a) (( '$(echo RAN)' ));; esac", ['echo RAN']),
+                ("echo ${x:-$[ '$(echo RAN)' ]}", ['echo RAN']),
+                ("(( $[ '$(echo RAN)' ] ))", ['echo RAN']),
+                ("echo $[ 1 ] '$(echo X)' ; (( 1 )) '$(echo Y)'", []),
+                ('((1))#c; echo $(echo X)', []),                 # nothing
+                ('echo $[1]#c $(echo RAN)', ['echo RAN']),       # 1#c RAN
+                # Not an arithmetic command, so the quotes hold.
+                ("cat <(( '$(echo X)' ))", []),     # `$(echo X)`: not found
+                ("cat <((echo '$(echo X)'))", []),               # $(echo X)
+                ("echo (( '$(echo X)' ))", []),                  # syntax error
+                ("[[ a == @(('$(echo X)')) ]]", []),
+                ("[[ ! (( '$(echo X)' == 1 )) ]]", []),
+                ("[[ ( (('$(echo X)')) ) ]]", []),
+                ("case a in @( (('$(echo X)')) )) :;; esac", []),
+                ("(( '$(echo X)' + 1", []),                      # syntax error
+                ("echo $[ '$(echo X)'", [])):                    # syntax error
+            with self.subTest(cmd=cmd):
+                self.assertEqual(bodies, bp.command_substitutions(cmd))
+
     def test_a_brace_word_in_arithmetic_keeps_a_quoted_backslash_newline(self):
         # As outside arithmetic, a comment-made `$( (` written in a `${…}` word
         # keeps `\⏎` in single quotes; printf printed the comment's column.
