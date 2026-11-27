@@ -3990,6 +3990,35 @@ class SpecialCaseTests(unittest.TestCase):
             "env C=kind-ci bash -c 'kubectl --context $C'' delete ns x'",
             home=home)[0])
 
+    def test_env_operands_reach_a_dollar_the_parent_leaves(self):
+        # `\$C` and a `$C` held in another name's value reach the child as
+        # text, which expands them to the operand. A production operand
+        # denies; any other prompts, since the guard cannot rule out the
+        # parent's own `$C`.
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        kubectl = "kubectl --context=%s delete pod x"
+        for ctx, want in (("gke_acme_prod-us", "deny"), ("kind-ci", "ask")):
+            for cmd in ('env C=%s bash -c "' + kubectl % "\\$C" + '"',
+                        'env C=%s sh -c "' + kubectl % "\\${C}" + '"',
+                        "B='$C'; env C=%s bash -c \"" + kubectl % "$B" + '"',
+                        'sudo C=%s bash -c "' + kubectl % "\\$C" + '"',
+                        'env -u KUBECONFIG C=%s bash -c "'
+                        + kubectl % "\\$C" + '"'):
+                with self.subTest(cmd=cmd % ctx):
+                    self.assertEqual(run_hook(cmd % ctx, home=home)[0], want)
+        self.assertEqual(run_hook(
+            'export C=kind-ci; env C=gke_acme_prod-us bash -c "'
+            + kubectl % "\\$C" + '"', home=home)[0], "deny")
+        # A live `$C` is the parent's, so the operand never decides it.
+        for cmd in ('env C=gke_acme_prod-us bash -c "' + kubectl % "$C" + '"',
+                    'C=kind-ci; env C=gke_acme_prod-us bash -c "echo \\$HOME; '
+                    + kubectl % "$C" + '"'):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(run_hook(cmd, home=home)[0], "ask")
+        self.assertIsNone(run_hook(
+            'C=kind-ci; env C=gke_acme_prod-us bash -c "' + kubectl % "$C"
+            + '"', home=home)[0])
+
     def test_env_split_string_is_not_a_shell(self):
         # env splits STRING into words and runs one command; it honours no
         # operators. `foo;` is an argument to kubectl, and `rm` never runs --

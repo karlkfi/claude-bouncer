@@ -3889,17 +3889,21 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
                 quotes = getattr(body, 'quotes', frozenset("'"))
                 # What `env`/`sudo` add reaches the body only where the child
                 # does the expanding: a body written wholly in single quotes.
-                # Anywhere else a `$C` left over is the parent's, unknown here,
-                # and reading the operand's value for it would defer on a
-                # guess, so those names stay out and it prompts (Q269).
+                # Anywhere else the parent expands a live `$C` itself, so that
+                # name stays out and it prompts (Q269). One it leaves as text
+                # reaches the child, but mixed quoting hides which, so the name
+                # takes the operand's value beside unknown.
+                texts = (ctx.get('command') or '', raw)
                 body_env = child
                 if not (quotes == {"'"} and getattr(body, 'quoted_chars', 0)
                         == len(body)):
-                    body_env = {k: v for k, v in child.items()
-                                if child_env.get(k) == v}
+                    live = _expanded_by_parent(set(child), (body,), texts)
+                    body_env = {k: v if child_env.get(k) == v
+                                else Readings.of(v, {None})
+                                for k, v in child.items()
+                                if k not in live or child_env.get(k) == v}
                 others = ()
                 if "'" not in quotes:
-                    texts = (ctx.get('command') or '', raw)
                     # `"\$X"` and `"$"X` reach the child as `$X`, which the
                     # lexer cannot tell from a live `"$X"`. Where the command
                     # holds either, a name also takes the value the child

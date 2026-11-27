@@ -208,6 +208,10 @@ An inline prefix does not reach its own command's words, though. bash expands th
 The guard judges such a command twice, under the prefix's value and under the shell's, and keeps every finding.
 The shell's reading is the one bash runs, so it is what catches `CTX=<prod>; CTX=kind-dev kubectl --context $CTX`. The prefix's reading is kept because a production name written in the prefix is denied today, and judging only the bash reading would downgrade that to a prompt. Its cost is a deny for `CTX=kind-dev; CTX=<prod> kubectl --context $CTX`, which runs against `kind-dev`.
 
+An `env` or `sudo` operand is the same case one step removed: `env CTX=x bash -c "… $CTX …"` builds its body before env runs, so a live `$CTX` there is the shell's and never the operand's.
+A `$CTX` the shell leaves as text, as in `\$CTX` or a variable whose value is `$CTX`, does reach the child, which expands it to the operand.
+The guard cannot always tell the two apart, so it judges the operand's value beside an unknown one: a production operand denies, and any other prompts (Q388).
+
 ### Why a quoted heredoc body is the one place segments are removed
 
 Everywhere else the splitter errs toward *more* segments to inspect: a crude split costs a spurious prompt, a missed one costs an outage.
