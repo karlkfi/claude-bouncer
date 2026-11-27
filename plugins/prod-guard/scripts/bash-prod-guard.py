@@ -1282,15 +1282,27 @@ _IFS_RE = re.compile('[ \t\n]+')
 _BRACED_REFS_RE = re.compile(r'(?:\$\{[A-Za-z_][A-Za-z0-9_]*\})+')
 
 
+class Expanded(str):
+    """A word expanded from a quoted token, which `raw` holds as lexed."""
+
+
+def _with_raw(word, tok):
+    if type(word) is str:
+        word = Expanded(word)
+    word.raw = tok
+    return word
+
+
 def expand_argv(argv, env):
     """Expand simple variable references in every token of `argv`, marking
     each word that may expand to nothing as a `MayVanish`. A word written with
     no quoting splits on whitespace where its expansion holds some, as bash
-    splits an unquoted expansion (Q382); an assignment-shaped word does not."""
+    splits an unquoted expansion (Q382); an assignment-shaped word does not.
+    A word from a quoted token keeps the token as `raw`, so a reader that
+    expands the text itself can tell what bash left alone (Q385)."""
     out = []
     for tok in argv:
-        # Only an assignment's value persists for a later word to re-expand;
-        # an `env -S` string relies on the parent having expanded it.
+        # Only an assignment's value persists for a later word to re-expand.
         if ASSIGNMENT_RE.match(tok):
             word = expand_word(tok, env)
         else:
@@ -1304,6 +1316,8 @@ def expand_argv(argv, env):
                 and _VAR_REFS_RE.fullmatch(tok)
                 and _VAR_REFS_RE.fullmatch(word)):
             word = MayVanish(word)
+        elif getattr(tok, 'quoted_from', None) is not None:
+            word = _with_raw(word, tok)
         out.append(word)
     return out
 
@@ -1361,7 +1375,7 @@ def wrapper_prints_only_before(head, operands, value_opts):
     return False
 
 
-def env_reshape_child(argv, child):
+def env_reshape_child(argv, child, unset=None):
     """Apply what the `env` option word at argv[0] does to the environment the
     command inherits: `-i`, `-` and `--ignore-environment` empty it, and
     `-u NAME` drops NAME. Both GNU and BSD env clear before they unset and
@@ -1369,7 +1383,8 @@ def env_reshape_child(argv, child):
 
     A name known to be gone is kept as set empty, which is how the child
     expands it: `env -u C bash -c '... "$C"'` reads `""`, where a name left out
-    would stay `$C`, unknown. One the hook never saw stays unknown."""
+    would stay `$C`, unknown. One the hook never saw stays unknown. A set
+    passed as `unset` gets each name `-u` drops."""
     tok = argv[0]
     used, opt, value = wrapper_option(argv, WRAPPER_VALUE_OPTS['env'])
     if tok.startswith('--'):
@@ -1381,6 +1396,8 @@ def env_reshape_child(argv, child):
         child.update(dict.fromkeys(child, ''))
     if opt in ('-u', '--unset') and value is not None:
         child[value] = ''
+        if unset is not None:
+            unset.add(value)
 
 
 def env_split_string(argv):
@@ -1405,6 +1422,42 @@ def env_split_string(argv):
         return shlex.split(value), argv[used:]
     except ValueError:
         return None
+
+
+def env_string_readings(argv, words, envs, left_dollar=False):
+    """The readings of the `env -S` string at argv[0], whose words the parent
+    expanded into `words`: the words env runs, and a list of other readings.
+
+    env expands each `${NAME}` in the string itself, against the environment
+    it started with (Q385). GNU env 9.11 does that before `-i` and `-u` apply,
+    and BSD env after `-u` but before `-i`, so `envs` holds one environment
+    per reading. Written wholly in single quotes, the string reaches env as
+    text, so env's readings are the only ones. Written wholly in double
+    quotes, or with no quoting, the parent expanded it first and its reading
+    stands, unless the command holds a `$` the shell left as text. Any other
+    quoting, or an escape, may have left only part of it alone, so env's
+    readings are judged with the parent's beside them."""
+    raw = [getattr(t, 'raw', t) for t in argv]
+    used, _, value = wrapper_option(raw, WRAPPER_VALUE_OPTS['env'])
+    tok = raw[used - 1]
+    if getattr(tok, 'quoted_from', None) is None:
+        return words, []
+    whole = (getattr(tok, 'quoted_chars', 0) == len(value)
+             and tok.quoted_from == len(tok) - len(value))
+    if whole and tok.quotes == {'"'} and not left_dollar:
+        return words, []
+    try:
+        split = shlex.split(value)
+    except ValueError:
+        return words, []
+    readings = []
+    for env in envs:
+        expanded = [expand_vars(w, env) for w in split]
+        if expanded not in readings:
+            readings.append(expanded)
+    if not (whole and tok.quotes == {"'"}):
+        readings.append(words)
+    return readings[0], readings[1:]
 
 
 # sudo modes that run no command, so the operands behind them are not one to
@@ -1505,7 +1558,7 @@ def find_actions(argv):
     return out
 
 
-def strip_wrappers(argv, env, alternates=None, child=None):
+def strip_wrappers(argv, env, alternates=None, child=None, left_dollar=False):
     """Remove leading launcher commands (sudo, env, timeout, xargs, ...) so
     the covered tool underneath is classified, not the wrapper. `env`
     assignments found behind `env`/`sudo` merge into the segment env.
@@ -1516,7 +1569,8 @@ def strip_wrappers(argv, env, alternates=None, child=None):
 
     A list passed as `alternates` gets each second reading the walk could not
     rule out, and each later command a `find` runs, as `(argv, child env)`:
-    the caller judges those too."""
+    the caller judges those too. `left_dollar` says the command holds a `$`
+    the shell left as text, which no token records (Q348)."""
     if child is None:
         child = {}
     while argv:
@@ -1534,6 +1588,7 @@ def strip_wrappers(argv, env, alternates=None, child=None):
             child.update(assigned)
         elif head == 'env':
             argv = argv[1:]
+            entry, unset = dict(child), set()
             assigned = False
             ended = False
             while argv:
@@ -1547,7 +1602,7 @@ def strip_wrappers(argv, env, alternates=None, child=None):
                     if not ended and wrapper_prints_only('env', argv[0]):
                         return ['env'] + argv
                     ended = ended or argv[0] == '--'
-                    env_reshape_child(argv, child)
+                    env_reshape_child(argv, child, unset)
                     split = env_split_string(argv)
                     if split is not None:
                         words, rest = split
@@ -1558,6 +1613,12 @@ def strip_wrappers(argv, env, alternates=None, child=None):
                         if (alternates is not None and rest
                                 and any(set('$`') & set(w) for w in words)):
                             alternates.append((['env'] + rest, dict(child)))
+                        words, others = env_string_readings(
+                            argv, words,
+                            (entry, {**entry, **dict.fromkeys(unset, '')}),
+                            left_dollar)
+                        for other in others if alternates is not None else ():
+                            alternates.append((other + rest, dict(child)))
                         argv = [MayVanish(w) if _BRACED_REFS_RE.fullmatch(w)
                                 else w for w in words] + rest
                         continue
@@ -3683,8 +3744,10 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
         # Expanded view for classification; raw view (nested-body extraction)
         # is left unexpanded so the child re-expands it against `child`.
         alternates = []
+        left_dollar = any(_LEFT_DOLLAR_RE.search(s)
+                          for s in (ctx.get('command') or '', raw))
         argv = strip_wrappers(expand_argv(argv_raw, words_env), seg_inline,
-                              alternates, child)
+                              alternates, child, left_dollar)
         # A word bash splits is several in the raw view too, so a `-c` or
         # `eval` body is read from the word that holds it (Q382).
         split_raw = []
