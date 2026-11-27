@@ -4875,6 +4875,13 @@ class QuotedSubstBodyEndToEndTests(unittest.TestCase):
         self.assertIn(out["hookSpecificOutput"]["permissionDecision"],
                       ("ask", "deny"))
 
+    def test_unclosed_brace_levels_are_judged_inside_the_timeout(self):
+        # Past 90s on main at d=24 (Q370), against run_hook's 10s. These are
+        # the verdicts main gives at d=12; bash runs nothing for either.
+        cmd = '${x:-$(' * 24 + 'echo ; rm /etc/q370-fake-target'
+        self._defer('echo "' + cmd)
+        self._decision('echo ' + cmd, "ask")
+
 
 class SubstitutionResumesCommandEndToEndTests(unittest.TestCase):
     """The words after a substitution's close belong to the command it sits in
