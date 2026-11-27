@@ -1213,6 +1213,48 @@ class VariableExpansionDecisionTests(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertEqual(run_hook(cmd)[0], "ask")
 
+    # --- Q385: env expands an `env -S` string against its own environment ---
+    # bash 5.3.15, `echo` for kubectl: `CTX=kind-dev; env -S '…${CTX}…'` prints
+    # `[]` under BSD env and GNU env 9.11, and so do the `\${CTX}` spellings;
+    # an exported, prefixed or double-quoted CTX prints `[kind-dev]`. Both
+    # expand before `-i` applies, and GNU before `-u` too.
+
+    K385 = "kubectl --context=${CTX} delete pod x"
+
+    def test_env_split_string_reads_envs_own_environment(self):
+        k = self.K385
+        for cmd in ("CTX=kind-dev; env -S '%s'" % k,
+                    "CTX=kind-dev; env -S'%s'" % k,
+                    "CTX=kind-dev; env --split-string='%s'" % k,
+                    "CTX=kind-dev; env -iS '%s'" % k,
+                    "export CTX=kind-dev; env -u CTX -S '%s'" % k,
+                    "CTX=kind-dev; env -S 'CTX=kind-ci %s'" % k,
+                    # The parent left the `$` alone, so env reads it too.
+                    'CTX=kind-dev; env -S "kubectl --context=\\${CTX} '
+                    'delete pod x"',
+                    "CTX=kind-dev; env -S kubectl\\ --context=\\${CTX}\\ "
+                    "delete\\ pod\\ x",
+                    "CTX=kind-dev; env -S 'kubectl --context=${CTX}'\" "
+                    "delete pod x\"",
+                    # A name the parent expanded to nothing stays unknown.
+                    'X=1 env -S "kubectl --context=${X} delete pod x"'):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(run_hook(cmd)[0], "ask")
+
+    def test_env_split_string_takes_what_env_is_given(self):
+        k = self.K385
+        for cmd in ("export CTX=kind-dev; env -S '%s'" % k,
+                    "CTX=kind-dev env -S '%s'" % k,
+                    "export CTX=gke_acme_prod-us; CTX=kind-dev env -S '%s'" % k,
+                    "export CTX=kind-dev; env -iS '%s'" % k,
+                    'CTX=kind-dev; env -S "%s"' % k):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(run_hook(cmd)[0])
+        for cmd in ("export CTX=gke_acme_prod-us; env -S '%s'" % k,
+                    "export CTX=gke_acme_prod-us; env -u CTX -S '%s'" % k):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(run_hook(cmd)[0], "deny")
+
     # --- Q321: a prefix is applied after its command's words expand ---------
     # bash 5.3.15: `CTX=p /bin/echo "[$CTX]"` prints `[]`, and `[q]` after
     # `CTX=q`. A double-quoted `bash -c`, `eval` or `env -S` string expands
