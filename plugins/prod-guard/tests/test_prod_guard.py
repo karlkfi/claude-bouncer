@@ -1271,6 +1271,14 @@ class VariableExpansionDecisionTests(unittest.TestCase):
             'delete pod x')
         self.assertEqual(decision, "deny")
 
+    def test_prefix_words_take_the_shells_value_past_an_escaped_backslash(self):
+        # `"\\$CTX"` is a backslash and then a live `$CTX`, so the body is
+        # built from the shell's value, which the child unescapes.
+        decision, _ = run_hook(
+            'CTX=gke_acme_prod-us; CTX=kind-ci bash -c '
+            '"kubectl --context=\\\\$CTX delete pod x"')
+        self.assertEqual(decision, "deny")
+
     def test_prefix_reading_still_prompts_beside_a_resolved_shell_value(self):
         decision, _ = run_hook(
             'CTX=kind-dev; CTX=$UNSET kubectl --context=$CTX delete pod x')
@@ -4002,6 +4010,7 @@ class SpecialCaseTests(unittest.TestCase):
                         'env C=%s sh -c "' + kubectl % "\\${C}" + '"',
                         "B='$C'; env C=%s bash -c \"" + kubectl % "$B" + '"',
                         'sudo C=%s bash -c "' + kubectl % "\\$C" + '"',
+                        'env -i C=%s bash -c "' + kubectl % "\\$C" + '"',
                         'env -u KUBECONFIG C=%s bash -c "'
                         + kubectl % "\\$C" + '"'):
                 with self.subTest(cmd=cmd % ctx):
@@ -4011,6 +4020,8 @@ class SpecialCaseTests(unittest.TestCase):
             + kubectl % "\\$C" + '"', home=home)[0], "deny")
         # A live `$C` is the parent's, so the operand never decides it.
         for cmd in ('env C=gke_acme_prod-us bash -c "' + kubectl % "$C" + '"',
+                    'C=kind-ci; env C=gke_acme_prod-us bash -c "'
+                    + kubectl % "\\\\$C" + '"',
                     'C=kind-ci; env C=gke_acme_prod-us bash -c "echo \\$HOME; '
                     + kubectl % "$C" + '"'):
             with self.subTest(cmd=cmd):

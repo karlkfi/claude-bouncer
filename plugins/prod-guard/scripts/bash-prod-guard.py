@@ -1069,12 +1069,16 @@ def _expanded_by_parent(names, words, texts):
     """The `names` a word not quoted singly references live, as `$NAME` rather
     than `\\$NAME`. The shell expands those before a prefix assignment applies,
     so they take its value and not the prefix's (Q321)."""
-    def live(n, s):
-        return re.search(r'(?<!\\)\$(?:\{%s\}|%s(?![A-Za-z0-9_]))' % (n, n), s)
+    def ref(n, s, before=''):
+        return re.search(before + r'\$(?:\{%s\}|%s(?![A-Za-z0-9_]))' % (n, n),
+                         s)
+    # In the text an odd run of backslashes escapes the `$`. The lexer has
+    # already spent those, so a backslash left in a word is literal.
+    even = r'(?<!\\)(?:\\\\)*'
     return {n for n in names
-            if any(live(n, str(w)) for w in words
+            if any(ref(n, str(w)) for w in words
                    if "'" not in getattr(w, 'quotes', frozenset("'")))
-            and any(live(n, s) for s in texts)}
+            and any(ref(n, s, even) for s in texts)}
 
 
 def _single_quoted_in_bodies(value):
@@ -3897,11 +3901,13 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
                 body_env = child
                 if not (quotes == {"'"} and getattr(body, 'quoted_chars', 0)
                         == len(body)):
-                    live = _expanded_by_parent(set(child), (body,), texts)
+                    read = {n for s in _choices(expand_vars(body, words_env))
+                            | {str(body)} for n in _REFERENCED_RE.findall(s)}
+                    read -= _expanded_by_parent(read, (body,), texts)
                     body_env = {k: v if child_env.get(k) == v
                                 else Readings.of(v, {None})
                                 for k, v in child.items()
-                                if k not in live or child_env.get(k) == v}
+                                if k in read or child_env.get(k) == v}
                 others = ()
                 if "'" not in quotes:
                     # `"\$X"` and `"$"X` reach the child as `$X`, which the
