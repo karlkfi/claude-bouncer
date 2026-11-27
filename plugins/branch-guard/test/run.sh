@@ -2814,6 +2814,34 @@ check "[overlap] cd \$VAR stands the probe down -> none" none \
      "$OVL_WT_DIRTY")"
 check "[overlap] cd - stands the probe down -> none" none \
   "$(decision_for "$(bash_payload 'cd - && git push')" "$OVL_WT_DIRTY")"
+#      A `cd` inside a substitution (Q383). A `$( )` body runs in a subshell, so
+#      its `cd` moves nothing and the push is still measured where it sits; a
+#      funsub runs in the caller's shell, so the push may have left, and the
+#      probe stands down. A body is placed where it sits, so a push inside one
+#      is measured in the tree a literal `cd` ahead of it moved to.
+OVL_CLEAN_Q="'$(nat "$OVL_WT_CLEAN")'"
+OVL_DIRTY_Q="'$(nat "$OVL_WT_DIRTY")'"
+check "[overlap] a \$( ) body's cd moves nothing -> deny" deny \
+  "$(decision_for "$(bash_payload "echo \"\$(cd $OVL_CLEAN_Q)\" && git push")" \
+     "$OVL_WT_DIRTY")"
+check "[overlap] a quoted funsub's cd stands the probe down -> none" none \
+  "$(decision_for "$(bash_payload "echo \"\${ cd $OVL_CLEAN_Q; }\" && git push")" \
+     "$OVL_WT_DIRTY")"
+check "[overlap] a bare funsub's cd stands the probe down -> none" none \
+  "$(decision_for "$(bash_payload "echo \${ cd $OVL_CLEAN_Q; } && git push")" \
+     "$OVL_WT_DIRTY")"
+check "[overlap] a push in a body after a \$( ) cd -> deny" deny \
+  "$(decision_for "$(bash_payload "echo \"\$(cd $OVL_CLEAN_Q)\"; echo \"\$(git push)\"")" \
+     "$OVL_WT_DIRTY")"
+check "[overlap] a push in a body after a funsub cd -> none" none \
+  "$(decision_for "$(bash_payload "echo \"\${ cd $OVL_CLEAN_Q; }\"; echo \"\$(git push)\"")" \
+     "$OVL_WT_DIRTY")"
+check "[overlap] a push in a body after a cd into the overlapping worktree -> deny" deny \
+  "$(decision_for "$(bash_payload "cd $OVL_DIRTY_Q && echo \"\$(git push)\"")" \
+     "$OVL_WT_CLEAN")"
+check "[overlap] a push in a body after a cd out of it -> none" none \
+  "$(decision_for "$(bash_payload "cd $OVL_CLEAN_Q && echo \"\$(git push)\"")" \
+     "$OVL_WT_DIRTY")"
 
 #      Aimed by `git -C`. This direction is the false ALLOW, which is the worse
 #      of the two: a wrong deny is visible to the session and a wrong allow is
@@ -3585,6 +3613,66 @@ check "[sh -c][dontAsk] control: OVERRIDE git reset --hard dirty on feature -> a
 check "[sh -c][dontAsk] OVERRIDE sh -c 'git reset --hard' dirty on feature -> deny" deny \
   "$(decision_for "$(bash_mode "BRANCH_GUARD_OVERRIDE=r sh -c 'git reset --hard'" dontAsk)" "$SHC.feat")"
 rm -rf "$SHC" "$SHC.feat"
+
+# 32. A command substitution's body (Q383, Q380). bash runs every one, and only
+#     a bare `$( )` was judged, because the lexer split at its `(`: a quoted
+#     one, a backtick and a funsub all deferred on `main`. Each body is now
+#     judged like a `-c` body, keeping only its asks and denies, from the
+#     directory in force where it sits.
+SUB="$(mktemp -d "$REPO_ROOT/tmp/sub.XXXXXX")"
+git -C "$SUB" init -q -b main
+git -C "$SUB" config user.name "Test"
+git -C "$SUB" config user.email "test@example.com"
+printf 'hello\n' > "$SUB/file.txt"
+git -C "$SUB" add file.txt
+git -C "$SUB" commit -q -m init
+git -C "$SUB" worktree add -q "$SUB.feat" -b claude/x
+SUB_MAIN="../$(basename "$SUB")"
+SUB_FEAT="../$(basename "$SUB.feat")"
+
+for c in 'echo "$(git commit -m x)"' 'echo `git commit -m x`' \
+         'echo "`git commit -m x`"' 'echo ${ git commit -m x; }' \
+         'echo "${ git commit -m x; }"' 'echo "${| git commit -m x; }"' \
+         'x="$(git commit -m x)"' 'echo "$(echo "`git commit -m x`")"' \
+         "sh -c 'echo \"\$(git commit -m x)\"'" 'bash -c "echo \`git commit -m x\`"' \
+         'echo "$(git push --force origin main)"'; do
+  check "[subst] on main: $c -> ask" ask \
+    "$(decision_for "$(bash_payload "$c")" "$SUB")"
+done
+check "[subst] on the feature branch: a forced push to main in a body -> ask" ask \
+  "$(decision_for "$(bash_payload 'echo "${ git push --force origin main; }"')" "$SUB.feat")"
+check "[subst][dontAsk] on main: echo \"\$(git commit -m x)\" -> deny" deny \
+  "$(decision_for "$(bash_mode 'echo "$(git commit -m x)"' dontAsk)" "$SUB")"
+check_text "[subst] the body's reason reaches the prompt" has "protected branch 'main'" \
+  "$(reason_for "$(bash_payload 'echo "$(git commit -m x)"')" "$SUB")"
+
+#     A body grants nothing: its allow defers, and a funsub hides a command
+#     from the auto-approve the way a `$( )` does.
+check "[subst] control: git status on the feature branch -> allow" allow \
+  "$(decision_for "$(bash_payload 'git status')" "$SUB.feat")"
+for c in 'echo "$(git commit -m x)"' 'git status "$(git commit -m x)"' \
+         'git status ${ touch PWNED; }' 'git status "${ touch PWNED; }"'; do
+  check "[subst] on the feature branch: $c -> none" none \
+    "$(decision_for "$(bash_payload "$c")" "$SUB.feat")"
+done
+
+#     The directory a body starts in is the one where it sits: a literal `cd`
+#     ahead of it moves it, a `cd` inside it moves its own later segments, and
+#     a `$( )` body's `cd` stays in its subshell.
+check "[subst] feature: cd <main> && echo \"\$(commit)\" -> ask" ask \
+  "$(decision_for "$(bash_payload "cd $SUB_MAIN && echo \"\$(git commit -m x)\"")" "$SUB.feat")"
+check "[subst] main: cd <feature> && echo \"\$(commit)\" -> none" none \
+  "$(decision_for "$(bash_payload "cd $SUB_FEAT && echo \"\$(git commit -m x)\"")" "$SUB")"
+check "[subst] feature: echo \"\$(cd <main> && commit)\" -> ask" ask \
+  "$(decision_for "$(bash_payload "echo \"\$(cd $SUB_MAIN && git commit -m x)\"")" "$SUB.feat")"
+check "[subst] main: echo \"\$(cd <feature>)\"; echo \"\$(commit)\" -> ask" ask \
+  "$(decision_for "$(bash_payload "echo \"\$(cd $SUB_FEAT)\"; echo \"\$(git commit -m x)\"")" "$SUB")"
+
+#     The break-glass does not reach into a body, as it does not into `-c`.
+printf 'dirty\n' > "$SUB.feat/file.txt"
+check "[subst][dontAsk] OVERRIDE echo \"\$(git reset --hard)\" dirty on feature -> deny" deny \
+  "$(decision_for "$(bash_mode 'BRANCH_GUARD_OVERRIDE=r echo "$(git reset --hard)"' dontAsk)" "$SUB.feat")"
+rm -rf "$SUB" "$SUB.feat"
 
 # The friction report's own suite, run here so every caller of this harness
 # covers it. It imports the hook rather than judging a command, so it needs an

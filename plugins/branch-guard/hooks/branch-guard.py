@@ -121,8 +121,8 @@ import sys, os, json, re, shlex, subprocess, fnmatch
 # copy under this plugin's `lib/` is vendored; see scripts/sync-lib.py.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 from bouncer_parse import (                                   # noqa: E402
-    ASSIGN_PLAIN, ASSIGN_SUBSCRIPT, PUNCT_CHARS, is_assignment, lex, note_discarded_writes,
-    split_assignment, split_operator_runs, strip_sh_keywords,
+    ASSIGN_PLAIN, ASSIGN_SUBSCRIPT, PUNCT_CHARS, command_substitutions, is_assignment, lex,
+    note_discarded_writes, split_assignment, split_operator_runs, strip_sh_keywords,
 )
 from bouncer_grants import load_grants, record_grants         # noqa: E402
 from bouncer_session import claude_tmp_root, is_session_tmp_path  # noqa: E402
@@ -610,6 +610,12 @@ PURE_SUBSTITUTIONS = frozenset({
     ('pwd',),                                   # working directory path
 })
 
+# A bash 5.3 funsub, `${ list; }` or `${| list; }`, as a token shows it: a
+# bare `${` where it stood unquoted, the whole construct where it was quoted.
+# It runs its list in the current shell, so it is a command substitution that
+# can also move the cwd of everything after it (Q383).
+FUNSUB_RE = re.compile(r'\$\{(?:[ \t\n|]|$)')
+
 # `git push` options that consume a separate following value token.
 PUSH_VALUE_OPTS = {'--repo', '-o', '--push-option', '--receive-pack', '--exec'}
 # `git push` flags that push more than the current branch.
@@ -1063,8 +1069,8 @@ def is_pure_substitution(inner):
 
 def has_shell_substitution(tokens):
     """True if any raw token hides a command the classifier never inspects:
-    command substitution (`` `…` `` or `$(…)`, including inside a quoted arg),
-    process substitution (`<(…)`/`>(…)`), or an unrecognized operator run
+    command substitution (`` `…` ``, `$(…)` or a funsub, including inside a
+    quoted arg), process substitution (`<(…)`/`>(…)`), or an unrecognized operator run
     (`<>`) that would otherwise merge a trailing command into a git segment's
     args. A run of separators alone (`);`, `;;`) never reaches here whole:
     `split_separator_runs` has already split it. Must run over the RAW token
@@ -1080,8 +1086,8 @@ def has_shell_substitution(tokens):
     `git -C "$(git rev-parse --show-toplevel)" status`) stays auto-approvable.
     Any non-registry or unparseable substitution still blocks."""
     for t in tokens:
-        if t.startswith('<(') or t.startswith('>('):
-            return True                        # process substitution — always blocks
+        if t.startswith('<(') or t.startswith('>(') or FUNSUB_RE.search(t):
+            return True                        # process substitution or funsub — always blocks
         if '`' in t or '$(' in t:
             subs = extract_command_substitutions(t)
             if subs is None or any(not is_pure_substitution(s) for s in subs):
@@ -1713,6 +1719,40 @@ def group_cwd(frames, flat, apart, pos, cwd):
             and cwd != frames[-1][1]:
         cwd = None
     return cwd
+
+
+def holds_funsub(seg):
+    return any(FUNSUB_RE.search(t) for t in seg)
+
+
+def segment_cwds(segments, tail, invs, seg_cwd, runs_funsub=holds_funsub):
+    """Each segment's index with the cwd it runs in, in source order.
+
+    A literal `cd` moves the cwd for everything after it, scoped the way bash
+    scopes it (Q302). A funsub runs in the current shell, so a `cd` in one
+    moves its caller too: after a segment `runs_funsub` names, the cwd is
+    unknown, as after a `cd $VAR` (Q383)."""
+    frames = []
+    flat, apart = compound_layout(segments, tail)
+    for pos, at in enumerate(flat):
+        if not isinstance(at, int):
+            seg_cwd = group_cwd(frames, flat, apart, pos, seg_cwd)
+            continue
+        seg = segments[at][0]
+        if loop_head(seg):
+            seg_cwd = group_cwd(frames, flat, apart, pos, seg_cwd)
+        yield at, seg_cwd
+        if pos in apart:
+            continue
+        if runs_funsub(seg):
+            seg_cwd = None
+        elif invs[at] is None:
+            is_cd, dest = cd_destination(seg, seg_cwd)
+            # A `case` arm ends at a `;;` no mark records, so the next
+            # arm would inherit a `cd` bash never ran there.
+            if is_cd:
+                seg_cwd = (None if any(f[0] == 'case' for f in frames)
+                           else dest)
 
 
 def ref_to_branch(ref, current):
@@ -3400,17 +3440,26 @@ def body_verdicts(shell, seg_cwd, cwd, head_base, ctx, depth):
     verdicts = [('nongit', None, False)]
     if body is None or depth >= MAX_BODY_DEPTH:
         return verdicts
-    try:
-        tokens = tokenize(strip_heredocs(body))
-    except ValueError:
-        return verdicts
     for hop in chdir:
         if hop is None or not is_literal_path(hop):
             seg_cwd = head_base = None
             break
         seg_cwd, head_base = resolve_path(seg_cwd, hop), resolve_path(head_base, hop)
+    return verdicts + judged_body(body, env, seg_cwd, cwd, head_base, ctx,
+                                  depth + 1)
+
+
+def judged_body(body, env, seg_cwd, cwd, head_base, ctx, depth):
+    """The `ask`/`ask-shared`/DENY_ROUTES verdicts in a body bash runs as a
+    command of its own, judged from `seg_cwd`, none of them liftable, so a
+    body never grants an allow."""
     if seg_cwd is not None:
         head_base = seg_cwd
+    text = strip_heredocs(body)
+    try:
+        tokens = tokenize(text)
+    except ValueError:
+        return []
     tail = []
     segments = command_segments(tokens, tail)
     invs = [parse_invocation(s) for s, _, _ in segments]
@@ -3418,9 +3467,62 @@ def body_verdicts(shell, seg_cwd, cwd, head_base, ctx, depth):
         if inv:
             inv['env'] = {**env, **inv['env']}
     inner = judge_segments(segments, tail, invs, seg_cwd, cwd, head_base, ctx,
-                           depth + 1)
-    return verdicts + [(v, r, False) for v, r, _ in inner
-                       if v in ('ask', 'ask-shared') or v in DENY_ROUTES]
+                           depth)
+    inner += substitution_verdicts(text, seg_cwd, cwd, head_base, ctx, depth)
+    return [(v, r, False) for v, r, _ in inner
+            if v in ('ask', 'ask-shared') or v in DENY_ROUTES]
+
+
+# A substitution's stand-in while `substitution_cwds` places it. A command
+# rarely holds the sentinel; one that does is left unplaced.
+SUBST_MARK = '\x1e'
+MARK_RE = re.compile(SUBST_MARK + r'(\d+)' + SUBST_MARK)
+
+
+def substitution_verdicts(text, seg_cwd, cwd, head_base, ctx, depth):
+    """The protective verdicts in every command substitution in `text`
+    (Q383): `$(…)`, backticks and funsubs, quoted or not. A prefix assignment
+    is not set until after the expansion, so a body starts with no `env`."""
+    spans, funsubs = [], []
+    bodies = command_substitutions(text, spans=spans, funsubs=funsubs)
+    if not bodies or depth >= MAX_BODY_DEPTH:
+        return []
+    verdicts = []
+    for body, start in zip(bodies, substitution_cwds(text, spans, funsubs, seg_cwd)):
+        verdicts += judged_body(body, {}, start, cwd, head_base, ctx, depth + 1)
+    return verdicts
+
+
+def substitution_cwds(text, spans, funsubs, seg_cwd):
+    """The cwd each substitution in `text` starts in, which is the one in
+    force where it sits. Each is replaced by a numbered word so the token
+    stream carries its position to `segment_cwds`. A `cd` inside a `$(…)` or
+    backtick body runs in a subshell and moves nothing outside it, while a
+    funsub's moves its caller. One the walk never reaches — a redirect
+    target, or a string already holding the sentinel — gets None."""
+    places = [None] * len(spans)
+    if SUBST_MARK in text:
+        return places
+    out, last = [], 0
+    for k, (start, end) in enumerate(spans):
+        out += [text[last:start], f'{SUBST_MARK}{k}{SUBST_MARK}']
+        last = end
+    try:
+        tokens = tokenize(''.join(out) + text[last:])
+    except ValueError:
+        return places
+    tail = []
+    segments = command_segments(tokens, tail)
+    invs = [parse_invocation(s) for s, _, _ in segments]
+
+    def held(seg):
+        return [int(k) for t in seg for k in MARK_RE.findall(t)]
+
+    for at, here in segment_cwds(segments, tail, invs, seg_cwd,
+                                 lambda seg: any(funsubs[k] for k in held(seg))):
+        for k in held(segments[at][0]):
+            places[k] = here
+    return places
 
 
 def judge_segments(segments, tail, invs, seg_cwd, cwd, head_base, ctx, depth=0):
@@ -3435,15 +3537,9 @@ def judge_segments(segments, tail, invs, seg_cwd, cwd, head_base, ctx, depth=0):
     resolve, `probe` goes false and the probes stand down. `cwd` is the tree
     the command is judged against, and `head_base` where HEAD is read after a
     `cd` the hook couldn't follow — None where no directory is a fair guess."""
-    verdicts, frames = [], []
-    flat, apart = compound_layout(segments, tail)
-    for pos, at in enumerate(flat):
-        if not isinstance(at, int):
-            seg_cwd = group_cwd(frames, flat, apart, pos, seg_cwd)
-            continue
+    verdicts = []
+    for at, seg_cwd in segment_cwds(segments, tail, invs, seg_cwd):
         (seg, writes, _), inv = segments[at], invs[at]
-        if loop_head(seg):
-            seg_cwd = group_cwd(frames, flat, apart, pos, seg_cwd)
         shell = shell_c_body(seg) if inv is None else None
         if shell:
             verdicts += body_verdicts(shell, seg_cwd, cwd, head_base, ctx, depth)
@@ -3477,11 +3573,6 @@ def judge_segments(segments, tail, invs, seg_cwd, cwd, head_base, ctx, depth=0):
                 verdicts.append(('benign', None, False))
             else:
                 verdicts.append(('nongit', None, False))
-            # A `case` arm ends at a `;;` no mark records, so the next
-            # arm would inherit a `cd` bash never ran there.
-            if is_cd and pos not in apart:
-                seg_cwd = (None if any(f[0] == 'case' for f in frames)
-                           else dest)
         else:
             inv_cwd = invocation_cwd(seg_cwd, inv)
             # The session's own branch is no answer for a repository the
@@ -3539,16 +3630,17 @@ def main():
         tail = []
         segments = command_segments(tokens, tail)
         invs = [parse_invocation(seg) for seg, _, _ in segments]
-        if not any(invs) and not any(shell_c_body(seg) for seg, _, _ in segments):
-            return                                 # no git/gh command -> defer
-        note_branch_creations(data)
-
         cwd = data.get('cwd') or os.getcwd()
         seen = set()
-        verdicts = judge_segments(segments, tail, invs, cwd, cwd, cwd, {
-            'policy': push_policy(), 'mode': mode,
-            'session_id': data.get('session_id') or '',
-            'branches': {}, 'roots': {}, 'seen': seen})
+        ctx = {'policy': push_policy(), 'mode': mode,
+               'session_id': data.get('session_id') or '',
+               'branches': {}, 'roots': {}, 'seen': seen}
+        inner = substitution_verdicts(cmd, cwd, cwd, cwd, ctx, 0)
+        if not any(invs) and not inner \
+                and not any(shell_c_body(seg) for seg, _, _ in segments):
+            return                                 # no git/gh command -> defer
+        note_branch_creations(data)
+        verdicts = judge_segments(segments, tail, invs, cwd, cwd, cwd, ctx) + inner
 
         # A protective ask wins over everything (and becomes deny when no human
         # is present). A shared one — the cause is a protected branch — is

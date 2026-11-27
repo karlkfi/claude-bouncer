@@ -99,6 +99,7 @@ The table below assumes the worktree is on a feature branch (`claude/x`) under t
 | `git reset --hard origin/main` *(clean worktree, a branch whose rebase is already published — every unshared commit has a patch-equivalent on a remote)* | allow |
 | `git stash` / `git stash pop` *(any branch — adds no commit, rewrites no history, recoverable by design)* | allow |
 | `git commit -m "fix"` *(on `main`)* | **ask** |
+| `echo "$(git commit -m x)"` / ``echo `git commit -m x` `` / `echo "${ git commit -m x; }"` *(on `main`: a command substitution's body, quoted or not)* | **ask** |
 | `git --git-dir=../x/.git commit` / `GIT_DIR=../x/.git git merge y` / `git -C "$X" push` *(any branch: a commit, merge, rebase, pull or push into a repository the hook can't name, whose branch it can't read)* | **ask** |
 | editing a file whose repo is on `main` *(Edit/Write/MultiEdit/NotebookEdit)* | **ask** |
 | editing a symlink in a gitignored dir that points at a tracked file, on `main` *(the write lands on branch contents)* | **ask** |
@@ -140,7 +141,7 @@ The table below assumes the worktree is on a feature branch (`claude/x`) under t
 | `git status ; echo x > out.txt` *(benign segment writes a file)* | defer |
 | `git log \| cat file.txt` *(filter reads a file)* / `git status \| tee out` *(filter writes)* | defer |
 | `head -5` / `echo hi` *(no git/gh segment)* | defer |
-| `` git status `touch evil` `` / `git commit -m "$(touch evil)"` *(hidden command substitution, not in the pure registry)* | defer |
+| `` git status `touch evil` `` / `git commit -m "$(touch evil)"` / `git status "${ touch evil; }"` *(hidden command substitution, not in the pure registry)* | defer |
 | `git status <(touch evil)` *(process substitution)* | defer |
 | `git checkout file.txt` *(ambiguous: branch vs. file)* | defer |
 | `git -c core.pager=cat log` *(inline-config escape hatch)* | defer |
@@ -154,7 +155,7 @@ The table below assumes the worktree is on a feature branch (`claude/x`) under t
 
 A few rows show the design's caution.
 `git status && rm -rf foo` **defers** rather than allowing: auto-approval requires *every* segment to be a recognized-safe git/gh invocation, so a trailing command can't ride along.
-The substitution rows defer for the same reason a level down — `` `…` ``, `$(…)`, and `<(…)`/`>(…)` run a command the classifier never sees (even inside a quoted argument or a redirect target like `` git diff > `evil` ``), so a would-be `allow` is downgraded to defer.
+The substitution rows defer for the same reason a level down — `` `…` ``, `$(…)`, a bash 5.3 funsub `${ …; }`, and `<(…)`/`>(…)` run a command the classifier never sees (even inside a quoted argument or a redirect target like `` git diff > `evil` ``), so a would-be `allow` is downgraded to defer.
 (A tiny registry of provably pure substitutions is the one exception — see below.)
 An output redirect to a real file (`git log > out`, `echo x > out`) is treated the same way — it's a write side-effect the classifier can't otherwise see, so the segment is downgraded out of `allow`.
 This both hardens the read commands (a redirected `git log --format=…` can't silently write attacker-influenced content) and keeps a ride-along filter/label from sneaking a write through.
@@ -618,12 +619,15 @@ If the `version` or `gitCommitSha` still shows the old release, the update didn'
    A shell run on a `-c` string (`sh -c '…'`, `bash -lc '…'`, and `dash`, `zsh`, `ksh`) has the string judged as a command of its own, from the directory the shell starts in, so `sh -c 'git commit -m x'` on `main` asks as the bare commit does.
    Like a wrapper's, the body's `ask`s and `deny`s stand and its `allow`s defer, and the break-glass does not reach through the shell.
    A body that won't lex, or one nested more than four shells deep, defers.
+   A command substitution's body, in any of its three spellings and quoted or not, is judged the same way, from the directory in force where it sits, so ``echo "`git commit -m x`"`` on `main` asks.
+   A `cd` inside an ordinary substitution's body stays in its subshell, while a funsub runs in the current shell, so after one the directory is unknown and the command is judged against the session's own checkout.
 4. **Classify** each segment as `allow` / `ask` / `deny` / `defer` / non-git: read-only git and gh and harmless mutations (`add`, `restore --staged`, `switch -c`, `worktree add`, branch/tag create) allow on any branch; branch-sensitive mutations (`commit`, `merge`, `rebase`, `cherry-pick`, `stash`, `push`) allow on a feature branch and ask on a protected one; destructive commands (`reset --hard`, `clean -f`, `branch -D`, and gh deletes/disables — a branch via `gh pr close --delete-branch` or `gh api -X DELETE …/git/refs/heads/…`; a repo via `gh repo delete` or `gh api -X DELETE repos/{o}/{r}`; a label via `gh label delete` / `gh api -X DELETE …/labels/…`; a release/secret/variable/gist/cache via `gh <sub> delete` (`secret`/`variable` also accept `remove`; a release asset via `gh release delete-asset`); a workflow via `gh workflow disable`) ask, except a clean-worktree `reset --hard` onto a tip proved unreachable that is also proved to orphan more than a reproducible merge or a published rebase, which denies; unknown or ambiguous forms defer.
    The branch is resolved with `git symbolic-ref`, in the tree the segment acts on — for Bash the session cwd, walked through a literal `cd` or `git -C`; for edits the file's own repo.
 5. **Combine** the segment verdicts: any `deny` → deny; else any `ask` → ask; else every segment must be recognized-safe → allow; else defer.
    A segment is recognized-safe when it's a git/gh `allow` or a **pure read-only filter** piped after one — `head`, `tail`, `cat`, `wc`, `nl`, `sort`, `uniq`, `cut`, `column`, `less`, `more` with no file positional and no write option (`git log | head -20`).
    At least one git/gh segment is still required (`head -5` alone defers).
-   Two things downgrade a would-be `allow` to defer without ever weakening a protective `ask`: an inline-config escape hatch (`git -c core.pager='!sh …' log`, or a `GIT_CONFIG*` variable carrying the same config) or any prefix variable outside the short list of data git and gh only read (`GIT_EXTERNAL_DIFF`, `GIT_SSH_COMMAND`, `PATH`, `HOME`, `LD_PRELOAD`, an editor or pager set to anything but `true`, `:` or `cat`), and a hidden command/process substitution in the raw token stream (`` `…` ``, `$(…)`, `<(…)`/`>(…)`, or an unrecognized operator run like `<>`) — checked over the raw tokens, before redirect targets are dropped, so `` git diff > `evil` `` is caught too. A small registry of provably pure substitutions (`$(git rev-parse --show-toplevel)`, `$(git branch --show-current)`, `$(pwd)`) is exempt from that second downgrade — matched structurally, so only the exact read-only command qualifies.
+   Two things downgrade a would-be `allow` to defer without ever weakening a protective `ask`: an inline-config escape hatch (`git -c core.pager='!sh …' log`, or a `GIT_CONFIG*` variable carrying the same config) or any prefix variable outside the short list of data git and gh only read (`GIT_EXTERNAL_DIFF`, `GIT_SSH_COMMAND`, `PATH`, `HOME`, `LD_PRELOAD`, an editor or pager set to anything but `true`, `:` or `cat`), and a hidden command/process substitution in the raw token stream (`` `…` ``, `$(…)`, `${ …; }`, `<(…)`/`>(…)`, or an unrecognized operator run like `<>`) — checked over the raw tokens, before redirect targets are dropped, so `` git diff > `evil` `` is caught too.
+   A small registry of provably pure substitutions (`$(git rev-parse --show-toplevel)`, `$(git branch --show-current)`, `$(pwd)`) is exempt from that second downgrade — matched structurally, so only the exact read-only command qualifies.
 6. **Fail safe** where no prompt can be shown (`dontAsk`, `bypassPermissions`): a would-be `ask` is emitted as `deny`, since no human is present to answer it.
    The reason names the mode and says retrying won't help, so the agent hands off instead of re-running a command that can't be approved from the session.
    This is the only route by which an `ask` becomes a `deny`; the step-4 deny above is already one in every mode, and its reason names the check rather than the mode.
@@ -831,7 +835,8 @@ The categories are branch-guard's, so another guard's reasons show there as `oth
   It does **not** intercept file mutations done through other Bash commands — e.g. `sed -i`, `>` redirects, or `rm` — on a protected branch.
   [workspace-guard](#companion-plugins), a companion plugin, guards those Bash file commands on a path boundary.
 - It auto-approves a *safe* set of `git`/`gh` subcommands and asks on a *destructive* set (denying within it only where the cause is a fact the model can check); anything outside both (an unknown subcommand, a `git config` form it can't classify, most `gh` mutations) **defers** to the normal permission flow rather than guessing.
-- Auto-approval is only ever withheld, never granted, by the shell-construct check: a command carrying a command/process substitution (`` `…` ``, `$(…)`, `<(…)`/`>(…)`) or an unrecognized operator run **defers** instead of auto-approving, since those run code the classifier can't see. The one exception is a tiny hardcoded registry of provably pure, read-only substitutions (`$(git rev-parse --show-toplevel)`, `$(git branch --show-current)`, `$(pwd)`), matched structurally so nothing else rides in.
+- Auto-approval is only ever withheld, never granted, by the shell-construct check: a command carrying a command/process substitution (`` `…` ``, `$(…)`, `${ …; }`, `<(…)`/`>(…)`) or an unrecognized operator run **defers** instead of auto-approving, since those run code the classifier can't see.
+  The one exception is a tiny hardcoded registry of provably pure, read-only substitutions (`$(git rev-parse --show-toplevel)`, `$(git branch --show-current)`, `$(pwd)`), matched structurally so nothing else rides in.
   It is a best-effort lexical check, not a sandbox — the filesystem boundary is workspace-guard's job, and a hard guarantee belongs in a git `pre-push` hook or server-side branch protection.
 - A `cd` is scoped by `( )`, `{ }`, conditionals, loops, pipes and `&`, but not by `&&` or `||`.
   So `false && cd ../other; git commit` is judged in `../other`, where bash commits in the current tree.
