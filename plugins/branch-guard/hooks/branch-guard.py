@@ -1725,23 +1725,84 @@ def holds_funsub(seg):
     return any(FUNSUB_RE.search(t) for t in seg)
 
 
+def joined_by(flat, pos):
+    """The `&&` or `||` joining the element that opens at `flat[pos]` to the
+    one before it in its and-or list, or None where it starts the list."""
+    j = pos - 1
+    while j >= 0 and flat[j] in ('\n', '!'):
+        j -= 1
+    return flat[j] if j >= 0 and flat[j] in ('&&', '||') else None
+
+
+def ends_and_run(flat, pos):
+    """True when the mark at `flat[pos]` ends a run of `&&`: an `||`, or the
+    end of the list. A newline after an operator continues the list, and an
+    opener starts the next element rather than ending this one."""
+    m = flat[pos]
+    if m in GROUP_CLOSERS or m in ('&&', '|', '|&', '!'):
+        return False
+    if m == '\n':
+        j = pos - 1
+        while j >= 0 and flat[j] == '\n':
+            j -= 1
+        return not (j >= 0 and flat[j] in ('&&', '||', '|', '|&'))
+    return True
+
+
 def segment_cwds(segments, tail, invs, seg_cwd, runs_funsub=holds_funsub):
-    """Each segment's index with the cwd it runs in, in source order.
+    """Each segment's index with the cwd it runs in, in source order, and
+    whether that cwd is blind.
 
     A literal `cd` moves the cwd for everything after it, scoped the way bash
     scopes it (Q302). A funsub runs in the current shell, so a `cd` in one
     moves its caller too: after a segment `runs_funsub` names, the cwd is
-    unknown, as after a `cd $VAR` (Q383)."""
-    frames = []
+    unknown, as after a `cd $VAR` (Q383). A `cd`, or a `{ }` that moved the
+    cwd, behind `&&` or `||` may not run (Q303). Behind `&&` it holds along
+    the run of `&&` after it, since nothing there runs unless it did; past
+    that run, or behind `||`, the cwd is blind: unknown, and bash may be in
+    either tree, so no directory is a fair place to read HEAD instead. A `cd`
+    that stays in the worktree it left is followed as before: both trees are
+    one."""
+    frames, sure, joins, blind, roots = [], [False], [], False, {}
     flat, apart = compound_layout(segments, tail)
+
+    def behind(op, prior, dest):
+        nonlocal blind
+        if dest is None or op is None or prior is not None \
+                and same_worktree(prior, dest, roots):
+            return dest
+        if op == '&&':
+            sure[-1] = True
+        elif op == '||':
+            blind = True
+            return None
+        return dest
+
+    def step(pos, cwd):
+        # One `sure` flag per open group, and a group behind `&&`/`||` that
+        # moved the cwd is judged the way a `cd` there is.
+        depth, top = len(frames), frames[-1] if frames else None
+        cwd = group_cwd(frames, flat, apart, pos, cwd)
+        if len(frames) > depth:
+            sure.append(False)
+            joins.append(joined_by(flat, pos))
+        elif len(frames) < depth:
+            sure.pop()
+            op = joins.pop()
+            if cwd != top[1] and top[0] != '(' and not top[3]:
+                cwd = behind(op, top[1], cwd)
+        return cwd
+
     for pos, at in enumerate(flat):
         if not isinstance(at, int):
-            seg_cwd = group_cwd(frames, flat, apart, pos, seg_cwd)
+            if sure[-1] and ends_and_run(flat, pos):
+                seg_cwd, blind, sure[-1] = None, True, False
+            seg_cwd = step(pos, seg_cwd)
             continue
         seg = segments[at][0]
         if loop_head(seg):
-            seg_cwd = group_cwd(frames, flat, apart, pos, seg_cwd)
-        yield at, seg_cwd
+            seg_cwd = step(pos, seg_cwd)
+        yield at, seg_cwd, blind and seg_cwd is None
         if pos in apart:
             continue
         if runs_funsub(seg):
@@ -1752,7 +1813,7 @@ def segment_cwds(segments, tail, invs, seg_cwd, runs_funsub=holds_funsub):
             # arm would inherit a `cd` bash never ran there.
             if is_cd:
                 seg_cwd = (None if any(f[0] == 'case' for f in frames)
-                           else dest)
+                           else behind(joined_by(flat, pos), seg_cwd, dest))
 
 
 def ref_to_branch(ref, current):
@@ -3488,8 +3549,9 @@ def substitution_verdicts(text, seg_cwd, cwd, head_base, ctx, depth):
     if not bodies or depth >= MAX_BODY_DEPTH:
         return []
     verdicts = []
-    for body, start in zip(bodies, substitution_cwds(text, spans, funsubs, seg_cwd)):
-        verdicts += judged_body(body, {}, start, cwd, head_base, ctx, depth + 1)
+    for body, (start, blind) in zip(bodies, substitution_cwds(text, spans, funsubs, seg_cwd)):
+        verdicts += judged_body(body, {}, start, cwd,
+                                None if blind else head_base, ctx, depth + 1)
     return verdicts
 
 
@@ -3499,8 +3561,9 @@ def substitution_cwds(text, spans, funsubs, seg_cwd):
     stream carries its position to `segment_cwds`. A `cd` inside a `$(…)` or
     backtick body runs in a subshell and moves nothing outside it, while a
     funsub's moves its caller. One the walk never reaches — a redirect
-    target, or a string already holding the sentinel — gets None."""
-    places = [None] * len(spans)
+    target, or a string already holding the sentinel — gets None. Each place
+    carries whether that cwd is blind, as `segment_cwds` says."""
+    places = [(None, False)] * len(spans)
     if SUBST_MARK in text:
         return places
     out, last = [], 0
@@ -3518,10 +3581,11 @@ def substitution_cwds(text, spans, funsubs, seg_cwd):
     def held(seg):
         return [int(k) for t in seg for k in MARK_RE.findall(t)]
 
-    for at, here in segment_cwds(segments, tail, invs, seg_cwd,
-                                 lambda seg: any(funsubs[k] for k in held(seg))):
+    for at, here, blind in segment_cwds(
+            segments, tail, invs, seg_cwd,
+            lambda seg: any(funsubs[k] for k in held(seg))):
         for k in held(segments[at][0]):
-            places[k] = here
+            places[k] = (here, blind)
     return places
 
 
@@ -3538,11 +3602,12 @@ def judge_segments(segments, tail, invs, seg_cwd, cwd, head_base, ctx, depth=0):
     the command is judged against, and `head_base` where HEAD is read after a
     `cd` the hook couldn't follow — None where no directory is a fair guess."""
     verdicts = []
-    for at, seg_cwd in segment_cwds(segments, tail, invs, seg_cwd):
+    for at, seg_cwd, blind in segment_cwds(segments, tail, invs, seg_cwd):
         (seg, writes, _), inv = segments[at], invs[at]
+        base = None if blind else head_base
         shell = shell_c_body(seg) if inv is None else None
         if shell:
-            verdicts += body_verdicts(shell, seg_cwd, cwd, head_base, ctx, depth)
+            verdicts += body_verdicts(shell, seg_cwd, cwd, base, ctx, depth)
         elif inv is None:
             is_cd, dest = cd_destination(seg, seg_cwd)
             # A non-git segment rides along only if it's a pure read-only
@@ -3579,7 +3644,7 @@ def judge_segments(segments, tail, invs, seg_cwd, cwd, head_base, ctx, depth=0):
             # invocation re-aims and the hook can't name: None, which the
             # branch-sensitive verbs ask on. A `cd` it couldn't follow still
             # reads the session's branch.
-            head_cwd = inv_cwd or invocation_cwd(seg_cwd or head_base, inv, True)
+            head_cwd = inv_cwd or invocation_cwd(seg_cwd or base, inv, True)
             seg_branch = branch_in(head_cwd, ctx['branches']) if head_cwd else None
             ctx['seen'].add(seg_branch)
             verdict, reason = classify_segment(

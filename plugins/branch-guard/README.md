@@ -611,6 +611,10 @@ If the `version` or `gitCommitSha` still shows the old release, the update didn'
    Leading reserved words (`{`, `if`, `then`, `!`, `do`, `function NAME`) are dropped too, so `{ git push --force origin main; } 2>&1`, a conditional, a loop body and a function body are each judged by the command inside them.
    They also scope the working directory: a `cd` inside `{ … }`, an `if` or a loop moves what follows, as bash runs those in the current shell, while one inside `( … )`, in a pipeline stage, or in a backgrounded list — bare or inside a group — is undone when that fork ends.
    A `cd` in a body that may not run — a conditional, a loop, a `case` arm, a function — leaves the directory after it unknown, and the command is judged against the session's own checkout.
+   A `cd` behind `&&` or `||` may not run either.
+   Behind `&&` it holds for the commands joined to it by `&&`, since none of them runs unless the `cd` did, so `make && cd ../wt && git commit` is judged in `../wt`.
+   Past that run, or behind `||`, bash may be in either tree, so the directory is unknown and no checkout stands in for it: `false && cd ../other; git commit` asks on any branch.
+   A `cd` that stays in the worktree it left is followed as before, since either way the command runs on the same branch.
 3. **Parse** each segment with `parse_invocation`: strip leading `NAME=VALUE` env prefixes (`GIT_AUTHOR_NAME=x git …`), command wrappers (`env`, `sudo`, `timeout`, `nice`, `nohup`, `command`, `stdbuf`, `setsid`, `time`, `exec`, with their own options), and program global options (`git -C path`, `-c k=v`) to find the `git`/`gh` subcommand and its arguments.
    Combined short flags (`git clean -fd`) are decomposed, and an abbreviated long option is written out the way git expands it (`git branch --forc` is `--force`; `git switch --forc` is ambiguous between `--force` and `--force-create`, so git refuses it and it is left as typed). cherry-pick and revert expand no abbreviation, so none is read there.
    A wrapped command gets every `ask` and `deny` the bare one would, but is never auto-approved: the wrapper can change the user or the environment, neither of which the classifier reads.
@@ -838,8 +842,6 @@ The categories are branch-guard's, so another guard's reasons show there as `oth
 - Auto-approval is only ever withheld, never granted, by the shell-construct check: a command carrying a command/process substitution (`` `…` ``, `$(…)`, `${ …; }`, `<(…)`/`>(…)`) or an unrecognized operator run **defers** instead of auto-approving, since those run code the classifier can't see.
   The one exception is a tiny hardcoded registry of provably pure, read-only substitutions (`$(git rev-parse --show-toplevel)`, `$(git branch --show-current)`, `$(pwd)`), matched structurally so nothing else rides in.
   It is a best-effort lexical check, not a sandbox — the filesystem boundary is workspace-guard's job, and a hard guarantee belongs in a git `pre-push` hook or server-side branch protection.
-- A `cd` is scoped by `( )`, `{ }`, conditionals, loops, pipes and `&`, but not by `&&` or `||`.
-  So `false && cd ../other; git commit` is judged in `../other`, where bash commits in the current tree.
 - Command wrappers are read from a fixed list.
   One outside it (`xargs`, whose arguments arrive on stdin, or a site-specific launcher) hides the `git` behind it, and the command defers to the normal permission flow.
   A shell is read only through its `-c` string: a script file, a script on stdin, and a body that runs its own arguments (`sh -c '"$@"' _ git commit`) defer the same way.
