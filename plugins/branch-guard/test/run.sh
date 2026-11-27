@@ -1572,9 +1572,12 @@ git -C "$WORK" checkout -q main
 check 'git commit -m "$(pwd)" on main -> ask' ask \
   "$(decision_for '{"tool_name":"Bash","tool_input":{"command":"git commit -m \"$(pwd)\""}}' "$WORK")"
 git -C "$WORK" checkout -q claude/x
-# A non-git segment can't ride along even with a pure substitution (cd is nongit).
-check 'cd "$(git rev-parse --show-toplevel)" && git status -> none' none \
+# A `cd` to the tree's own root is followed (Q347) and lands where `cd .` does;
+# a non-git segment still can't ride along beside a pure substitution.
+check 'cd "$(git rev-parse --show-toplevel)" && git status -> allow' allow \
   "$(decision_for '{"tool_name":"Bash","tool_input":{"command":"cd \"$(git rev-parse --show-toplevel)\" && git status"}}' "$WORK")"
+check 'ls "$(pwd)" && git status -> none' none \
+  "$(decision_for '{"tool_name":"Bash","tool_input":{"command":"ls \"$(pwd)\" && git status"}}' "$WORK")"
 
 # ---------------------------------------------------------------------------
 # 19. Pipe to a pure read-only filter: a recognized-safe git/gh segment piped
@@ -3425,6 +3428,38 @@ for r in "git --git-dir='$GD_MAIN' log -1" "GIT_DIR='$GD_MAIN' git status" \
   check "[repo] feature: $r -> allow" allow \
     "$(decision_for "$(bash_payload "$r")" "$WRAP")"
 done
+
+#     29g. A `cd` to a double-quoted `$(git rev-parse --show-toplevel)` or
+#     `$(pwd)` is followed (Q347), so the commit is judged on the branch where
+#     it lands. From the feature branch, one into the sibling on `main` asks
+#     instead of reading the session's branch; from `main`, one into the
+#     feature checkout no longer asks on `main`'s account. `cd "$X"` is the
+#     control that still falls back. Quoted so bash reads it as text, or
+#     spelled another way, the target is not followed.
+mkdir -p "$WRAP/sub"
+for c in 'cd "$(git rev-parse --show-toplevel)"' 'cd "$( git  rev-parse --show-toplevel )"' \
+         'cd "$(pwd)"' 'cd -P "$(pwd)"/..' ; do
+  check "[cd-subst] feature: $c && git commit -> allow" allow \
+    "$(decision_for "$(bash_payload "$c && git commit -m x")" "$WRAP/sub")"
+done
+for c in "cd \"\$(git rev-parse --show-toplevel)/$SIB\"" "cd \"\$(pwd)\"/$SIB"; do
+  check "[cd-subst] feature: $c && git commit -> ask" ask \
+    "$(decision_for "$(bash_payload "$c && git commit -m x")" "$WRAP")"
+  check "[cd-subst] feature: $c; git push -> ask" ask \
+    "$(decision_for "$(bash_payload "$c; git push origin HEAD")" "$WRAP")"
+done
+check "[cd-subst] feature: a commit in a substitution after the cd -> ask" ask \
+  "$(decision_for "$(bash_payload "cd \"\$(pwd)/$SIB\"; echo \"\$(git commit -m x)\"")" "$WRAP")"
+for c in 'cd "$X"' "cd '\$(pwd)'/$SIB" "cd \"\\\$(pwd)/$SIB\"" "cd \"\$(pwd -P)/$SIB\"" \
+         "cd \"\$(pwd)\$X/$SIB\""; do
+  check "[cd-subst] feature: $c && git commit -> none" none \
+    "$(decision_for "$(bash_payload "$c && git commit -m x")" "$WRAP")"
+done
+check "[cd-subst] main: cd \"\$(git rev-parse --show-toplevel)\" && git commit -> ask" ask \
+  "$(decision_for "$(bash_payload 'cd "$(git rev-parse --show-toplevel)" && git commit -m x')" "$WRAP_MAIN")"
+check "[cd-subst] main: cd <toplevel>/<feature> && git commit -> none" none \
+  "$(decision_for "$(bash_payload "cd \"\$(git rev-parse --show-toplevel)/$WRAP_FEAT\" && git commit -m x")" "$WRAP_MAIN")"
+rmdir "$WRAP/sub"
 
 #     The ref probes run in the followed tree, and stand down to the unprobed ask
 #     where the hook can't name one. A tip nothing else reaches denies when probed.

@@ -638,6 +638,9 @@ PURE_SUBSTITUTIONS = frozenset({
     ('git', 'branch', '--show-current'),        # current branch name
     ('pwd',),                                   # working directory path
 })
+# The two of them that print a directory the hook can compute for itself, so
+# a `cd` to one is followed (`cd_substitution`).
+CD_SUBSTITUTIONS = frozenset({('git', 'rev-parse', '--show-toplevel'), ('pwd',)})
 
 # A bash 5.3 funsub, `${ list; }` or `${| list; }`, as a token shows it: a
 # bare `${` where it stood unquoted, the whole construct where it was quoted.
@@ -1632,10 +1635,39 @@ def resolve_path(cwd, path):
     return os.path.realpath(os.path.join(cwd, path))
 
 
+def is_cd_substitution(inner):
+    try:
+        return tuple(tokenize(inner)) in CD_SUBSTITUTIONS
+    except ValueError:
+        return False
+
+
+def cd_substitution(token, cwd):
+    """`token` with a leading double-quoted `$(pwd)` or
+    `$(git rev-parse --show-toplevel)` replaced by the directory it prints
+    from `cwd`, as workspace-guard's `cd` tracker computes it; the token
+    itself when it opens with neither, and None when that directory is
+    unknown. Unquoted, the lexer splits a `$(` apart, and single-quoted or
+    escaped it is literal text, which posix shlex leaves indistinguishable
+    from the substitution, so any `\\$` in the command keeps it unread."""
+    if not token.startswith('$(') or getattr(token, 'quotes', None) != {'"'} \
+            or '\\$' in _bash_command:
+        return token
+    end = token.find(')')
+    if end < 0 or not is_cd_substitution(token[2:end]):
+        return token
+    if 'rev-parse' in token[2:end]:
+        here = worktree_root(cwd) if cwd else None
+    else:
+        here = cwd
+    return None if here is None else here + token[end + 1:]
+
+
 def cd_destination(tokens, cwd):
     """Where a `cd` segment leaves the shell, as (is_cd, directory):
 
-      (True, path)  — a `cd` with a single literal operand
+      (True, path)  — a `cd` with a single literal operand, or one opening
+                      with a substitution `cd_substitution` computes
       (True, None)  — a `cd` the hook can't follow: no operand (`$HOME`),
                       `cd -` (`$OLDPWD`), or a `$VAR`/`$(…)`/glob/`~` target
       (False, None) — not a `cd` at all
@@ -1654,7 +1686,8 @@ def cd_destination(tokens, cwd):
     for t in tokens[i + 1:]:
         if t.startswith('-'):
             continue
-        if not is_literal_path(t):
+        t = cd_substitution(t, cwd)
+        if t is None or not is_literal_path(t):
             return (True, None)
         return (True, resolve_path(cwd, t))
     return (True, None)
@@ -3684,6 +3717,10 @@ def substitution_cwds(text, spans, funsubs, seg_cwd):
         return places
     out, last = [], 0
     for k, (start, end) in enumerate(spans):
+        # Left written out, so a `cd` to one is followed here as it is in the
+        # command; its own body reads no branch, so it needs no place.
+        if text.startswith('$(', start) and is_cd_substitution(text[start + 2:end - 1]):
+            continue
         out += [text[last:start], f'{SUBST_MARK}{k}{SUBST_MARK}']
         last = end
     try:
