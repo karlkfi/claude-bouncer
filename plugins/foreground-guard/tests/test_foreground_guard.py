@@ -1858,6 +1858,37 @@ class SubstitutionBackgroundTests(unittest.TestCase):
                 self.assertIsNone(d)
 
 
+class RedirectTargetSubstitutionTests(unittest.TestCase):
+    """Q430: bash expands a redirect's target word before the command runs,
+    so a substitution there runs in the foreground like one in an argument.
+    Timed against bash 5.3: `cat <<< "$(sleep 1)"`, `> "$(sleep 1; ...)"` and
+    `echo x 2> $(sleep 1; ...)` each took 1 s."""
+
+    def test_a_watch_in_a_target_is_judged(self):
+        for cmd in ('cat <<< "$(tail -f log.txt)"', "cat <<< $(tail -f log.txt)",
+                    'cat <<< "x `tail -f log.txt`"', 'cat <<< "$(sleep 600)"',
+                    'echo x > "$(tail -f log.txt)"', 'cat < "$(tail -f log.txt)"',
+                    "echo x 2> $(tail -f log.txt)", '> "$(gh run watch 1)"'):
+            with self.subTest(cmd=cmd):
+                d, _ = run_hook(cmd)
+                self.assertEqual(d, "deny")
+
+    def test_a_slow_command_in_a_target_is_judged(self):
+        for cmd in ('cat <<< "$(make test-race)"',
+                    'echo x > "$(make test-race)"'):
+            with self.subTest(cmd=cmd):
+                d, _ = run_hook(cmd, config=SLOW_CFG)
+                self.assertEqual(d, "deny")
+
+    def test_a_target_that_runs_nothing_defers(self):
+        for cmd in ("cat <<< ok", "echo x > out.txt",
+                    "cat <<< '$(tail -f log.txt)'",
+                    'cat <<< "$(tail -f log.txt)" &'):
+            with self.subTest(cmd=cmd):
+                d, _ = run_hook(cmd)
+                self.assertIsNone(d)
+
+
 class DecisionTableTests(unittest.TestCase):
     def test_every_row_matches_the_hook(self):
         rows, stray = readme_decision_rows()

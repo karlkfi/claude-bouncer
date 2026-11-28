@@ -100,6 +100,7 @@ The test suite drives every row through the hook; a row whose command cell is an
 | `x=$(sleep 30 &)` | **deny** (the substitution waits for whatever holds its stdout) |
 | `x=$(sleep 30 >/dev/null &)` | defer (stdout redirected off the substitution) |
 | `echo '$(gh run watch 456)'` | defer (single quotes keep it literal) |
+| `cat <<< "$(gh run watch 456)"` | **deny** (a redirect's target is expanded before the command runs) |
 | `make test-race` (configured min 600000 ms, default timeout) | **deny** (names the minimum) <!-- check: {"command": "make test-race", "config": {"slow": {"commands": {"make": {"test-race": 600000}}}}} --> |
 | `make test-race` with `timeout: 600000` | defer <!-- check: {"command": "make test-race", "timeout_ms": 600000, "config": {"slow": {"commands": {"make": {"test-race": 600000}}}}} --> |
 | `make test-race` with `run_in_background: true` | defer <!-- check: {"command": "make test-race", "run_in_background": true, "config": {"slow": {"commands": {"make": {"test-race": 600000}}}}} --> |
