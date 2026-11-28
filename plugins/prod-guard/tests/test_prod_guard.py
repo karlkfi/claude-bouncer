@@ -1825,6 +1825,79 @@ class EmptyContextFlagTests(unittest.TestCase):
         self.assertEqual(decision, "ask", reason)
 
 
+class IfsSplitTests(unittest.TestCase):
+    """An unquoted expansion splits on the shell's IFS (Q423). Each split
+    below is what bash 5.3 printed for `set -- <word>` under that IFS, and
+    each command shape was run with `/bin/echo` in kubectl's place."""
+
+    D = "kubectl,--context,gke_acme_prod-us,delete,ns,x"
+
+    def test_split_fields_matches_bash(self):
+        for pieces, ifs, want in (
+                ([("a,b", True)], ",", ["a", "b"]),
+                ([("a,,b", True)], ",", ["a", "", "b"]),
+                ([(",a,b,", True)], ",", ["", "a", "b"]),
+                ([("a b,c", True)], ",", ["a b", "c"]),
+                ([(" a , b,,c ", True)], ", ", ["a", "b", "", "c"]),
+                ([("a b", True)], "", None),
+                ([("a\tb  c", True)], None, ["a", "b", "c"]),
+                ([(",", True)], ",", [""]),
+                ([(" \t", True)], None, []),
+                ([("x,", False), ("a:b", True), (",y:z", False)], ":",
+                 ["x,a", "b,y:z"]),
+                ([("p", False), ("a,b", True)], ",", ["pa", "b"]),
+                ([("xaybz", True)], "ab", ["x", "y", "z"])):
+            with self.subTest(pieces=pieces, ifs=ifs):
+                self.assertEqual(guard.split_fields(pieces, ifs), want)
+
+    def run_cmd(self, command):
+        return run_hook(command, home=make_home(kubeconfig=KUBECONFIG_KIND))
+
+    def test_a_command_split_on_ifs_denies(self):
+        d = self.D
+        for cmd in ('IFS=,; X="%s"; $X' % d,
+                    'IFS=,; A="--context,gke_acme_prod-us,delete,ns,x"; kubectl $A',
+                    'export IFS=,; X="%s"; $X' % d,
+                    'IFS=:,; X="kubectl:--context,gke_acme_prod-us:delete:ns:x"; $X',
+                    'true && IFS=,; X="%s"; $X' % d,
+                    'IFS=,; X="%s"; eval $X' % d,
+                    "X=\"%s\"; IFS=, eval '$X'" % d,
+                    'f() { local IFS=,; X="%s"; $X; }; f' % d,
+                    # The prefix applies after the words have been split.
+                    'IFS=,; X="%s"; IFS=" " $X' % d,
+                    # An empty field is an argument: the context is empty.
+                    'IFS=,; A="--context,,delete,ns,x"; kubectl $A'):
+            with self.subTest(cmd=cmd):
+                decision, reason = self.run_cmd(cmd)
+                self.assertEqual(decision, "deny", reason)
+
+    def test_an_unknown_ifs_is_judged_as_the_default_too(self):
+        held = 'X="kubectl --context gke_acme_prod-us delete ns x"; $X'
+        for cmd in ("IFS=$(cat sep); " + held,
+                    "read IFS < sep; " + held,
+                    "source ./env.sh; " + held):
+            with self.subTest(cmd=cmd):
+                decision, reason = self.run_cmd(cmd)
+                self.assertEqual(decision, "deny", reason)
+
+    def test_a_literal_ifs_character_stays_whole(self):
+        decision, reason = self.run_cmd(
+            "IFS=-; C=x; kubectl --context=gke_acme_prod-us$C delete ns x")
+        self.assertEqual(decision, "deny", reason)
+        self.assertIn("gke_acme_prod-us", reason)
+
+    def test_a_word_ifs_does_not_split_stays_one_word(self):
+        # bash looks the whole word up as a command and runs nothing.
+        for cmd in ('IFS=,; X="kubectl --context gke_acme_prod-us delete ns x"; $X',
+                    'IFS=; X="kubectl --context gke_acme_prod-us delete ns x"; $X',
+                    # A new shell resets IFS.
+                    'IFS=,; X="%s"; bash -c "$X"' % self.D,
+                    "export IFS=,; export X=\"%s\"; bash -c '$X'" % self.D):
+            with self.subTest(cmd=cmd):
+                decision, reason = self.run_cmd(cmd)
+                self.assertIsNone(decision, reason)
+
+
 class ExportedEnvironmentTests(unittest.TestCase):
     """Every evaluator reads the environment the command's child inherits, so
     an `export` earlier in the command counts like an inline prefix (Q168)."""
