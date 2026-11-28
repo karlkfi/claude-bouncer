@@ -3930,6 +3930,26 @@ def entry_operand_mask(tokens):
     return mask
 
 
+def copy_into_operands(tokens):
+    """For a `cp`/`mv` whose last operand may be a directory to copy INTO,
+    `(index, sources)`: the destination's index in `files_in_command(tokens)`
+    and the source operands. None for any other command, for a single operand,
+    and under `-T`/`--no-target-directory`, which replaces the destination.
+    """
+    name = os.path.basename(tokens[0])
+    if name not in ('cp', 'mv'):
+        return None
+    flag_files, flags_seen, positionals = _split_args(tokens, SPEC[name])
+    if any(f.startswith('--no-t') or (f[1:2] != '-' and 'T' in f)
+           for f in flags_seen):
+        return None
+    if len(flag_files) == 1 and positionals:      # `-t DIR`
+        return 0, positionals
+    if not flag_files and len(positionals) > 1:
+        return len(positionals) - 1, positionals[:-1]
+    return None
+
+
 def override_hint(what, prefixable):
     """The sentence a cross-workspace deny closes with: how to reach the
     override from HERE.
@@ -5913,6 +5933,23 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
                 return (offender_display(cand, rp), res[0], res[1])
         return None
 
+    def copied_into_notes_run(dest, sources, group_cwd, group_cwd_unknown):
+        """True when `cp SRC... DEST` only creates entries strictly inside a
+        side-session notes run folder: DEST is the run folder, and each
+        `DEST/<basename of SRC>` passes the check a write naming it would."""
+        kind, rp = resolve_token(dest, group_cwd, group_cwd_unknown)
+        if kind != 'path' or not is_notes_run_folder(rp):
+            return False
+        for src in sources:
+            base = os.path.basename(src)
+            # `dir/` copies contents on BSD, and an expansion has no one name.
+            if base in ('', '.', '..') or any(c in base for c in '$`~*?[{}\\'):
+                return False
+            if check_file(os.path.join(rp, base), group_cwd,
+                          group_cwd_unknown) is not None:
+                return False
+        return True
+
     def stage_ln(target, link, group_cwd, group_cwd_unknown, bases):
         """If `ln TARGET LINK` (symbolic or hard) points outside, record
         LINK's resolved path. LINK may be None (omitted) — then the link name
@@ -6427,10 +6464,15 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
         if len(entry_mask) != len(fs):
             entry_mask = [False] * len(fs)
         script_at = sed_script_slot(g)
+        into = copy_into_operands(g)
         for i, f in enumerate(fs):
             f_is_read = is_read and (out_from is None or i < out_from)
             o = check_file(f, cmd_cwd, cmd_cwd_unknown, is_read=f_is_read,
                            entry=entry_mask[i])
+            if o is not None and o[1] == 'outside' and into \
+                    and i == into[0] and copied_into_notes_run(
+                        f, into[1], cmd_cwd, cmd_cwd_unknown):
+                o = None
             if o is not None and i == script_at and o[1] == 'outside':
                 o = (f, 'sedscript', None)
             if o is not None:
@@ -8206,6 +8248,13 @@ def is_notes_run_path(rp):
     run, _, rest = rp[len(root) + 1:].partition(os.sep)
     return bool(rest) and not any(c in rest for c in '*?[{}') \
         and _real_dir(os.path.join(root, run)) is not None
+
+
+def is_notes_run_folder(rp):
+    """True when resolved path ``rp`` is an existing run folder itself."""
+    root = side_session_notes_root()
+    return bool(root) and os.path.dirname(rp) == root \
+        and _real_dir(rp) is not None
 
 
 def main():
