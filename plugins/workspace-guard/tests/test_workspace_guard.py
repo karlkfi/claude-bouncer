@@ -10765,11 +10765,15 @@ class InstalledReadTreesE2ETests(unittest.TestCase):
         # bash expands each of these into a run folder, or into something in
         # one that realpath never saw.
         for tail in ("/*", "/*/", "/fam*", "/*/n.md", "/family/*",
-                     "/family/**", "/family/[n].md", "/family/?.md",
-                     "/{family,other}", "/family{,/sub}", "/family/{,sub}",
-                     "/family/{sub,../other}", "/family/{,../}../other"):
+                     "/family/**", "/family/[n].md", "/family/?.md"):
             with self.subTest(tail=tail):
                 self._expect(f"rm -rf {sh(self.notes)}{tail}", "ask")
+        # The quoted root makes each brace word partly quoted, which the hook
+        # cannot expand (Q404).
+        for tail in ("/{family,other}", "/family{,/sub}", "/family/{,sub}",
+                     "/family/{sub,../other}", "/family/{,../}../other"):
+            with self.subTest(tail=tail):
+                self._expect(f"rm -rf {sh(self.notes)}{tail}", "deny")
         for tail in ("/*", "/family/*"):
             with self.subTest(tail=tail, tool="PowerShell"):
                 self._expect(f"Remove-Item -Recurse {ps(self.notes + tail)}",
@@ -14778,6 +14782,113 @@ class MarkerByteTests(OutsideParentFixture, unittest.TestCase):
             % self.RS))
         self.assertIsNone(self._ps(
             'Write-Output $(Get-Content in.txt) "%s"' % self.RS))
+
+
+class BraceExpandUnitTests(unittest.TestCase):
+    """Q404: ``brace_expand`` makes the words bash makes.
+
+    Each expectation is what bash 5.3.15 printed for the word, empty words
+    dropped. They are pinned here because a Windows runner's `bash` need not
+    brace-expand at all.
+    """
+
+    BASH = {
+        'docs/{a,../../x}': ['docs/a', 'docs/../../x'],
+        '{,../}x': ['x', '../x'],
+        'a{b,c{d,e}f}g': ['abg', 'acdfg', 'acefg'],
+        '{a}': ['{a}'],
+        '{}': ['{}'],
+        'x{1..3}': ['x1', 'x2', 'x3'],
+        '{01..03}': ['01', '02', '03'],
+        '{3..1}': ['3', '2', '1'],
+        '{1..9..4}': ['1', '5', '9'],
+        '{a..c}': ['a', 'b', 'c'],
+        '{-../}': ['{-../}'],
+        '{a,b}{c,d}': ['ac', 'ad', 'bc', 'bd'],
+        'a{,}b': ['ab', 'ab'],
+        '{a,{b}': ['{a,{b}'],
+        '{a,b': ['{a,b'],
+        'a}b{c,d}': ['a}bc', 'a}bd'],
+        '{a,b}}': ['a}', 'b}'],
+        '{{a,b}': ['{a', '{b'],
+        '{1..a}': ['{1..a}'],
+        '{A..Z..5}': ['A', 'F', 'K', 'P', 'U', 'Z'],
+        '{-03..2}': ['-03', '-02', '-01', '000', '001', '002'],
+        '{a,,b}': ['a', 'b'],
+        '{,}': [],
+        '{5..1..2}': ['5', '3', '1'],
+        'f.{txt,bak}': ['f.txt', 'f.bak'],
+    }
+
+    def test_matches_bash(self):
+        for word, want in self.BASH.items():
+            with self.subTest(word=word):
+                self.assertEqual(want, [w for w in guard.brace_expand(word) if w])
+
+    def test_a_parameter_brace_is_not_a_list(self):
+        self.assertEqual(["${a,b}"], guard.brace_expand("${a,b}"))
+
+    def test_past_the_cap_is_none(self):
+        self.assertIsNone(guard.brace_expand("x{1..300}"))
+        self.assertIsNone(guard.brace_expand("{1..20}{1..20}"))
+
+
+class BraceOperandTests(OutsideParentFixture, unittest.TestCase):
+    """Q404: an operand is judged by the words bash brace-expands it to.
+
+    Each outside case below allowed before the fix, because the unexpanded
+    word resolved with `{a,..` as one path component that the next `..`
+    cancelled. Driven under bash 5.3.15: `cat < {../f,}` reads `../f`, since
+    bash drops the empty word and the redirect gets one target.
+    """
+
+    def test_an_outside_alternative_is_judged(self):
+        for cmd in ("cat sub/{a,../../%s}", "rm {,../}%s", "cat < {../%s,}",
+                    "cat in.txt > {../%s,}", "echo w > {../%s,}",
+                    "cat sub/{in,../../%s}.txt", "cat {../%s,in.txt}",
+                    "grep --file=sub/{a,../../%s} x in.txt"):
+            with self.subTest(cmd=cmd):
+                self.assertIn(self._decision(cmd % self.TARGET),
+                              ("ask", "deny"))
+
+    def test_in_workspace_alternatives_allow(self):
+        for cmd in ("cat {in,sub/x}.txt", "cat sub/{a,b}", "cat in{,}.txt",
+                    "cat sub/{a..c}", "cat {}"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual("allow", self._decision(cmd))
+
+    def test_a_wholly_quoted_brace_is_literal(self):
+        # bash reads `sub/{a,..` + `..` + `x}`: a name in the root.
+        for cmd in ("cat 'sub/{a,../../%s}'", 'cat "sub/{a,../../%s}"'):
+            with self.subTest(cmd=cmd):
+                self.assertEqual("allow", self._decision(cmd % self.TARGET))
+
+    def test_a_partly_quoted_brace_denies(self):
+        # Quoting inside a word decides which braces bash expands, and the
+        # lexer's record does not say where the quotes were.
+        for cmd in ('cat "sub/"{a,../../%s}', "cat sub/{a,'../../%s'}",
+                    "cat sub/\\{a,../../%s}"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual("deny", self._decision(cmd % self.TARGET))
+
+    def test_a_cd_target_is_its_expanded_word(self):
+        # bash: `cd {..,} && pwd` prints the parent, the empty word dropped.
+        for cmd in ("cd {..,} && cat %s", "pushd {..,} && cat %s",
+                    "cd {sub,..} && cat %s"):
+            with self.subTest(cmd=cmd):
+                self.assertIn(self._decision(cmd % self.TARGET),
+                              ("ask", "deny"))
+        self.assertEqual("allow", self._decision("cd {sub,} && cat ../in.txt"))
+
+    def test_a_list_past_the_cap_denies(self):
+        self.assertEqual("deny", self._decision("cat in{1..300}.txt"))
+
+    def test_an_unbounded_word_denies_inside_the_timeout(self):
+        # Unbounded, the first ran 5s and the second out of stack, which
+        # exits the hook non-zero and enforces nothing.
+        for word in ("{" * 20000 + ",", "{a,b}" * 2000):
+            with self.subTest(size=len(word)):
+                self.assertEqual("deny", self._decision("cat " + word))
 
 
 if __name__ == "__main__":

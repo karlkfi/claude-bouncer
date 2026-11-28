@@ -704,6 +704,10 @@ Symlink staging (step 7) has no PowerShell equivalent yet.
    Tokens that bash would still expand unpredictably at runtime — `~user`/`~+`/`~-`, or a `$` that introduces an expansion (`$VAR`, `${VAR}`, `$(...)`, `$1`, `$?`), or a backtick substitution — short-circuit to `ask`, since `realpath` would otherwise lexically place them inside `cwd`.
    The two whitelisted pure substitutions from step 6 (`$(git rev-parse --show-toplevel)`, `$(pwd)`) are the exception: when one *leads* a file operand or redirect target it is resolved against the tracked cwd first — the same value bash computes — and the remainder is concatenated verbatim (bash inserts no separator), so `cp x "$(git rev-parse --show-toplevel)/backup/"` classifies the real in-repo destination instead of asking. Any `$`/`~` left in the remainder, a non-whitelisted substitution, or an untracked cwd keeps the `ask`.
    A `$` bash keeps literal — trailing (`foo$`) or before a non-name char (`a$.b`) — is treated as part of the filename and resolved normally.
+   An unquoted brace list or sequence is expanded first, as bash expands it, and every word it makes is resolved: `cat docs/{a,../../x}` is judged as `docs/a` and `docs/../../x`, and `{../x,}` as `../x` alone, since bash drops the empty word.
+   A wholly quoted brace is a literal name.
+   A `cd` or `pushd` target is expanded the same way: one word left is the directory tracked, and more than one leaves the working directory untracked, since bash's `cd` then fails.
+   A brace in a partly quoted word, or a list of more than 256 words, gets the runtime-expanded `deny`: which braces bash expands there depends on where the quotes fall, and the hook does not keep that.
    On Windows a leading-slash path is read through Git Bash's mount table before `realpath`, since that is what the shell will do with it: `/c/…` is the C: drive, `/tmp` is `%TMP%`, `/bin` is `<git>\usr\bin`, and anything else sits under the Git install dir.
    Without it the guard named a directory on whichever drive happened to be current.
    The native `Read`/`Edit` tools are *not* the shell and keep the drive-relative reading they themselves use.
@@ -861,8 +865,8 @@ flowing, avoid triggering it:
   asks.) Reading files under `~/.claude/projects/` (Claude Code's own session
   and sub-agent data) is also exempt for read-only commands. A file inside an
   existing `~/Library/Application Support/Claude/side-session-notes/<run>/` is
-  exempt for reads and writes; name it literally, since a glob or a brace in
-  the path still asks on a write.
+  exempt for reads and writes; name it literally, since a glob or a quoted
+  brace in the path still asks on a write.
 - **Read dependency source from in-workspace vendored/pinned copies, not the
   global cache.** Out-of-tree caches (Go's `~/go/pkg/mod`, npm's `~/.npm`, pip's
   `~/.cache/pip`, cargo's `~/.cargo/registry`) are outside the project root, so

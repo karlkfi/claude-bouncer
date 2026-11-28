@@ -93,7 +93,7 @@ Content is not judged at all: a session can leave another session text to act on
 **Why not backlogged:** the person at the prompt sees a path and cannot judge the content, and sessions can pass the same data by message.
 Over 2026-11-18 to 2026-11-24 (UTC), one machine's transcripts held 44 asks, 33 of them writes to the notes, and every one of the 33 ran.
 Controlling what moves between sessions needs a guard that reads the content.
-Writes to the notes root, to a run folder as a whole, and to any path holding a glob or a brace keep the `ask`.
+Writes to the notes root, to a run folder as a whole, and to any path holding a glob or a quoted brace keep the `ask`; an unquoted brace list is expanded first, so each word it makes is judged on its own.
 
 A hard link in a run folder is a second name for a file elsewhere, and `realpath` cannot see that.
 Making one asks when its source is outside the session's project, so the file a session can expose that way is one of its own.
