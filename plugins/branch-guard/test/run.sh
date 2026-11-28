@@ -2590,9 +2590,19 @@ check "[overlap] an owned side branch the base missed -> allow" allow \
   "$(ovl_own 'git push origin feat/clean')"
 check "[overlap] that branch beside HEAD -> deny" deny \
   "$(ovl_own 'git push origin HEAD feat/clean')"
-check_text "[overlap] the side branch's deny rebases that branch" has \
-  "git rebase origin/main feat/side\`" \
+#      `git rebase <base> <branch>` switches to <branch>, so the fix switches
+#      back; where another worktree holds the branch git refuses that switch
+#      (exit 128 on git 2.55), so the rebase is aimed at that worktree instead.
+check_text "[overlap] the side branch's deny rebases it and switches back" has \
+  "git rebase origin/main feat/side && git switch claude/x\`" \
   "$(reason_for "$(OWN_CWD="$OVL" own_payload 'git push origin feat/side' '')" "$OVL" HOME="$OWN_HOME")"
+git -C "$OVL" worktree add -q "$OVL/wt-side" feat/side
+side_held="$(reason_for "$(OWN_CWD="$OVL" own_payload 'git push origin feat/side' '')" "$OVL" HOME="$OWN_HOME")"
+check_text "[overlap] a side branch held elsewhere is rebased there" has \
+  "wt-side rebase origin/main\`" "$side_held"
+check_text "[overlap] ... with git -C, not by switching to it" lacks \
+  "git rebase origin/main feat/side" "$side_held"
+git -C "$OVL" worktree remove --force "$OVL/wt-side"
 check "[overlap] a leased side:side the base moved under -> deny" deny \
   "$(decision_for "$(push 'git push --force-with-lease=feat/side origin feat/side:feat/side')" "$OVL")"
 check "[overlap] a leased side:side the base missed -> allow" allow \

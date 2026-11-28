@@ -2315,16 +2315,39 @@ def push_overlap(cwd, branch, ref='HEAD'):
     return (base, hits)
 
 
-def push_overlap_reason(base, paths, side=None):
-    """The CAUSE clause for an overlap deny; `refuse()` adds the closing one.
-    <side> names a pushed branch other than the worktree's, which the rebase
-    then has to name too."""
-    target = f" {side}" if side else ''
+def worktree_holding(cwd, branch):
+    """The path of the worktree that has <branch> checked out, or None."""
+    r = run_git(cwd, 'worktree', 'list', '--porcelain')
+    if r is None or r.returncode != 0:
+        return None
+    path = None
+    for line in r.stdout.splitlines():
+        if line.startswith('worktree '):
+            path = line[len('worktree '):]
+        elif line == 'branch refs/heads/' + branch:
+            return path
+    return None
+
+
+def side_rebase(cwd, base, side, current):
+    """The rebase for a pushed branch that is not the worktree's. `git rebase
+    <base> <side>` switches to <side> first, so it is followed by a switch
+    back; where another worktree holds <side> git refuses that switch, so the
+    rebase runs there instead."""
+    holder = worktree_holding(cwd, side)
+    if holder:
+        return f"git fetch && git -C {shlex.quote(holder)} rebase {base}"
+    return (f"git fetch && git rebase {base} {shlex.quote(side)} "
+            f"&& git switch {shlex.quote(current)}")
+
+
+def push_overlap_reason(base, paths, rebase=None):
+    """The CAUSE clause for an overlap deny; `refuse()` adds the closing one."""
     return (f"'{base}' has moved since this branch left it, and its new commits "
             f"edit the same lines this branch does in {', '.join(paths)} — the "
             f"merge is going to come out wrong, and a merge queue would spend a "
             f"whole check cycle finding that. "
-            f"`git fetch && git rebase {base}{target}` finds it now")
+            f"`{rebase or f'git fetch && git rebase {base}'}` finds it now")
 
 
 def skips_base(flags, short):
@@ -2704,8 +2727,9 @@ def classify_git(sub, args, branch, policy, cwd, probe, mode='',
                 base, paths = push_overlap(
                     cwd, b, 'refs/heads/' + side if side else 'HEAD')
                 if paths:
+                    rebase = side and side_rebase(cwd, base, side, branch)
                     return ('deny-rebase',
-                            push_overlap_reason(base, paths, side))
+                            push_overlap_reason(base, paths, rebase))
         return (decision or 'defer', reason)
 
     # Harmless mutations — don't put work onto or rewrite a branch's history.

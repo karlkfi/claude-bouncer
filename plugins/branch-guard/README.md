@@ -450,7 +450,8 @@ A literal `cd` moves that tree for everything after it and a literal `git -C` fo
 Getting this wrong went both ways — a rebase demanded for an overlap that belonged to another worktree's branch, and a `git -C` push waved through when it carried the overlap outright.
 
 It measures each branch the push sends, at that branch's own tip.
-A branch this session created, or a leased one, pushed while another branch is checked out is read as itself, and the deny names it in the rebase: `git rebase origin/main feat/side`.
+A branch this session created, or a leased one, pushed while another branch is checked out is read as itself, and the deny's rebase names it and switches back, `git rebase origin/main feat/side && git switch <worktree branch>`, because `git rebase` with a branch argument checks that branch out first.
+Where another worktree has the branch checked out, git refuses that, so the deny aims the rebase there instead: `git -C <that worktree> rebase origin/main`.
 Before, the created branch was not measured at all and the leased one was measured at `HEAD`, so a side branch the base had moved under could be pushed stale.
 A queue-id claim sends no branch and is not measured.
 
