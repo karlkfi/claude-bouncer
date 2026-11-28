@@ -1792,15 +1792,17 @@ def holds_funsub(seg):
 def mask_funsubs(text):
     """`text` with each outermost funsub replaced by a `${…}` word numbering
     its body, and the bodies. The lexer splits an unquoted funsub apart, so
-    this is what lets the cwd walk read one whole (Q427). A text already
-    holding the sentinel is left as it is, with no bodies."""
+    this is what lets the cwd walk read one whole (Q427). A funsub inside a
+    process substitution runs in that subshell and is left as it is, as is a
+    text already holding the sentinel."""
     if '\x1e' in text:
         return text, []
-    spans, flags = [], []
+    spans, flags, pspans = [], [], []
     found = command_substitutions(text, spans=spans, funsubs=flags)
+    process_substitutions(text, spans=pspans)
     out, bodies, last = [], [], 0
     for body, (start, end), funsub in zip(found, spans, flags):
-        if funsub:
+        if funsub and not any(s <= start < e for s, e in pspans):
             out += [text[last:start], '${\x1e%d\x1e}' % len(bodies)]
             bodies.append(body)
             last = end

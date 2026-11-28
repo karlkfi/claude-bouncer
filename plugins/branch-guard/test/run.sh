@@ -3890,6 +3890,13 @@ check "[funsub] main: echo \${ cd <feature>; }; git commit -> none" none \
   "$(decision_for "$(bash_payload "echo \${ cd $SUB_FEAT; }; git commit -m x")" "$SUB")"
 check "[funsub] main: echo \${ cd \"\$X\"; }; git commit -> ask" ask \
   "$(decision_for "$(bash_payload 'echo ${ cd "$X"; }; git commit -m x')" "$SUB")"
+# A funsub inside a process substitution runs in that subshell.
+for c in "cat <(echo \${ cd $SUB_FEAT; }); git commit -m x" "cat <(echo \"\${ cd $SUB_FEAT; }\"); git commit -m x" \
+         "tee >(echo \${ cd $SUB_FEAT; }) < /dev/null; git commit -m x"; do
+  check "[funsub] main: $c -> ask" ask "$(decision_for "$(bash_payload "$c")" "$SUB")"
+done
+check "[funsub] main: cat <(true) \${ cd <feature>; }; git commit -> none" none \
+  "$(decision_for "$(bash_payload "cat <(true) \${ cd $SUB_FEAT; }; git commit -m x")" "$SUB")"
 rm -rf "$SUB" "$SUB.feat"
 
 # The friction report's own suite, run here so every caller of this harness
