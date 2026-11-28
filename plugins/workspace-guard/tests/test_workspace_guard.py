@@ -14785,33 +14785,44 @@ class MarkerByteTests(OutsideParentFixture, unittest.TestCase):
 
 
 class BraceExpandUnitTests(unittest.TestCase):
-    """Q404: ``brace_expand`` makes the words bash makes."""
+    """Q404: ``brace_expand`` makes the words bash makes.
 
-    CASES = ("docs/{a,../../x}", "{,../}x", "a{b,c{d,e}f}g", "{a}", "{}",
-             "x{1..3}", "{01..03}", "{3..1}", "{1..9..4}", "{a..c}", "{-../}",
-             "{a,b}{c,d}", "a{,}b", "{a,{b}", "{a,b", "a}b{c,d}", "{a,b}}",
-             "{{a,b}", "{1..a}", "{A..Z..5}", "{-03..2}", "{a,,b}", "{,}",
-             "{5..1..2}", "f.{txt,bak}")
+    Each expectation is what bash 5.3.15 printed for the word, empty words
+    dropped. They are pinned here because a Windows runner's `bash` need not
+    brace-expand at all.
+    """
 
-    @staticmethod
-    def _bash_expands():
-        # On Windows `bash` can be the WSL launcher, with no distro behind it.
-        try:
-            return subprocess.run(["bash", "-c", "echo {a,b}"], timeout=10,
-                                  capture_output=True, text=True
-                                  ).stdout.strip() == "a b"
-        except (OSError, subprocess.SubprocessError):
-            return False
+    BASH = {
+        'docs/{a,../../x}': ['docs/a', 'docs/../../x'],
+        '{,../}x': ['x', '../x'],
+        'a{b,c{d,e}f}g': ['abg', 'acdfg', 'acefg'],
+        '{a}': ['{a}'],
+        '{}': ['{}'],
+        'x{1..3}': ['x1', 'x2', 'x3'],
+        '{01..03}': ['01', '02', '03'],
+        '{3..1}': ['3', '2', '1'],
+        '{1..9..4}': ['1', '5', '9'],
+        '{a..c}': ['a', 'b', 'c'],
+        '{-../}': ['{-../}'],
+        '{a,b}{c,d}': ['ac', 'ad', 'bc', 'bd'],
+        'a{,}b': ['ab', 'ab'],
+        '{a,{b}': ['{a,{b}'],
+        '{a,b': ['{a,b'],
+        'a}b{c,d}': ['a}bc', 'a}bd'],
+        '{a,b}}': ['a}', 'b}'],
+        '{{a,b}': ['{a', '{b'],
+        '{1..a}': ['{1..a}'],
+        '{A..Z..5}': ['A', 'F', 'K', 'P', 'U', 'Z'],
+        '{-03..2}': ['-03', '-02', '-01', '000', '001', '002'],
+        '{a,,b}': ['a', 'b'],
+        '{,}': [],
+        '{5..1..2}': ['5', '3', '1'],
+        'f.{txt,bak}': ['f.txt', 'f.bak'],
+    }
 
     def test_matches_bash(self):
-        if not self._bash_expands():
-            self.skipTest("needs a bash that brace-expands to compare against")
-        for word in self.CASES:
+        for word, want in self.BASH.items():
             with self.subTest(word=word):
-                out = subprocess.run(
-                    ["bash", "-c", 'for w in %s; do printf "<%%s>\\n" "$w"; done'
-                     % word], capture_output=True, text=True, check=True).stdout
-                want = [line[1:-1] for line in out.splitlines()]
                 self.assertEqual(want, [w for w in guard.brace_expand(word) if w])
 
     def test_a_parameter_brace_is_not_a_list(self):
