@@ -5628,13 +5628,18 @@ class LoopReassignTests(OutsideParentFixture, unittest.TestCase):
                     "D=./sub; for i in 1 2; do cat \"$D/x\"; read D; done",
                     "D=./sub; for i in 1 2; do cat \"$D/x\"; "
                     "for D in ../%s; do :; done; done",
-                    "D=./sub; for i in 1; do cat \"$D/x\"; IFS=/; done"):
+                    "D=./sub; for i in 1; do cat \"$D/x\"; IFS=/; done",
+                    # A brace body in place of `do … done` runs again too.
+                    "D=./sub; for i in 1 2; { cat \"$D/x\"; D=../%s; }",
+                    "D=./sub; select s in a; { cat \"$D/x\"; D=../%s; }",
+                    "D=./sub; for ((i=0;i<2;i++)) { cat \"$D/x\"; D=../%s; }"):
             with self.subTest(cmd=cmd):
                 self.assertEqual("deny", self._decision(
                     cmd.replace("%s", self.TARGET)))
 
     def test_a_body_that_leaves_the_name_alone_still_resolves(self):
         for cmd in ("D=./sub; for i in 1 2; do cat \"$D/x\"; done",
+                    "D=./sub; for i in 1 2; { cat \"$D/x\"; }; cat \"$D/y\"",
                     "D=./sub; for i in 1 2; do cat \"$D/x\"; E=../q; done",
                     # `for` rebinds its own variable on every pass.
                     "for f in in.txt sub; do cat \"$f\"; f=../q; done"):

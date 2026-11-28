@@ -5611,7 +5611,8 @@ def split_groups(tokens, scopes=None, herestrings=None, lastpipe=False,
     expands.
 
     ``loops``, when given, receives a ``(first, last)`` pair of group indexes
-    per `for`, `select`, `while` or `until`, from its header to its `done`.
+    per `for`, `select`, `while` or `until`, from its header to its `done`, or
+    to the `}` of a `for` or `select` written with a brace body.
     """
     groups, cur, cur_redir, i = [], [], [], 0
     paren, prev_sep, pipe, nhd = 0, '', 0, 0
@@ -5629,6 +5630,9 @@ def split_groups(tokens, scopes=None, herestrings=None, lastpipe=False,
     frames, fn, cmd_pos, lead, closed = [], None, True, '', []
     last_close = False
     pdepth, pstarted = 0, False
+    # A `for` or `select` frame with no `do` yet, and each `{` frame that
+    # opened in place of one, paired with the loop frame its `}` also closes.
+    headers, brace_bodies = [], []
     while i < len(tokens):
         t = tokens[i]
         top = frames[-1] if frames and frames[-1][0] == 'esac' else None
@@ -5722,8 +5726,14 @@ def split_groups(tokens, scopes=None, herestrings=None, lastpipe=False,
                 i += 4 if tokens[i + 2:i + 4] == ['(', ')'] else 2
                 continue
             if t in COMPOUND_CLOSERS:
+                body_of = headers.pop() if t == '{' and headers \
+                    and headers[-1] is frames[-1] else None
                 frames.append([COMPOUND_CLOSERS[t], None, len(groups),
                                len(shells), 0])
+                if t in ('for', 'select'):
+                    headers.append(frames[-1])
+                elif body_of is not None:
+                    brace_bodies.append((frames[-1], body_of))
                 if fn is not None:
                     opened += 1
                     shells.append((opened, fn))
@@ -5736,14 +5746,20 @@ def split_groups(tokens, scopes=None, herestrings=None, lastpipe=False,
                     frames[-1][1] = opened
                 lead = ''
             elif frames and frames[-1][0] == t:
-                _, scope, first, depth, _ = frames.pop()
-                if loops is not None and t == 'done':
-                    loops.append((first, len(groups)))
-                if scope in shells:
-                    del shells[shells.index(scope):]
-                    last_close = last_close or isinstance(scope, int)
-                elif scope is None:
-                    closed.append((first, depth))
+                ends = [frames.pop()]
+                if brace_bodies and brace_bodies[-1][0] is ends[0]:
+                    ends.append(frames.pop())     # the loop under its `{ … }`
+                    brace_bodies.pop()
+                if loops is not None and ends[-1][0] == 'done':
+                    loops.append((ends[-1][2], len(groups)))
+                for _, scope, first, depth, _ in ends:
+                    if scope in shells:
+                        del shells[shells.index(scope):]
+                        last_close = last_close or isinstance(scope, int)
+                    elif scope is None:
+                        closed.append((first, depth))
+            elif t == 'do' and headers and frames and headers[-1] is frames[-1]:
+                headers.pop()
             fn = None
             cmd_pos = t in LEADING_WORDS
         elif not is_operator(t, REDIR) and not is_operator(t, DUP):
