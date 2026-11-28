@@ -5611,6 +5611,36 @@ class OutsideParentFixture(object):
         return out and out["hookSpecificOutput"]["permissionDecision"]
 
 
+class LoopReassignTests(OutsideParentFixture, unittest.TestCase):
+    """Q406: a name a loop body assigns is not read at its pre-loop value.
+
+    bash runs the body again, so a use above the assignment sees the assigned
+    value on every pass after the first. Each case below allowed before.
+    """
+
+    def test_a_use_above_a_reassignment_is_not_resolved(self):
+        for cmd in ("D=./sub; for i in 1 2; do cat \"$D/x\"; D=../%s; done",
+                    "D=./sub; while true; do cat \"$D/x\"; D=../%s; done",
+                    "D=./sub; until false; do cat \"$D/x\"; D=../%s; done",
+                    "D=./sub; select s in a; do cat \"$D/x\"; D=../%s; done",
+                    "D=./sub; for i in 1 2; do for j in 1; do cat \"$D/x\"; "
+                    "done; D=../%s; done",
+                    "D=./sub; for i in 1 2; do cat \"$D/x\"; read D; done",
+                    "D=./sub; for i in 1 2; do cat \"$D/x\"; "
+                    "for D in ../%s; do :; done; done",
+                    "D=./sub; for i in 1; do cat \"$D/x\"; IFS=/; done"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual("deny", self._decision(
+                    cmd.replace("%s", self.TARGET)))
+
+    def test_a_body_that_leaves_the_name_alone_still_resolves(self):
+        for cmd in ("D=./sub; for i in 1 2; do cat \"$D/x\"; done",
+                    "D=./sub; for i in 1 2; do cat \"$D/x\"; E=../q; done",
+                    # `for` rebinds its own variable on every pass.
+                    "for f in in.txt sub; do cat \"$f\"; f=../q; done"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual("allow", self._decision(cmd))
+
 class SubshellCdTests(OutsideParentFixture, unittest.TestCase):
     """Q173: a `cd` in a subshell moves that subshell and nothing after it.
 
@@ -14783,36 +14813,6 @@ class MarkerByteTests(OutsideParentFixture, unittest.TestCase):
         self.assertIsNone(self._ps(
             'Write-Output $(Get-Content in.txt) "%s"' % self.RS))
 
-
-class LoopReassignTests(OutsideParentFixture, unittest.TestCase):
-    """Q406: a name a loop body assigns is not read at its pre-loop value.
-
-    bash runs the body again, so a use above the assignment sees the assigned
-    value on every pass after the first. Each case below allowed before.
-    """
-
-    def test_a_use_above_a_reassignment_is_not_resolved(self):
-        for cmd in ("D=./sub; for i in 1 2; do cat \"$D/x\"; D=../%s; done",
-                    "D=./sub; while true; do cat \"$D/x\"; D=../%s; done",
-                    "D=./sub; until false; do cat \"$D/x\"; D=../%s; done",
-                    "D=./sub; select s in a; do cat \"$D/x\"; D=../%s; done",
-                    "D=./sub; for i in 1 2; do for j in 1; do cat \"$D/x\"; "
-                    "done; D=../%s; done",
-                    "D=./sub; for i in 1 2; do cat \"$D/x\"; read D; done",
-                    "D=./sub; for i in 1 2; do cat \"$D/x\"; "
-                    "for D in ../%s; do :; done; done",
-                    "D=./sub; for i in 1; do cat \"$D/x\"; IFS=/; done"):
-            with self.subTest(cmd=cmd):
-                self.assertEqual("deny", self._decision(
-                    cmd.replace("%s", self.TARGET)))
-
-    def test_a_body_that_leaves_the_name_alone_still_resolves(self):
-        for cmd in ("D=./sub; for i in 1 2; do cat \"$D/x\"; done",
-                    "D=./sub; for i in 1 2; do cat \"$D/x\"; E=../q; done",
-                    # `for` rebinds its own variable on every pass.
-                    "for f in in.txt sub; do cat \"$f\"; f=../q; done"):
-            with self.subTest(cmd=cmd):
-                self.assertEqual("allow", self._decision(cmd))
 
 class BraceExpandUnitTests(unittest.TestCase):
     """Q404: ``brace_expand`` makes the words bash makes.
