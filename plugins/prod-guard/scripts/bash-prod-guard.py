@@ -2687,7 +2687,7 @@ def _kube_target(argv, seg_env, context_flags, named=None):
     ns = first_flag_value(argv, ('-n', '--namespace'))
     ns_suffix = ("; namespace '%s'" % ns) if ns else ''
     ctx = first_flag_value(argv, context_flags)
-    if ctx is not None:
+    if ctx:
         return (ctx, "kube-context '%s' (from %s%s)"
                 % (ctx, context_flags[0], ns_suffix), None, '')
     ambient = kube_current_context(seg_env)

@@ -1227,7 +1227,6 @@ class VariableExpansionDecisionTests(unittest.TestCase):
                     "CTX=kind-dev; env -S'%s'" % k,
                     "CTX=kind-dev; env --split-string='%s'" % k,
                     "CTX=kind-dev; env -iS '%s'" % k,
-                    "export CTX=kind-dev; env -u CTX -S '%s'" % k,
                     "CTX=kind-dev; env -S 'CTX=kind-ci %s'" % k,
                     # The parent left the `$` alone, so env reads it too.
                     'CTX=kind-dev; env -S "kubectl --context=\\${CTX} '
@@ -1240,6 +1239,13 @@ class VariableExpansionDecisionTests(unittest.TestCase):
                     'X=1 env -S "kubectl --context=${X} delete pod x"'):
             with self.subTest(cmd=cmd):
                 self.assertEqual(run_hook(cmd)[0], "ask")
+
+    def test_env_split_string_reads_an_unset_name_as_empty(self):
+        # `-u CTX` leaves env's environment without CTX, so the context is
+        # empty and kubectl takes the current one (Q433).
+        self.assertEqual(run_hook(
+            "export CTX=kind-dev; env -u CTX -S '%s'" % self.K385,
+            home=make_home(kubeconfig=KUBECONFIG_PROD))[0], "deny")
 
     def test_env_split_string_takes_what_env_is_given(self):
         k = self.K385
@@ -1782,6 +1788,41 @@ class NamedKubeconfigTests(unittest.TestCase):
             self.assertIsNone(decision, (cmd, reason))
             decision, _ = self.run_cmd(cmd % self.prod)
             self.assertEqual(decision, "deny", cmd)
+
+
+class EmptyContextFlagTests(unittest.TestCase):
+    """kubectl, helm and flux read an empty context flag as no flag and run
+    against the current context, so the guard judges it as absent (Q433)."""
+
+    EMPTY = ("kubectl --context= delete pod x",
+             "kubectl --context '' delete pod x",
+             'kubectl --context="" delete pod x',
+             "Z=; kubectl --context=$Z delete pod x",
+             "export Z=; bash -c 'kubectl --context=$Z delete pod x'",
+             "env Z= bash -c 'kubectl --context=$Z delete pod x'",
+             "export Z=kind-ci; env -u Z bash -c 'kubectl --context=$Z delete pod x'",
+             "helm --kube-context= upgrade r ./chart",
+             "flux --context= reconcile ks app")
+
+    def test_prod_current_context_denies_on_its_name(self):
+        home = make_home(kubeconfig=KUBECONFIG_PROD)
+        for cmd in self.EMPTY:
+            decision, reason = run_hook(cmd, home=home)
+            self.assertEqual(decision, "deny", (cmd, reason))
+            self.assertIn("gke_acme_prod-us", reason, cmd)
+
+    def test_nonprod_current_context_denies_as_ambient(self):
+        home = make_home(kubeconfig=KUBECONFIG_KIND)
+        for cmd in self.EMPTY:
+            decision, reason = run_hook(cmd, home=home)
+            self.assertEqual(decision, "deny", (cmd, reason))
+            self.assertIn("ambient kube-context", reason, cmd)
+
+    def test_unresolved_value_still_asks(self):
+        home = make_home(kubeconfig=KUBECONFIG_KIND)
+        decision, reason = run_hook(
+            "kubectl --context=$Z delete pod x", home=home)
+        self.assertEqual(decision, "ask", reason)
 
 
 class ExportedEnvironmentTests(unittest.TestCase):
@@ -3964,7 +4005,8 @@ class SpecialCaseTests(unittest.TestCase):
 
     def test_env_removals_reach_a_single_quoted_body(self):
         # `-i` and `-u C` take C away from the child, so a non-production
-        # value exported earlier no longer pins the body's target.
+        # value exported earlier no longer pins the body's target: the
+        # context is empty, which kubectl reads as the current one (Q433).
         home = make_home(kubeconfig=KUBECONFIG_PROD)
         body = " bash -c 'kubectl --context \"$C\" delete ns x'"
         for env in ("env -u C", "env -uC", "env --unset=C", "env -i",
@@ -3972,10 +4014,10 @@ class SpecialCaseTests(unittest.TestCase):
                     "sudo env -u C"):
             with self.subTest(env=env):
                 self.assertEqual(run_hook(
-                    "export C=kind-ci; " + env + body, home=home)[0], "ask")
+                    "export C=kind-ci; " + env + body, home=home)[0], "deny")
         self.assertEqual(run_hook(
             "export C=kind-ci; env -S '-u C bash -c \"kubectl --context "
-            "\\$C delete ns x\"'", home=home)[0], "ask")
+            "\\$C delete ns x\"'", home=home)[0], "deny")
         # `-ui` unsets a name `i`, and `--ig` is ambiguous with
         # `--ignore-signal`, so neither empties the environment.
         for env in ("env -ui", "env --ig"):
