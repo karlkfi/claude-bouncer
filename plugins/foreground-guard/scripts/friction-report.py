@@ -22,9 +22,10 @@ Usage:
     python3 scripts/friction-report.py --json           # machine-readable
 
 Each hook decision *that lets the call through* is recorded as an ``attachment``
-line of type ``hook_success`` carrying ``hookName`` (``PreToolUse:Bash``), the
-hook ``command`` (which names the guard script), and ``stdout`` (the decision
-JSON). The triggering Bash command is joined back via ``toolUseID``.
+line of type ``hook_success`` carrying ``hookName`` (``PreToolUse:Bash`` or
+``PreToolUse:Monitor``, the two tools this guard's hook matches), the hook
+``command`` (which names the guard script), and ``stdout`` (the decision JSON).
+The triggering command is joined back via ``toolUseID``.
 
 An attachment of any other ``type`` holds no verdict — the hook crashed or was
 cancelled, so the call ran unguarded. Those are counted as ``error``, not folded
@@ -33,7 +34,7 @@ into ``defer``; see ``HOOK_OK``.
 A ``deny`` is recorded nowhere in that stream — see ``DENY_TEXT`` below — so it
 is recovered from the error tool result the blocked call handed back instead.
 
-The friction *rate* divides by Bash calls, not by decision records — see
+The friction *rate* divides by Bash and Monitor calls, not by decision records — see
 ``SCOPE_KEYS`` for why the decision stream cannot be a denominator.
 """
 import argparse
@@ -168,7 +169,13 @@ HOOK_OK = 'hook_success'
 # The wider scope assumes what the transcripts cannot show: that the guard ran
 # for the whole window. Calls predating its install sit in the denominator, so a
 # fresh install reads low until the window catches up. The report says so.
-SCOPE_KEYS = ('bash_calls', 'sessions', 'sessions_prompted')
+SCOPE_KEYS = ('bash_calls', 'monitor_calls', 'sessions', 'sessions_prompted')
+
+# The tools the hook matches, each with the tally key counting its calls.
+# `bash_calls` keeps meaning Bash calls alone, so a JSON consumer reading it
+# sees no number change meaning under the same name.
+CALL_KEYS = {'Bash': 'bash_calls', 'Monitor': 'monitor_calls'}
+HOOK_NAMES = frozenset('PreToolUse:' + t for t in CALL_KEYS)
 
 # Tallied on the same walk as SCOPE_KEYS but not part of the denominator: the
 # guard's own overrides, read off the command string (see OVERRIDE_SIG).
@@ -335,13 +342,15 @@ def new_scope():
 def iter_decisions(paths, plugin, cutoff, repo, tally=None):
     """Yield decision dicts from the given transcript files.
 
-    Builds a per-file toolUseID -> Bash command map (ids are session-scoped)
+    Builds a per-file toolUseID -> command map over Bash and Monitor calls
+    (ids are session-scoped)
     so each decision can name the command that triggered it. Reads two sources:
     the hook attachment stream (allow/ask/defer) and the error tool results that
     carry the denies the attachment stream omits.
 
     A `tally` dict from new_scope() collects the denominator as it goes — the
-    in-scope Bash calls and the sessions holding them — plus the overrides,
+    in-scope Bash and Monitor calls and the sessions holding them — plus the
+    overrides,
     which are read off the commands rather than off any decision. It is
     complete only once the generator is exhausted.
     """
@@ -349,7 +358,7 @@ def iter_decisions(paths, plugin, cutoff, repo, tally=None):
         cmd_by_id = {}
         records = []
         seen = set()
-        calls = 0
+        calls = dict.fromkeys(CALL_KEYS.values(), 0)
         overrides = 0
         try:
             with open(path, encoding='utf-8') as fh:
@@ -363,20 +372,24 @@ def iter_decisions(paths, plugin, cutoff, repo, tally=None):
                         continue
                     if is_repeat(rec, seen):
                         continue
-                    # Index Bash tool_use commands for the join. Indexing spans
+                    # Index tool_use commands for the join. Indexing spans
                     # the whole file (a decision may sit outside the window
                     # while its command record does not); the tally does not.
                     msg = rec.get('message') or {}
-                    n_bash = n_override = 0
+                    n_calls = collections.Counter()
+                    n_override = 0
                     for b in (msg.get('content') or []):
                         if (isinstance(b, dict) and b.get('type') == 'tool_use'
-                                and b.get('name') == 'Bash' and b.get('id')):
+                                and b.get('name') in CALL_KEYS and b.get('id')):
                             cmd = (b.get('input') or {}).get('command', '')
+                            if not isinstance(cmd, str):
+                                cmd = ''
                             cmd_by_id[b['id']] = cmd
-                            n_bash += 1
+                            n_calls[CALL_KEYS[b['name']]] += 1
                             n_override += 1 if OVERRIDE_SIG.search(cmd) else 0
-                    if n_bash and tally is not None and scope(rec, cutoff, repo):
-                        calls += n_bash
+                    if n_calls and tally is not None and scope(rec, cutoff, repo):
+                        for key, n in n_calls.items():
+                            calls[key] += n
                         overrides += n_override
                     records.append(rec)
         except OSError:
@@ -386,7 +399,7 @@ def iter_decisions(paths, plugin, cutoff, repo, tally=None):
         decided = set()   # (guard, toolUseID) seen in the attachment stream
         for rec in records:
             att = rec.get('attachment')
-            if not isinstance(att, dict) or att.get('hookName') != 'PreToolUse:Bash':
+            if not isinstance(att, dict) or att.get('hookName') not in HOOK_NAMES:
                 continue
             if att.get('type') != HOOK_OK:
                 # No verdict to read: the hook never ran to completion, so the
@@ -432,8 +445,9 @@ def iter_decisions(paths, plugin, cutoff, repo, tally=None):
                 if plugin != 'all' and name != plugin:
                     continue
                 tuid = block.get('tool_use_id')
-                # No Bash tool_use behind it means a sibling guard blocked some
-                # other tool (Edit, Write) — out of scope for a Bash report.
+                # No Bash or Monitor call behind it means a sibling guard
+                # blocked some other tool (Edit, Write), which this hook never
+                # sees.
                 if tuid not in cmd_by_id:
                     continue
                 if (name, tuid) in decided:
@@ -448,8 +462,9 @@ def iter_decisions(paths, plugin, cutoff, repo, tally=None):
                     'cwd': cwd, 'ts': ts, 'command': cmd_by_id[tuid],
                 }
 
-        if tally is not None and (calls or prompted):
-            tally['bash_calls'] += calls
+        if tally is not None and (any(calls.values()) or prompted):
+            for key, n in calls.items():
+                tally[key] += n
             tally['overrides'] += overrides
             tally['sessions'] += 1
             tally['sessions_prompted'] += 1 if prompted else 0
@@ -540,21 +555,25 @@ def print_text(r, top, plugin='foreground-guard'):
     print(f"  plugins: {by_plugin}")
     parts = [f"{k} {v}" for k, v in r['decisions'].most_common()]
     print(f"  outcomes: {', '.join(parts)}")
-    # The rate divides by Bash calls, never by the decisions above — see
-    # SCOPE_KEYS. With no tally the count prints alone rather than acquiring a
-    # denominator it does not have.
+    # The rate divides by Bash and Monitor calls, never by the decisions above
+    # — see SCOPE_KEYS. With no tally the count prints alone rather than
+    # acquiring a denominator it does not have.
     sc = r.get('scope') or {}
-    calls = sc.get('bash_calls', 0)
+    bash, monitor = sc.get('bash_calls', 0), sc.get('monitor_calls', 0)
+    calls = bash + monitor
     if not calls:
         print(f"  friction (ask+deny): {asks}")
     else:
         prompted, sessions = sc['sessions_prompted'], sc['sessions']
+        made = (f"{calls} Bash call{'' if calls == 1 else 's'}" if not monitor
+                else f"{calls} Bash and Monitor calls ({bash} Bash, "
+                     f"{monitor} Monitor)")
         print(f"  friction (ask+deny): {asks} — {100 * asks / calls:.1f}% of "
-              f"the {calls} Bash call{'' if calls == 1 else 's'} in the window")
+              f"the {made} in the window")
         print(f"  sessions with a prompt: {prompted} of {sessions} "
               f"({100 * prompted / sessions:.0f}%)")
-        print("  note: the denominator is every Bash call in the window, so a "
-              "guard installed")
+        print("  note: the denominator is every Bash and Monitor call in the "
+              "window, so a guard installed")
         print("        part-way through it reads low until the window catches "
               "up")
     # Under one guard the deny recovery is complete, so the count stands on its
@@ -637,9 +656,10 @@ def main():
     if args.json:
         out = {
             # `total` still counts decision records; the rate's denominator is
-            # `bash_calls` (see SCOPE_KEYS), so consumers keep their key.
+            # `bash_calls` plus `monitor_calls` (see SCOPE_KEYS).
             'total': report['total'],
             'bash_calls': tally['bash_calls'],
+            'monitor_calls': tally['monitor_calls'],
             'sessions': tally['sessions'],
             'sessions_prompted': tally['sessions_prompted'],
             'decisions': dict(report['decisions']),
