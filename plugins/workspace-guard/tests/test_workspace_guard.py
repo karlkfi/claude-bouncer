@@ -14780,5 +14780,74 @@ class MarkerByteTests(OutsideParentFixture, unittest.TestCase):
             'Write-Output $(Get-Content in.txt) "%s"' % self.RS))
 
 
+class BraceExpandUnitTests(unittest.TestCase):
+    """Q404: ``brace_expand`` makes the words bash makes."""
+
+    CASES = ("docs/{a,../../x}", "{,../}x", "a{b,c{d,e}f}g", "{a}", "{}",
+             "x{1..3}", "{01..03}", "{3..1}", "{1..9..4}", "{a..c}", "{-../}",
+             "{a,b}{c,d}", "a{,}b", "{a,{b}", "{a,b", "a}b{c,d}", "{a,b}}",
+             "{{a,b}", "{1..a}", "{A..Z..5}", "{-03..2}", "{a,,b}", "{,}",
+             "{5..1..2}", "f.{txt,bak}")
+
+    @unittest.skipUnless(shutil.which("bash"), "needs bash to compare against")
+    def test_matches_bash(self):
+        for word in self.CASES:
+            with self.subTest(word=word):
+                out = subprocess.run(
+                    ["bash", "-c", 'for w in %s; do printf "<%%s>\\n" "$w"; done'
+                     % word], capture_output=True, text=True, check=True).stdout
+                want = [line[1:-1] for line in out.splitlines()]
+                self.assertEqual(want, [w for w in guard.brace_expand(word) if w])
+
+    def test_a_parameter_brace_is_not_a_list(self):
+        self.assertEqual(["${a,b}"], guard.brace_expand("${a,b}"))
+
+    def test_past_the_cap_is_none(self):
+        self.assertIsNone(guard.brace_expand("x{1..300}"))
+        self.assertIsNone(guard.brace_expand("{1..20}{1..20}"))
+
+
+class BraceOperandTests(OutsideParentFixture, unittest.TestCase):
+    """Q404: an operand is judged by the words bash brace-expands it to.
+
+    Each outside case below allowed before the fix, because the unexpanded
+    word resolved with `{a,..` as one path component that the next `..`
+    cancelled. Driven under bash 5.3.15: `cat < {../f,}` reads `../f`, since
+    bash drops the empty word and the redirect gets one target.
+    """
+
+    def test_an_outside_alternative_is_judged(self):
+        for cmd in ("cat sub/{a,../../%s}", "rm {,../}%s", "cat < {../%s,}",
+                    "cat in.txt > {../%s,}", "echo w > {../%s,}",
+                    "cat sub/{in,../../%s}.txt", "cat {../%s,in.txt}",
+                    "grep --file=sub/{a,../../%s} x in.txt"):
+            with self.subTest(cmd=cmd):
+                self.assertIn(self._decision(cmd % self.TARGET),
+                              ("ask", "deny"))
+
+    def test_in_workspace_alternatives_allow(self):
+        for cmd in ("cat {in,sub/x}.txt", "cat sub/{a,b}", "cat in{,}.txt",
+                    "cat sub/{a..c}", "cat {}"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual("allow", self._decision(cmd))
+
+    def test_a_wholly_quoted_brace_is_literal(self):
+        # bash reads `sub/{a,..` + `..` + `x}`: a name in the root.
+        for cmd in ("cat 'sub/{a,../../%s}'", 'cat "sub/{a,../../%s}"'):
+            with self.subTest(cmd=cmd):
+                self.assertEqual("allow", self._decision(cmd % self.TARGET))
+
+    def test_a_partly_quoted_brace_denies(self):
+        # Quoting inside a word decides which braces bash expands, and the
+        # lexer's record does not say where the quotes were.
+        for cmd in ('cat "sub/"{a,../../%s}', "cat sub/{a,'../../%s'}",
+                    "cat sub/\\{a,../../%s}"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual("deny", self._decision(cmd % self.TARGET))
+
+    def test_a_list_past_the_cap_denies(self):
+        self.assertEqual("deny", self._decision("cat in{1..300}.txt"))
+
+
 if __name__ == "__main__":
     unittest.main()

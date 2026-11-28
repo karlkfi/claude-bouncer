@@ -1198,6 +1198,105 @@ ENTRY_OPERANDS = {'rm': 'all', 'mv': 'sources'}
 # a prefix of the candidates and silently allow the rest.
 MAX_LOOP_CANDIDATES = 256
 
+BRACE_SEQ_RE = re.compile(
+    r'(-?\d+)\.\.(-?\d+)(?:\.\.(-?\d+))?\Z'
+    r'|([A-Za-z])\.\.([A-Za-z])(?:\.\.(-?\d+))?\Z')
+
+
+def _brace_sequence(body):
+    """The members of a `{x..y[..step]}` body, or None if bash keeps it literal."""
+    m = BRACE_SEQ_RE.match(body)
+    if not m:
+        return None
+    if m.group(1) is not None:
+        a, b, step = m.group(1), m.group(2), m.group(3)
+        lo, hi, conv = int(a), int(b), str
+        padded = any(len(x.lstrip('-')) > 1 and x.lstrip('-')[0] == '0'
+                     for x in (a, b))
+        if padded:
+            width = max(len(a), len(b))
+
+            def conv(n):
+                return ('-' + str(-n).zfill(width - 1) if n < 0
+                        else str(n).zfill(width))
+    else:
+        lo, hi, step, conv = ord(m.group(4)), ord(m.group(5)), m.group(6), chr
+    step = abs(int(step or 1)) or 1
+    rng = range(lo, hi + 1, step) if lo <= hi else range(lo, hi - 1, -step)
+    if len(rng) > MAX_LOOP_CANDIDATES:
+        return []
+    return [conv(n) for n in rng]
+
+
+def _brace_parts(word, start):
+    """For the `{` at `start`, return (index of its `}`, its alternatives), or
+    None where bash leaves that brace literal."""
+    depth, commas = 0, []
+    for i in range(start, len(word)):
+        c = word[i]
+        if c == '{':
+            depth += 1
+        elif c == ',' and depth == 1:
+            commas.append(i)
+        elif c == '}':
+            depth -= 1
+            if depth:
+                continue
+            if commas:
+                cuts = [start] + commas + [i]
+                return i, [word[cuts[k] + 1:cuts[k + 1]]
+                           for k in range(len(cuts) - 1)]
+            seq = _brace_sequence(word[start + 1:i])
+            return None if seq is None else (i, seq)
+    return None
+
+
+def brace_expand(word):
+    """The words bash's brace expansion makes of `word`, in bash's order, or
+    None past MAX_LOOP_CANDIDATES. A `${` opens a parameter, not a list."""
+    for i, c in enumerate(word):
+        if c != '{' or (i and word[i - 1] == '$'):
+            continue
+        found = _brace_parts(word, i)
+        if not found:
+            continue
+        end, parts = found
+        if not parts:
+            return None
+        out = []
+        for part in parts:
+            tails = brace_expand(part + word[end + 1:])
+            if tails is None:
+                return None
+            out += [word[:i] + t for t in tails]
+            if len(out) > MAX_LOOP_CANDIDATES:
+                return None
+        return out
+    return [word]
+
+
+def brace_words(tok):
+    """The operands bash makes of `tok` by brace expansion, or None where the
+    hook cannot say (over the cap, or a brace only partly quoted).
+
+    A word written plain expands as bash does, dropping the empty words bash
+    drops, which is what lets `{../x,}` name `../x` alone. A wholly quoted word
+    stays literal. A plain `str` has lost its quoting record (an `--opt=val`
+    value, a spliced variable), so both readings are judged.
+    """
+    if '{' not in tok or getattr(tok, 'quoted_chars', 0) == len(tok):
+        return [tok]
+    words = brace_expand(tok)
+    if words is None:
+        return None
+    if words == [tok]:
+        return words
+    if not isinstance(tok, QuotedStr):
+        return [tok] + words
+    if tok.quoted_from is not None:
+        return None
+    return [w for w in words if w]
+
 
 def literal_assignment_value(raw, allow_glob=False):
     """Return the literal an assignment RHS resolves to, or None if bash
@@ -4212,7 +4311,8 @@ def build_reason(offenders, scratch_hint='', override=None, prefixable=False):
             + ", ".join(sorted(set(buckets['expand'])))
             + ". Fix: if this lands inside the project root, write the literal "
             "path, one command per call (drop the $VAR / $(...) / `...` / "
-            "leading ~); otherwise use the Read/Grep tools.")
+            "leading ~, and spell out a partly quoted {a,b} list as one path "
+            "per operand); otherwise use the Read/Grep tools.")
     if buckets['untracked']:
         hints.append(
             "Relative path(s) after an untracked cd: "
@@ -5894,10 +5994,18 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
         single candidate — the original single-path check. A token whose
         candidate set is over the cap is reported as 'expand' — it IS a
         runtime-expanded token, and enumerating it is what hung the hook (Q46).
+        A brace list or sequence expands first, as bash does it, and every
+        word it makes is a candidate (``brace_words``).
         """
-        cands = expand_loop_candidates(f, loopmap)
-        if cands is None:
+        words = brace_words(f)
+        if words is None:
             return (f, 'expand', None)
+        cands = []
+        for word in words:
+            more = expand_loop_candidates(word, loopmap)
+            if more is None:
+                return (f, 'expand', None)
+            cands += more
         for cand in cands:
             kind, rp = resolve_token(cand, group_cwd, group_cwd_unknown, entry)
             if kind == 'skip':
