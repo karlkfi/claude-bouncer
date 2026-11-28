@@ -44,7 +44,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 from bouncer_parse import (                                    # noqa: E402
     ASSIGN_SUBSCRIPT, CHAIN_OPS, COMMENT_PRECEDERS, DUP, END_OPS,
     MAX_SUBST_DEPTH, PIPE_OPS, PUNCT_CHARS, QuoteTrackingLexer, REDIR,
-    SEPARATORS, SH_KEYWORDS, _OPERATORS, is_assignment, is_operator, split_assignment,
+    SEPARATORS, SH_KEYWORDS, _OPERATORS, is_assignment, is_operator,
+    is_reserved_word, split_assignment,
     _consume_heredoc_body, _scan_backticks, _scan_dollar_paren,
     command_substitutions, glue_dollar_paren,
     process_substitutions,
@@ -346,6 +347,21 @@ def wrapper_operands(wrapper, args, ended=None):
     return args
 
 
+def strip_keywords(tokens):
+    """`strip_sh_keywords`, except that a `time` the strip stops behind on a
+    word starting with `-` goes back to the wrapper walk (Q319). bash reads
+    `time -p -p make` as the keyword running `-p`, but under `--posix` and in
+    dash `time` before an option is `/usr/bin/time`, which runs make."""
+    body = strip_sh_keywords(tokens)
+    if body and body[0].startswith('-'):
+        j = len(tokens) - len(body)
+        while j and tokens[j - 1] in ('-p', '--'):
+            j -= 1
+        if j and tokens[j - 1] == 'time' and is_reserved_word(tokens[j - 1]):
+            return tokens[j - 1:]
+    return body
+
+
 def peel_wrappers(tokens, assigned=None):
     """Strip reserved words, inline assignments, and wrapper commands with
     their options, in the order bash resolves them, until the real command
@@ -355,7 +371,7 @@ def peel_wrappers(tokens, assigned=None):
     Reserved words are stripped in command position only: behind a wrapper
     `time` is the program, so `command time -o log make` writes `log` and
     runs make."""
-    tokens = strip_sh_keywords(tokens)
+    tokens = strip_keywords(tokens)
     while True:
         tokens = strip_env_prefix(tokens)
         if tokens and os.path.basename(tokens[0]) in WRAPPERS:

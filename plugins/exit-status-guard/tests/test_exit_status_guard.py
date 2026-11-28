@@ -128,6 +128,12 @@ CASES = [
      False, True, ''),
     # bash 5.3.15 runs a program named `-p` here, never the gate.
     ('time -- -p runs -p', 'time -- -p make check | tail -5', False, False, ''),
+    # bash runs `-p` for these too, but under `--posix` and in dash `time`
+    # before an option is `/usr/bin/time`, which runs the gate (Q319).
+    ('time -p -p gate piped', 'time -p -p make check | tail -5', False, True, ''),
+    ('time "-p" gate piped', 'time "-p" make check | tail -5', False, True, ''),
+    ('time -p -p in sh -c', "sh -c 'time -p -p make check | tail -5'",
+     False, True, ''),
     ('sudo-wrapped gate piped', 'sudo make install | tail -5', False, True, ''),
     # Q293: a `#` in an extglob group is text, and one after a blank inside
     # `[[ … ]]` is still a comment, so the gate on the line after it runs.

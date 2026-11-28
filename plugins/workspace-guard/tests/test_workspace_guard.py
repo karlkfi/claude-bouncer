@@ -3442,6 +3442,19 @@ class HookEndToEndTests(unittest.TestCase):
             with self.subTest(c=c):
                 self._decision(c + " cat /etc/q28-fake-target", "ask")
 
+    def test_time_before_an_option_is_judged_as_usr_bin_time(self):
+        # bash 5.3.15 runs a program named `-p` for each of these, but under
+        # `--posix` and in dash `time` before an option is `/usr/bin/time`,
+        # which runs `cat` (Q319). `time -- -p` runs `-p` in all three.
+        for c in ('time -p -p', 'time "-p"', "time '-p'", 'time -p -p --'):
+            with self.subTest(c=c):
+                self._decision(c + " cat /etc/q28-fake-target", "ask")
+        for c in ("sh -c 'time -p -p cat /etc/q28-fake-target'",
+                  "bash --posix -c 'time -p -p cat /etc/q28-fake-target'"):
+            with self.subTest(c=c):
+                self._decision(c, "ask")
+        self._defer("time -- -p cat /etc/q28-fake-target")
+
     def test_oneline_for_do_loopvar_outside_ask(self):
         # Pre-Q28 the `do` on the same line masked the guarded command and the
         # one-line `for … do … done` loop deferred; now the loop variable is
