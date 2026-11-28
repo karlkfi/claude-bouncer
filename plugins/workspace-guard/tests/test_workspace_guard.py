@@ -14789,8 +14789,19 @@ class BraceExpandUnitTests(unittest.TestCase):
              "{{a,b}", "{1..a}", "{A..Z..5}", "{-03..2}", "{a,,b}", "{,}",
              "{5..1..2}", "f.{txt,bak}")
 
-    @unittest.skipUnless(shutil.which("bash"), "needs bash to compare against")
+    @staticmethod
+    def _bash_expands():
+        # On Windows `bash` can be the WSL launcher, with no distro behind it.
+        try:
+            return subprocess.run(["bash", "-c", "echo {a,b}"], timeout=10,
+                                  capture_output=True, text=True
+                                  ).stdout.strip() == "a b"
+        except (OSError, subprocess.SubprocessError):
+            return False
+
     def test_matches_bash(self):
+        if not self._bash_expands():
+            self.skipTest("needs a bash that brace-expands to compare against")
         for word in self.CASES:
             with self.subTest(word=word):
                 out = subprocess.run(
