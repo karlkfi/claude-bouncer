@@ -1121,6 +1121,25 @@ def expand_word(tok, env, start=0):
     return Readings.of(expand_vars(text, env), {text})
 
 
+def _expand_outside_single_quotes(tok, env):
+    """`tok` with each reference the shell expands in it replaced: every one
+    outside a single-quoted run (Q424). A token holding single quotes whose
+    runs are unknown is left as written."""
+    if "'" not in getattr(tok, 'quotes', ()):
+        return expand_vars(tok, env)
+    runs = getattr(tok, 'quoted_runs', None)
+    if runs is None:
+        return tok
+    single = [(a, b) for a, b, c in runs if c == "'"]
+
+    def repl(m):
+        name = m.group(1) or m.group(2)
+        if name in env and not any(a <= m.start() < b for a, b in single):
+            return str(env[name])
+        return m.group(0)
+    return VAR_REF_RE.sub(repl, tok)
+
+
 def expand_vars(value, env):
     """Expand simple `$NAME` / `${NAME}` references in `value` against `env`.
 
@@ -1302,10 +1321,15 @@ def split_fields(pieces, ifs=None):
     only the characters an expansion produced can delimit. IFS whitespace
     runs merge and are trimmed at either end; any other IFS character ends a
     field on its own, so two in a row leave an empty one between them, but a
-    trailing one adds none. None where nothing delimits (Q423)."""
+    trailing one adds none. An empty piece that is not expanded is a quoted
+    empty string, which keeps its field. None where nothing delimits (Q423,
+    Q424)."""
     if ifs is None:
         ifs = DEFAULT_IFS
-    chars = [(c, e) for text, e in pieces for c in text]
+    chars = []
+    for text, expanded in pieces:
+        chars += [(c, expanded) for c in text] if text or expanded \
+            else [(None, False)]
 
     def ws(k):
         return k < len(chars) and chars[k][1] and chars[k][0] in ifs \
@@ -1316,12 +1340,14 @@ def split_fields(pieces, ifs=None):
 
     if not any(delim(k) for k in range(len(chars))):
         return None
-    fields, cur, i = [], [], 0
+    fields, cur, held, i = [], [], False, 0
     while ws(i):
         i += 1
     while i < len(chars):
         if not delim(i):
-            cur.append(chars[i][0])
+            if chars[i][0] is not None:
+                cur.append(chars[i][0])
+            held = True
             i += 1
             continue
         while ws(i):
@@ -1331,34 +1357,49 @@ def split_fields(pieces, ifs=None):
             while ws(i):
                 i += 1
             fields.append(''.join(cur))
-        elif cur:
+        elif held:
             fields.append(''.join(cur))
-        cur = []
-    if cur:
+        cur, held = [], False
+    if held:
         fields.append(''.join(cur))
     return fields
 
 
 def _expansion_pieces(tok, env, word):
-    """`tok` expanded as `(text, expanded)` pieces, or the whole word as one
-    expanded piece where the pieces do not rebuild `word`."""
+    """`tok` expanded as `(text, expanded)` pieces, where only an expansion
+    outside every quoted run of the token counts as expanded, or None where
+    the pieces cannot be told apart. A word from an unquoted token that the
+    pieces do not rebuild is one expanded piece, as it always split."""
+    runs = getattr(tok, 'quoted_runs', None)
+    if runs is None and getattr(tok, 'quoted_from', None) is not None:
+        return None
+    runs = runs or ()
+    refs = [(m.start(), m) for m in VAR_REF_RE.finditer(tok)
+            if (m.group(1) or m.group(2)) in env]
+    marks = [(a, None) for a, b, _ in runs if a == b]
     pieces, at = [], 0
-    for m in VAR_REF_RE.finditer(tok):
-        name = m.group(1) or m.group(2)
-        if name in env:
-            pieces += [(tok[at:m.start()], False), (str(env[name]), True)]
-            at = m.end()
-    pieces.append((tok[at:], False))
+    for pos, m in sorted(refs + marks, key=lambda r: (r[0], r[1] is not None)):
+        if tok[at:pos]:
+            pieces.append((tok[at:pos], False))
+        if m is None:
+            pieces.append(('', False))
+            at = pos
+            continue
+        quoted = any(a <= pos < b for a, b, _ in runs)
+        pieces.append((str(env[m.group(1) or m.group(2)]), not quoted))
+        at = m.end()
+    if tok[at:]:
+        pieces.append((tok[at:], False))
     if ''.join(text for text, _ in pieces) != word:
-        return [(str(word), True)]
+        return None if runs else [(str(word), True)]
     return pieces
 
 
 def expand_argv(argv, env, ifs=None):
     """Expand simple variable references in every token of `argv`, marking
-    each word that may expand to nothing as a `MayVanish`. A word written with
-    no quoting splits on `ifs` where its expansion holds some, as bash splits
-    an unquoted expansion (Q382, Q423); an assignment-shaped word does not.
+    each word that may expand to nothing as a `MayVanish`. A word splits on
+    `ifs` where an expansion outside its quotes holds some, as bash splits an
+    unquoted expansion (Q382, Q423, Q424); an assignment-shaped word does not.
     A word from a quoted token keeps the token as `raw`, so a reader that
     expands the text itself can tell what bash left alone (Q385)."""
     out = []
@@ -1368,11 +1409,11 @@ def expand_argv(argv, env, ifs=None):
             word = expand_word(tok, env)
         else:
             word = expand_vars(tok, env)
-            if getattr(tok, 'quoted_from', None) is None and word != tok:
-                fields = split_fields(_expansion_pieces(tok, env, word), ifs)
-                if fields is not None:
-                    out += fields
-                    continue
+            pieces = _expansion_pieces(tok, env, word) if word != tok else None
+            fields = None if pieces is None else split_fields(pieces, ifs)
+            if fields is not None:
+                out += fields
+                continue
         if (tok and getattr(tok, 'quoted_from', None) is None
                 and _VAR_REFS_RE.fullmatch(tok)
                 and _VAR_REFS_RE.fullmatch(word)):
@@ -4039,8 +4080,7 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
             # The parent expands a word outside single quotes before `eval`
             # re-reads it, so a `$X` holding `a; b` runs two commands (Q382).
             # That reading is judged too.
-            parent = ' '.join(t if "'" in getattr(t, 'quotes', ())
-                              else expand_vars(t, words_env)
+            parent = ' '.join(_expand_outside_single_quotes(t, words_env)
                               for t in argv_raw[1:])
             if parent != text:
                 findings += evaluate_command_string(
