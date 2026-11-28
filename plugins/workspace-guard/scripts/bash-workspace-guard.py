@@ -5303,12 +5303,19 @@ def funsub_poison(body, varmap):
         poison_vars(g, varmap)
 
 
-def loop_assigned(body, names, varmap):
-    """The ``names`` a loop body's groups may assign, by the rules the group
-    loop applies to each group (Q406). A body that may change IFS, or holds a
-    funsub, may assign any of them."""
+def loop_assigned(span, names, varmap):
+    """The ``names`` a loop's body may assign, by the rules the group loop
+    applies to each group (Q406). ``span`` runs from the loop's own header,
+    which runs first on every pass and so is skipped. A nested `for` or
+    `select` header assigns its variable alone. A body that may change IFS, or
+    holds a funsub, may assign any of them."""
     probe = dict.fromkeys(names, '')
-    for g, *_ in body:
+    for g, *_ in span[1:]:
+        kw = strip_sh_keywords(g)
+        if kw[:1] in (['for'], ['select']) and len(kw) > 1 \
+                and IDENT_RE.fullmatch(kw[1]):
+            probe.pop(kw[1], None)
+            continue
         sub_g = [substitute_vars(t, varmap) for t in g]
         if clobbers_ifs(sub_g) or any(FUNSUB_MARK_RE.search(t) for t in g):
             return set(names)

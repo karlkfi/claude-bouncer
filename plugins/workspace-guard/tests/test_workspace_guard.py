@@ -14799,6 +14799,8 @@ class LoopReassignTests(OutsideParentFixture, unittest.TestCase):
                     "D=./sub; for i in 1 2; do for j in 1; do cat \"$D/x\"; "
                     "done; D=../%s; done",
                     "D=./sub; for i in 1 2; do cat \"$D/x\"; read D; done",
+                    "D=./sub; for i in 1 2; do cat \"$D/x\"; "
+                    "for D in ../%s; do :; done; done",
                     "D=./sub; for i in 1; do cat \"$D/x\"; IFS=/; done"):
             with self.subTest(cmd=cmd):
                 self.assertEqual("deny", self._decision(
