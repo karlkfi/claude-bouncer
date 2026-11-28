@@ -1198,6 +1198,8 @@ ENTRY_OPERANDS = {'rm': 'all', 'mv': 'sources'}
 # a prefix of the candidates and silently allow the rest.
 MAX_LOOP_CANDIDATES = 256
 
+BRACE_MAX_OPEN = 64
+BRACE_MAX_LEN = 4096
 BRACE_SEQ_RE = re.compile(
     r'(-?\d+)\.\.(-?\d+)(?:\.\.(-?\d+))?\Z'
     r'|([A-Za-z])\.\.([A-Za-z])(?:\.\.(-?\d+))?\Z')
@@ -1253,7 +1255,14 @@ def _brace_parts(word, start):
 
 def brace_expand(word):
     """The words bash's brace expansion makes of `word`, in bash's order, or
-    None past MAX_LOOP_CANDIDATES. A `${` opens a parameter, not a list."""
+    None past MAX_LOOP_CANDIDATES. A `${` opens a parameter, not a list.
+
+    A word past BRACE_MAX_OPEN braces or BRACE_MAX_LEN characters is None
+    unread: each brace rescans the word and recurses once, so an unbounded
+    one ran past the hook's timeout or out of stack.
+    """
+    if word.count('{') > BRACE_MAX_OPEN or len(word) > BRACE_MAX_LEN:
+        return None
     for i, c in enumerate(word):
         if c != '{' or (i and word[i - 1] == '$'):
             continue

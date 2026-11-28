@@ -14848,6 +14848,13 @@ class BraceOperandTests(OutsideParentFixture, unittest.TestCase):
     def test_a_list_past_the_cap_denies(self):
         self.assertEqual("deny", self._decision("cat in{1..300}.txt"))
 
+    def test_an_unbounded_word_denies_inside_the_timeout(self):
+        # Unbounded, the first ran 5s and the second out of stack, which
+        # exits the hook non-zero and enforces nothing.
+        for word in ("{" * 20000 + ",", "{a,b}" * 2000):
+            with self.subTest(size=len(word)):
+                self.assertEqual("deny", self._decision("cat " + word))
+
 
 if __name__ == "__main__":
     unittest.main()
