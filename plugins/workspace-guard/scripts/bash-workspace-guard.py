@@ -5303,6 +5303,24 @@ def funsub_poison(body, varmap):
         poison_vars(g, varmap)
 
 
+def loop_assigned(body, names, varmap):
+    """The ``names`` a loop body's groups may assign, by the rules the group
+    loop applies to each group (Q406). A body that may change IFS, or holds a
+    funsub, may assign any of them."""
+    probe = dict.fromkeys(names, '')
+    for g, *_ in body:
+        sub_g = [substitute_vars(t, varmap) for t in g]
+        if clobbers_ifs(sub_g) or any(FUNSUB_MARK_RE.search(t) for t in g):
+            return set(names)
+        for t in g:
+            if is_assignment(t):
+                if split_assignment(t)[0] == 'IFS':
+                    return set(names)
+                probe.pop(split_assignment(t)[0], None)
+        poison_vars(sub_g, probe)
+    return set(names) - probe.keys()
+
+
 PIPE_OPS = ('|', '|&')
 
 # The reserved word that opens each compound command, mapped to its closer.
@@ -5526,7 +5544,8 @@ def _substitution_close(tokens, start):
     return None
 
 
-def split_groups(tokens, scopes=None, herestrings=None, lastpipe=False):
+def split_groups(tokens, scopes=None, herestrings=None, lastpipe=False,
+                 loops=None):
     """Split a token list into `(cmd_tokens, redir_targets, persists, pipe,
     heredocs)` groups.
 
@@ -5583,6 +5602,9 @@ def split_groups(tokens, scopes=None, herestrings=None, lastpipe=False):
     group's cwd, and placing it needs the word. A caller asking for them also
     gets a group for a bare `<<<"$(…)"` with no command word, which bash still
     expands.
+
+    ``loops``, when given, receives a ``(first, last)`` pair of group indexes
+    per `for`, `select`, `while` or `until`, from its header to its `done`.
     """
     groups, cur, cur_redir, i = [], [], [], 0
     paren, prev_sep, pipe, nhd = 0, '', 0, 0
@@ -5708,6 +5730,8 @@ def split_groups(tokens, scopes=None, herestrings=None, lastpipe=False):
                 lead = ''
             elif frames and frames[-1][0] == t:
                 _, scope, first, depth, _ = frames.pop()
+                if loops is not None and t == 'done':
+                    loops.append((first, len(groups)))
                 if scope in shells:
                     del shells[shells.index(scope):]
                     last_close = last_close or isinstance(scope, int)
@@ -5902,9 +5926,12 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
                 for m in FUNSUB_MARK_RE.finditer(t)
                 if int(m.group(1)) < len(fun_bodies)]
 
-    scopes = []
+    scopes, loops = [], []
     groups = split_groups(resume_interrupted_commands(tokens), scopes,
-                          lastpipe=seed_lastpipe)
+                          lastpipe=seed_lastpipe, loops=loops)
+    loop_bodies = {}
+    for first, last in loops:
+        loop_bodies.setdefault(first, []).append(groups[first:last + 1])
     # Whether `lastpipe` may be on anywhere in the string, for the bodies it
     # runs; a superset, since a body's position is not tracked here.
     lastpipe = seed_lastpipe or any(lastpipe_setting(g) for g, *_ in groups)
@@ -6200,7 +6227,18 @@ def _analyze_command(cmd, ctx, base_cwd, depth=0, in_subst=False, seed_vars=None
     # The same for the commands a `find` runs, each with its own cwd state.
     find_runs = []
     saved_shells, left_unknown, restore = [], False, None
-    for (g, g_redir, persists, pipe, _nhd), (shells, own) in zip(groups, scopes):
+    for k, ((g, g_redir, persists, pipe, _nhd), (shells, own)) in enumerate(
+            zip(groups, scopes)):
+        for body in loop_bodies.get(k, ()):
+            # bash runs the body again, so a use above an assignment in it
+            # sees that assignment on every pass after the first (Q406).
+            names = set(varmap) | set(textmap) | set(loopmap)
+            gone = loop_assigned(body, names, varmap)
+            for nm in gone:
+                varmap.pop(nm, None)
+                textmap.pop(nm, None)
+                loopmap.pop(nm, None)
+            blacklist_loops(gone)
         if restore is not None:
             group_cwd, group_cwd_unknown = restore
             restore = None
