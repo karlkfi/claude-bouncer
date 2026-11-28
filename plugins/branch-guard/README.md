@@ -449,6 +449,12 @@ It measures the tree the push runs from, which is not always the session's.
 A literal `cd` moves that tree for everything after it and a literal `git -C` for one command, so both are followed, as is a `cd` to the two substitutions above; a target only the shell can compute is not, and the check stands down rather than measuring a tree the push is not coming from.
 Getting this wrong went both ways — a rebase demanded for an overlap that belonged to another worktree's branch, and a `git -C` push waved through when it carried the overlap outright.
 
+It measures each branch the push sends, at that branch's own tip.
+A branch this session created, or a leased one, pushed while another branch is checked out is read as itself, and the deny's rebase names it and switches back, `git rebase origin/main feat/side && git switch <worktree branch>`, because `git rebase` with a branch argument checks that branch out first.
+Where another worktree has the branch checked out, git refuses that, so the deny aims the rebase there instead: `git -C <that worktree> rebase origin/main`.
+Before, the created branch was not measured at all and the leased one was measured at `HEAD`, so a side branch the base had moved under could be pushed stale.
+A queue-id claim sends no branch and is not measured.
+
 The check runs only where a push would otherwise be auto-approved, so `protected` and `off` never reach it.
 Every probe fails silent: a detached HEAD, a shallow clone, an unresolvable base ref, a git too old for `merge-tree --write-tree`, or no `origin` at all costs a missed catch rather than a blocked push.
 `--dry-run` and `--delete` land nothing on the base, so neither is checked.
