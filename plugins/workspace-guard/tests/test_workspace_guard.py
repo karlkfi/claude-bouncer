@@ -10693,6 +10693,45 @@ class InstalledReadTreesE2ETests(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self._expect(cmd, "allow")
 
+    def test_copy_into_notes_run_folder_allowed(self):
+        run = sh(self.run_dir)
+        with open(os.path.join(self.workspace, "b.txt"), "w") as f:
+            f.write("x\n")
+        for cmd in (f"cp ./in.txt {run}", f"cp ./in.txt {run}/",
+                    f"cp ./in.txt ./b.txt {run}/", f"mv ./in.txt {run}",
+                    f"cp -t {run} ./in.txt ./b.txt",
+                    f"S=.; cp $S/in.txt {run}/",
+                    f"cd {run} && cp {sh(os.path.join(self.workspace, 'in.txt'))} ."):
+            with self.subTest(cmd=cmd):
+                self._expect(cmd, "allow")
+
+    def test_copy_into_notes_run_folder_still_asks(self):
+        run = sh(self.run_dir)
+        away = os.path.join(self.home, "elsewhere")
+        os.mkdir(away)
+        os.symlink(os.path.join(away, "f"), os.path.join(self.run_dir, "l.txt"))
+        os.symlink(away, os.path.join(self.notes, "linked-run"))
+        with open(os.path.join(self.workspace, "l.txt"), "w") as f:
+            f.write("x\n")
+        for cmd in (
+                f"cp ./l.txt {run}/",                 # lands on a link out
+                f"cp ./in.txt ./l.txt {run}/",
+                f"cp -T ./in.txt {run}",              # replaces the folder
+                f"mv --no-target-directory ./d {run}",
+                f"cp ./*.txt {run}/",                 # names the hook cannot see
+                f"cp -R ./ {run}/",
+                f"cp ./in.txt {sh(self.notes)}/",     # a file beside the runs
+                f"cp ./in.txt {sh(os.path.join(self.notes, 'no-such-run'))}",
+                f"cp ./in.txt {sh(os.path.join(self.notes, 'linked-run'))}/",
+                f"cp ./in.txt {sh(self.notes + '-old')}/",
+                f"mv {run} ./here",                   # the folder as a source
+                f"cp {run}",
+                f"rm -rf {run}/"):
+            with self.subTest(cmd=cmd):
+                self._expect(cmd, "ask")
+        self._expect(f"ln -s {sh(away)} {self._run_path('in.txt')} "
+                     f"&& cp ./in.txt {run}/", "ask")
+
     def test_notes_run_folder_file_tools_defer(self):
         for tool in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
             with self.subTest(tool=tool):
@@ -10757,7 +10796,10 @@ class InstalledReadTreesE2ETests(unittest.TestCase):
                      os.path.join(self.run_dir, "up", "family"),
                      os.path.join(self.notes, "linked-run", "n.md")):
             with self.subTest(path=path):
-                self._expect(f"cp ./in.txt {sh(path)}", "ask")
+                # `up/family` is the run folder, so `cp` puts `in.txt` in it.
+                self._expect(f"cp ./in.txt {sh(path)}",
+                             "allow" if path.endswith("family") else "ask")
+                self._expect(f"cp -T ./in.txt {sh(path)}", "ask")
                 self._expect(f"Copy-Item ./in.txt {ps(path)}", "ask",
                              tool_name="PowerShell")
                 self.assertEqual(self._file_tool("Write", path), "ask")

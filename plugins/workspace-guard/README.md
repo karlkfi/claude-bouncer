@@ -111,6 +111,7 @@ The desktop app's shared notes are exempt for reads, and for writes inside a run
 | `tail /tmp/claude-501/<this-project>/<sibling-session>/…` (sibling read) | allow |
 | `echo x > /tmp/claude-501/<this-project>/<sibling-session>/scratchpad/f` (sibling write) | **deny** |
 | `cp in.txt ~/Library/Application\ Support/Claude/side-session-notes/<run>/n.md` | allow |
+| `cp a.txt b.txt ~/Library/Application\ Support/Claude/side-session-notes/<run>/` | allow |
 | `rm -rf ~/Library/Application\ Support/Claude/side-session-notes/<run>` (or `…/*`, or `…/<run>/*`) | **ask** |
 | `f=notes.md; cat $f`                 | allow    |
 | `for f in docs/*.md; do cat $f; done` | allow   |
@@ -1051,6 +1052,8 @@ Both rules apply to every configured path: the host-temp roots and allowlist abo
 Claude Desktop gives linked sessions a shared folder, `~/Library/Application Support/Claude/side-session-notes/<run>/`, adds it to each session as a working directory, and tells sessions to leave findings there.
 A write strictly inside a run folder is exempt, from Bash, PowerShell, and the native file tools alike.
 The run folder has to exist already and be a real directory.
+So is a `cp` or `mv` whose destination is the run folder, when every `<run>/<source name>` it creates would be exempt named in full.
+A source the hook cannot name, such as `*.txt` or `dir/`, still asks, and so does `-T`, which replaces the folder.
 
 These still ask:
 
