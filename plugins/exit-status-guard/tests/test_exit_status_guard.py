@@ -2271,16 +2271,23 @@ class TestHookEndToEnd(unittest.TestCase):
         if not root:
             self.skipTest('no per-user scratch root on this platform')
         made_root = not os.path.isdir(root)
+        os.makedirs(root, mode=0o700, exist_ok=True)  # per-UID private
+        # Concurrent suites share the root, so remove only what this run made.
+        project = tempfile.mkdtemp(prefix='exit-status-guard-suite-', dir=root)
         session = 'exit-status-guard-suite-%d' % os.getpid()
-        project = os.path.join(root, 'exit-status-guard-suite-project')
         path = os.path.join(project, session, 'scratchpad')
-        os.makedirs(path, mode=0o700)     # Claude Code's root is per-UID private
+        os.makedirs(path)
         try:
             out = self.run_hook({
                 'tool_name': 'Bash', 'cwd': REPO, 'session_id': session,
                 'tool_input': {'command': 'make check | tail -5'}})
         finally:
-            shutil.rmtree(root if made_root else project)
+            shutil.rmtree(project)
+            if made_root:
+                try:
+                    os.rmdir(root)
+                except OSError:
+                    pass
         reason = json.loads(out)['hookSpecificOutput']['permissionDecisionReason']
         self.assertIn(path + '/out.log', reason)
 
