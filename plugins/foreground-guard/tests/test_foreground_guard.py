@@ -1830,6 +1830,34 @@ class AndOrListBackgroundTests(unittest.TestCase):
                 self.assertIsNone(d)
 
 
+class SubstitutionBackgroundTests(unittest.TestCase):
+    """Q363: bash reads a substitution's stdout until every writer closes it,
+    so a job backgrounded inside one still holds the command around it.
+    Each case was timed against bash 5.3 with a 1 s sleep."""
+
+    def test_a_job_holding_the_pipe_is_judged(self):
+        for cmd in ("x=$(sleep 30 &)", "while true; do x=$(sleep 1 &); done",
+                    "x=$(sleep 30 2>&1 &)", "x=$(sleep 30 2>/dev/null &)",
+                    "x=$(sleep 30 2>&1 >/dev/null &)",
+                    "x=$(sleep 30 3>&1 >/dev/null &)",
+                    "x=$(sleep 30 >/dev/null && true &)",
+                    "x=$(true && sleep 30 >/dev/null &)", "x=`sleep 30 &`",
+                    "x=$(bash -c 'sleep 30 &')", "x=$(gh run watch 1 &)"):
+            with self.subTest(cmd=cmd):
+                d, _ = run_hook(cmd)
+                self.assertEqual(d, "deny")
+
+    def test_a_job_off_the_pipe_is_detached(self):
+        for cmd in ("x=$(sleep 30 >/dev/null &)", "x=$(sleep 30 >&2 &)",
+                    "x=$(sleep 30 1>&2 &)", "x=$(sleep 30 &>/dev/null &)",
+                    "x=$(sleep 30 >&- &)", "x=$(sleep 30 >/dev/null 2>&1 &)",
+                    "x=$( (sleep 30 >/dev/null &) )",
+                    "x=$(bash -c 'sleep 30 >/dev/null &')", "sleep 30 &"):
+            with self.subTest(cmd=cmd):
+                d, _ = run_hook(cmd)
+                self.assertIsNone(d)
+
+
 class DecisionTableTests(unittest.TestCase):
     def test_every_row_matches_the_hook(self):
         rows, stray = readme_decision_rows()

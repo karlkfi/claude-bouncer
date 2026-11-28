@@ -378,9 +378,45 @@ def heredoc_substitutions(expanded):
 # backgrounded (otherwise the `&` lands on the redirect target and the
 # startup-grace `sleep` false-positives as a poll).
 REDIR = frozenset({'>', '>>', '<', '<<', '<<<', '>&', '<&', '>|', '&>', '&>>'})
+# Operators that join a segment into a larger background job.
+JOB_JOINERS = frozenset({'&&', '||', '|', '|&'})
 
 
-def split_segments(tokens, bg=None):
+def holds_stdout(words):
+    """Whether a simple command's descriptors still reach its stdout once its
+    redirects apply, in order: `>/dev/null` frees it, `2>&1 >/dev/null`
+    leaves stderr on it, and `3>&1` adds a descriptor that holds it."""
+    on = {1: True}
+    i = 0
+    while i < len(words):
+        t, fd = words[i], None
+        if t.isdigit() and getattr(t, 'glued', False) \
+                and getattr(t, 'quoted_from', None) is None \
+                and i + 1 < len(words) and is_operator(words[i + 1]) \
+                and words[i + 1] in REDIR:
+            fd, i = int(t), i + 1
+            t = words[i]
+        if not (is_operator(t) and t in REDIR):
+            i += 1
+            continue
+        target = words[i + 1] if i + 1 < len(words) else ''
+        i += 2
+        if t in ('&>', '&>>') or (t == '>&' and fd is None
+                                  and not target.rstrip('-').isdigit()
+                                  and target != '-'):
+            on[1] = on[2] = False
+        elif t in ('>&', '<&') and target.rstrip('-').isdigit():
+            src = int(target.rstrip('-'))
+            n = fd if fd is not None else int(t == '>&')
+            on[n] = on.get(src, False)
+            if target.endswith('-'):
+                on[src] = False
+        else:
+            on[fd if fd is not None else int(t[0] == '>')] = False
+    return any(on.values())
+
+
+def split_segments(tokens, bg=None, piped=None):
     """Split a token stream into (argv, terminator) pairs on every separator
     token (`;`, `&`, `&&`, `|`, `||`, parens, and mixed runs). The
     terminator is the token that ended the segment ('' at end of input).
@@ -404,10 +440,17 @@ def split_segments(tokens, bg=None):
 
     Given a list as `bg`, appends one flag per segment: whether an `&` runs
     it in the background, read off `backgrounded` rather than off its own
-    terminator (Q280)."""
+    terminator (Q280).
+
+    Given a list as `piped`, appends one flag per segment: whether its
+    background job, run inside a command substitution, would keep the
+    substitution's pipe open. Only a lone command ended by its own `&`, with
+    every descriptor redirected off stdout, lets go of it: a job of several
+    commands runs in a subshell that holds the pipe itself (Q363)."""
     covered = backgrounded(tokens) if bg is not None else None
     segs, cur = [], []
-    first = 0
+    first = lo = 0
+    before = ''
     skip_next_word = False
     for i, t in enumerate(tokens):
         if is_operator(t):
@@ -418,7 +461,11 @@ def split_segments(tokens, bg=None):
                 segs.append((cur, t))
                 if covered is not None:
                     bg.append(covered[first])
+                if piped is not None:
+                    piped.append(t != '&' or before in JOB_JOINERS
+                                 or holds_stdout(tokens[lo:i]))
             cur = []
+            before, lo = t, i + 1
             skip_next_word = False
         elif skip_next_word:
             skip_next_word = False
@@ -430,6 +477,8 @@ def split_segments(tokens, bg=None):
         segs.append((cur, ''))
         if covered is not None:
             bg.append(covered[first])
+        if piped is not None:
+            piped.append(True)
     return segs
 
 
@@ -793,9 +842,11 @@ def finding_slow(cfg, what, min_ms, timeout_ms, timeout_was_set):
 # Class A analysis
 # ---------------------------------------------------------------------------
 
-def analyze_class_a(raw, cfg, depth=0):
+def analyze_class_a(raw, cfg, depth=0, piped=False):
     """Class A findings for a command string. Returns (findings, override,
     slept), where `slept` says a foreground `sleep` ran anywhere in it.
+    `piped` says its stdout is a command substitution's pipe, which bash
+    reads until every writer closes it, background jobs included (Q363).
     Recurses (bounded) into `bash -c '...'` / `eval ...` bodies so a quoted
     poll loop can't ride past the guard; `bash some-script.sh` stays opaque
     (no script-file inspection)."""
@@ -812,12 +863,13 @@ def analyze_class_a(raw, cfg, depth=0):
     if tokens is None:
         return findings, None, False  # unparseable: fail-open, defer
 
-    def recurse(body, in_loop=False):
+    def recurse(body, in_loop=False, sub_piped=None):
         # A nested command string: its findings are this command's, an
         # override prefix inside it stands the whole call down, and a sleep
         # it runs inside this command's loop makes the loop a poll (Q359).
         nonlocal loop_sleep
-        sub_f, sub_o, sub_slept = analyze_class_a(body, cfg, depth + 1)
+        sub_f, sub_o, sub_slept = analyze_class_a(
+            body, cfg, depth + 1, piped if sub_piped is None else sub_piped)
         findings.extend(sub_f)
         if state['override'] is None:
             state['override'] = sub_o
@@ -833,10 +885,11 @@ def analyze_class_a(raw, cfg, depth=0):
     loop_sleep = False   # a foreground `sleep` inside a loop (any duration)
     sleep_findings = []
     any_bg = False
-    bg_flags = []
+    bg_flags, held_flags = [], []
     opened = []          # compound keywords open at this segment, outermost first
-    segments = split_segments(tokens, bg_flags)
-    for (group, _term), bg in zip(segments, bg_flags):
+    segments = split_segments(tokens, bg_flags, held_flags)
+    for (group, _term), bg, held in zip(segments, bg_flags, held_flags):
+        bg = bg and not (piped and held)
         any_bg = any_bg or bg
         # A segment opens or closes compounds only with its leading words, so
         # a sleep after `done` is outside the loop and judged on its own (Q283).
@@ -871,7 +924,7 @@ def analyze_class_a(raw, cfg, depth=0):
         # background job under `&`, and in the foreground under a `timeout`
         # wrap, because the shell expands it before `timeout` starts.
         for body in [] if bg else substitutions_in(group, bodies, marker_re):
-            recurse(body, subst_in_loop)
+            recurse(body, subst_in_loop, True)
         state['timeout_wrapped'] = False
         argv = strip_head(list(group), state)
         if not argv:
@@ -918,7 +971,7 @@ def analyze_class_a(raw, cfg, depth=0):
     # judged as foreground (parse uncertainty defers).
     if not any_bg:
         for body in heredoc_substitutions(expanded):
-            recurse(body)
+            recurse(body, sub_piped=True)
 
     if loop_sleep:
         # Loop-with-sleep: the canonical foreground poll. Any sleep duration
