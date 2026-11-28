@@ -620,7 +620,7 @@ check "[protected] create-only claim -> none" none \
 #     command itself, then the PostToolUse hook, against a private grant store.
 OWN_HOME="$(mktemp -d "$REPO_ROOT/tmp/own-home.XXXXXX")"
 own_payload() {   # COMMAND EVENT [SESSION] [TOOL_USE_ID]
-  jq -nc --arg cmd "$1" --arg cwd "$(nat "$WORK")" --arg ev "$2" \
+  jq -nc --arg cmd "$1" --arg cwd "$(nat "${OWN_CWD:-$WORK}")" --arg ev "$2" \
          --arg sid "${3:-sess-own}" --arg tu "${4:-}" \
     '{tool_name: "Bash", tool_input: {command: $cmd}, cwd: $cwd, session_id: $sid}
      + (if $ev == "" then {} else {hook_event_name: $ev} end)
@@ -629,12 +629,12 @@ own_payload() {   # COMMAND EVENT [SESSION] [TOOL_USE_ID]
 OWN_N=0
 own_create() {    # COMMAND [SESSION]  (one tool_use_id per command, as Claude Code sends)
   OWN_N=$((OWN_N + 1))
-  decision_for "$(own_payload "$1" '' "${2:-}" "toolu-own-$OWN_N")" "$WORK" HOME="$OWN_HOME" >/dev/null
-  ( cd "$WORK" && eval "$1" ) >/dev/null 2>&1 || true   # a create may fail by design
-  decision_for "$(own_payload "$1" PostToolUse "${2:-}" "toolu-own-$OWN_N")" "$WORK" HOME="$OWN_HOME" >/dev/null
+  decision_for "$(own_payload "$1" '' "${2:-}" "toolu-own-$OWN_N")" "${OWN_CWD:-$WORK}" HOME="$OWN_HOME" >/dev/null
+  ( cd "${OWN_CWD:-$WORK}" && eval "$1" ) >/dev/null 2>&1 || true   # a create may fail by design
+  decision_for "$(own_payload "$1" PostToolUse "${2:-}" "toolu-own-$OWN_N")" "${OWN_CWD:-$WORK}" HOME="$OWN_HOME" >/dev/null
 }
 own_push() {      # COMMAND [SESSION]
-  decision_for "$(own_payload "$1" '' "${2:-}")" "$WORK" HOME="$OWN_HOME"
+  decision_for "$(own_payload "$1" '' "${2:-}")" "${OWN_CWD:-$WORK}" HOME="$OWN_HOME"
 }
 git -C "$WORK" checkout -q claude/x
 own_create 'git branch feat/q309-a'
@@ -2565,6 +2565,38 @@ check "[overlap] a queue-id claim from the overlapping branch -> allow" allow \
   "$(decision_for "$(push 'git push --force-with-lease=refs/queue-ids/Q42: origin HEAD:refs/queue-ids/Q42')" "$OVL")"
 check "[overlap] the claim beside the branch itself -> deny" deny \
   "$(decision_for "$(push 'git push --force-with-lease=refs/queue-ids/Q42: origin HEAD HEAD:refs/queue-ids/Q42')" "$OVL")"
+#      A side branch is measured itself, not HEAD (Q316). feat/side edits the
+#      line the base moved and feat/clean edits another file, while HEAD
+#      overlaps throughout -- so feat/clean allowing is what shows HEAD is no
+#      longer the branch being read.
+ovl_side() {      # BRANCH FILE: a branch off the fork point editing line 10
+  git -C "$OVL" switch -q "$1"
+  numbered "$OVL/$2" 10 "side edit"
+  git -C "$OVL" commit -q -am "side work"
+  git -C "$OVL" switch -q claude/x
+}
+OWN_CWD="$OVL"
+own_create 'git branch feat/side main'
+own_create 'git branch feat/clean main'
+unset OWN_CWD
+ovl_side feat/side file.txt
+ovl_side feat/clean other.txt
+ovl_own() { decision_for "$(OWN_CWD="$OVL" own_payload "$1" '')" "$OVL" HOME="$OWN_HOME"; }
+check "[overlap] an owned side branch the base moved under -> deny" deny \
+  "$(ovl_own 'git push origin feat/side')"
+check "[overlap] same, as side:side -> deny" deny \
+  "$(ovl_own 'git push origin feat/side:feat/side')"
+check "[overlap] an owned side branch the base missed -> allow" allow \
+  "$(ovl_own 'git push origin feat/clean')"
+check "[overlap] that branch beside HEAD -> deny" deny \
+  "$(ovl_own 'git push origin HEAD feat/clean')"
+check_text "[overlap] the side branch's deny rebases that branch" has \
+  "git rebase origin/main feat/side\`" \
+  "$(reason_for "$(OWN_CWD="$OVL" own_payload 'git push origin feat/side' '')" "$OVL" HOME="$OWN_HOME")"
+check "[overlap] a leased side:side the base moved under -> deny" deny \
+  "$(decision_for "$(push 'git push --force-with-lease=feat/side origin feat/side:feat/side')" "$OVL")"
+check "[overlap] a leased side:side the base missed -> allow" allow \
+  "$(decision_for "$(push 'git push --force-with-lease=feat/clean origin feat/clean:feat/clean')" "$OVL")"
 ovl_reason="$(reason_for "$(push 'git push')" "$OVL")"
 check_text "[overlap] reason names the file" has "file.txt" "$ovl_reason"
 check_text "[overlap] reason names the base ref" has "origin/main" "$ovl_reason"

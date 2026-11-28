@@ -2010,7 +2010,7 @@ def lease_target(token, current):
     return None if glob or other is not None else branch
 
 
-def push_decision(args, current, policy, owned=frozenset(), off_branch=None):
+def push_decision(args, current, policy, owned=frozenset(), sent=None):
     """Given the tokens after `push`, the worktree's current branch, and the
     policy, return (decision, reason) where decision is 'allow', 'ask',
     'ask-shared' (a protected target), or None (defer). strict auto-approves a
@@ -2024,9 +2024,9 @@ def push_decision(args, current, policy, owned=frozenset(), off_branch=None):
 
     `owned` names branches this session created (`owned_branches`); a push to
     one allows like a push of the worktree branch. A queue-id claim allows in
-    its create-only form alone (`queue_claim`). When every refspec is one of
-    those two and none sends the worktree branch, `off_branch` gets an entry:
-    the overlap check measures HEAD, which such a push does not send."""
+    its create-only form alone (`queue_claim`). On an allow, `sent` gets each
+    local branch the push sends, for the overlap check to measure; a claim
+    sends no branch and adds nothing."""
     positionals, many, tags, delete, i = [], False, False, False, 0
     leased, leases, forced, unread = set(), [], False, False
     while i < len(args):
@@ -2076,12 +2076,12 @@ def push_decision(args, current, policy, owned=frozenset(), off_branch=None):
              if refspecs else [(current, current, False, None)])
     claims = [not delete and not forced and not unread and queue_claim(s, leases)
               for s in refspecs] or [False]
-    fresh = 0
+    sources = []
 
     for (src_b, dst_b, glob, other), claim in zip(pairs, claims):
         if claim:
-            fresh += 1
             continue
+        sources.append(current if src_b is None else src_b)
         if glob:
             return ('ask', "Push uses a wildcard refspec (multiple branches)")
         if dst_b and is_protected(dst_b):
@@ -2120,12 +2120,10 @@ def push_decision(args, current, policy, owned=frozenset(), off_branch=None):
             if src_b is not None and src_b != current \
                     and not (leased_rewrite or owned_push):
                 return ('ask', f"Push sends local branch '{src_b}', not the worktree branch '{current}'")
-            if owned_push and src_b != current:
-                fresh += 1
 
     if policy == 'strict':
-        if off_branch is not None and fresh == len(pairs):
-            off_branch.append(True)
+        if sent is not None:
+            sent.extend(dict.fromkeys(sources))
         return ('allow', f"Push of worktree branch '{current}' — auto-approved.")
     return (None, None)
 
@@ -2209,12 +2207,12 @@ def ranges_meet(mine, theirs):
     return any(a[0] <= b[1] and b[0] <= a[1] for a in mine for b in theirs)
 
 
-def merge_conflicts(cwd, base):
-    """Paths git reports conflicting when <base> merges into HEAD, or None when
+def merge_conflicts(cwd, base, ref='HEAD'):
+    """Paths git reports conflicting when <base> merges into <ref>, or None when
     git won't say — no `--write-tree` before git 2.38, a missing ref, a shallow
     clone. The one caller discounts an ignored path either way; the two answers
     are kept apart so a reader can tell "merges clean" from "couldn't ask"."""
-    r = run_git(cwd, 'merge-tree', '--write-tree', '--name-only', base, 'HEAD')
+    r = run_git(cwd, 'merge-tree', '--write-tree', '--name-only', base, ref)
     if r is None or r.returncode not in (0, 1):
         return None
     if r.returncode == 0:
@@ -2266,11 +2264,11 @@ def base_ref(cwd):
     return BASE_REF_FALLBACK
 
 
-def push_overlap(cwd, branch):
-    """(base_ref, paths) where the base's own movement lands in this branch's
-    edited lines. An empty path list means no overlap OR no opinion — every
-    probe that can't answer returns one, so the caller can only ever be told to
-    ask, never told the push is fine.
+def push_overlap(cwd, branch, ref='HEAD'):
+    """(base_ref, paths) where the base's own movement lands in the edited
+    lines of <branch>, read at <ref>. An empty path list means no overlap OR no
+    opinion — every probe that can't answer returns one, so the caller can only
+    ever be told to ask, never told the push is fine.
 
     Both sides are diffed from the fork point, so both sets of ranges are
     numbered in that shared ancestor and can be compared at all. Paths in both
@@ -2282,7 +2280,7 @@ def push_overlap(cwd, branch):
     if is_release_branch(branch):
         return ('', [])
     base = base_ref(cwd)
-    fork = run_git(cwd, 'merge-base', 'HEAD', base)
+    fork = run_git(cwd, 'merge-base', ref, base)
     tip = run_git(cwd, 'rev-parse', '--verify', '--quiet', base + '^{commit}')
     if fork is None or fork.returncode != 0 or tip is None or tip.returncode != 0:
         return (base, [])
@@ -2294,7 +2292,7 @@ def push_overlap(cwd, branch):
     # survives the suite), so don't add a fixture pretending otherwise.
     if not fork_sha or fork_sha == tip_sha:
         return (base, [])
-    mine = changed_ranges(cwd, fork_sha, 'HEAD')
+    mine = changed_ranges(cwd, fork_sha, ref)
     theirs = changed_ranges(cwd, fork_sha, base)
     if mine is None or theirs is None:
         return (base, [])
@@ -2306,7 +2304,7 @@ def push_overlap(cwd, branch):
     # other), so the discount is conditional on asking. git declining to answer
     # discounts the path, same as a clean merge: an old git or a shallow clone
     # must not turn into a wall of prompted pushes.
-    conflicts = merge_conflicts(cwd, base) if ignored else frozenset()
+    conflicts = merge_conflicts(cwd, base, ref) if ignored else frozenset()
     hits = []
     for path in shared:
         if path in ignored:
@@ -2317,13 +2315,16 @@ def push_overlap(cwd, branch):
     return (base, hits)
 
 
-def push_overlap_reason(base, paths):
-    """The CAUSE clause for an overlap deny; `refuse()` adds the closing one."""
+def push_overlap_reason(base, paths, side=None):
+    """The CAUSE clause for an overlap deny; `refuse()` adds the closing one.
+    <side> names a pushed branch other than the worktree's, which the rebase
+    then has to name too."""
+    target = f" {side}" if side else ''
     return (f"'{base}' has moved since this branch left it, and its new commits "
             f"edit the same lines this branch does in {', '.join(paths)} — the "
             f"merge is going to come out wrong, and a merge queue would spend a "
             f"whole check cycle finding that. "
-            f"`git fetch && git rebase {base}` finds it now")
+            f"`git fetch && git rebase {base}{target}` finds it now")
 
 
 def skips_base(flags, short):
@@ -2676,11 +2677,11 @@ def classify_git(sub, args, branch, policy, cwd, probe, mode='',
             return ('defer', None)
         if branch is None:
             return ('defer', None) if probe else ('ask', UNNAMED_REPO)
-        off_branch = []
+        sent = []
         decision, reason = push_decision(
             args, branch, policy,
             owned_branches(cwd, session_id) if probe else frozenset(),
-            off_branch)
+            sent)
         # An auto-approve says the push is in bounds; it says nothing about the
         # branch still being built on what it thinks it is. Checked ONLY on a
         # would-be `allow`, so `protected` and `off` never run it and no verdict
@@ -2697,11 +2698,14 @@ def classify_git(sub, args, branch, policy, cwd, probe, mode='',
         # it: these read whichever tree the caller resolved for this segment,
         # so a target it could not resolve has to stand them down rather than
         # measure the tree the push is not coming from.
-        if decision == 'allow' and probe and not off_branch \
-                and not skips_base(flags, short):
-            base, paths = push_overlap(cwd, branch)
-            if paths:
-                return ('deny-rebase', push_overlap_reason(base, paths))
+        if decision == 'allow' and probe and not skips_base(flags, short):
+            for b in sent:
+                side = None if b == branch else b
+                base, paths = push_overlap(
+                    cwd, b, 'refs/heads/' + side if side else 'HEAD')
+                if paths:
+                    return ('deny-rebase',
+                            push_overlap_reason(base, paths, side))
         return (decision or 'defer', reason)
 
     # Harmless mutations — don't put work onto or rewrite a branch's history.
