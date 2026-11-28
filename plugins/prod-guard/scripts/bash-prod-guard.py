@@ -1116,6 +1116,10 @@ def expand_word(tok, env, start=0):
     written beside the expanded one (Q365). The lexer records which quotes a
     word used, not where each run sat, so the whole word is the text."""
     text = tok[start:]
+    if getattr(tok, 'quoted_runs', ()):
+        text = QuotedStr(text)
+        text.quoted_runs = tuple((a - start, b - start, c)
+                                 for a, b, c in tok.quoted_runs if a >= start)
     if "'" not in getattr(tok, 'quotes', ()) or not VAR_REF_RE.search(text):
         return expand_vars(text, env)
     return Readings.of(expand_vars(text, env), {text})
@@ -1131,13 +1135,12 @@ def _expand_outside_single_quotes(tok, env):
     if runs is None:
         return tok
     single = [(a, b) for a, b, c in runs if c == "'"]
-
-    def repl(m):
-        name = m.group(1) or m.group(2)
-        if name in env and not any(a <= m.start() < b for a, b in single):
-            return str(env[name])
-        return m.group(0)
-    return VAR_REF_RE.sub(repl, tok)
+    out, at = [], 0
+    for start, end, name in _var_refs(tok):
+        if name in env and not any(a <= start < b for a, b in single):
+            out += [tok[at:start], str(env[name])]
+            at = end
+    return ''.join(out) + tok[at:]
 
 
 def expand_vars(value, env):
@@ -1159,20 +1162,37 @@ def expand_vars(value, env):
     return out
 
 
+def _var_refs(value):
+    """`(start, end, name)` for each simple reference in `value`. Where the
+    lexer stripped a quote or escape from just after a bare name, a quoted
+    run begins or ends inside the match, and the name ends there, as the
+    shell's did: `$X"x"` reads `$X` (Q424)."""
+    cuts = {p for a, b, _ in getattr(value, 'quoted_runs', ()) for p in (a, b)}
+    refs = []
+    for m in VAR_REF_RE.finditer(value):
+        start, end, name = m.start(), m.end(), m.group(1) or m.group(2)
+        cut = min((p for p in cuts if start + 1 < p < end), default=None)
+        if m.group(2) and cut is not None:
+            end, name = cut, value[start + 1:cut]
+        refs.append((start, end, name))
+    return refs
+
+
 def _expand(value, env, held):
-    def live(m):
-        return not any(a < m.start() < b for a, b in held)
+    refs = [r for r in _var_refs(value)
+            if not any(a < r[0] < b for a, b in held)]
 
     def sub(env):
-        def repl(m):
-            name = m.group(1) or m.group(2)
-            return env[name] if name in env and live(m) else m.group(0)
-        return VAR_REF_RE.sub(repl, value)
+        out, at = [], 0
+        for start, end, name in refs:
+            if name in env:
+                out += [value[at:start], env[name]]
+                at = end
+        return ''.join(out) + value[at:]
     out = sub(env)
     # A name with several readings gives a value with several (Q301).
-    forked = sorted({m.group(1) or m.group(2) for m in VAR_REF_RE.finditer(value)
-                     if live(m) and isinstance(
-                         env.get(m.group(1) or m.group(2)), Readings)})
+    forked = sorted({name for _, _, name in refs
+                     if isinstance(env.get(name), Readings)})
     if not forked:
         return out
     alts = _alternatives(env, forked)
@@ -1374,20 +1394,21 @@ def _expansion_pieces(tok, env, word):
     if runs is None and getattr(tok, 'quoted_from', None) is not None:
         return None
     runs = runs or ()
-    refs = [(m.start(), m) for m in VAR_REF_RE.finditer(tok)
-            if (m.group(1) or m.group(2)) in env]
+    refs = [(start, (end, name)) for start, end, name in _var_refs(tok)
+            if name in env]
     marks = [(a, None) for a, b, _ in runs if a == b]
     pieces, at = [], 0
-    for pos, m in sorted(refs + marks, key=lambda r: (r[0], r[1] is not None)):
+    for pos, ref in sorted(refs + marks,
+                           key=lambda r: (r[0], r[1] is not None)):
         if tok[at:pos]:
             pieces.append((tok[at:pos], False))
-        if m is None:
+        if ref is None:
             pieces.append(('', False))
             at = pos
             continue
         quoted = any(a <= pos < b for a, b, _ in runs)
-        pieces.append((str(env[m.group(1) or m.group(2)]), not quoted))
-        at = m.end()
+        pieces.append((str(env[ref[1]]), not quoted))
+        at = ref[0]
     if tok[at:]:
         pieces.append((tok[at:], False))
     if ''.join(text for text, _ in pieces) != word:

@@ -1926,6 +1926,21 @@ class MixedQuotingTests(unittest.TestCase):
                 decision, reason = self.run_cmd(cmd)
                 self.assertEqual(decision, "deny", reason)
 
+    def test_a_quote_after_a_name_ends_it(self):
+        # The lexer strips `$X"x"` to `$Xx`; bash reads the name as `X`.
+        x = 'X="kubectl --context gke_acme_prod-us delete ns"; '
+        c = 'C=gke_acme_pr; '
+        for cmd in (x + '$X"x"', x + "$X'x'", x + '$X\\x',
+                    'IFS=,; X="kubectl,--context,gke_acme_prod-us,delete,ns"; '
+                    '$X"x"',
+                    # The production name exists only once the name ends.
+                    c + 'kubectl --context "$C"od-us delete ns x',
+                    c + 'kubectl --context $C"od-us" delete ns x',
+                    c + 'D=$C"od-us"; kubectl --context $D delete ns x'):
+            with self.subTest(cmd=cmd):
+                decision, reason = self.run_cmd(cmd)
+                self.assertEqual(decision, "deny", reason)
+
     def test_a_quoted_expansion_stays_one_word(self):
         # bash hands kubectl one --context value holding the whole string,
         # and `eval` reads a `;` that came from its own expansion as text.
