@@ -706,6 +706,7 @@ Symlink staging (step 7) has no PowerShell equivalent yet.
    A `$` bash keeps literal — trailing (`foo$`) or before a non-name char (`a$.b`) — is treated as part of the filename and resolved normally.
    An unquoted brace list or sequence is expanded first, as bash expands it, and every word it makes is resolved: `cat docs/{a,../../x}` is judged as `docs/a` and `docs/../../x`, and `{../x,}` as `../x` alone, since bash drops the empty word.
    A wholly quoted brace is a literal name.
+   A `cd` or `pushd` target is expanded the same way: one word left is the directory tracked, and more than one leaves the working directory untracked, since bash's `cd` then fails.
    A brace in a partly quoted word, or a list of more than 256 words, gets the runtime-expanded `deny`: which braces bash expands there depends on where the quotes fall, and the hook does not keep that.
    On Windows a leading-slash path is read through Git Bash's mount table before `realpath`, since that is what the shell will do with it: `/c/…` is the C: drive, `/tmp` is `%TMP%`, `/bin` is `<git>\usr\bin`, and anything else sits under the Git install dir.
    Without it the guard named a directory on whichever drive happened to be current.

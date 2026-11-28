@@ -3268,6 +3268,10 @@ def classify_cd(tokens):
     for t in tokens[1:]:
         if t.startswith('-'):
             continue                              # option flag, keep looking
+        words = brace_words(t)
+        if not words or len(words) != 1:
+            return ('unknown', None)              # bash cds to the one word left
+        t = words[0]
         sub = CD_SUBST.get(normalize_subst(t))
         if sub is not None:
             return ('subst', sub)

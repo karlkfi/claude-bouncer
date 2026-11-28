@@ -14871,6 +14871,15 @@ class BraceOperandTests(OutsideParentFixture, unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertEqual("deny", self._decision(cmd % self.TARGET))
 
+    def test_a_cd_target_is_its_expanded_word(self):
+        # bash: `cd {..,} && pwd` prints the parent, the empty word dropped.
+        for cmd in ("cd {..,} && cat %s", "pushd {..,} && cat %s",
+                    "cd {sub,..} && cat %s"):
+            with self.subTest(cmd=cmd):
+                self.assertIn(self._decision(cmd % self.TARGET),
+                              ("ask", "deny"))
+        self.assertEqual("allow", self._decision("cd {sub,} && cat ../in.txt"))
+
     def test_a_list_past_the_cap_denies(self):
         self.assertEqual("deny", self._decision("cat in{1..300}.txt"))
 
