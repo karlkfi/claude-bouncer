@@ -10765,11 +10765,15 @@ class InstalledReadTreesE2ETests(unittest.TestCase):
         # bash expands each of these into a run folder, or into something in
         # one that realpath never saw.
         for tail in ("/*", "/*/", "/fam*", "/*/n.md", "/family/*",
-                     "/family/**", "/family/[n].md", "/family/?.md",
-                     "/{family,other}", "/family{,/sub}", "/family/{,sub}",
-                     "/family/{sub,../other}", "/family/{,../}../other"):
+                     "/family/**", "/family/[n].md", "/family/?.md"):
             with self.subTest(tail=tail):
                 self._expect(f"rm -rf {sh(self.notes)}{tail}", "ask")
+        # The quoted root makes each brace word partly quoted, which the hook
+        # cannot expand (Q404).
+        for tail in ("/{family,other}", "/family{,/sub}", "/family/{,sub}",
+                     "/family/{sub,../other}", "/family/{,../}../other"):
+            with self.subTest(tail=tail):
+                self._expect(f"rm -rf {sh(self.notes)}{tail}", "deny")
         for tail in ("/*", "/family/*"):
             with self.subTest(tail=tail, tool="PowerShell"):
                 self._expect(f"Remove-Item -Recurse {ps(self.notes + tail)}",
