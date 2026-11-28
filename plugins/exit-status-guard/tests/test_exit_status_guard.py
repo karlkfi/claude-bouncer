@@ -1367,6 +1367,42 @@ CASES = [
     ('kubectl rollout undo is a restore, not a free pass',
      'make check; kubectl rollout undo deploy/foo', False, True, ''),
 
+    # --- An --abort, or a checkout of paths, is a restore and not a gate -----
+    # Its status answers nothing: an abort fails when there is nothing to
+    # abort, which is the expected case for a cleanup run first (Q248).
+    ('an abort cleaning up before a rebase',
+     'git rebase --abort; git rebase --onto origin/main OLD', False, False, ''),
+    ('an abort cleaning up before a merge',
+     'git merge --abort; git merge --squash feature', False, False, ''),
+    ('an abort before a cherry-pick',
+     'git cherry-pick --abort; git cherry-pick abc', False, False, ''),
+    ('an abort behind a git global option',
+     'git -C . rebase --abort; git push', False, False, ''),
+    ('a piped abort', 'git rebase --abort | tail', False, False, ''),
+    ('the recommended restore form with a rebase abort',
+     'git rebase -q origin/main > log 2>&1; rc=$?; git rebase --abort; '
+     '[ "$rc" -ne 0 ] || exit 1', False, False, ''),
+    ('a trial merge torn down with an abort, re-checked for success',
+     'git merge --no-edit x > log 2>&1; rc=$?; git merge --abort; '
+     '[ "$rc" -eq 0 ] || exit 1', False, False, ''),
+    ('a checkout of paths before a reset',
+     'git checkout -- tests/a.py tests/b.py; git reset -q HEAD -- docs/x.md',
+     False, False, ''),
+    ('a piped checkout of paths', 'git checkout -- a.py | tail', False, False, ''),
+    # An abort is still a mutator, so it gets no more than `git reset` does.
+    ('an abort after a gate with no capture',
+     'make check > log 2>&1; git rebase --abort', False, True,
+     'is sequenced before'),
+    ('an abort after a bare gate', 'make check; git merge --abort', False, True,
+     'is sequenced before'),
+    # The forms beside them are still gates.
+    ('a checkout of a branch is still a gate', 'git checkout main; git push',
+     False, True, 'is sequenced before'),
+    ('a piped checkout of a branch', 'git checkout main | tail', False, True,
+     'piped'),
+    ('a rebase --continue is still a gate', 'git rebase --continue; git push',
+     False, True, 'is sequenced before'),
+
     # --- A mutation hanging off a test of the captured status ---------------
     # The restore form with the order reversed: capture, test, and join the
     # publish to the test with `&&`. The status is consulted, not ignored.
@@ -1695,7 +1731,9 @@ class TestRegistry(unittest.TestCase):
                     'kubectl delete -f x.yaml',
                     'kubectl rollout undo deploy/foo', 'helm uninstall rel',
                     'helm rollback rel 1', 'terraform destroy -auto-approve',
-                    'tofu destroy'):
+                    'tofu destroy', 'git rebase --abort', 'git merge --abort',
+                    'git cherry-pick --abort', 'git am --abort',
+                    'git revert --abort'):
             words = cmd.split()
             with self.subTest(cmd):
                 self.assertTrue(reg.is_restore(words), 'not matched as a restore')

@@ -134,7 +134,7 @@ make check > <scratchpad>/c.log 2>&1; rc=$?; git checkout -- f; [ "$rc" -ne 0 ] 
 ```
 
 The deny names both forms, `&&` first, because most sequencing denials do want it.
-A restore that is itself a registry mutator — `git reset --hard`, `git apply`, `kubectl delete` — is passed over rather than denied, so the suggestion above runs as written.
+A restore that is itself a registry mutator — `git reset --hard`, `git apply`, `git rebase --abort`, `kubectl delete` — is passed over rather than denied, so the suggestion above runs as written.
 The restore has to be in `restores`, the status has to be captured before it, and the capture has to be read after it; drop any one and the deny comes back.
 A publish is never a restore, so `make check > c.log 2>&1; rc=$?; git push; [ "$rc" -ne 0 ] || exit 1` still denies — capturing a status does not make a push conditional on it.
 
@@ -181,6 +181,8 @@ make --version | head -1                # a capability probe
 shellcheck --version | grep 0.11        # probes are structural, not per-tool
 git show origin/main:CLAUDE.md | grep -n "make check"
 git commit -m "fix: make check | tail was reporting EXIT=0"
+git rebase --abort; git rebase --onto origin/main old  # an abort answers nothing
+git checkout -- f; git reset -q HEAD -- g  # nor does a checkout of paths
 git stash list | head                   # a read verb, so this is a read
 git tag --sort=-v:refname | head -5     # a listing flag, so this is a read
 make check; git tag -l                  # a read, so there is nothing to gate
@@ -206,6 +208,10 @@ Neither classifier can tell them apart from the subcommand alone, so the split i
   `status` is deliberately not one of them: `kubectl rollout status` waits for a condition and reports it as an exit code, so it stays a **gate** — a pipe still swallows the answer it waited for.
 - **Where no verb splits them, the write forms are what gets registered.** `git tag --sort` lists and `git tag -a` publishes, and git grows listing flags every release while tag-creation flags stay put.
   So `gates` and `mutators` name the creating and deleting forms, and everything else is a read by default — enumerating the listing flags is the side that goes stale ([#19](https://github.com/karlkfi/claude-pipe-guard/issues/19)).
+
+An `--abort` of a rebase, merge, cherry-pick, `am` or revert is not a gate, because its status answers nothing: it fails when there is nothing to abort, which is the expected case for a cleanup run first.
+A `git checkout -- <paths>` overwrites files from the index and answers nothing either, while a `git checkout <branch>` stays a gate.
+An abort is still a mutator and a restore, so after a gate it gets exactly what `git reset` gets.
 
 Capability probes (`--version`, `--help`, `-V`, `-h`) are recognized structurally for every gate rather than by per-tool exemptions — a per-tool pattern fixes the tool it was reported against and leaves the whole class.
 `-v` is deliberately **not** a probe flag: it means `--version` to `make` but verbose to `go test`, and exempting it would exempt `go test -v ./... | tail`, which is the bug this guard exists to catch.
