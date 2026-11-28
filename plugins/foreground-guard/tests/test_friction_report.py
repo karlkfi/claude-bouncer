@@ -885,6 +885,73 @@ class ScopeTallyTests(unittest.TestCase):
         self.assertEqual(tally["bash_calls"], 2)
 
 
+def _as_monitor(*records):
+    """The same records for a Monitor call: the hook matches `Bash|Monitor`, so
+    a Monitor call leaves the same trace under its own tool and hook names."""
+    out = json.loads(json.dumps(records))
+    for rec in out:
+        for b in (rec.get("message") or {}).get("content") or []:
+            if b.get("type") == "tool_use":
+                b["name"] = "Monitor"
+        if "attachment" in rec:
+            rec["attachment"]["hookName"] = "PreToolUse:Monitor"
+    return out
+
+
+class MonitorCallTests(unittest.TestCase):
+    """Q408: a Monitor call is judged by the same hook, so its prompts, its
+    denies and the call itself all belong in the report."""
+
+    def _tally(self, records, plugin="foreground-guard"):
+        root = write_transcripts([records])
+        paths = [str(p) for p in Path(root).rglob("*.jsonl")]
+        tally = fr.new_scope()
+        decisions = list(fr.iter_decisions(paths, plugin, None, "", tally))
+        return tally, decisions
+
+    def test_a_denied_monitor_call_is_counted(self):
+        tally, decisions = self._tally(
+            _as_monitor(*_deny_record("toolu_m", "sleep 300")))
+        self.assertEqual([d["decision"] for d in decisions], ["deny"])
+        self.assertEqual(decisions[0]["command"], "sleep 300")
+        self.assertEqual(tally["sessions_prompted"], 1)
+
+    def test_a_monitor_attachment_is_read(self):
+        tally, decisions = self._tally(_as_monitor(*_decision_record(
+            "toolu_m", "gh run watch 456", _stdout("ask", REASON_WATCH))))
+        self.assertEqual([d["decision"] for d in decisions], ["ask"])
+
+    def test_monitor_calls_are_tallied_apart_from_bash_calls(self):
+        records = _as_monitor(_bash_call("toolu_m", "until x; do sleep 5; done"))
+        records.append(_bash_call("toolu_b", "git status"))
+        tally, _ = self._tally(records)
+        self.assertEqual((tally["bash_calls"], tally["monitor_calls"]), (1, 1))
+
+    def test_the_rate_names_both_tools(self):
+        r = fr.build_report(
+            [{"plugin": "foreground-guard", "decision": "deny",
+              "reason": REASON_DENY, "command": "sleep 300"}],
+            {"bash_calls": 18, "monitor_calls": 2, "sessions": 1,
+             "sessions_prompted": 1})
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            fr.print_text(r, 15)
+        self.assertIn("1 — 5.0% of the 20 Bash and Monitor calls "
+                      "(18 Bash, 2 Monitor) in the window", buf.getvalue())
+
+    def test_json_carries_monitor_calls_beside_bash_calls(self):
+        records = _as_monitor(*_deny_record("toolu_m", "sleep 300"))
+        records.append(_bash_call("toolu_b", "git status"))
+        r = subprocess.run(
+            [sys.executable, str(SCRIPT), "--transcripts",
+             write_transcripts([records]), "--since", "all", "--json"],
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        data = json.loads(r.stdout)
+        self.assertEqual((data["bash_calls"], data["monitor_calls"],
+                          data["total"]), (1, 1, 1))
+
+
 class PrintTests(unittest.TestCase):
     def test_empty(self):
         buf = io.StringIO()
