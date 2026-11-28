@@ -416,7 +416,7 @@ def holds_stdout(words):
     return any(on.values())
 
 
-def split_segments(tokens, bg=None, piped=None):
+def split_segments(tokens, bg=None, piped=None, targets=None):
     """Split a token stream into (argv, terminator) pairs on every separator
     token (`;`, `&`, `&&`, `|`, `||`, parens, and mixed runs). The
     terminator is the token that ended the segment ('' at end of input).
@@ -446,39 +446,48 @@ def split_segments(tokens, bg=None, piped=None):
     background job, run inside a command substitution, would keep the
     substitution's pipe open. Only a lone command ended by its own `&`, with
     every descriptor redirected off stdout, lets go of it: a job of several
-    commands runs in a subshell that holds the pipe itself (Q363)."""
+    commands runs in a subshell that holds the pipe itself (Q363).
+
+    Given a list as `targets`, appends each segment's redirect target words.
+    bash expands them before the command runs, so a substitution in
+    `cat <<< "$(tail -f x)"` is the segment's own (Q430). A segment of
+    redirects alone, `> "$(cmd)"`, comes back with an empty argv."""
     covered = backgrounded(tokens) if bg is not None else None
-    segs, cur = [], []
+    segs, cur, tgt = [], [], []
     first = lo = 0
     before = ''
     skip_next_word = False
+
+    def emit(term, end):
+        segs.append((cur, term))
+        if targets is not None:
+            targets.append(tgt)
+        if covered is not None:
+            bg.append(covered[first])
+        if piped is not None:
+            piped.append(term != '&' or before in JOB_JOINERS
+                         or holds_stdout(tokens[lo:end]))
+
     for i, t in enumerate(tokens):
         if is_operator(t):
             if t in REDIR:
                 skip_next_word = True
                 continue
-            if cur:
-                segs.append((cur, t))
-                if covered is not None:
-                    bg.append(covered[first])
-                if piped is not None:
-                    piped.append(t != '&' or before in JOB_JOINERS
-                                 or holds_stdout(tokens[lo:i]))
-            cur = []
+            if cur or tgt:
+                emit(t, i)
+            cur, tgt = [], []
             before, lo = t, i + 1
             skip_next_word = False
-        elif skip_next_word:
+            continue
+        if not (cur or tgt):
+            first = i
+        if skip_next_word:
             skip_next_word = False
+            tgt.append(t)
         else:
-            if not cur:
-                first = i
             cur.append(t)
-    if cur:
-        segs.append((cur, ''))
-        if covered is not None:
-            bg.append(covered[first])
-        if piped is not None:
-            piped.append(True)
+    if cur or tgt:
+        emit('', len(tokens))
     return segs
 
 
@@ -885,11 +894,12 @@ def analyze_class_a(raw, cfg, depth=0, piped=False):
     loop_sleep = False   # a foreground `sleep` inside a loop (any duration)
     sleep_findings = []
     any_bg = False
-    bg_flags, held_flags = [], []
+    bg_flags, pipe_flags, target_words = [], [], []
     opened = []          # compound keywords open at this segment, outermost first
-    segments = split_segments(tokens, bg_flags, held_flags)
-    for (group, _term), bg, held in zip(segments, bg_flags, held_flags):
-        bg = bg and not (piped and held)
+    segments = split_segments(tokens, bg_flags, pipe_flags, target_words)
+    for (group, _term), bg, holds_pipe, tgt in zip(
+            segments, bg_flags, pipe_flags, target_words):
+        bg = bg and not (piped and holds_pipe)
         any_bg = any_bg or bg
         # A segment opens or closes compounds only with its leading words, so
         # a sleep after `done` is outside the loop and judged on its own (Q283).
@@ -923,7 +933,8 @@ def analyze_class_a(raw, cfg, depth=0, piped=False):
         # A substitution runs where the segment holding it runs: in the
         # background job under `&`, and in the foreground under a `timeout`
         # wrap, because the shell expands it before `timeout` starts.
-        for body in [] if bg else substitutions_in(group, bodies, marker_re):
+        for body in [] if bg else substitutions_in(group + tgt, bodies,
+                                                   marker_re):
             recurse(body, subst_in_loop, True)
         state['timeout_wrapped'] = False
         argv = strip_head(list(group), state)
@@ -1087,12 +1098,12 @@ def simple_commands(raw, depth=0):
             return None
         out += sub
     state = {'override': None}
-    bg_flags = []
-    segments = split_segments(tokens, bg_flags)
-    for (group, _term), bg in zip(segments, bg_flags):
+    bg_flags, target_words = [], []
+    segments = split_segments(tokens, bg_flags, targets=target_words)
+    for (group, _term), bg, tgt in zip(segments, bg_flags, target_words):
         if bg:
             continue  # the shell waits for neither it nor its substitutions
-        for body in substitutions_in(group, bodies, marker_re):
+        for body in substitutions_in(group + tgt, bodies, marker_re):
             sub = simple_commands(body, depth + 1)
             if sub is None:
                 return None
