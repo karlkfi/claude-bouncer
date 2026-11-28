@@ -1280,7 +1280,7 @@ class MayVanish(str):
 
 
 _VAR_REFS_RE = re.compile('(?:%s)*' % VAR_REF_RE.pattern)
-_IFS_RE = re.compile('[ \t\n]+')
+DEFAULT_IFS = ' \t\n'
 # What `env -S` expands in its string: the braced form only. Both env
 # implementations refuse a bare `$NAME` there and run nothing.
 _BRACED_REFS_RE = re.compile(r'(?:\$\{[A-Za-z_][A-Za-z0-9_]*\})+')
@@ -1297,11 +1297,68 @@ def _with_raw(word, tok):
     return word
 
 
-def expand_argv(argv, env):
+def split_fields(pieces, ifs=None):
+    """bash's field splitting of one word, given as `(text, expanded)` pieces:
+    only the characters an expansion produced can delimit. IFS whitespace
+    runs merge and are trimmed at either end; any other IFS character ends a
+    field on its own, so two in a row leave an empty one between them, but a
+    trailing one adds none. None where nothing delimits (Q423)."""
+    if ifs is None:
+        ifs = DEFAULT_IFS
+    chars = [(c, e) for text, e in pieces for c in text]
+
+    def ws(k):
+        return k < len(chars) and chars[k][1] and chars[k][0] in ifs \
+            and chars[k][0] in DEFAULT_IFS
+
+    def delim(k):
+        return chars[k][1] and chars[k][0] in ifs
+
+    if not any(delim(k) for k in range(len(chars))):
+        return None
+    fields, cur, i = [], [], 0
+    while ws(i):
+        i += 1
+    while i < len(chars):
+        if not delim(i):
+            cur.append(chars[i][0])
+            i += 1
+            continue
+        while ws(i):
+            i += 1
+        if i < len(chars) and delim(i):
+            i += 1
+            while ws(i):
+                i += 1
+            fields.append(''.join(cur))
+        elif cur:
+            fields.append(''.join(cur))
+        cur = []
+    if cur:
+        fields.append(''.join(cur))
+    return fields
+
+
+def _expansion_pieces(tok, env, word):
+    """`tok` expanded as `(text, expanded)` pieces, or the whole word as one
+    expanded piece where the pieces do not rebuild `word`."""
+    pieces, at = [], 0
+    for m in VAR_REF_RE.finditer(tok):
+        name = m.group(1) or m.group(2)
+        if name in env:
+            pieces += [(tok[at:m.start()], False), (str(env[name]), True)]
+            at = m.end()
+    pieces.append((tok[at:], False))
+    if ''.join(text for text, _ in pieces) != word:
+        return [(str(word), True)]
+    return pieces
+
+
+def expand_argv(argv, env, ifs=None):
     """Expand simple variable references in every token of `argv`, marking
     each word that may expand to nothing as a `MayVanish`. A word written with
-    no quoting splits on whitespace where its expansion holds some, as bash
-    splits an unquoted expansion (Q382); an assignment-shaped word does not.
+    no quoting splits on `ifs` where its expansion holds some, as bash splits
+    an unquoted expansion (Q382, Q423); an assignment-shaped word does not.
     A word from a quoted token keeps the token as `raw`, so a reader that
     expands the text itself can tell what bash left alone (Q385)."""
     out = []
@@ -1312,9 +1369,9 @@ def expand_argv(argv, env):
         else:
             word = expand_vars(tok, env)
             if getattr(tok, 'quoted_from', None) is None and word != tok:
-                fields = _IFS_RE.split(word.strip(' \t\n'))
-                if fields != [word]:
-                    out += [f for f in fields if f]
+                fields = split_fields(_expansion_pieces(tok, env, word), ifs)
+                if fields is not None:
+                    out += fields
                     continue
         if (tok and getattr(tok, 'quoted_from', None) is None
                 and _VAR_REFS_RE.fullmatch(tok)
@@ -3624,6 +3681,9 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
     if exported is None:
         exported = dict(os.environ)
     shell_env = dict(exported if shell is None else shell)
+    if shell is None:
+        # A new shell sets IFS itself and never imports it.
+        shell_env.pop('IFS', None)
     exported = dict(exported)
     # Open compound commands, innermost last. A plain `{ …; }` always runs, so
     # what it assigns stays assigned. A conditional or a loop may not run, so a
@@ -3708,6 +3768,14 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
         # its words reference. The rest wait for a segment that reads them,
         # so they do not count toward the cap (Q377).
         read = set(exported) | set(_REFERENCED_RE.findall(' '.join(group)))
+        # Every word is split on IFS, so it is read wherever a word expands.
+        # A value holding a substitution the guard did not run may be the
+        # default.
+        ifs = shell_env.get('IFS')
+        if ifs is not None and not isinstance(ifs, Readings) and (
+                '$' in ifs or '`' in ifs):
+            shell_env['IFS'] = Readings.of(ifs, {None})
+        read.add('IFS')
         forked = sorted(n for n in (set(shell_env) | set(exported)) & read
                         if isinstance(shell_env.get(n, exported.get(n)), Readings))
         if forked:
@@ -3750,20 +3818,21 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
         alternates = []
         left_dollar = any(_LEFT_DOLLAR_RE.search(s)
                           for s in (ctx.get('command') or '', raw))
-        argv = strip_wrappers(expand_argv(argv_raw, words_env), seg_inline,
+        argv = strip_wrappers(expand_argv(argv_raw, words_env, ifs), seg_inline,
                               alternates, child, left_dollar)
         # A word bash splits is several in the raw view too, so a `-c` or
         # `eval` body is read from the word that holds it (Q382).
         split_raw = []
         for t in argv_raw:
-            fields = expand_argv([t], words_env)
+            fields = expand_argv([t], words_env, ifs)
             # One field takes its value where it may be the `-c` itself.
             if len(fields) == 1 and (fields[0] == t or (
                     getattr(t, 'quoted_from', None) is not None
                     and fields[0][:1] not in ('-', '+'))):
                 fields = [t]
             split_raw += fields
-        # IFS is not tracked, so the word as written is judged too.
+        # IFS may hold a value the guard cannot read, so the word as written
+        # is judged too.
         unsplit_raw = strip_wrappers(list(argv_raw), {})
         argv_raw = strip_wrappers(split_raw, {})
         for alt, alt_env in alternates:
@@ -3937,6 +4006,7 @@ def evaluate_command_string(raw, ctx, depth=0, exported=None, shell=None,
                 sub_shell = None
                 if sourced:
                     sub_shell = dict(body_env)
+                    sub_shell.pop('IFS', None)
                     _forget({EVERY_NAME}, sub_shell)
                 sub_known = ({EVERY_NAME: set()}, {}) if sourced else None
                 sub_f, sub_o, sub_s = evaluate_command_string(
