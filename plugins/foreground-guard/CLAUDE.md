@@ -54,7 +54,7 @@ Work is tracked in the repo-root backlog, [`docs/queue/`](../../docs/queue/READM
 - Never parse heredoc bodies as command segments — `strip_heredoc_bodies` runs before tokenization (the workspace-guard #83 bug class).
   The one exception is the command substitutions in an unquoted-delimiter body, which bash runs: those are judged, the body's words never are.
   `bash some-script.sh` stays opaque — no script-file inspection.
-- False-positive discipline is a contract: `tail -n 50`, `grep -f patterns.txt`, `git log --follow`, startup-grace sleeps below the floor, backgrounded segments, and `timeout N`-wrapped commands must defer silently — a substitution in a `timeout`-wrapped command's arguments aside, since the shell runs it before `timeout` starts.
+- False-positive discipline is a contract: `tail -n 50`, `grep -f patterns.txt`, `git log --follow`, startup-grace sleeps below the floor, backgrounded segments, and `timeout N`-wrapped commands must defer silently — a backgrounded job still holding a substitution's stdout aside, since bash waits for it, and a substitution in a `timeout`-wrapped command's arguments aside, since the shell runs it before `timeout` starts.
   Add a regression test with any matcher change.
 
 ## Testing

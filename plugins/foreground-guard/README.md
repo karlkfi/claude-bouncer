@@ -97,6 +97,8 @@ The test suite drives every row through the hook; a row whose command cell is an
 | `cat <<EOF` … `tail -f x` … `EOF` | defer (heredoc body is data) <!-- check: {"command": "cat <<EOF\ntail -f x\nEOF"} --> |
 | `X="$(gh run watch 456)"` | **deny** (the substitution runs first, quoted or not) |
 | `echo "$(gh run watch 456)" & ls` | defer (substitution backgrounded with its command) |
+| `x=$(sleep 30 &)` | **deny** (the substitution waits for whatever holds its stdout) |
+| `x=$(sleep 30 >/dev/null &)` | defer (stdout redirected off the substitution) |
 | `echo '$(gh run watch 456)'` | defer (single quotes keep it literal) |
 | `make test-race` (configured min 600000 ms, default timeout) | **deny** (names the minimum) <!-- check: {"command": "make test-race", "config": {"slow": {"commands": {"make": {"test-race": 600000}}}}} --> |
 | `make test-race` with `timeout: 600000` | defer <!-- check: {"command": "make test-race", "timeout_ms": 600000, "config": {"slow": {"commands": {"make": {"test-race": 600000}}}}} --> |
@@ -221,6 +223,8 @@ These pass untouched, by design:
 - **An `&`** that detaches the blocking command (including a backgrounded subshell or loop).
   It exempts what bash detaches: the and-or list it ends, back to the `;` or newline before it.
   So `sleep 30 & make build` and `sleep 30 && ls &` pass, and `sleep 300; ls &` does not.
+  Inside a command substitution an `&` detaches nothing from the wait: the job keeps the substitution's stdout, and bash reads it until every writer closes it, so `x=$(sleep 30 &)` waits the full 30 seconds.
+  There it exempts only a single command ended by its own `&` with every descriptor redirected off stdout, such as `sleep 30 >/dev/null &`; a `2>&1` left pointing at the pipe, or a job of several commands, still waits.
 - **A `timeout N ...` wrap** exempts the wrapped command from Class A — a silent defer, not a downgraded block.
   Rationale: an explicit bound is precisely the fix the guard teaches, and the Bash tool's own timeout still backstops it.
   `timeout 30 gh run watch 123` runs without friction.
