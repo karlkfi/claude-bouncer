@@ -122,7 +122,8 @@ import sys, os, json, re, shlex, subprocess, fnmatch
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 from bouncer_parse import (                                   # noqa: E402
     ASSIGN_PLAIN, ASSIGN_SUBSCRIPT, PUNCT_CHARS, QuotedStr, command_substitutions,
-    is_assignment, lex, note_discarded_writes, split_assignment, split_operator_runs, strip_sh_keywords,
+    is_assignment, lex, note_discarded_writes, process_substitutions, split_assignment,
+    split_operator_runs, strip_sh_keywords,
 )
 from bouncer_grants import load_grants, record_grants         # noqa: E402
 from bouncer_session import claude_tmp_root, is_session_tmp_path  # noqa: E402
@@ -3648,12 +3649,21 @@ MARK_RE = re.compile(SUBST_MARK + r'(\d+)' + SUBST_MARK)
 
 def substitution_verdicts(text, seg_cwd, cwd, head_base, ctx, depth):
     """The protective verdicts in every command substitution in `text`
-    (Q383): `$(…)`, backticks and funsubs, quoted or not. A prefix assignment
-    is not set until after the expansion, so a body starts with no `env`."""
-    spans, funsubs = [], []
-    bodies = command_substitutions(text, spans=spans, funsubs=funsubs)
-    if not bodies or depth >= MAX_BODY_DEPTH:
+    (Q383): `$(…)`, backticks and funsubs, quoted or not, and every unquoted
+    process substitution, whose body bash runs as surely (Q420). A `$(…)`
+    inside a `<(…)` belongs to that body and is judged when it is. A prefix
+    assignment is not set until after the expansion, so a body starts with
+    no `env`."""
+    spans, funsubs, pspans = [], [], []
+    found = zip(command_substitutions(text, spans=spans, funsubs=funsubs), spans, funsubs)
+    procs = [(body, span, False)
+             for body, span in zip(process_substitutions(text, spans=pspans), pspans)]
+    found = sorted(procs + [f for f in found
+                            if not any(s <= f[1][0] < e for _, (s, e), _ in procs)],
+                   key=lambda f: f[1][0])
+    if not found or depth >= MAX_BODY_DEPTH:
         return []
+    bodies, spans, funsubs = zip(*found)
     verdicts = []
     for body, (start, blind) in zip(bodies, substitution_cwds(text, spans, funsubs, seg_cwd)):
         verdicts += judged_body(body, {}, start, cwd,

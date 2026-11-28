@@ -101,6 +101,7 @@ The table below assumes the worktree is on a feature branch (`claude/x`) under t
 | `git stash` / `git stash pop` *(any branch — adds no commit, rewrites no history, recoverable by design)* | allow |
 | `git commit -m "fix"` *(on `main`)* | **ask** |
 | `echo "$(git commit -m x)"` / ``echo `git commit -m x` `` / `echo "${ git commit -m x; }"` *(on `main`: a command substitution's body, quoted or not)* | **ask** |
+| `cat <(git commit -m x)` / `tee >(git commit -m x)` *(on `main`: an unquoted process substitution's body)* | **ask** |
 | `git --git-dir=../x/.git commit` / `GIT_DIR=../x/.git git merge y` / `git -C "$X" push` *(any branch: a commit, merge, rebase, pull or push into a repository the hook can't name, whose branch it can't read)* | **ask** |
 | editing a file whose repo is on `main` *(Edit/Write/MultiEdit/NotebookEdit)* | **ask** |
 | editing a symlink in a gitignored dir that points at a tracked file, on `main` *(the write lands on branch contents)* | **ask** |
@@ -625,7 +626,8 @@ If the `version` or `gitCommitSha` still shows the old release, the update didn'
    Like a wrapper's, the body's `ask`s and `deny`s stand and its `allow`s defer, and the break-glass does not reach through the shell.
    A body that won't lex, or one nested more than four shells deep, defers.
    A command substitution's body, in any of its three spellings and quoted or not, is judged the same way, from the directory in force where it sits, so ``echo "`git commit -m x`"`` on `main` asks.
-   A `cd` inside an ordinary substitution's body stays in its subshell, while a funsub runs in the current shell, so after one the directory is unknown and the command is judged against the session's own checkout.
+   So is an unquoted process substitution's, `<(…)` or `>(…)`, so `cat <(git commit -m x)` on `main` asks; quoted, bash leaves it as text.
+   A `cd` inside an ordinary or process substitution's body stays in its subshell, while a funsub runs in the current shell, so after one the directory is unknown and the command is judged against the session's own checkout.
 4. **Classify** each segment as `allow` / `ask` / `deny` / `defer` / non-git: read-only git and gh and harmless mutations (`add`, `restore --staged`, `switch -c`, `worktree add`, branch/tag create) allow on any branch; branch-sensitive mutations (`commit`, `merge`, `rebase`, `cherry-pick`, `stash`, `push`) allow on a feature branch and ask on a protected one; destructive commands (`reset --hard`, `clean -f`, `branch -D`, and gh deletes/disables — a branch via `gh pr close --delete-branch` or `gh api -X DELETE …/git/refs/heads/…`; a repo via `gh repo delete` or `gh api -X DELETE repos/{o}/{r}`; a label via `gh label delete` / `gh api -X DELETE …/labels/…`; a release/secret/variable/gist/cache via `gh <sub> delete` (`secret`/`variable` also accept `remove`; a release asset via `gh release delete-asset`); a workflow via `gh workflow disable`) ask, except a clean-worktree `reset --hard` onto a tip proved unreachable that is also proved to orphan more than a reproducible merge or a published rebase, which denies; unknown or ambiguous forms defer.
    The branch is resolved with `git symbolic-ref`, in the tree the segment acts on — for Bash the session cwd, walked through a literal `cd` or `git -C`; for edits the file's own repo.
 5. **Combine** the segment verdicts: any `deny` → deny; else any `ask` → ask; else every segment must be recognized-safe → allow; else defer.
