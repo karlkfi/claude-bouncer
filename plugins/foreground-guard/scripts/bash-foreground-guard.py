@@ -894,12 +894,12 @@ def analyze_class_a(raw, cfg, depth=0, piped=False):
     loop_sleep = False   # a foreground `sleep` inside a loop (any duration)
     sleep_findings = []
     any_bg = False
-    bg_flags, held_flags, target_words = [], [], []
+    bg_flags, pipe_flags, target_words = [], [], []
     opened = []          # compound keywords open at this segment, outermost first
-    segments = split_segments(tokens, bg_flags, held_flags, target_words)
-    for (group, _term), bg, held, tgt in zip(segments, bg_flags, held_flags,
-                                             target_words):
-        bg = bg and not (piped and held)
+    segments = split_segments(tokens, bg_flags, pipe_flags, target_words)
+    for (group, _term), bg, holds_pipe, tgt in zip(
+            segments, bg_flags, pipe_flags, target_words):
+        bg = bg and not (piped and holds_pipe)
         any_bg = any_bg or bg
         # A segment opens or closes compounds only with its leading words, so
         # a sleep after `done` is outside the loop and judged on its own (Q283).
