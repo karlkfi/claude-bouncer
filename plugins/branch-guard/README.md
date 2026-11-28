@@ -15,7 +15,7 @@ Once in a while it's `main`, or it's `git reset --hard`, or `git push origin HEA
 The default `Bash(git commit:*)` permission rules can't tell these apart — they either trust every git command or prompt on every one.
 
 branch-guard is a `PreToolUse` hook that classifies each `git`/`gh` command, **auto-approves the safe ones** (read-only, staging, branch/worktree creation, commits and pushes on a feature branch), and **prompts** before anything that touches a protected branch (`main`/`master`, plus any you add) or is destructive.
-One destructive case it can settle itself it **denies** instead, handing the model the check rather than spending your attention on it.
+A destructive case it can settle itself it **denies** instead, handing the model the check rather than spending your attention on it.
 Everything else defers to your normal permission settings.
 
 ## Contents
@@ -67,7 +67,7 @@ The table below assumes the worktree is on a feature branch (`claude/x`) under t
 | `git switch -c claude/y` / `git checkout -b claude/y` | allow |
 | `git worktree add ../wt feature` | allow *(**ask** with [`BRANCH_GUARD_WORKTREE_GRANTS=1`](#configuration))* |
 | `git worktree remove ../wt` *(git refuses one holding modified or untracked files)* | allow |
-| `git worktree remove --force <scratchpad>/pr1` *(an absolute path into this session's own Claude Code scratchpad; another session's, or a relative path, still asks)* | allow |
+| `git worktree remove --force <scratchpad>/pr1` *(an absolute path into this session's own Claude Code scratchpad; another session's asks, and a relative path denies with the absolute one to write)* | allow |
 | `W=<scratchpad>/pr1; git worktree remove --force "$W"` *(the same path through a variable a literal assignment at the head of the command sets; see [Limitations](#limitations) for which assignments are followed)* | allow |
 | `git commit -m "fix"` *(feature branch)* | allow |
 | `git add -A && git commit -m x && git push` *(feature branch)* | allow |
@@ -130,7 +130,8 @@ The table below assumes the worktree is on a feature branch (`claude/x`) under t
 | `gh api -X DELETE repos/o/r` *(deletes a repository — exact `repos/{o}/{r}` path)* | **ask** |
 | `git restore file.txt` *(discards working changes)* | **ask** |
 | `git checkout -f -b x` / `git switch -f -c x <start>` *(creates a branch and discards working changes)* | **ask** |
-| `git worktree remove --force ../wt` *(deletes a worktree holding modified or untracked files, anywhere but this session's scratchpad)* | **ask** |
+| `git worktree remove --force .claude/worktrees/<name>` / `… --force <another session's scratchpad>/pr1` *(a session's own working tree, or a peer session's scratch: someone else's to give up)* | **ask** |
+| `git worktree remove --force ../wt` / `… --force "$W"` *(any other worktree, or one named in a form the guard can't expand — the reason carries the sequence that needs no `--force`: `git -C <worktree> status --short`, delete what it lists by name, then the plain `git worktree remove`)* | **deny** |
 | `git config --global user.name x` | **ask** |
 | `BRANCH_GUARD_OVERRIDE=<reason> git restore file.txt` *(break-glass on a local-loss ask — see below)* | allow |
 | `BRANCH_GUARD_OVERRIDE=<reason> git push` *(break-glass on an overlap deny — the policy had already approved this push)* | allow |
@@ -321,7 +322,7 @@ The [break-glass](#break-glass-branch_guard_override) does not lift this one, an
 ## Break-glass: `BRANCH_GUARD_OVERRIDE`
 
 In `dontAsk` and `bypassPermissions` an **ask** becomes a **deny**, and a deny has no answer.
-(The prefix also lifts both denies that fire in every mode: the unreachable-tip `reset --hard`, on the same reasoning and the same local-only loss, and the overlap deny on a push the policy had already approved.)
+(The prefix also lifts three of the denies that fire in every mode: the unreachable-tip `reset --hard` and the forced `worktree remove`, on the same reasoning and the same local-only loss, and the overlap deny on a push the policy had already approved.)
 That is right for a shared branch and wrong for a scratch one: the session still has work to do, so it does the work some other way.
 A session that couldn't run `git restore file.txt` edited the file back to its `HEAD` content by hand instead — same end state, no atomicity, no guarantee the result matched `HEAD`, and nothing in the log to review.
 Where no ungated equivalent exists (you cannot delete a branch by editing a file), the state is simply stranded.
@@ -742,7 +743,7 @@ Each prompt or denial falls in one category, and each category has one fix:
 | `unnamed-target` | A branch or directory the guard couldn't read or resolve | Name an existing branch, and a literal directory in `cd` or `git -C` |
 | `uncommitted-work` | Working-tree changes or untracked files that would be lost | Commit the work to a branch first |
 | `stash-drop` | A stash drop or clear | Apply the stash and commit it before dropping it |
-| `worktree-force` | `git worktree remove --force` | Clean or commit inside it, then remove it without `--force`; use the session scratchpad for throwaway checkouts |
+| `worktree-force` | `git worktree remove --force`, as a prompt for a `.claude/worktrees/` checkout or a peer session's scratch and a denial anywhere else | Clean or commit inside it, then remove it without `--force`; use the session scratchpad for throwaway checkouts |
 | `worktree-admin` | `git worktree prune` or `move` | Remove your own worktree by path with `git worktree remove` |
 | `worktree-grant` | A `git worktree add` with grants turned on | Approve once per checkout, or unset `BRANCH_GUARD_WORKTREE_GRANTS` |
 | `tag-delete` | A local tag delete | Leave the tag for the user to delete |
@@ -832,7 +833,7 @@ The categories are branch-guard's, so another guard's reasons show there as `oth
   Any other value — including one nobody meant as false — leaves it on, so a typo costs a prompt somebody can answer rather than a guard that quietly stopped running.
 
 - **Non-interactive modes** — in `dontAsk` and `bypassPermissions` an `ask` is automatically emitted as `deny` so the guard fails safe when no human is present.
-  (Three verdicts deny in every mode regardless — see [What it does](#what-it-does) — and are unaffected by this.)
+  (Four verdicts deny in every mode regardless — see [What it does](#what-it-does) — and are unaffected by this.)
   The denial says so plainly (see [Behavior](#behavior)): there is no confirmation to grant in this mode, so the way through is to run the command yourself, re-run the session interactively, or — for the narrow set of asks it covers — use the [`BRANCH_GUARD_OVERRIDE` break-glass](#break-glass-branch_guard_override).
   (Claude Code ignores hook decisions entirely under `bypassPermissions`, so a hard guarantee there still needs a git `pre-push` hook or server-side branch protection.)
 

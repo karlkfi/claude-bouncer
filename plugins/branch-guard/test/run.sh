@@ -1048,9 +1048,12 @@ check "git restore (worktree) -> ask" ask \
 #     `branch -d`. Crossed against the force spelling, which can.
 check "git worktree remove -> allow (git refuses a dirty one)" allow \
   "$(decision_for "$(bash_cmd 'git worktree remove ../wt')" "$WORK")"
-check "git worktree remove --force -> ask" ask \
+#     What --force would lose is what `git status` lists there, so the forced
+#     form denies with the plain sequence in the reason (below, with the two
+#     cells that keep a human).
+check "git worktree remove --force -> deny" deny \
   "$(decision_for "$(bash_cmd 'git worktree remove --force ../wt')" "$WORK")"
-check "git worktree remove -f -> ask" ask \
+check "git worktree remove -f -> deny" deny \
   "$(decision_for "$(bash_cmd 'git worktree remove -f ../wt')" "$WORK")"
 
 #     A worktree inside this session's own scratchpad is the exception (Q308):
@@ -1087,7 +1090,7 @@ check "[scratchpad] worktree remove -f in own scratchpad -> allow" allow \
      "$WORK" "${TEMP_ENV[@]}")"
 # git matches a relative operand by suffix against every worktree, so `pr1`
 # here could remove a peer's `.../pr1`: it asks even where it resolves inside.
-check "[scratchpad] relative operand, though it resolves inside -> ask" ask \
+check "[scratchpad] relative operand, though it resolves inside -> deny" deny \
   "$(decision_for "$(sess_payload "git -C '$(nat "$OWN")' worktree remove --force pr1")" \
      "$WORK" "${TEMP_ENV[@]}")"
 check "[scratchpad] another session's scratchpad -> ask" ask \
@@ -1099,14 +1102,14 @@ check "[scratchpad] no session_id in the payload -> ask" ask \
 # Git Bash's `ln -s` copies unless Windows permits a real link (5e), and a
 # copy is a real directory inside the scratchpad, so only a link is asserted.
 if [[ -L "$OWN/escape" ]]; then
-  check "[scratchpad] a symlink out of the scratchpad -> ask" ask \
+  check "[scratchpad] a symlink out of the scratchpad -> deny" deny \
     "$(decision_for "$(sess_payload "git worktree remove --force '$(nat "$OWN/escape")'")" \
        "$WORK" "${TEMP_ENV[@]}")"
 fi
-check "[scratchpad] a path the hook cannot expand -> ask" ask \
+check "[scratchpad] a path the hook cannot expand -> deny" deny \
   "$(decision_for "$(sess_payload 'git worktree remove --force "$SCRATCH/pr1"')" \
      "$WORK" "${TEMP_ENV[@]}")"
-check "[scratchpad] own session id outside the temp root -> ask" ask \
+check "[scratchpad] own session id outside the temp root -> deny" deny \
   "$(decision_for "$(sess_payload "git worktree remove --force '$(nat "$WORK/$SESS/pr1")'")" \
      "$WORK" "${TEMP_ENV[@]}")"
 #     The same operand written through a variable a leading literal assignment
@@ -1122,28 +1125,88 @@ check "[scratchpad] S=<own>; remove --force \"\$S/pr1\" -> allow" allow \
 check "[scratchpad] W=<peer>; remove --force \"\$W\" -> ask" ask \
   "$(decision_for "$(sess_payload "W='$(nat "$PEER/pr1")'; git worktree remove --force \"\$W\"")" \
      "$WORK" "${TEMP_ENV[@]}")"
-check "[scratchpad] W=<a real checkout>; remove --force \"\$W\" -> ask" ask \
+check "[scratchpad] W=<a real checkout>; remove --force \"\$W\" -> deny" deny \
   "$(decision_for "$(sess_payload "W='$(nat "$WORK/wt")'; git worktree remove --force \"\$W\"")" \
      "$WORK" "${TEMP_ENV[@]}")"
-check "[scratchpad] W=<own>; remove --force '\$W' (a literal) -> ask" ask \
+check "[scratchpad] W=<own>; remove --force '\$W' (a literal) -> deny" deny \
   "$(decision_for "$(sess_payload "W='$(nat "$OWN/pr1")'; git worktree remove --force '\$W'")" \
      "$WORK" "${TEMP_ENV[@]}")"
-check "[scratchpad] W=<own>; remove --force \\\$W (escaped) -> ask" ask \
+check "[scratchpad] W=<own>; remove --force \\\$W (escaped) -> deny" deny \
   "$(decision_for "$(sess_payload "W='$(nat "$OWN/pr1")'; git worktree remove --force \\\$W")" \
      "$WORK" "${TEMP_ENV[@]}")"
-check "[scratchpad] git status && W=<own>; remove (may not run) -> ask" ask \
+check "[scratchpad] git status && W=<own>; remove (may not run) -> deny" deny \
   "$(decision_for "$(sess_payload "git status && W='$(nat "$OWN/pr1")'; git worktree remove --force \"\$W\"")" \
      "$WORK" "${TEMP_ENV[@]}")"
-check "[scratchpad] W=<own> & remove (assigned apart) -> ask" ask \
+check "[scratchpad] W=<own> & remove (assigned apart) -> deny" deny \
   "$(decision_for "$(sess_payload "W='$(nat "$OWN/pr1")' & git worktree remove --force \"\$W\"")" \
      "$WORK" "${TEMP_ENV[@]}")"
 # A name already exported hands git the new value too, and the hook cannot
 # tell what that does; a variable bash acts on is not a plain word either.
-check "[scratchpad] W=<own> with W exported -> ask" ask \
+check "[scratchpad] W=<own> with W exported -> deny" deny \
   "$(decision_for "$(sess_payload "W='$(nat "$OWN/pr1")'; git worktree remove --force \"\$W\"")" \
      "$WORK" "${TEMP_ENV[@]}" W=x)"
-check "[scratchpad] PWD=<own>; remove --force \"\$PWD\" -> ask" ask \
+check "[scratchpad] PWD=<own>; remove --force \"\$PWD\" -> deny" deny \
   "$(decision_for "$(sess_payload "PWD='$(nat "$OWN/pr1")'; git worktree remove --force \"\$PWD\"")" \
+     "$WORK" "${TEMP_ENV[@]}")"
+#     Past the scratchpad the verdict picks who answers (hook-verdict): a
+#     session's own working tree under `.claude/worktrees/`, and a peer
+#     session's scratch above, are someone's to give up and keep the prompt;
+#     anything else denies with the sequence that needs no --force. Crossed
+#     over the spellings that reach each cell, and over the permission mode.
+KEPT="$WORK/.claude/worktrees/kept-one"
+# sess_mode COMMAND MODE -> sess_payload's payload in a permission mode.
+sess_mode() { sess_payload "$1" | jq -c --arg m "$2" '. + {permission_mode: $m}'; }
+check "[kept] remove --force <repo>/.claude/worktrees/<name> -> ask" ask \
+  "$(decision_for "$(sess_payload "git worktree remove --force '$(nat "$KEPT")'")" \
+     "$WORK" "${TEMP_ENV[@]}")"
+check "[kept] the same checkout by a relative path -> ask" ask \
+  "$(decision_for "$(sess_payload 'git worktree remove --force .claude/worktrees/kept-one')" \
+     "$WORK" "${TEMP_ENV[@]}")"
+check "[kept] the same checkout through a bound variable -> ask" ask \
+  "$(decision_for "$(sess_payload "W='$(nat "$KEPT")'; git worktree remove --force \"\$W\"")" \
+     "$WORK" "${TEMP_ENV[@]}")"
+check "[kept] under dontAsk nobody can answer -> deny" deny \
+  "$(decision_for "$(sess_mode "git worktree remove --force '$(nat "$KEPT")'" dontAsk)" \
+     "$WORK" "${TEMP_ENV[@]}")"
+check_text "[kept] and that denial is the mode's, not the sequence" lacks \
+  'drop `--force`' \
+  "$(reason_for "$(sess_mode "git worktree remove --force '$(nat "$KEPT")'" dontAsk)" \
+     "$WORK" "${TEMP_ENV[@]}")"
+check "[kept] a checkout nested inside one is not one -> deny" deny \
+  "$(decision_for "$(sess_payload "git worktree remove --force '$(nat "$KEPT/tmp/rev1")'")" \
+     "$WORK" "${TEMP_ENV[@]}")"
+check "[kept] a directory merely named worktrees is not one -> deny" deny \
+  "$(decision_for "$(sess_payload "git worktree remove --force '$(nat "$WORK/worktrees/kept-one")'")" \
+     "$WORK" "${TEMP_ENV[@]}")"
+check "[kept] a peer's scratch by a relative path -> ask" ask \
+  "$(decision_for "$(sess_payload "git -C '$(nat "$PEER")' worktree remove --force pr1")" \
+     "$WORK" "${TEMP_ENV[@]}")"
+for m in acceptEdits auto dontAsk; do
+  check "[force-remove] elsewhere denies under $m" deny \
+    "$(decision_for "$(sess_mode 'git worktree remove --force tmp/rev1' "$m")" \
+       "$WORK" "${TEMP_ENV[@]}")"
+done
+FORCE_REASON="$(reason_for "$(sess_payload 'git worktree remove --force tmp/rev1')" \
+  "$WORK" "${TEMP_ENV[@]}")"
+check_prefix "[force-remove] the denial opens with the guard's name" \
+  'branch-guard: `git worktree remove --force`' "$FORCE_REASON"
+check_text "[force-remove] the reason names the plain sequence" has \
+  'git worktree remove <worktree>' "$FORCE_REASON"
+check_text "[force-remove] and the scratchpad that needs none" has \
+  "session's own scratchpad" "$FORCE_REASON"
+check_text "[force-remove] it never invites a confirmation" lacks \
+  'confirm before proceeding' "$FORCE_REASON"
+check_text "[force-remove] the sequence comes before the break-glass" has \
+  'git worktree remove <worktree>' "${FORCE_REASON%%BRANCH_GUARD_OVERRIDE*}"
+check_text "[force-remove] an unexpandable operand says so" has \
+  'cannot expand' \
+  "$(reason_for "$(sess_payload 'git worktree remove --force "$SCRATCH/pr1"')" \
+     "$WORK" "${TEMP_ENV[@]}")"
+check "[force-remove] the break-glass lifts it, as it did the ask" allow \
+  "$(decision_for "$(sess_payload 'BRANCH_GUARD_OVERRIDE=probe-checkout git worktree remove --force tmp/rev1')" \
+     "$WORK" "${TEMP_ENV[@]}")"
+check "[force-remove] riding beside rm it still denies" deny \
+  "$(decision_for "$(sess_payload 'git worktree remove --force tmp/rev1 && rm -rf x')" \
      "$WORK" "${TEMP_ENV[@]}")"
 # The value reaches every arm, not only this one, which is what lets the
 # assignment ride along: a protected name through a variable is still one.
@@ -1262,7 +1325,7 @@ done
 for w in --force --fo; do
   check "git clean $w -d -> ask" ask \
     "$(decision_for "$(bash_cmd "git clean $w -d")" "$WORK")"
-  check "git worktree remove $w ../wt -> ask" ask \
+  check "git worktree remove $w ../wt -> deny" deny \
     "$(decision_for "$(bash_cmd "git worktree remove $w ../wt")" "$WORK")"
 done
 printf 'dirty\n' >> "$WORK/file.txt"

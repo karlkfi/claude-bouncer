@@ -74,7 +74,7 @@ classifier reason states only the CAUSE; `confirm()` adds the closing clause, so
 the two paths read honestly — an `ask` offers a confirmation, a `deny` says
 there is none to be had and points at the terminal instead.
 
-Three verdicts deny in every mode rather than only in an unattended one, for the
+Four verdicts deny in every mode rather than only in an unattended one, for the
 same reason: the missing input is a fact the session can settle for itself, so
 the answer belongs in the reason rather than in a prompt, and `refuse()` writes
 it there from DENY_ROUTES. 'deny-unreachable' is a `git reset --hard` moving a
@@ -84,10 +84,14 @@ direction — a merged pull request says the content is already on main, and no
 pull request says it is not; 'deny-rebase' is a push onto a base that has moved
 into this branch's own lines, which a `git rebase` settles; 'deny-unpinned' is a
 gh write naming a pull request, issue or release that exists in every repository
-while naming no repository, which `--repo` settles. Every other `ask` in the
-file still asks a human, including the three `classify_reset` keeps.
+while naming no repository, which `--repo` settles; 'deny-force-remove' is a
+`git worktree remove --force` of a checkout that is neither in this session's
+own scratchpad, which allows, nor held by a person or a peer session, which
+still asks — what `--force` would delete there is what `git status` lists, and
+the plain spelling has git check it. Every other `ask` in the file still asks a
+human, including the three `classify_reset` keeps.
 
-'deny-unpinned' is the one of the three that denies a command the guard would
+'deny-unpinned' is the one of the four that denies a command the guard would
 otherwise have DEFERRED, so it adds friction rather than redirecting an existing
 verdict. That is deliberate and is the only form the catch can take: the wrong
 target is a silent success against someone else's repository, which a prompt
@@ -99,8 +103,8 @@ reason to run: with nothing to answer the prompt, work reroutes onto whatever
 ungated path exists (hand-editing a file back to its HEAD content rather than
 `git restore`) or is simply abandoned. So a narrow break-glass exists — the
 command prefix `BRANCH_GUARD_OVERRIDE=<reason>` (`override_reason`), which
-lifts an `ask` — or a 'deny-unreachable', whose loss is the same local one —
-whose damage cannot leave this machine: OVERRIDABLE_GIT. It reaches no `gh`
+lifts an `ask` — or a 'deny-unreachable' or 'deny-force-remove', whose loss is
+the same local one — whose damage cannot leave this machine: OVERRIDABLE_GIT. It reaches no `gh`
 form and no protected branch — those asks are tagged `ask-shared` and are
 unliftable by construction. It reaches one push and only through the verdict:
 a 'deny-rebase' is minted after the policy has already approved that exact
@@ -872,6 +876,13 @@ DENY_ROUTES = {
         "one the current directory resolves to, which is worth checking rather "
         "than assuming: the shell's directory persists across calls and drifts, "
         "so the repository gh picks is not always the one the work is in."),
+    'deny-force-remove': (
+        "write the worktree's absolute path out in full: one inside this "
+        "session's own scratchpad is then removed with `--force` and no "
+        "prompt. Anywhere else drop `--force` — `git -C <worktree> status "
+        "--short` lists what it would have deleted, so delete those files by "
+        "name and run `git worktree remove <worktree>`, which git itself "
+        "refuses while anything uncommitted is left."),
 }
 
 
@@ -1661,6 +1672,20 @@ def cd_substitution(token, cwd):
     else:
         here = cwd
     return None if here is None else here + token[end + 1:]
+
+
+def held_by_another(rp, session_id):
+    """True when resolved path `rp` is a checkout this session cannot be the
+    one to give up: a direct child of a `.claude/worktrees` directory, which is
+    a session's own working tree and is kept after the session ends, or a path
+    in Claude Code's temp root outside this session's own tree."""
+    parent = os.path.dirname(rp)
+    if os.path.basename(parent) == 'worktrees' \
+            and os.path.basename(os.path.dirname(parent)) == '.claude':
+        return True
+    root = claude_tmp_root()
+    return (rp == root or rp.startswith(root + os.sep)) \
+        and not is_session_tmp_path(rp, session_id, root)
 
 
 def cd_destination(tokens, cwd):
@@ -2685,7 +2710,8 @@ def classify_reset(branch, cwd, probe):
 def classify_git(sub, args, branch, policy, cwd, probe, mode='',
                  session_id=''):
     """Verdict ('allow' | 'ask' | 'ask-shared' | 'deny-rebase' |
-    'deny-unreachable' | 'defer', reason) for a `git <sub>` command."""
+    'deny-unreachable' | 'deny-force-remove' | 'defer', reason) for a
+    `git <sub>` command."""
     flags = {a for a in args if a.startswith('-')}
     short = short_flag_letters(args)
     pos = [a for a in args if not a.startswith('-')]
@@ -2816,8 +2842,29 @@ def classify_git(sub, args, branch, policy, cwd, probe, mode='',
                     if rp and is_session_tmp_path(rp, session_id,
                                                   claude_tmp_root()):
                         return ('allow', None)
-                return ('ask', "`git worktree remove --force` deletes a worktree "
-                               "holding modified or untracked files")
+                # Past that allow the verdict picks who answers. A checkout a
+                # person or a peer session holds is theirs to give up, so it
+                # still asks. For any other the loss is a fact the session can
+                # read off `git status`, and the plain spelling makes git check
+                # it, so the reason carries that sequence instead of a prompt
+                # that waits on a session nobody is watching. An operand the
+                # hook cannot place lands there too: whoever answered the prompt
+                # could not expand it either.
+                if target and is_literal_path(target):
+                    rp = resolve_path(cwd, target)
+                    if rp and held_by_another(rp, session_id):
+                        return ('ask', "`git worktree remove --force` deletes "
+                                       "a worktree holding modified or "
+                                       "untracked files")
+                    return ('deny-force-remove',
+                            "`git worktree remove --force` deletes a worktree "
+                            "holding modified or untracked files, and nothing "
+                            "it needs `--force` for is beyond this session to "
+                            "check")
+                return ('deny-force-remove',
+                        "`git worktree remove --force` deletes a worktree "
+                        "holding modified or untracked files, and names it "
+                        "in a form this guard cannot expand")
             return ('allow', None)
         if first in ('prune', 'move'):
             return ('ask', "Pruning or moving a git worktree")
@@ -3132,7 +3179,8 @@ def override_reason(segments):
 
 def is_overridable(inv, verdict, writes):
     """True if a segment's verdict is one the break-glass may lift: a plain
-    `ask` or a 'deny-unreachable' from a git subcommand in OVERRIDABLE_GIT, or a
+    `ask`, a 'deny-unreachable' or a 'deny-force-remove' from a git subcommand
+    in OVERRIDABLE_GIT, or a
     'deny-rebase' from a `push` — never an `ask-shared`, whose cause is a
     protected branch. Either way the invocation has to be aimed at this
     repository, with nothing attached that reaches further than the subcommand
@@ -3173,25 +3221,27 @@ def is_overridable(inv, verdict, writes):
         return False
     if verdict == 'deny-rebase':
         return inv['sub'] == 'push'
-    return (verdict in ('ask', 'deny-unreachable')
+    return (verdict in ('ask', 'deny-unreachable', 'deny-force-remove')
             and inv['sub'] in OVERRIDABLE_GIT)
 
 
 def classify_segment(inv, branch, policy, cwd, probe, mode='', session_id=''):
     """Verdict ('nongit' | 'allow' | 'ask' | 'ask-shared' | 'deny-rebase' |
-    'deny-unreachable' | 'deny-unpinned' | 'defer', reason) for one segment.
+    'deny-unreachable' | 'deny-unpinned' | 'deny-force-remove' | 'defer',
+    reason) for one segment.
     'nongit' marks a segment that isn't a git/gh invocation (so the whole
     command can't be auto-approved); 'ask-shared' is an `ask` whose cause is a
-    protected branch, kept distinct so the break-glass can't lift it. The three
+    protected branch, kept distinct so the break-glass can't lift it. The
     DENY_ROUTES tags deny in every permission mode, because the cause is a fact
     the session can check for itself — 'deny-unreachable' for a reset onto a tip
     nothing else reaches, 'deny-rebase' for a push onto a base that has moved
     into this branch's own lines, 'deny-unpinned' for a gh write naming a target
-    that exists in every repository without naming the repository. The
-    break-glass lifts the first two, so they travel with the plain `ask`
-    everywhere else; it does not lift 'deny-unpinned', which needs none —
-    `--repo` is always available and is the thing being asked for, where the
-    other two name work the session must go and do.
+    that exists in every repository without naming the repository,
+    'deny-force-remove' for a forced worktree removal whose loss `git status`
+    lists. The break-glass lifts all but 'deny-unpinned', so those travel with
+    the plain `ask` everywhere else; 'deny-unpinned' needs none — `--repo` is
+    always available and is the thing being asked for, where the others name
+    work the session must go and do.
 
     `cwd` and `probe` are the caller's answer to *which tree does this segment
     act on* — see `git_cwd` and `cd_destination`. `probe` false means the hook
