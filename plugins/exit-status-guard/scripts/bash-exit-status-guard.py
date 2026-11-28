@@ -526,7 +526,23 @@ def shell_segments(text, depth=0):
 # `go test`, so exempting it would exempt `go test -v ./... | tail`, which is
 # the bug this guard exists to catch. `make -v | head` stays denied, and
 # `--version` is the way out of it.
-PROBE_FLAGS = frozenset({'--version', '--help', '-V', '-h', 'version', '--usage'})
+#
+# The word's role decides, not its spelling. A flag directly after an option is
+# that option's value -- `git commit -m --help` commits -- and `version` is a
+# probe only as the subcommand, so `git checkout version` still switches branch.
+PROBE_FLAGS = frozenset({'--version', '--help', '-V', '-h', '--usage'})
+
+
+def is_probe(words):
+    """Whether ``words`` ask the tool about itself rather than run it."""
+    if words[1:2] == ['version']:
+        return True
+    for prev, w in zip(words, words[1:]):
+        if w in PROBE_FLAGS and not (
+                prev.startswith('-') and prev not in PROBE_FLAGS
+                and '=' not in prev):
+            return True
+    return False
 
 # git prints a subcommand's option names for `git <sub> --git-completion-helper`
 # and exits, but only when the helper is the sole argument: `git checkout b
@@ -634,7 +650,7 @@ class Registry(object):
         # Read from the parsed words rather than the joined head, so a flag
         # spelled inside a quoted argument stays one word: `git commit -m "bump
         # --version output"` is a commit, and still a gate.
-        if any(w in PROBE_FLAGS for w in words[1:]):
+        if is_probe(words):
             return False
         if len(words) == 3 and words[0] == 'git' and words[2] in GIT_COMPLETION_HELPERS:
             return False

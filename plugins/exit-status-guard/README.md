@@ -214,6 +214,7 @@ A `git checkout -- <paths>` overwrites files from the index and answers nothing 
 An abort is still a mutator and a restore, so after a gate it gets exactly what `git reset` gets.
 
 Capability probes (`--version`, `--help`, `-V`, `-h`) are recognized structurally for every gate rather than by per-tool exemptions — a per-tool pattern fixes the tool it was reported against and leaves the whole class.
+A probe is read by its role and not its spelling: directly after an option, a probe flag is that option's value, so `git commit -m --help | tail` still denies, and a bare `version` is a probe only as the subcommand, so `git checkout version | tail` does too.
 `-v` is deliberately **not** a probe flag: it means `--version` to `make` but verbose to `go test`, and exempting it would exempt `go test -v ./... | tail`, which is the bug this guard exists to catch.
 
 ## Install
