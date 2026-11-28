@@ -249,11 +249,12 @@ As with filters, the command must still contain a git/gh segment (`echo hi` alon
 A third relaxation covers a constant idiom: passing a repo path or branch name to a git/gh command via substitution.
 A `$(…)` or backtick substitution normally downgrades the whole command to defer, but a tiny hardcoded registry of **pure read-only substitutions** — `$(git rev-parse --show-toplevel)`, `$(git branch --show-current)`, and `$(pwd)` — is exempt, so `gh pr view "$(git branch --show-current)"` and `git -C "$(git rev-parse --show-toplevel)" status` auto-approve instead of prompting.
 The match is **structural**: the command inside the substitution must tokenize to exactly a registry entry with no extra argument, separator, redirect, or nested substitution — so `$(git branch --show-current; rm -rf x)`, `$(git rev-parse --show-toplevel > f)`, and `$(git status)` all keep deferring. Because the classifier reasons about the literal tokens and never resolves a substitution's output, this can only lift the defer on an already-safe git/gh chain — it never turns a destructive verdict or a protected-branch `ask` into an `allow` (`git commit -m "$(pwd)"` on `main` still asks).
-A non-git segment still can't ride along, so `cd "$(git rev-parse --show-toplevel)" && git status` keeps deferring — the registry lifts the substitution guard, not the `cd`, whose target is still not a literal this hook can place.
+A non-git segment still can't ride along beside one, so `ls "$(pwd)" && git status` keeps deferring — the registry lifts the substitution guard, not the segment.
 
 A fourth relaxation covers the habit sessions here lead with most: a `cd` before the real command.
-A `cd` counts as recognized-safe when its target is a literal path — no `$VAR`, no `$(…)`, no glob or `~`, and neither a bare `cd` nor `cd -` — **and** resolves into the same worktree the command is already being judged against, compared by `git rev-parse --show-toplevel`.
-So `cd . && git status` and `cd <this worktree>/sub && git status` auto-approve.
+A `cd` counts as recognized-safe when its target is a literal path — no `$VAR`, no other `$(…)`, no glob or `~`, and neither a bare `cd` nor `cd -` — **and** resolves into the same worktree the command is already being judged against, compared by `git rev-parse --show-toplevel`.
+A target opening with a double-quoted `$(git rev-parse --show-toplevel)` or `$(pwd)` counts as literal, because the hook computes the directory it prints, the way bash would; single-quoted, escaped or unquoted it does not.
+So `cd . && git status`, `cd <this worktree>/sub && git status` and `cd "$(git rev-parse --show-toplevel)" && git status` auto-approve, and `cd "$(git rev-parse --show-toplevel)/../main-checkout" && git commit` is judged on that checkout's branch.
 
 Worktree identity is the test, not repository identity and not path containment.
 Two worktrees of one repository share a `--git-common-dir` and differ in `--show-toplevel`, and a linked worktree often sits *inside* the primary checkout's directory tree — so either weaker test would call a sibling worktree "here" and approve a command against a branch this session never checked out.
@@ -445,7 +446,7 @@ Both sides are diffed from the fork point, so both sets of line numbers are coun
 Hunks are read with `-U0` and widened by the three lines of context a hunk carries, so edits within six lines of each other meet and edits seven apart do not — sharing a *file* is not sharing an edit.
 
 It measures the tree the push runs from, which is not always the session's.
-A literal `cd` moves that tree for everything after it and a literal `git -C` for one command, so both are followed; a target only the shell can compute is not, and the check stands down rather than measuring a tree the push is not coming from.
+A literal `cd` moves that tree for everything after it and a literal `git -C` for one command, so both are followed, as is a `cd` to the two substitutions above; a target only the shell can compute is not, and the check stands down rather than measuring a tree the push is not coming from.
 Getting this wrong went both ways — a rebase demanded for an overlap that belonged to another worktree's branch, and a `git -C` push waved through when it carried the overlap outright.
 
 The check runs only where a push would otherwise be auto-approved, so `protected` and `off` never reach it.
