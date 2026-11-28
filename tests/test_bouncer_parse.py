@@ -1480,6 +1480,19 @@ class AssignmentTests(unittest.TestCase):
                 self.assertEqual(count, bp.lex(word)[0].quoted_chars)
         self.assertEqual(0, bp.QuotedStr('x').quoted_chars)
 
+    def test_quoted_runs_say_where_each_quoted_run_sits(self):
+        """prod-guard reads them to split only the unquoted part of a word
+        that mixes quoting (Q424)."""
+        for word, runs in (
+                ('"$A"=$B', ((0, 2, '"'),)),
+                ("\"$X\"''", ((0, 2, '"'), (2, 2, "'"))),
+                ("a'b c'd\\ e", ((1, 4, "'"), (5, 6, '\\'))),
+                ('"f\\"g"', ((0, 1, '"'), (1, 2, '\\'), (2, 3, '"'))),
+                ('plain', ())):
+            with self.subTest(word=word):
+                self.assertEqual(runs, bp.lex(word)[0].quoted_runs)
+        self.assertEqual((), bp.QuotedStr('x').quoted_runs)
+
     def test_the_quote_characters_are_still_recorded(self):
         """prod-guard reads `.quotes` to tell a `-c` body's expander apart."""
         self.assertEqual(frozenset("'"), bp.lex("'a b'")[0].quotes)

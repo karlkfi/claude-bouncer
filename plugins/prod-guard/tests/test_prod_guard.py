@@ -1898,6 +1898,61 @@ class IfsSplitTests(unittest.TestCase):
                 self.assertIsNone(decision, reason)
 
 
+class MixedQuotingTests(unittest.TestCase):
+    """A word that mixes quoted and unquoted runs splits where an unquoted
+    expansion does (Q424). Each shape was run under bash 5.3 with `/bin/echo`
+    in kubectl's place."""
+
+    B = 'B="gke_acme_prod-us delete ns x"; '
+    X = 'X="kubectl --context gke_acme_prod-us delete ns x"; '
+    E = 'X="echo hi; kubectl --context gke_acme_prod-us delete pod x"; '
+
+    def run_cmd(self, command):
+        return run_hook(command, home=make_home(kubeconfig=KUBECONFIG_KIND))
+
+    def test_the_unquoted_expansion_splits(self):
+        for cmd in ('A=--context; ' + self.B + 'kubectl "$A"=$B',
+                    self.B + 'kubectl "--context="$B',
+                    self.B + "kubectl '--context='$B",
+                    self.X + '""$X',
+                    self.X + "''$X",
+                    self.X + '$X""',
+                    'IFS=,; X="kubectl,--context,gke_acme_prod-us,delete,ns,x"; '
+                    "$X''",
+                    # The parent expands `"$X"` before `eval` reads it, so
+                    # its `;` separates two commands.
+                    self.E + "eval \"$X\"''"):
+            with self.subTest(cmd=cmd):
+                decision, reason = self.run_cmd(cmd)
+                self.assertEqual(decision, "deny", reason)
+
+    def test_a_quote_after_a_name_ends_it(self):
+        # The lexer strips `$X"x"` to `$Xx`; bash reads the name as `X`.
+        x = 'X="kubectl --context gke_acme_prod-us delete ns"; '
+        c = 'C=gke_acme_pr; '
+        for cmd in (x + '$X"x"', x + "$X'x'", x + '$X\\x',
+                    'IFS=,; X="kubectl,--context,gke_acme_prod-us,delete,ns"; '
+                    '$X"x"',
+                    # The production name exists only once the name ends.
+                    c + 'kubectl --context "$C"od-us delete ns x',
+                    c + 'kubectl --context $C"od-us" delete ns x',
+                    c + 'D=$C"od-us"; kubectl --context $D delete ns x'):
+            with self.subTest(cmd=cmd):
+                decision, reason = self.run_cmd(cmd)
+                self.assertEqual(decision, "deny", reason)
+
+    def test_a_quoted_expansion_stays_one_word(self):
+        # bash hands kubectl one --context value holding the whole string,
+        # and `eval` reads a `;` that came from its own expansion as text.
+        for cmd in (self.B + 'kubectl --context="$B"',
+                    self.B + 'kubectl "--context=$B"',
+                    self.E + "eval '$X'",
+                    self.E + "eval '$X'\"\""):
+            with self.subTest(cmd=cmd):
+                decision, reason = self.run_cmd(cmd)
+                self.assertIsNone(decision, reason)
+
+
 class ExportedEnvironmentTests(unittest.TestCase):
     """Every evaluator reads the environment the command's child inherits, so
     an `export` earlier in the command counts like an inline prefix (Q168)."""
