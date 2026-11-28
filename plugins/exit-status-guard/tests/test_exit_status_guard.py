@@ -872,6 +872,27 @@ CASES = [
     ('backgrounded commit naming --help still denies',
      'git commit -m "docs: --help text" > tmp/c.log 2>&1; echo "EXIT=$?"',
      True, True, ''),
+    # A probe word is read by its role (Q366). Right after an option it is that
+    # option's value, and git commits each of these.
+    ('a probe flag as a message still denies', 'git commit -m --help | tail',
+     False, True, 'piped'),
+    ('a short probe flag as a message', 'git commit -m -h | tail', False, True,
+     'piped'),
+    ('a probe flag as a long option value',
+     'git commit --message --help | tail', False, True, 'piped'),
+    ('a probe flag as a message, sequenced',
+     'git commit -m --version; git push', False, True, 'is sequenced before'),
+    # `version` probes only as the subcommand; as an operand it is a name.
+    ('version as a message, sequenced', 'git commit -m version; git push',
+     False, True, 'is sequenced before'),
+    ('a branch called version', 'git checkout version | tail', False, True,
+     'piped'),
+    ('version as the subcommand is a probe', 'make version | head', False,
+     False, ''),
+    ('a probe flag after an option that carries its value',
+     'git commit --message=x --help | tail', False, False, ''),
+    ('a probe flag after an option value', 'go test -run TestX --help | head',
+     False, False, ''),
     # git's completion helper prints the option list and exits only as the
     # subcommand's sole argument; anywhere else git rejects it or runs (Q350).
     ('git checkout completion helper piped',
